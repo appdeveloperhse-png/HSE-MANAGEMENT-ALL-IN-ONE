@@ -1,3 +1,0 @@
-"""
-HSE Management System
-"""
