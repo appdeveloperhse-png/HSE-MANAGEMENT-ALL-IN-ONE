@@ -905,10 +905,10 @@ def generate_incident_docx(incident_id, path):
     row=db.fetchone("SELECT * FROM incidents WHERE id=?",(incident_id,))
     if not row: raise ValueError("Incident record not found.")
     doc=Document()
-    sec=doc.sections[0]
-    sec.orientation=WD_ORIENT.PORTRAIT
-    sec.page_width=Inches(8.27); sec.page_height=Inches(11.69)
-    sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35); sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35)
+    # Use a controlled professional report layout.  The report contains several
+    # investigation tables and evidence fields, so landscape prevents table
+    # compression while preserving the existing report content.
+    set_docx_landscape(doc)
     add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"])
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
     add_docx_kv_table(doc,[
@@ -2363,6 +2363,8 @@ class MainWindow(QMainWindow):
             if not path:return
             try:
                 generate_incident_docx(incident_id,path)
+                if not Path(path).exists() or Path(path).stat().st_size < 1000:
+                    raise ValueError("The Investigation Professional Report was not created correctly.")
                 rr=db.fetchone("SELECT investigation_details FROM incidents WHERE id=?",(incident_id,))
                 try: details=json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
                 except Exception: details={}
@@ -3152,10 +3154,23 @@ class MainWindow(QMainWindow):
         existing=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)) if audit_id else None
         if existing and existing["status"]=="Submitted": readonly=True
         else: readonly=False
-        d=QDialog(self); d.setWindowTitle("Audit Workspace"); d.resize(1250,900); d.setMinimumSize(1050,760)
+        d=QDialog(self); d.setWindowTitle("Audit Workspace")
+        # Open the complete Audit Workspace in the available desktop area so the
+        # tabs and bottom action buttons are visible without manually resizing or
+        # dragging the window.  The content itself remains scrollable where the
+        # number of findings/evidence requires it.
+        screen=d.screen() or QApplication.primaryScreen()
+        if screen:
+            available=screen.availableGeometry()
+            d.setGeometry(available)
+        else:
+            d.resize(1250,900)
+        d.setMinimumSize(1050,760)
         outer=QVBoxLayout(d)
+        outer.setContentsMargins(12,12,12,10)
+        outer.setSpacing(8)
         banner=QHBoxLayout(); head=QLabel("AUDIT WORKSPACE"); head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;"); banner.addWidget(head); banner.addStretch(); outer.addLayout(banner)
-        tabs=QTabWidget(); outer.addWidget(tabs,1)
+        tabs=QTabWidget(); tabs.setDocumentMode(True); tabs.setUsesScrollButtons(False); tabs.tabBar().setExpanding(True); outer.addWidget(tabs,1)
         overview=QWidget(); of=QFormLayout(overview); of.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         audit_type=QComboBox(); audit_type.addItems(self._audit_types());
         title=QLineEdit(); audit_date=QDateEdit(); audit_date.setCalendarPopup(True); audit_date.setDisplayFormat("dd-MMM-yyyy"); audit_date.setDate(datetime.now().date())
@@ -3268,8 +3283,12 @@ class MainWindow(QMainWindow):
                 reference.setText(next_number("HSE-AUD","audits"))
             if refresh is None: refresh=lambda:None
 
-        buttons=QHBoxLayout(); save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); close=QPushButton("Close")
-        for b in [save,submit,close]: buttons.addWidget(b)
+        buttons=QHBoxLayout(); buttons.setSpacing(8)
+        save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); close=QPushButton("Close")
+        for b in [save,submit,close]:
+            b.setMinimumHeight(42)
+            buttons.addWidget(b)
+        buttons.addStretch()
         outer.addLayout(buttons)
         if readonly: save.setEnabled(True); submit.setEnabled(False)
         def validate_submission():
@@ -3526,72 +3545,196 @@ class MainWindow(QMainWindow):
         path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)")
         if not path:return
         try:
-            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A5"; ws.sheet_view.showGridLines=False
-            ws.merge_cells("A1:C3"); ws.merge_cells("D1:H3"); ws.merge_cells("I1:K1"); ws.merge_cells("I2:K2"); ws.merge_cells("I3:K3")
-            ws["D1"]=f"AUDIT REPORT\n{company_name()}"; ws["I1"]=f"Audit No.: {a['number']}"; ws["I2"]=f"Document No.: {document_prefix()}-AUDIT"; ws["I3"]=f"Date: {a['audit_date']}"
-            logo_path=report_logo_path()
-            if logo_path and Path(logo_path).exists():
-                try:
-                    logo=XLImage(logo_path); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
-                except Exception: logging.exception("Unable to embed audit Excel logo")
-            for ref in ["A1","D1","I1","I2","I3"]:
-                if not isinstance(ws[ref],MergedCell): ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
-            ws.append([]); ws.append(["AUDIT SUMMARY"])
-            for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),("Total Findings",len(fs))]: ws.append([k,safe(v)])
-            ws.column_dimensions["A"].width=25; ws.column_dimensions["B"].width=70
+            from openpyxl.worksheet.table import Table, TableStyleInfo
+            from openpyxl.worksheet.page import PageMargins
 
-            # Findings: one finding per row, with embedded evidence in the Evidence Photo cell.
-            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.sheet_view.showGridLines=False
-            headers=["Finding Number","Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence Photo","Target Date","Close Out Evidence"]
-            fws.append(headers)
+            wb=Workbook()
+            wb.properties.title=f"Audit Report - {safe(a['number'])}"
+            wb.properties.subject="HSE Audit Report"
+            wb.properties.creator=company_name()
+
+            # ------------------------------------------------------------
+            # Professional report header helper used on each worksheet.
+            # ------------------------------------------------------------
+            def report_header(ws,title,columns_end):
+                # Keep the report header visually consistent even for sheets with
+                # only 5-7 data columns; the actual table can still use fewer columns.
+                layout_cols=max(columns_end,11)
+                ws.sheet_view.showGridLines=False
+                ws.merge_cells(start_row=1,start_column=1,end_row=3,end_column=3)
+                ws.merge_cells(start_row=1,start_column=4,end_row=3,end_column=8)
+                right_start=9
+                ws.merge_cells(start_row=1,start_column=right_start,end_row=1,end_column=layout_cols)
+                ws.merge_cells(start_row=2,start_column=right_start,end_row=2,end_column=layout_cols)
+                ws.merge_cells(start_row=3,start_column=right_start,end_row=3,end_column=layout_cols)
+                ws.cell(1,4).value=f"{title}\n{company_name()}"
+                ws.cell(1,right_start).value=f"Audit No.: {safe(a['number'])}"
+                ws.cell(2,right_start).value=f"Document No.: {document_prefix()}-AUDIT"
+                ws.cell(3,right_start).value=f"Audit Date: {safe(a['audit_date'])}"
+                logo_path=report_logo_path()
+                if logo_path and Path(logo_path).exists():
+                    try:
+                        logo=XLImage(str(logo_path)); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
+                    except Exception: logging.exception("Unable to embed audit Excel logo")
+                thin=Side(style="thin",color="A6A6A6")
+                header_fill=PatternFill("solid",fgColor="17365D")
+                light_fill=PatternFill("solid",fgColor="D9E2F3")
+                for r in range(1,4): ws.row_dimensions[r].height=24
+                ws.row_dimensions[1].height=30
+                for row in ws.iter_rows(min_row=1,max_row=3,min_col=1,max_col=layout_cols):
+                    for c in row:
+                        if isinstance(c,MergedCell): continue
+                        c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
+                        c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                ws.cell(1,4).font=copy(ws.cell(1,4).font); ws.cell(1,4).font=ws.cell(1,4).font.copy(bold=True,size=14)
+                for ref in [f"{chr(64+right_start)}1",f"{chr(64+right_start)}2",f"{chr(64+right_start)}3"]:
+                    if ref in ws:
+                        ws[ref].fill=light_fill; ws[ref].font=ws[ref].font.copy(bold=True,size=10)
+                ws.page_setup.orientation="landscape"
+                ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
+                ws.sheet_properties.pageSetUpPr.fitToPage=True
+                ws.page_margins=PageMargins(left=0.25,right=0.25,top=0.45,bottom=0.45,header=0.2,footer=0.2)
+                ws.oddFooter.center.text="Page &P of &N"
+                ws.oddFooter.right.text=company_name()
+
+            def style_data_sheet(ws,header_row,table_ref,name):
+                ws.freeze_panes=f"A{header_row+1}"
+                ws.auto_filter.ref=table_ref
+                thin=Side(style="thin",color="D0D0D0")
+                for c in ws[header_row]:
+                    if isinstance(c,MergedCell): continue
+                    c.font=c.font.copy(bold=True,color="FFFFFF")
+                    c.fill=PatternFill("solid",fgColor="17365D")
+                    c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                    c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
+                for row in ws.iter_rows(min_row=header_row+1,max_row=ws.max_row,min_col=1,max_col=ws.max_column):
+                    for c in row:
+                        if isinstance(c,MergedCell): continue
+                        c.alignment=Alignment(vertical="top",horizontal="left",wrap_text=True)
+                        c.border=Border(bottom=thin)
+                if ws.max_row >= header_row+1:
+                    tab=Table(displayName=name,ref=table_ref)
+                    tab.tableStyleInfo=TableStyleInfo(name="TableStyleMedium2",showFirstColumn=False,showLastColumn=False,showRowStripes=True,showColumnStripes=False)
+                    ws.add_table(tab)
+
+            # ------------------------------------------------------------
+            # 1. Executive / audit summary
+            # ------------------------------------------------------------
+            ws=wb.active; ws.title="Audit Summary"
+            report_header(ws,"AUDIT REPORT",8)
+            ws["A5"]="AUDIT SUMMARY"; ws.merge_cells("A5:H5")
+            ws["A5"].font=ws["A5"].font.copy(bold=True,size=12,color="FFFFFF"); ws["A5"].fill=PatternFill("solid",fgColor="17365D"); ws["A5"].alignment=Alignment(horizontal="left",vertical="center")
+            ws.append(["Field","Value","Field","Value","Field","Value","Field","Value"])
+            summary_pairs=[
+                ("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),
+                ("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),
+                ("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),
+                ("Status",a["status"]),("Total Findings",len(fs))]
+            # Keep the summary compact but readable: two field/value pairs per row.
+            for i in range(0,len(summary_pairs),2):
+                p1=summary_pairs[i]; p2=summary_pairs[i+1] if i+1<len(summary_pairs) else ("","")
+                ws.append([safe(p1[0]),safe(p1[1]),safe(p2[0]),safe(p2[1]),"","","",""])
+            for r in range(6,ws.max_row+1):
+                for c in [1,3]:
+                    ws.cell(r,c).font=ws.cell(r,c).font.copy(bold=True)
+                    ws.cell(r,c).fill=PatternFill("solid",fgColor="EAF0F7")
+                for c in range(1,9): ws.cell(r,c).alignment=Alignment(vertical="top",wrap_text=True)
+            for col,w in {"A":22,"B":38,"C":22,"D":38,"E":4,"F":4,"G":4,"H":4}.items(): ws.column_dimensions[col].width=w
+            ws.row_dimensions[6].height=28
+
+            # ------------------------------------------------------------
+            # 2. Findings register as a real Excel Table
+            # ------------------------------------------------------------
+            fws=wb.create_sheet("Findings")
+            headers=["Finding No.","Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence Photo","Target Date","Status","Close Out Evidence"]
+            report_header(fws,"AUDIT FINDINGS",len(headers))
+            fws.append([]); fws.append(headers)
             for f in fs:
-                fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["clause"],f["sub_clause"],f["finding_type"],f["location"] if "location" in f.keys() else "",f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],"",f["target_date"],f["close_out_evidence"] if "close_out_evidence" in f.keys() else ""])
-                rr=fws.max_row; fws.row_dimensions[rr].height=115
-                photos=[]
+                fws.append([
+                    safe(f["finding_number"]),safe(f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),safe(f["clause"]),safe(f["sub_clause"]),
+                    safe(f["finding_type"]),safe(f["location"] if "location" in f.keys() else ""),safe(f["finding_detail"] or f["observation"]),
+                    safe(f["corrective_action"]),safe(f["responsible"]),"",safe(f["target_date"]),
+                    "OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")
+                ])
+                rr=fws.max_row; fws.row_dimensions[rr].height=100
+                photos=[]; other_files=[]
                 for ar in self._audit_attachment_rows(audit_id,f["id"]):
                     fp=Path(safe(ar["file_path"]))
                     if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
+                    elif fp.exists(): other_files.append(fp.name)
                 if photos:
                     try:
-                        img=XLImage(str(photos[0])); img.width=135; img.height=95; img.anchor=f"J{rr}"; fws.add_image(img); fws.cell(rr,10).value=""
+                        img=XLImage(str(photos[0])); ratio=min(135/max(img.width,1),85/max(img.height,1),1); img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio)); img.anchor=f"J{rr}"; fws.add_image(img)
                     except Exception: logging.exception("Unable to embed audit finding photo")
-            widths={"A":14,"B":16,"C":12,"D":20,"E":18,"F":20,"G":38.44,"H":38.44,"I":24,"J":30,"K":16,"L":28}
-            for col,w in widths.items(): fws.column_dimensions[col].width=w
+                if other_files: fws.cell(rr,10).value="; ".join(other_files)
+                elif photos: fws.cell(rr,10).value="Photo evidence"
+                else: fws.cell(rr,10).value="No photo"
+            style_data_sheet(fws,5,f"A5:M{fws.max_row}","AuditFindings")
+            for col,w in {"A":13,"B":16,"C":12,"D":18,"E":20,"F":20,"G":42,"H":42,"I":24,"J":24,"K":16,"L":20,"M":32}.items(): fws.column_dimensions[col].width=w
 
-            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.sheet_view.showGridLines=False; aws.append(["Finding Number","Evidence Photo","File Type","Uploaded By","Upload Date"])
+            # ------------------------------------------------------------
+            # 3. Evidence / attachment register
+            # ------------------------------------------------------------
+            aws=wb.create_sheet("Attachments")
+            headers=["Finding Number","Attachment / Evidence","File Type","Uploaded By","Upload Date"]
+            report_header(aws,"AUDIT EVIDENCE REGISTER",len(headers))
+            aws.append([]); aws.append(headers)
             attachment_rows=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
             for f in fs: attachment_rows += [(f["finding_number"],ar) for ar in self._audit_attachment_rows(audit_id,f["id"])]
             for label,ar in attachment_rows:
-                fp=Path(safe(ar["file_path"])); aws.append([label,"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
-                rr=aws.max_row; aws.row_dimensions[rr].height=120
+                fp=Path(safe(ar["file_path"]))
+                aws.append([safe(label),"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+                rr=aws.max_row; aws.row_dimensions[rr].height=90
                 if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                     try:
-                        img=XLImage(str(fp)); img.width=175; img.height=100; img.anchor=f"B{rr}"; aws.add_image(img)
-                    except Exception: logging.exception("Unable to embed audit attachment photo")
-            for col,w in {"A":18,"B":32,"C":14,"D":24,"E":20}.items(): aws.column_dimensions[col].width=w
+                        img=XLImage(str(fp)); ratio=min(150/max(img.width,1),75/max(img.height,1),1); img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio)); img.anchor=f"B{rr}"; aws.add_image(img); aws.cell(rr,2).value="Photo evidence"
+                    except Exception: aws.cell(rr,2).value=fp.name
+                else: aws.cell(rr,2).value=fp.name
+            if aws.max_row>=5: style_data_sheet(aws,5,f"A5:E{aws.max_row}","AuditAttachments")
+            for col,w in {"A":18,"B":42,"C":15,"D":24,"E":22}.items(): aws.column_dimensions[col].width=w
 
-            cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.sheet_view.showGridLines=False
-            cws.append(["Finding Number","Finding Detail","Corrective Action","Responsible Person","Target Date","Status","Close Out Evidence"])
+            # ------------------------------------------------------------
+            # 4. Corrective action tracker as a real Excel Table
+            # ------------------------------------------------------------
+            cws=wb.create_sheet("Corrective Action Tracker")
+            headers=["Finding No.","Finding Detail","Corrective Action","Responsible Person","Target Date","Status","Close Out Evidence"]
+            report_header(cws,"CORRECTIVE ACTION TRACKER",len(headers))
+            cws.append([]); cws.append(headers)
             for f in fs:
-                try: days=(date.fromisoformat(safe(f["target_date"]))-date.today()).days if f["target_date"] else ""
-                except Exception: days=""
-                cws.append([f["finding_number"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["target_date"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["close_out_evidence"] if "close_out_evidence" in f.keys() else ""])
-            for col,w in {"A":14,"B":38.44,"C":38.44,"D":24,"E":16,"F":20,"G":30}.items(): cws.column_dimensions[col].width=w
-            for rr in range(2,cws.max_row+1): cws.row_dimensions[rr].height=65
+                cws.append([safe(f["finding_number"]),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["responsible"]),safe(f["target_date"]),"OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")])
+                cws.row_dimensions[cws.max_row].height=60
+            if cws.max_row>=5: style_data_sheet(cws,5,f"A5:G{cws.max_row}","AuditCAPA")
+            for col,w in {"A":14,"B":42,"C":42,"D":24,"E":16,"F":20,"G":32}.items(): cws.column_dimensions[col].width=w
 
-            thin=Side(style="thin",color="808080")
+            # Consistent professional formatting / print setup.
             for sh in wb.worksheets:
-                sh.freeze_panes=sh.freeze_panes or "A2"; sh.auto_filter.ref=sh.dimensions
-                for cell in sh[1]:
-                    if isinstance(cell,MergedCell): continue
-                    cell.font=cell.font.copy(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D"); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                sh.sheet_properties.pageSetUpPr.fitToPage=True
+                sh.print_title_rows="1:5"
                 for row in sh.iter_rows():
                     for c in row:
                         if isinstance(c,MergedCell): continue
-                        c.alignment=Alignment(vertical="center",horizontal="left",wrap_text=True); c.border=Border(bottom=thin)
-            wb.save(path); self.show_export_success(path)
+                        c.alignment=Alignment(vertical="top",horizontal="left",wrap_text=True)
+                if sh.max_row>=5:
+                    for c in sh[5]:
+                        if isinstance(c,MergedCell): continue
+                        c.font=c.font.copy(bold=True,color="FFFFFF")
+                        c.fill=PatternFill("solid",fgColor="17365D")
+                        c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                        c.border=Border(left=Side(style="thin",color="A6A6A6"),right=Side(style="thin",color="A6A6A6"),top=Side(style="thin",color="A6A6A6"),bottom=Side(style="thin",color="A6A6A6"))
+                sh.auto_filter.ref=sh.auto_filter.ref or (f"A5:{chr(64+min(sh.max_column,26))}{sh.max_row}" if sh.max_row>=5 else None)
+
+            target=Path(path); temp=target.with_name(target.name+".tmp.xlsx")
+            try:
+                wb.save(temp)
+                with zipfile.ZipFile(temp,"r") as z:
+                    bad=z.testzip()
+                    if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
+                os.replace(temp,target)
+            finally:
+                temp.unlink(missing_ok=True)
+            self.show_export_success(path)
         except Exception as e:
-            logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
+            logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",f"Unable to generate the Audit Excel report.\n\n{e}")
 
     def _audit_export_pdf(self,audit_id):
         a,fs=self._audit_report_data(audit_id)
