@@ -1,0 +1,6 @@
+PySide6
+reportlab
+openpyxl
+python-docx
+Pillow
+
