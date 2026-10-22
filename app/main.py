@@ -1058,9 +1058,9 @@ def generate_incident_docx(incident_id, path):
     section_table("Corrective Action Plan",["Action","Responsible","Target Date","Status","Closeout Evidence"],[[a.get("action",""),a.get("responsible",""),a.get("target_date",""),a.get("status","Open"),"; ".join(a.get("attachments",[])) or "None"] for a in actions])
     add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id))
     sig=details.get("approval_signatures",{}) if isinstance(details.get("approval_signatures",{}),dict) else {}
-    document.add_paragraph()
-    document.add_heading("Review and Approval / Sign-off", level=2)
-    st=document.add_table(rows=4, cols=3); st.style="Table Grid"; st.autofit=False
+    doc.add_paragraph()
+    doc.add_heading("Review and Approval / Sign-off", level=2)
+    st=doc.add_table(rows=4, cols=3); st.style="Table Grid"; st.autofit=False
     for i,label in enumerate(["Prepared by","Reviewed by","Approved by"]):
         st.cell(0,i).text=label
         x=sig.get(label.lower().replace(" ","_"),{}) or {}
@@ -3514,19 +3514,48 @@ class MainWindow(QMainWindow):
                 for i,v in enumerate(values): cells[i].text=v
                 # Evidence photo(s) stay inside the Evidence cell on this same finding row.
                 evidence_cell=cells[8]
-                for ar in self._audit_attachment_rows(audit_id,f["id"]):
+                evidence_rows=self._audit_attachment_rows(audit_id,f["id"])
+                if not evidence_rows:
+                    evidence_cell.text="No evidence attached"
+                for ar in evidence_rows:
                     fp=Path(safe(ar["file_path"]))
+                    if evidence_cell.paragraphs and not evidence_cell.paragraphs[0].text and not evidence_cell.paragraphs[0].runs:
+                        pp=evidence_cell.paragraphs[0]
+                    else:
+                        pp=evidence_cell.add_paragraph()
+                    pp.add_run(fp.name if fp.name else "Evidence attachment")
                     if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                         try:
-                            pp=evidence_cell.paragraphs[0] if evidence_cell.paragraphs and not evidence_cell.paragraphs[0].text else evidence_cell.add_paragraph()
-                            pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                            pp.add_run().add_picture(str(fp),width=Inches(0.85),height=Inches(0.75))
+                            ip=evidence_cell.add_paragraph(); ip.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                            ip.add_run().add_picture(str(fp),width=Inches(0.85),height=Inches(0.75))
                         except Exception: logging.exception("Unable to embed audit finding evidence photo")
                 for c in cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
                 trPr=cells[0]._tc.getparent().get_or_add_trPr()
                 trHeight=OxmlElement("w:trHeight"); trHeight.set(qn("w:val"),str(2880)); trHeight.set(qn("w:hRule"),"atLeast"); trPr.append(trHeight)
                 for i,c in enumerate(cells): c.width=Inches(widths[i])
             style_docx_table(ft,header=True,font_size=7)
+
+            # Include audit-level evidence files as well as finding-level evidence above.
+            general_evidence=self._audit_attachment_rows(audit_id)
+            p=doc.add_paragraph(); r=p.add_run("AUDIT-LEVEL ATTACHMENTS / EVIDENCE"); r.bold=True; r.font.size=11
+            if general_evidence:
+                at=doc.add_table(rows=1,cols=4)
+                for ci,h in enumerate(["Attachment / Evidence","Type","Uploaded By","Upload Date"]): at.cell(0,ci).text=h
+                for ar in general_evidence:
+                    fp=Path(safe(ar["file_path"]))
+                    cells=at.add_row().cells
+                    cells[0].text=fp.name or "Evidence attachment"
+                    cells[1].text=safe(ar["attachment_type"] if "attachment_type" in ar.keys() else "Evidence")
+                    cells[2].text=safe(ar["uploaded_by"] if "uploaded_by" in ar.keys() else "")
+                    cells[3].text=safe(ar["uploaded_at"] if "uploaded_at" in ar.keys() else "")
+                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                        try:
+                            pp=cells[0].add_paragraph(); pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                            pp.add_run().add_picture(str(fp),width=Inches(0.8),height=Inches(0.65))
+                        except Exception: logging.exception("Unable to embed audit-level evidence photo")
+                style_docx_table(at,header=True,font_size=7)
+            else:
+                doc.add_paragraph("No audit-level attachments recorded.")
 
             doc.add_paragraph()
             p=doc.add_paragraph(); r=p.add_run("REVIEW / APPROVAL"); r.bold=True; r.font.size=11
@@ -3757,6 +3786,28 @@ class MainWindow(QMainWindow):
             ps=styles["Normal"]; ps.fontSize=6.2; ps.leading=7.2
             pdata=[[Paragraph(xml_safe(v),ps) for v in row] for row in data]
             ft=Table(pdata,repeatRows=1,colWidths=[25,55,55,60,115,100,65,55,55]); ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP") ])); story.append(ft)
+            # Add a consolidated evidence register so audit-level and finding-level
+            # attachments are visible in the professional PDF report.
+            story += [Spacer(1,12),Paragraph("<b>ATTACHMENTS / EVIDENCE REGISTER</b>",styles["Heading2"])]
+            evidence_data=[["Finding / Level","Attachment / Evidence","Type","Uploaded By","Upload Date"]]
+            evidence_items=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
+            for finding in fs:
+                evidence_items += [(safe(finding["finding_number"]),ar) for ar in self._audit_attachment_rows(audit_id,finding["id"])]
+            for label,ar in evidence_items:
+                fp=Path(safe(ar["file_path"]))
+                evidence_data.append([label,fp.name or "Evidence attachment",safe(ar["attachment_type"] if "attachment_type" in ar.keys() else "Evidence"),safe(ar["uploaded_by"] if "uploaded_by" in ar.keys() else ""),safe(ar["uploaded_at"] if "uploaded_at" in ar.keys() else "")])
+                if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                    try:
+                        evidence_data.append(["",Paragraph("Photo evidence",ps),"", "", ""])
+                        evidence_data[-1][1]=RLImage(str(fp),width=1.0*72,height=0.75*72,preserveAspectRatio=True)
+                    except Exception:
+                        logging.exception("Unable to embed audit evidence image in PDF")
+            if len(evidence_data)>1:
+                ep=[[Paragraph(xml_safe(str(v)) if not isinstance(v,RLImage) else "",ps) if not isinstance(v,RLImage) else v for v in row] for row in evidence_data]
+                et=Table(ep,repeatRows=1,colWidths=[65,175,55,85,80])
+                et.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story.append(et)
+            else:
+                story.append(Paragraph("No attachments or evidence files are recorded for this audit.",ps))
             story += [Spacer(1,12),Paragraph("<b>REVIEW & APPROVAL</b>",styles["Heading2"]),Paragraph(xml_safe(f"Auditor: {a['auditor']} | {a['auditor_position']} | {a['auditor_date']}"),ps),Paragraph(xml_safe(f"Reviewer: {a['reviewer']} | {a['reviewer_position']} | {a['reviewer_date']}"),ps),Paragraph(xml_safe(f"Approver: {a['approver']} | {a['approver_position']} | {a['approver_date']}"),ps)]
             doc.build(story); self.show_export_success(path)
         except Exception as e: logging.exception("Audit PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
