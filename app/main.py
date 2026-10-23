@@ -325,6 +325,15 @@ class Database:
             ON training_records(employee_db_id, course_id, training_date);
         """)
 
+        # Training-only employee fields; additive migrations preserve all existing data.
+        employee_columns = {r["name"] for r in self.conn.execute("PRAGMA table_info(employees)").fetchall()}
+        if "date_joining" not in employee_columns:
+            self.conn.execute("ALTER TABLE employees ADD COLUMN date_joining TEXT DEFAULT ''")
+        if "safety_induction_date" not in employee_columns:
+            self.conn.execute("ALTER TABLE employees ADD COLUMN safety_induction_date TEXT DEFAULT ''")
+        # Older versions offered "Either"; the current Training Type choices are Internal or External.
+        self.conn.execute("UPDATE training_courses SET provider_type='Internal' WHERE lower(COALESCE(provider_type,''))='either'")
+
         # Backward-compatible migrations for existing installations.
         self.conn.execute("CREATE TABLE IF NOT EXISTS incident_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS audit_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)")
@@ -1887,8 +1896,8 @@ class MainWindow(QMainWindow):
             "CAPA Register",
             "Reports",
             "Master Data",
-            "Settings",
-            "Training"
+            "Training",
+            "Settings"
         ]
 
         self.nav.addItems(modules)
@@ -1921,9 +1930,9 @@ class MainWindow(QMainWindow):
         elif row == 6:
             self.master_data()
         elif row == 7:
-            self.settings_page()
-        elif row == 8:
             self.training()
+        elif row == 8:
+            self.settings_page()
 
     # --------------------------------------------------------
 
@@ -3944,8 +3953,8 @@ class MainWindow(QMainWindow):
     def training(self):
         w, layout = self.page("Training Management")
         intro = QLabel(
-            "Manage designation-based training requirements and employee training records. "
-            "The register displays employees as rows and training courses as columns."
+            "Training Matrix, employee Training Register and Master Training Record. "
+            "Trade-based requirements are fetched automatically from the matrix."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -3954,70 +3963,92 @@ class MainWindow(QMainWindow):
         tabs.setDocumentMode(True)
         layout.addWidget(tabs, 1)
 
+        trade_options = [
+            "Welder", "Rigger", "Fabricator", "Electrician", "Mechanical Technician",
+            "Instrument Technician", "Scaffolder", "Scaffold Inspector", "Forklift Operator",
+            "Crane Operator", "Banksman / Signaler", "Helper", "General Worker", "Driver",
+            "HSE Officer", "HSE Supervisor", "Supervisor", "Engineer", "Storekeeper", "Other"
+        ]
+        department_options = [
+            "HSE", "Operations", "Construction", "Maintenance", "Engineering", "Electrical",
+            "Mechanical", "Welding", "Fabrication", "Rigging", "Scaffolding", "Logistics",
+            "Warehouse", "Transport", "Administration", "HR", "IT", "Quality", "Environment",
+            "Security", "Facilities", "Other"
+        ]
+
+        def distinct_values(column):
+            try:
+                rows = db.fetchall(
+                    f"SELECT DISTINCT {column} AS value FROM employees "
+                    f"WHERE COALESCE(active,1)=1 AND COALESCE({column},'')<>'' ORDER BY {column} COLLATE NOCASE"
+                )
+                return [safe(row["value"]).strip() for row in rows if safe(row["value"]).strip()]
+            except Exception:
+                return []
+
+        def fill_combo(combo, options, first_label=None, first_data=""):
+            combo.clear()
+            if first_label is not None:
+                combo.addItem(first_label, first_data)
+            for value in options:
+                if value and value not in [combo.itemText(i) for i in range(combo.count())]:
+                    combo.addItem(value, value)
+
+        # ---------------- Training Matrix ----------------
         matrix_page = QWidget()
         matrix_layout = QVBoxLayout(matrix_page)
         matrix_layout.setContentsMargins(8, 8, 8, 8)
         matrix_layout.setSpacing(8)
-
-        form_box = QGroupBox("Training Matrix — course requirements")
+        form_box = QGroupBox("Training Matrix — applicable course requirements")
         form_layout = QGridLayout(form_box)
-        form_layout.setHorizontalSpacing(10)
+        form_layout.setHorizontalSpacing(8)
         form_layout.setVerticalSpacing(7)
 
         course_name = QLineEdit()
-        course_name.setPlaceholderText("e.g. First Aid, HSE Induction, LOTO")
-        designation = QComboBox()
-        designation.addItem("All Designations", "")
-        designation_rows = db.fetchall(
-            "SELECT DISTINCT designation FROM employees "
-            "WHERE COALESCE(active,1)=1 AND COALESCE(designation,'')<>'' "
-            "ORDER BY designation COLLATE NOCASE"
-        )
-        for row in designation_rows:
-            designation.addItem(safe(row["designation"]), safe(row["designation"]))
-
+        course_name.setPlaceholderText("e.g. HSE Induction, First Aid, LOTO")
+        trade_combo = QComboBox()
+        trade_combo.setEditable(True)
+        trade_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        trade_combo.setToolTip("Choose one trade or enter multiple comma-separated trades. Leave blank for all trades.")
+        fill_combo(trade_combo, trade_options, "All Trades", "")
+        trade_combo.setCurrentIndex(0)
         department = QComboBox()
-        department.addItem("All Departments", "")
-        department_rows = db.fetchall(
-            "SELECT DISTINCT department FROM employees "
-            "WHERE COALESCE(active,1)=1 AND COALESCE(department,'')<>'' "
-            "ORDER BY department COLLATE NOCASE"
-        )
-        for row in department_rows:
-            department.addItem(safe(row["department"]), safe(row["department"]))
-
+        fill_combo(department, department_options + distinct_values("department"), "All Departments", "")
         mandatory = QComboBox()
         mandatory.addItems(["Mandatory", "Recommended"])
-        provider_type = QComboBox()
-        provider_type.addItems(["Internal", "External", "Either"])
+        training_type = QComboBox()
+        training_type.addItems(["Internal", "External"])
         validity = QSpinBox()
         validity.setRange(0, 600)
         validity.setSuffix(" months")
         validity.setSpecialValueText("No expiry / not set")
         source = QComboBox()
-        source.addItems(["Company", "Qatar legal requirement", "Client / project", "Risk assessment", "Other"])
+        source.addItems([
+            "Qatar law / regulation", "Regulatory / authority requirement", "Client / project requirement",
+            "Risk assessment", "Company procedure / policy", "Contractual requirement", "Other"
+        ])
         certificate_required = QCheckBox("Certificate required")
         active = QCheckBox("Active requirement")
         active.setChecked(True)
 
         form_layout.addWidget(QLabel("Course name"), 0, 0)
         form_layout.addWidget(course_name, 0, 1, 1, 2)
-        form_layout.addWidget(QLabel("Designation"), 0, 3)
-        form_layout.addWidget(designation, 0, 4)
-        form_layout.addWidget(QLabel("Department"), 0, 5)
-        form_layout.addWidget(department, 0, 6)
-        form_layout.addWidget(QLabel("Requirement"), 1, 0)
-        form_layout.addWidget(mandatory, 1, 1)
-        form_layout.addWidget(QLabel("Provider type"), 1, 2)
-        form_layout.addWidget(provider_type, 1, 3)
-        form_layout.addWidget(QLabel("Validity"), 1, 4)
-        form_layout.addWidget(validity, 1, 5)
-        form_layout.addWidget(QLabel("Requirement source"), 2, 0)
-        form_layout.addWidget(source, 2, 1, 1, 2)
-        form_layout.addWidget(certificate_required, 2, 3)
-        form_layout.addWidget(active, 2, 4)
+        form_layout.addWidget(QLabel("Applicable trade(s)"), 0, 3)
+        form_layout.addWidget(trade_combo, 0, 4, 1, 2)
+        form_layout.addWidget(QLabel("Department"), 1, 0)
+        form_layout.addWidget(department, 1, 1)
+        form_layout.addWidget(QLabel("Requirement"), 1, 2)
+        form_layout.addWidget(mandatory, 1, 3)
+        form_layout.addWidget(QLabel("Training type"), 1, 4)
+        form_layout.addWidget(training_type, 1, 5)
+        form_layout.addWidget(QLabel("Validity"), 2, 0)
+        form_layout.addWidget(validity, 2, 1)
+        form_layout.addWidget(QLabel("Requirement source"), 2, 2)
+        form_layout.addWidget(source, 2, 3, 1, 2)
+        form_layout.addWidget(certificate_required, 2, 5)
+        form_layout.addWidget(active, 3, 0, 1, 2)
         form_layout.setColumnStretch(1, 2)
-        form_layout.setColumnStretch(4, 1)
+        form_layout.setColumnStretch(4, 2)
         matrix_layout.addWidget(form_box)
 
         matrix_buttons = QHBoxLayout()
@@ -4026,9 +4057,9 @@ class MainWindow(QMainWindow):
         deactivate_course_btn = QPushButton("Deactivate Selected")
         export_matrix_btn = QPushButton("Export Matrix to Excel")
         refresh_matrix_btn = QPushButton("Refresh")
-        for btn in (save_course_btn, clear_course_btn, deactivate_course_btn,
-                    export_matrix_btn, refresh_matrix_btn):
-            btn.setMinimumWidth(105)
+        for btn in (save_course_btn, clear_course_btn, deactivate_course_btn, export_matrix_btn, refresh_matrix_btn):
+            btn.setMinimumHeight(34)
+            btn.setMinimumWidth(100)
             matrix_buttons.addWidget(btn)
         matrix_buttons.addStretch(1)
         matrix_layout.addLayout(matrix_buttons)
@@ -4036,37 +4067,76 @@ class MainWindow(QMainWindow):
         course_table = QTableWidget()
         course_table.setColumnCount(9)
         course_table.setHorizontalHeaderLabels([
-            "ID", "Training Course", "Designation", "Department", "Requirement",
-            "Provider Type", "Validity (months)", "Requirement Source", "Status"
+            "ID", "Training Course", "Applicable Trade(s)", "Department", "Requirement",
+            "Training Type", "Validity (months)", "Requirement Source", "Status"
         ])
-        course_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        course_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        course_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        course_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        course_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        course_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         course_table.setAlternatingRowColors(True)
-        course_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        course_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        course_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
-        course_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        course_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        course_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        course_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        course_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         course_table.setColumnHidden(0, True)
         matrix_layout.addWidget(course_table, 1)
         tabs.addTab(matrix_page, "Training Matrix")
 
+        # ---------------- Training Register ----------------
         register_page = QWidget()
         register_layout = QVBoxLayout(register_page)
         register_layout.setContentsMargins(8, 8, 8, 8)
         register_layout.setSpacing(8)
-
         register_help = QLabel(
-            "One employee per row and one training course per column. "
-            "Select a course cell to record completion, expiry and certificate details. "
-            "Scroll horizontally when the organisation has many courses; resize the window as needed."
+            "One employee per row and one course per column. Select an applicable course cell to add a training date, "
+            "expiry date and certificate. The employee's trade and department determine applicable courses."
         )
         register_help.setWordWrap(True)
         register_layout.addWidget(register_help)
 
+        employee_box = QGroupBox("Add employee to the training register")
+        employee_form = QGridLayout(employee_box)
+        employee_id_input = QLineEdit()
+        employee_id_input.setPlaceholderText("Employee ID (optional)")
+        employee_name_input = QLineEdit()
+        employee_name_input.setPlaceholderText("Employee full name")
+        employee_department_input = QComboBox()
+        employee_department_input.setEditable(True)
+        fill_combo(employee_department_input, department_options + distinct_values("department"), "Select department", "")
+        employee_trade_input = QComboBox()
+        employee_trade_input.setEditable(True)
+        fill_combo(employee_trade_input, trade_options + distinct_values("designation"), "Select trade", "")
+        joining_date = QDateEdit()
+        joining_date.setCalendarPopup(True)
+        joining_date.setDisplayFormat("yyyy-MM-dd")
+        joining_date.setDate(QDate.currentDate())
+        safety_induction_date = QDateEdit()
+        safety_induction_date.setCalendarPopup(True)
+        safety_induction_date.setDisplayFormat("yyyy-MM-dd")
+        safety_induction_date.setSpecialValueText("Not completed")
+        safety_induction_date.setDate(QDate(2000, 1, 1))
+        safety_induction_date.setMinimumDate(QDate(2000, 1, 1))
+        safety_induction_date.setMaximumDate(QDate.currentDate().addYears(20))
+        safety_induction_date.setToolTip("Set to 2000-01-01 if safety induction has not yet been completed.")
+        add_employee_btn = QPushButton("Save Employee")
+        employee_form.addWidget(QLabel("Employee ID"), 0, 0)
+        employee_form.addWidget(employee_id_input, 0, 1)
+        employee_form.addWidget(QLabel("Employee name *"), 0, 2)
+        employee_form.addWidget(employee_name_input, 0, 3)
+        employee_form.addWidget(QLabel("Department"), 0, 4)
+        employee_form.addWidget(employee_department_input, 0, 5)
+        employee_form.addWidget(QLabel("Trade"), 1, 0)
+        employee_form.addWidget(employee_trade_input, 1, 1)
+        employee_form.addWidget(QLabel("Date joined"), 1, 2)
+        employee_form.addWidget(joining_date, 1, 3)
+        employee_form.addWidget(QLabel("Safety induction date"), 1, 4)
+        employee_form.addWidget(safety_induction_date, 1, 5)
+        employee_form.addWidget(add_employee_btn, 2, 5)
+        register_layout.addWidget(employee_box)
+
         register_toolbar = QHBoxLayout()
         register_search = QLineEdit()
-        register_search.setPlaceholderText("Search employee, ID, designation or department…")
+        register_search.setPlaceholderText("Search employee, ID, trade or department…")
         register_search.setClearButtonEnabled(True)
         refresh_register_btn = QPushButton("Refresh Register")
         export_register_btn = QPushButton("Export Register to Excel")
@@ -4074,25 +4144,56 @@ class MainWindow(QMainWindow):
         register_toolbar.addWidget(refresh_register_btn)
         register_toolbar.addWidget(export_register_btn)
         register_layout.addLayout(register_toolbar)
-
         status_summary = QLabel("")
         status_summary.setStyleSheet("font-weight: bold; padding: 4px;")
         register_layout.addWidget(status_summary)
-
         register_table = QTableWidget()
         register_table.setAlternatingRowColors(True)
-        register_table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        register_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
+        register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         register_table.setWordWrap(True)
-        register_table.horizontalHeader().setMinimumSectionSize(110)
-        register_table.horizontalHeader().setDefaultSectionSize(175)
-        register_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        register_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        register_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        register_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        register_table.horizontalHeader().setMinimumSectionSize(100)
+        register_table.horizontalHeader().setDefaultSectionSize(170)
         register_table.verticalHeader().setDefaultSectionSize(58)
         register_layout.addWidget(register_table, 1)
         tabs.addTab(register_page, "Training Register")
+
+        # ---------------- Master Training Record ----------------
+        master_page = QWidget()
+        master_layout = QVBoxLayout(master_page)
+        master_layout.setContentsMargins(8, 8, 8, 8)
+        master_layout.setSpacing(8)
+        master_info = QLabel("Complete employee-by-course history, including joining date, safety induction, trade, training dates, expiry, type and compliance status.")
+        master_info.setWordWrap(True)
+        master_layout.addWidget(master_info)
+        master_toolbar = QHBoxLayout()
+        master_search = QLineEdit()
+        master_search.setPlaceholderText("Search employee, course, trade or department…")
+        master_search.setClearButtonEnabled(True)
+        refresh_master_btn = QPushButton("Refresh Master Record")
+        export_master_excel_btn = QPushButton("Export Master Record to Excel")
+        export_master_word_btn = QPushButton("Export Master Record to Word")
+        for btn in (refresh_master_btn, export_master_excel_btn, export_master_word_btn):
+            btn.setMinimumHeight(34)
+        master_toolbar.addWidget(master_search, 1)
+        master_toolbar.addWidget(refresh_master_btn)
+        master_toolbar.addWidget(export_master_excel_btn)
+        master_toolbar.addWidget(export_master_word_btn)
+        master_layout.addLayout(master_toolbar)
+        master_table = QTableWidget()
+        master_table.setColumnCount(13)
+        master_table.setHorizontalHeaderLabels([
+            "Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date",
+            "Training Course", "Training Type", "Requirement Source", "Training Date", "Expiry Date",
+            "Status", "Certificate No."
+        ])
+        master_table.setAlternatingRowColors(True)
+        master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        master_table.setWordWrap(True)
+        master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        master_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        master_layout.addWidget(master_table, 1)
+        tabs.addTab(master_page, "Master Training Record")
 
         selected_course_id = {"value": None}
 
@@ -4100,31 +4201,26 @@ class MainWindow(QMainWindow):
             selected_course_id["value"] = None
             course_table.clearSelection()
             course_name.clear()
-            designation.setCurrentIndex(0)
+            trade_combo.setCurrentIndex(0)
+            trade_combo.setEditText("All Trades")
             department.setCurrentIndex(0)
             mandatory.setCurrentIndex(0)
-            provider_type.setCurrentIndex(0)
+            training_type.setCurrentIndex(0)
             validity.setValue(0)
-            source.setCurrentText("Company")
+            source.setCurrentText("Company procedure / policy")
             certificate_required.setChecked(False)
             active.setChecked(True)
             save_course_btn.setText("Save Course")
 
         def load_courses():
-            rows = db.fetchall(
-                "SELECT * FROM training_courses ORDER BY active DESC, course_name COLLATE NOCASE"
-            )
+            rows = db.fetchall("SELECT * FROM training_courses ORDER BY active DESC, course_name COLLATE NOCASE")
             course_table.setRowCount(len(rows))
             for r, row in enumerate(rows):
                 values = [
-                    row["id"], row["course_name"],
-                    row["designation"] or "All Designations",
-                    row["department"] or "All Departments",
-                    "Mandatory" if row["mandatory"] else "Recommended",
-                    row["provider_type"] or "Internal",
-                    row["validity_months"] or 0,
-                    row["requirement_source"] or "Company",
-                    "Active" if row["active"] else "Inactive"
+                    row["id"], row["course_name"], row["designation"] or "All Trades",
+                    row["department"] or "All Departments", "Mandatory" if row["mandatory"] else "Recommended",
+                    row["provider_type"] or "Internal", row["validity_months"] or 0,
+                    row["requirement_source"] or "Company procedure / policy", "Active" if row["active"] else "Inactive"
                 ]
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(str(value))
@@ -4133,6 +4229,7 @@ class MainWindow(QMainWindow):
                     course_table.setItem(r, c, item)
             course_table.resizeRowsToContents()
             load_register()
+            load_master_record()
 
         def select_course_row(row, column=0):
             item = course_table.item(row, 0)
@@ -4144,14 +4241,19 @@ class MainWindow(QMainWindow):
                 return
             selected_course_id["value"] = int(course_id)
             course_name.setText(safe(rec["course_name"]))
-            idx = designation.findData(safe(rec["designation"]))
-            designation.setCurrentIndex(max(0, idx))
-            idx = department.findData(safe(rec["department"]))
-            department.setCurrentIndex(max(0, idx))
+            saved_trade = safe(rec["designation"]).strip()
+            trade_combo.setEditText(saved_trade if saved_trade else "All Trades")
+            saved_dept = safe(rec["department"]).strip()
+            if department.findText(saved_dept) < 0 and saved_dept:
+                department.addItem(saved_dept, saved_dept)
+            department.setCurrentText(saved_dept if saved_dept else "All Departments")
             mandatory.setCurrentIndex(0 if rec["mandatory"] else 1)
-            provider_type.setCurrentText(safe(rec["provider_type"]) or "Internal")
+            training_type.setCurrentText(safe(rec["provider_type"]) if safe(rec["provider_type"]) in ("Internal", "External") else "Internal")
             validity.setValue(int(rec["validity_months"] or 0))
-            source.setCurrentText(safe(rec["requirement_source"]) or "Company")
+            req_source = safe(rec["requirement_source"])
+            if source.findText(req_source) < 0 and req_source:
+                source.addItem(req_source)
+            source.setCurrentText(req_source or "Company procedure / policy")
             certificate_required.setChecked(bool(rec["certificate_required"]))
             active.setChecked(bool(rec["active"]))
             save_course_btn.setText("Update Course")
@@ -4162,41 +4264,35 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Training Matrix", "Enter a training course name.")
                 course_name.setFocus()
                 return
-            desig = safe(designation.currentData())
-            dept = safe(department.currentData())
+            raw_trade = trade_combo.currentText().strip()
+            trades = "" if raw_trade.lower() in ("all trades", "all designations", "") else ", ".join(
+                dict.fromkeys(t.strip() for t in raw_trade.split(",") if t.strip())
+            )
+            dept_text = department.currentText().strip()
+            dept = "" if dept_text.lower() in ("all departments", "") else dept_text
             values = (
-                name, desig, dept,
-                1 if mandatory.currentIndex() == 0 else 0,
-                provider_type.currentText(),
-                int(validity.value()),
-                source.currentText(),
-                1 if certificate_required.isChecked() else 0,
-                1 if active.isChecked() else 0
+                name, trades, dept, 1 if mandatory.currentIndex() == 0 else 0,
+                training_type.currentText(), int(validity.value()), source.currentText(),
+                1 if certificate_required.isChecked() else 0, 1 if active.isChecked() else 0
             )
             existing = db.fetchone(
                 "SELECT id FROM training_courses WHERE lower(course_name)=lower(?) "
-                "AND COALESCE(designation,'')=? AND COALESCE(department,'')=? AND active=1 "
-                "AND id<>COALESCE(?, -1)",
-                (name, desig, dept, selected_course_id["value"])
+                "AND COALESCE(designation,'')=? AND COALESCE(department,'')=? AND active=1 AND id<>COALESCE(?, -1)",
+                (name, trades, dept, selected_course_id["value"])
             )
             if existing:
-                QMessageBox.warning(
-                    self, "Training Matrix",
-                    "An active course with the same name, designation and department already exists."
-                )
+                QMessageBox.warning(self, "Training Matrix", "An active course with the same course name, trade(s) and department already exists.")
                 return
             if selected_course_id["value"] is None:
                 db.execute(
                     """INSERT INTO training_courses
-                    (course_name,designation,department,mandatory,provider_type,validity_months,
-                     requirement_source,certificate_required,active)
+                    (course_name,designation,department,mandatory,provider_type,validity_months,requirement_source,certificate_required,active)
                     VALUES (?,?,?,?,?,?,?,?,?)""", values
                 )
             else:
                 db.execute(
-                    """UPDATE training_courses SET course_name=?,designation=?,department=?,
-                    mandatory=?,provider_type=?,validity_months=?,requirement_source=?,
-                    certificate_required=?,active=? WHERE id=?""",
+                    """UPDATE training_courses SET course_name=?,designation=?,department=?,mandatory=?,provider_type=?,
+                    validity_months=?,requirement_source=?,certificate_required=?,active=? WHERE id=?""",
                     values + (selected_course_id["value"],)
                 )
             reset_course_form()
@@ -4209,8 +4305,7 @@ class MainWindow(QMainWindow):
                 return
             course_id = course_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
             answer = QMessageBox.question(
-                self, "Deactivate Course",
-                "Deactivate this course? Existing training records will be retained.",
+                self, "Deactivate Course", "Deactivate this course? Existing training records will be retained.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if answer == QMessageBox.StandardButton.Yes:
@@ -4232,62 +4327,74 @@ class MainWindow(QMainWindow):
 
         def latest_training(employee_db_id, course_id):
             return db.fetchone(
-                """SELECT * FROM training_records
-                   WHERE employee_db_id=? AND course_id=?
-                   ORDER BY training_date DESC, id DESC LIMIT 1""",
+                "SELECT * FROM training_records WHERE employee_db_id=? AND course_id=? ORDER BY training_date DESC, id DESC LIMIT 1",
                 (employee_db_id, course_id)
             )
 
         def course_applies(course, employee):
-            desig = safe(course["designation"]).strip()
-            dept = safe(course["department"]).strip()
-            return (
-                (not desig or desig.lower() == safe(employee["designation"]).strip().lower())
-                and (not dept or dept.lower() == safe(employee["department"]).strip().lower())
-            )
+            raw_trades = safe(course["designation"]).strip()
+            emp_trade = safe(employee["designation"]).strip().lower()
+            allowed_trades = [t.strip().lower() for t in raw_trades.split(",") if t.strip()]
+            trade_match = not allowed_trades or emp_trade in allowed_trades or "all trades" in allowed_trades or "all designations" in allowed_trades
+            course_dept = safe(course["department"]).strip().lower()
+            emp_dept = safe(employee["department"]).strip().lower()
+            return trade_match and (not course_dept or course_dept == emp_dept or course_dept == "all departments")
 
-        def training_status(record):
+        def training_status(record, course=None):
             if not record:
                 return "Training Required"
             expiry = safe(record["expiry_date"]).strip()
             if not expiry:
                 return "Completed"
             try:
-                expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-                today = date.today()
-                if expiry_date < today:
+                expiry_day = datetime.strptime(expiry, "%Y-%m-%d").date()
+                days_left = (expiry_day - date.today()).days
+                if days_left < 0:
                     return "Expired"
-                if (expiry_date - today).days <= 30:
+                if course and safe(course["provider_type"]).lower() == "external" and days_left <= 45:
+                    return "Due Soon"
+                if course and safe(course["provider_type"]).lower() == "internal" and days_left <= 30:
                     return "Due Soon"
                 return "Valid"
             except Exception:
                 return "Completed"
 
-        def set_status_style(item, status):
+        def set_status_style(item, status, course=None):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item.setToolTip(status)
-            if status == "Valid" or status == "Completed":
-                item.setForeground(QBrush(QColor("#176B3A")))
-            elif status == "Due Soon":
-                item.setForeground(QBrush(QColor("#9A6700")))
-            elif status == "Expired" or status == "Training Required":
-                item.setForeground(QBrush(QColor("#B42318")))
+            item.setToolTip(item.toolTip() or status)
+            bg = None
+            if status == "Expired" or status == "Training Required":
+                bg = QColor("#FDE2E2")
+                fg = QColor("#B42318")
+            elif status == "Due Soon" and course and safe(course["provider_type"]).lower() == "external":
+                bg = QColor("#FDE2E2")
+                fg = QColor("#B42318")
+            elif status == "Due Soon" and course and safe(course["provider_type"]).lower() == "internal":
+                bg = QColor("#DDF5E5")
+                fg = QColor("#176B3A")
+            elif status in ("Valid", "Completed"):
+                fg = QColor("#176B3A")
             elif status == "N/A":
-                item.setForeground(QBrush(QColor("#7A7A7A")))
+                fg = QColor("#777777")
+            else:
+                fg = QColor("#9A6700")
+            item.setForeground(QBrush(fg))
+            if bg:
+                item.setBackground(QBrush(bg))
             font = item.font()
             font.setBold(True)
             item.setFont(font)
 
+        def get_employees():
+            return db.fetchall(
+                "SELECT id,employee_id,name,designation,department,active,date_joining,safety_induction_date "
+                "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
+            )
+
         def load_register():
-            employees = db.fetchall(
-                """SELECT id, employee_id, name, designation, department, active
-                   FROM employees WHERE COALESCE(active,1)=1
-                   ORDER BY name COLLATE NOCASE"""
-            )
-            courses = db.fetchall(
-                "SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"
-            )
-            base_headers = ["Employee ID", "Employee Name", "Department", "Designation"]
+            employees = get_employees()
+            courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE")
+            base_headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"]
             headers = base_headers + [safe(c["course_name"]) for c in courses]
             register_table.clear()
             register_table.setColumnCount(len(headers))
@@ -4295,88 +4402,105 @@ class MainWindow(QMainWindow):
             register_table.setRowCount(len(employees))
             for r, employee in enumerate(employees):
                 fixed_values = [
-                    safe(employee["employee_id"]),
-                    safe(employee["name"]),
-                    safe(employee["department"]),
-                    safe(employee["designation"])
+                    safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
+                    safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"])
                 ]
                 for c, value in enumerate(fixed_values):
                     item = QTableWidgetItem(value)
                     if c == 0:
                         item.setData(Qt.ItemDataRole.UserRole, int(employee["id"]))
                     register_table.setItem(r, c, item)
-                for offset, course in enumerate(courses, start=4):
+                for offset, course in enumerate(courses, start=6):
                     item = QTableWidgetItem()
                     item.setData(Qt.ItemDataRole.UserRole, int(course["id"]))
                     if not course_applies(course, employee):
                         item.setText("N/A")
-                        set_status_style(item, "N/A")
-                        item.setToolTip("This training is not applicable to the employee's designation/department.")
+                        item.setToolTip("Not applicable to this employee's trade/department.")
+                        set_status_style(item, "N/A", course)
                     else:
                         record = latest_training(employee["id"], course["id"])
-                        status = training_status(record)
+                        status = training_status(record, course)
                         if record:
-                            training_date = safe(record["training_date"])
-                            expiry = safe(record["expiry_date"])
-                            display = status + "\nTrained: " + training_date
-                            if expiry:
-                                display += "\nExpiry: " + expiry
+                            training_date_text = safe(record["training_date"])
+                            expiry_text = safe(record["expiry_date"])
+                            display = status + "\nTrained: " + training_date_text
+                            if expiry_text:
+                                display += "\nExpiry: " + expiry_text
                             item.setText(display)
-                            details = [
-                                "Status: " + status,
-                                "Training date: " + (training_date or "—"),
-                                "Expiry date: " + (expiry or "No expiry recorded"),
-                                "Provider: " + (safe(record["provider"]) or "—"),
-                                "Certificate: " + (safe(record["certificate_no"]) or "—"),
-                                "Click to add a renewal record; previous records are retained."
-                            ]
-                            item.setToolTip("\n".join(details))
+                            item.setToolTip(
+                                "Status: " + status + "\nTraining date: " + (training_date_text or "—") +
+                                "\nExpiry date: " + (expiry_text or "No expiry recorded") +
+                                "\nTraining type: " + safe(course["provider_type"]) +
+                                "\nClick to add a renewal record; previous records are retained."
+                            )
                         else:
                             item.setText("Training Required")
-                            item.setToolTip("No training record exists for this employee and course. Click to record training.")
-                        set_status_style(item, status)
+                            item.setToolTip("No training record exists. Click to enter a completion date.")
+                        set_status_style(item, status, course)
                     register_table.setItem(r, offset, item)
             register_table.resizeRowsToContents()
-            if register_table.columnCount() > 4:
-                register_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-                for c in range(5, register_table.columnCount()):
-                    register_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
-            required = expired = due = valid = completed = 0
+            for col in range(min(6, register_table.columnCount())):
+                register_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            for col in range(6, register_table.columnCount()):
+                register_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            counts = {"Training Required": 0, "Expired": 0, "Due Soon": 0, "Valid": 0, "Completed": 0}
             for r in range(register_table.rowCount()):
-                for c in range(4, register_table.columnCount()):
+                for c in range(6, register_table.columnCount()):
                     cell = register_table.item(r, c)
                     if not cell:
                         continue
                     status = cell.toolTip().split("\n")[0].replace("Status: ", "") if cell.toolTip().startswith("Status: ") else cell.text().split("\n")[0]
-                    if status == "Training Required":
-                        required += 1
-                    elif status == "Expired":
-                        expired += 1
-                    elif status == "Due Soon":
-                        due += 1
-                    elif status == "Valid":
-                        valid += 1
-                    elif status == "Completed":
-                        completed += 1
+                    if status in counts:
+                        counts[status] += 1
             status_summary.setText(
-                f"Employees: {len(employees)}   |   Active courses: {len(courses)}   |   "
-                f"Training required: {required}   |   Expired: {expired}   |   Due soon: {due}   |   "
-                f"Valid: {valid}   |   Completed (no expiry): {completed}"
+                f"Employees: {len(employees)} | Active courses: {len(courses)} | "
+                f"Training required: {counts['Training Required']} | Expired: {counts['Expired']} | "
+                f"Due soon: {counts['Due Soon']} | Valid: {counts['Valid']} | No expiry: {counts['Completed']}"
             )
             apply_register_filter()
 
         def apply_register_filter(*args):
             query = register_search.text().strip().lower()
             for r in range(register_table.rowCount()):
-                haystack = " ".join(
-                    register_table.item(r, c).text()
-                    for c in range(min(4, register_table.columnCount()))
-                    if register_table.item(r, c)
-                ).lower()
+                haystack = " ".join(register_table.item(r, c).text() for c in range(min(6, register_table.columnCount())) if register_table.item(r, c)).lower()
                 register_table.setRowHidden(r, bool(query) and query not in haystack)
 
+        def add_employee():
+            name = employee_name_input.text().strip()
+            emp_id = employee_id_input.text().strip()
+            dept = employee_department_input.currentText().strip()
+            trade = employee_trade_input.currentText().strip()
+            if dept.lower() == "select department":
+                dept = ""
+            if trade.lower() == "select trade":
+                trade = ""
+            if not name:
+                QMessageBox.warning(self, "Training Register", "Enter the employee name.")
+                employee_name_input.setFocus()
+                return
+            if emp_id and db.fetchone("SELECT id FROM employees WHERE lower(employee_id)=lower(?)", (emp_id,)):
+                QMessageBox.warning(self, "Training Register", "That employee ID already exists. Use the existing employee record or enter a different ID.")
+                employee_id_input.setFocus()
+                return
+            induction = safety_induction_date.date().toString("yyyy-MM-dd")
+            if induction == "2000-01-01":
+                induction = ""
+            db.execute(
+                "INSERT INTO employees (employee_id,name,designation,department,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,1)",
+                (emp_id, name, trade, dept, joining_date.date().toString("yyyy-MM-dd"), induction)
+            )
+            employee_id_input.clear()
+            employee_name_input.clear()
+            employee_department_input.setCurrentIndex(0)
+            employee_trade_input.setCurrentIndex(0)
+            joining_date.setDate(QDate.currentDate())
+            safety_induction_date.setDate(QDate(2000, 1, 1))
+            load_register()
+            load_master_record()
+            QMessageBox.information(self, "Training Register", "Employee saved and training applicability refreshed.")
+
         def edit_training_cell(row, column):
-            if column < 4:
+            if column < 6:
                 return
             employee_item = register_table.item(row, 0)
             course_item = register_table.item(row, column)
@@ -4389,22 +4513,15 @@ class MainWindow(QMainWindow):
             if not employee or not course or not course_applies(course, employee):
                 return
             record = latest_training(employee_db_id, course_id)
-
             dialog = QDialog(self)
             dialog.setWindowTitle("Record Training — " + safe(course["course_name"]))
-            dialog.setMinimumSize(520, 440)
-            dialog.resize(620, 500)
+            dialog.setMinimumSize(540, 460)
+            dialog.resize(620, 520)
             dlg_layout = QVBoxLayout(dialog)
-            info = QLabel(
-                f"<b>Employee:</b> {safe(employee['name'])} &nbsp;&nbsp; "
-                f"<b>Designation:</b> {safe(employee['designation'])}<br>"
-                f"<b>Course:</b> {safe(course['course_name'])}<br>"
-                f"<b>Provider type:</b> {safe(course['provider_type'])}"
-            )
-            info.setWordWrap(True)
-            dlg_layout.addWidget(info)
-
             form = QFormLayout()
+            employee_label = QLabel(f"{safe(employee['name'])} | {safe(employee['designation'])} | {safe(employee['department'])}")
+            employee_label.setWordWrap(True)
+            form.addRow("Employee", employee_label)
             training_date = QDateEdit()
             training_date.setCalendarPopup(True)
             training_date.setDisplayFormat("yyyy-MM-dd")
@@ -4412,10 +4529,11 @@ class MainWindow(QMainWindow):
             expiry_date = QDateEdit()
             expiry_date.setCalendarPopup(True)
             expiry_date.setDisplayFormat("yyyy-MM-dd")
-            expiry_date.setDate(QDate.currentDate())
+            expiry_date.setDate(QDate.currentDate().addMonths(max(1, int(course["validity_months"] or 1))))
             no_expiry = QCheckBox("No expiry date")
             provider = QLineEdit()
-            provider.setPlaceholderText("Training provider / internal trainer")
+            provider.setPlaceholderText("Internal trainer / external training organisation")
+            provider_type_label = QLabel(safe(course["provider_type"]))
             cert_no = QLineEdit()
             cert_no.setPlaceholderText("Certificate or record reference")
             attachment = QLineEdit()
@@ -4428,16 +4546,17 @@ class MainWindow(QMainWindow):
             notes = QTextEdit()
             notes.setPlaceholderText("Assessment result, remarks or competency notes")
             notes.setMaximumHeight(85)
+            form.addRow("Training type", provider_type_label)
             form.addRow("Training date", training_date)
             form.addRow("Expiry date", expiry_date)
             form.addRow("", no_expiry)
-            form.addRow("Provider / trainer", provider)
+            form.addRow("Trainer / organisation", provider)
             form.addRow("Certificate number", cert_no)
             form.addRow("Attachment", attachment_row)
             form.addRow("Notes", notes)
             dlg_layout.addLayout(form)
-
             validity_months = int(course["validity_months"] or 0)
+
             def update_expiry_from_training(qdate=None):
                 if validity_months <= 0 or no_expiry.isChecked():
                     return
@@ -4446,18 +4565,16 @@ class MainWindow(QMainWindow):
                     parsed = QDate.fromString(calculated, "yyyy-MM-dd")
                     if parsed.isValid():
                         expiry_date.setDate(parsed)
+
             training_date.dateChanged.connect(update_expiry_from_training)
             no_expiry.toggled.connect(lambda checked: expiry_date.setEnabled(not checked))
             no_expiry.setChecked(validity_months <= 0)
             if validity_months > 0:
                 update_expiry_from_training()
             if record:
-                try:
-                    parsed = QDate.fromString(safe(record["training_date"]), "yyyy-MM-dd")
-                    if parsed.isValid():
-                        training_date.setDate(parsed)
-                except Exception:
-                    pass
+                parsed = QDate.fromString(safe(record["training_date"]), "yyyy-MM-dd")
+                if parsed.isValid():
+                    training_date.setDate(parsed)
                 if safe(record["expiry_date"]):
                     parsed = QDate.fromString(safe(record["expiry_date"]), "yyyy-MM-dd")
                     if parsed.isValid():
@@ -4469,16 +4586,9 @@ class MainWindow(QMainWindow):
                 cert_no.setText(safe(record["certificate_no"]))
                 attachment.setText(safe(record["attachment_path"]))
                 notes.setPlainText(safe(record["notes"]))
-
-            browse_attachment.clicked.connect(
-                lambda: attachment.setText(
-                    QFileDialog.getOpenFileName(
-                        dialog, "Select Training Certificate", "",
-                        "Documents and Images (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)"
-                    )[0] or attachment.text()
-                )
-            )
-
+            browse_attachment.clicked.connect(lambda: attachment.setText(
+                QFileDialog.getOpenFileName(dialog, "Select Training Certificate", "",
+                "Documents and Images (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)")[0] or attachment.text()))
             button_row = QHBoxLayout()
             save_btn = QPushButton("Save Training Record")
             cancel_btn = QPushButton("Cancel")
@@ -4493,46 +4603,67 @@ class MainWindow(QMainWindow):
                 if expiry_text and expiry_text < date_text:
                     QMessageBox.warning(dialog, "Training Register", "Expiry date cannot be before the training date.")
                     return
-                # Append a new record so prior training/renewal history remains available.
                 db.execute(
-                    """INSERT INTO training_records
-                    (employee_db_id,course_id,training_date,expiry_date,provider,certificate_no,attachment_path,notes)
+                    """INSERT INTO training_records (employee_db_id,course_id,training_date,expiry_date,provider,certificate_no,attachment_path,notes)
                     VALUES (?,?,?,?,?,?,?,?)""",
-                    (
-                        employee_db_id, course_id, date_text, expiry_text,
-                        provider.text().strip(), cert_no.text().strip(),
-                        attachment.text().strip(), notes.toPlainText().strip()
-                    )
+                    (employee_db_id, course_id, date_text, expiry_text, provider.text().strip(), cert_no.text().strip(), attachment.text().strip(), notes.toPlainText().strip())
                 )
                 dialog.accept()
                 load_register()
+                load_master_record()
 
             save_btn.clicked.connect(save_training_record)
             cancel_btn.clicked.connect(dialog.reject)
             dialog.exec()
 
-        def export_training_register():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Training Register", "Training_Register.xlsx", "Excel Workbook (*.xlsx)"
-            )
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            employees = db.fetchall(
-                """SELECT id, employee_id, name, designation, department
-                   FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"""
-            )
-            courses = db.fetchall(
-                "SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"
-            )
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Training Register"
-            headers = ["Employee ID", "Employee Name", "Department", "Designation"] + [
-                safe(c["course_name"]) for c in courses
-            ]
-            ws.append(["HSE TRAINING REGISTER"])
+        def master_rows():
+            result = []
+            employees = get_employees()
+            courses = db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE")
+            for employee in employees:
+                applicable_found = False
+                for course in courses:
+                    if not course_applies(course, employee):
+                        continue
+                    applicable_found = True
+                    record = latest_training(employee["id"], course["id"])
+                    status = training_status(record, course)
+                    result.append([
+                        safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
+                        safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
+                        safe(course["course_name"]), safe(course["provider_type"]), safe(course["requirement_source"]),
+                        safe(record["training_date"]) if record else "", safe(record["expiry_date"]) if record else "",
+                        status, safe(record["certificate_no"]) if record else ""
+                    ])
+                if not applicable_found:
+                    result.append([
+                        safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
+                        safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
+                        "No applicable course configured", "", "", "", "", "N/A", ""
+                    ])
+            return result
+
+        def load_master_record():
+            rows = master_rows()
+            master_table.setRowCount(len(rows))
+            for r, values in enumerate(rows):
+                for c, value in enumerate(values):
+                    item = QTableWidgetItem(str(value or ""))
+                    if c == 11:
+                        course = db.fetchone("SELECT * FROM training_courses WHERE course_name=?", (values[6],)) if values[6] != "No applicable course configured" else None
+                        set_status_style(item, values[11], course)
+                    master_table.setItem(r, c, item)
+            master_table.resizeRowsToContents()
+            apply_master_filter()
+
+        def apply_master_filter(*args):
+            query = master_search.text().strip().lower()
+            for r in range(master_table.rowCount()):
+                haystack = " ".join(master_table.item(r, c).text() for c in range(master_table.columnCount()) if master_table.item(r, c)).lower()
+                master_table.setRowHidden(r, bool(query) and query not in haystack)
+
+        def style_excel(ws, title, headers):
+            ws.append([title])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
             ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="17365D")
@@ -4543,36 +4674,60 @@ class MainWindow(QMainWindow):
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="245486")
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            for employee in employees:
-                values = [
-                    safe(employee["employee_id"]), safe(employee["name"]),
-                    safe(employee["department"]), safe(employee["designation"])
-                ]
-                for course in courses:
-                    if not course_applies(course, employee):
-                        values.append("N/A")
-                        continue
-                    record = latest_training(employee["id"], course["id"])
-                    status = training_status(record)
-                    if record:
-                        text = status + "\nTraining: " + safe(record["training_date"])
-                        if safe(record["expiry_date"]):
-                            text += "\nExpiry: " + safe(record["expiry_date"])
-                        values.append(text)
-                    else:
-                        values.append("Training Required")
-                ws.append(values)
             thin = Side(style="thin", color="D5DADF")
             for row in ws.iter_rows(min_row=2):
                 for cell in row:
                     cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
-            for col in range(1, len(headers) + 1):
-                letter = ws.cell(row=2, column=col).column_letter
-                ws.column_dimensions[letter].width = 20 if col <= 4 else 24
-            ws.freeze_panes = "E3"
+            ws.freeze_panes = "A3"
             ws.auto_filter.ref = f"A2:{ws.cell(row=max(2, ws.max_row), column=len(headers)).coordinate}"
             ws.sheet_view.showGridLines = False
+            for col in range(1, len(headers) + 1):
+                ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 22
+
+        def finish_excel(ws, headers):
+            thin = Side(style="thin", color="D5DADF")
+            for row in ws.iter_rows(min_row=2):
+                for cell in row:
+                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+            ws.freeze_panes = "A3"
+            ws.auto_filter.ref = f"A2:{ws.cell(row=max(2, ws.max_row), column=len(headers)).coordinate}"
+            ws.sheet_view.showGridLines = False
+
+        def export_training_register():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Training Register", "Training_Register.xlsx", "Excel Workbook (*.xlsx)")
+            if not path:
+                return
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            employees = get_employees()
+            courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE")
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Training Register"
+            headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"] + [safe(c["course_name"]) for c in courses]
+            style_excel(ws, "HSE TRAINING REGISTER", headers)
+            for employee in employees:
+                values = [safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]), safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"])]
+                for course in courses:
+                    if not course_applies(course, employee):
+                        values.append("N/A")
+                        continue
+                    record = latest_training(employee["id"], course["id"])
+                    status = training_status(record, course)
+                    if record:
+                        text_value = status + "\nTraining: " + safe(record["training_date"])
+                        if safe(record["expiry_date"]):
+                            text_value += "\nExpiry: " + safe(record["expiry_date"])
+                        values.append(text_value)
+                    else:
+                        values.append("Training Required")
+                ws.append(values)
+            for col in range(1, len(headers) + 1):
+                ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 20 if col <= 6 else 24
+            ws.freeze_panes = "G3"
+            finish_excel(ws, headers)
             try:
                 wb.save(path)
                 QMessageBox.information(self, "Training Register", f"Register exported successfully:\n{path}")
@@ -4580,58 +4735,88 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Training Register", f"Could not export Excel file:\n{exc}")
 
         def export_training_matrix():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Training Matrix", "Training_Matrix.xlsx", "Excel Workbook (*.xlsx)"
-            )
+            path, _ = QFileDialog.getSaveFileName(self, "Export Training Matrix", "Training_Matrix.xlsx", "Excel Workbook (*.xlsx)")
             if not path:
                 return
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
             rows = db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE")
+            headers = ["Course", "Applicable Trade(s)", "Department", "Mandatory", "Training Type", "Validity (months)", "Requirement Source", "Certificate Required", "Status"]
             wb = Workbook()
             ws = wb.active
             ws.title = "Training Matrix"
-            headers = ["Course", "Designation", "Department", "Mandatory", "Provider Type",
-                       "Validity (months)", "Requirement Source", "Certificate Required", "Status"]
-            ws.append(["HSE TRAINING MATRIX"])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
-            ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
-            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
-            ws["A1"].alignment = Alignment(horizontal="center")
-            ws.append(headers)
-            for cell in ws[2]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="245486")
-                cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            style_excel(ws, "HSE TRAINING MATRIX", headers)
             for row in rows:
-                ws.append([
-                    safe(row["course_name"]), safe(row["designation"]) or "All Designations",
-                    safe(row["department"]) or "All Departments",
-                    "Mandatory" if row["mandatory"] else "Recommended",
-                    safe(row["provider_type"]), int(row["validity_months"] or 0),
-                    safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No",
-                    "Active" if row["active"] else "Inactive"
-                ])
-            thin = Side(style="thin", color="D5DADF")
-            for row in ws.iter_rows():
-                for cell in row:
-                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-                    cell.alignment = Alignment(vertical="top", wrap_text=True)
-            for col in range(1, len(headers) + 1):
-                ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 23
-            ws.freeze_panes = "A3"
-            ws.auto_filter.ref = f"A2:I{max(2, ws.max_row)}"
-            ws.sheet_view.showGridLines = False
+                ws.append([safe(row["course_name"]), safe(row["designation"]) or "All Trades", safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
+            finish_excel(ws, headers)
             try:
                 wb.save(path)
                 QMessageBox.information(self, "Training Matrix", f"Matrix exported successfully:\n{path}")
             except Exception as exc:
                 QMessageBox.critical(self, "Training Matrix", f"Could not export Excel file:\n{exc}")
 
+        def export_master_excel():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Master Training Record", "Master_Training_Record.xlsx", "Excel Workbook (*.xlsx)")
+            if not path:
+                return
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            headers = [master_table.horizontalHeaderItem(i).text() for i in range(master_table.columnCount())]
+            rows = master_rows()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Master Training Record"
+            style_excel(ws, "MASTER TRAINING RECORD", headers)
+            for row in rows:
+                ws.append(row)
+            finish_excel(ws, headers)
+            try:
+                wb.save(path)
+                QMessageBox.information(self, "Master Training Record", f"Excel export completed:\n{path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Master Training Record", f"Could not export Excel file:\n{exc}")
+
+        def export_master_word():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Master Training Record", "Master_Training_Record.docx", "Word Document (*.docx)")
+            if not path:
+                return
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
+            headers = [master_table.horizontalHeaderItem(i).text() for i in range(master_table.columnCount())]
+            rows = master_rows()
+            doc = Document()
+            section = doc.sections[0]
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width, section.page_height = section.page_height, section.page_width
+            doc.add_heading("Master Training Record", 0)
+            doc.add_paragraph(f"Organisation: {safe(company_name())} | Generated: {date.today().isoformat()}")
+            table = doc.add_table(rows=1, cols=len(headers))
+            table.style = "Table Grid"
+            table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            for i, header in enumerate(headers):
+                table.rows[0].cells[i].text = header
+            for row in rows:
+                cells = table.add_row().cells
+                for i, value in enumerate(row):
+                    cells[i].text = str(value or "")
+                    cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            for cell in table.rows[0].cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        run.bold = True
+                        run.font.size = Pt(8)
+            for row in table.rows[1:]:
+                for cell in row.cells:
+                    for paragraph in cell.paragraphs:
+                        for run in paragraph.runs:
+                            run.font.size = Pt(7)
+            try:
+                doc.save(path)
+                QMessageBox.information(self, "Master Training Record", f"Word export completed:\n{path}")
+            except Exception as exc:
+                QMessageBox.critical(self, "Master Training Record", f"Could not export Word file:\n{exc}")
+
         def filter_course_rows(*args):
-            query = register_search.text().strip().lower()
-            # Course list is independent of employee filtering; this is a no-op placeholder
-            # kept separate to avoid coupling register search to the matrix editor.
             return
 
         save_course_btn.clicked.connect(save_course)
@@ -4640,10 +4825,15 @@ class MainWindow(QMainWindow):
         export_matrix_btn.clicked.connect(export_training_matrix)
         refresh_matrix_btn.clicked.connect(load_courses)
         course_table.cellClicked.connect(select_course_row)
+        add_employee_btn.clicked.connect(add_employee)
         refresh_register_btn.clicked.connect(load_register)
         export_register_btn.clicked.connect(export_training_register)
         register_search.textChanged.connect(apply_register_filter)
         register_table.cellClicked.connect(edit_training_cell)
+        refresh_master_btn.clicked.connect(load_master_record)
+        export_master_excel_btn.clicked.connect(export_master_excel)
+        export_master_word_btn.clicked.connect(export_master_word)
+        master_search.textChanged.connect(apply_master_filter)
 
         load_courses()
         tabs.setCurrentIndex(0)
