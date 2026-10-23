@@ -11,7 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, QDate
-from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor
+from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLineEdit, QTextEdit, QPushButton, QLabel,
@@ -4009,9 +4009,21 @@ class MainWindow(QMainWindow):
         trade_combo = QComboBox()
         trade_combo.setEditable(True)
         trade_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        trade_combo.setToolTip("Choose one trade or enter multiple comma-separated trades. Leave blank for all trades.")
-        fill_combo(trade_combo, trade_options, "All Trades", "")
-        trade_combo.setCurrentIndex(0)
+        trade_combo.setToolTip("Open the dropdown and check every trade this course applies to. Select All Trades for universal applicability.")
+        trade_model = QStandardItemModel(trade_combo)
+        trade_combo.setModel(trade_model)
+        for trade_label in ["All Trades"] + trade_options:
+            trade_item = QStandardItem(trade_label)
+            trade_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+            trade_item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+            trade_model.appendRow(trade_item)
+        trade_combo.lineEdit().setReadOnly(True)
+        trade_combo.lineEdit().setPlaceholderText("Select one or more trades…")
+        trade_other_label = QLabel("Other trade")
+        trade_other_input = QLineEdit()
+        trade_other_input.setPlaceholderText("Enter other trade name")
+        trade_other_label.setVisible(False)
+        trade_other_input.setVisible(False)
         department = QComboBox()
         fill_combo(department, department_options + distinct_values("department"), "All Departments", "")
         mandatory = QComboBox()
@@ -4047,6 +4059,9 @@ class MainWindow(QMainWindow):
         form_layout.addWidget(source, 2, 3, 1, 2)
         form_layout.addWidget(certificate_required, 2, 5)
         form_layout.addWidget(active, 3, 0, 1, 2)
+        form_layout.addWidget(trade_other_label, 3, 2)
+        form_layout.addWidget(trade_other_input, 3, 3, 1, 3)
+        trade_other_label.setVisible(False)
         form_layout.setColumnStretch(1, 2)
         form_layout.setColumnStretch(4, 2)
         matrix_layout.addWidget(form_box)
@@ -4054,7 +4069,7 @@ class MainWindow(QMainWindow):
         matrix_buttons = QHBoxLayout()
         save_course_btn = QPushButton("Save Course")
         clear_course_btn = QPushButton("Clear Form")
-        deactivate_course_btn = QPushButton("Deactivate Selected")
+        deactivate_course_btn = QPushButton("Delete Selected")
         export_matrix_btn = QPushButton("Export Matrix to Excel")
         refresh_matrix_btn = QPushButton("Refresh")
         for btn in (save_course_btn, clear_course_btn, deactivate_course_btn, export_matrix_btn, refresh_matrix_btn):
@@ -4181,11 +4196,11 @@ class MainWindow(QMainWindow):
         master_toolbar.addWidget(export_master_word_btn)
         master_layout.addLayout(master_toolbar)
         master_table = QTableWidget()
-        master_table.setColumnCount(13)
+        master_table.setColumnCount(14)
         master_table.setHorizontalHeaderLabels([
             "Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date",
             "Training Course", "Training Type", "Requirement Source", "Training Date", "Expiry Date",
-            "Status", "Certificate No."
+            "Status", "Certificate No.", "Attachment"
         ])
         master_table.setAlternatingRowColors(True)
         master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -4197,12 +4212,90 @@ class MainWindow(QMainWindow):
 
         selected_course_id = {"value": None}
 
+        def checked_trades():
+            selected = []
+            all_item = trade_model.item(0)
+            if all_item and all_item.checkState() == Qt.CheckState.Checked:
+                return []
+            for idx in range(1, trade_model.rowCount()):
+                item = trade_model.item(idx)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    value = item.text().strip()
+                    if value == "Other":
+                        other_value = trade_other_input.text().strip()
+                        if other_value:
+                            selected.append(other_value)
+                    else:
+                        selected.append(value)
+            return list(dict.fromkeys(selected))
+
+        def update_trade_summary(*args):
+            all_item = trade_model.item(0)
+            selected = checked_trades()
+            if all_item and all_item.checkState() == Qt.CheckState.Checked:
+                summary = "All Trades"
+            else:
+                labels = []
+                for idx in range(1, trade_model.rowCount()):
+                    item = trade_model.item(idx)
+                    if item and item.checkState() == Qt.CheckState.Checked:
+                        labels.append(item.text())
+                summary = ", ".join(labels) if labels else "Select trade(s)…"
+            trade_combo.lineEdit().setText(summary)
+            show_other = any(trade_model.item(i).text() == "Other" and trade_model.item(i).checkState() == Qt.CheckState.Checked for i in range(1, trade_model.rowCount()))
+            trade_other_label.setVisible(show_other)
+            trade_other_input.setVisible(show_other)
+
+        def toggle_trade_item(index):
+            if not index.isValid():
+                return
+            item = trade_model.itemFromIndex(index)
+            if not item:
+                return
+            new_state = Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
+            if item.row() == 0 and new_state == Qt.CheckState.Checked:
+                for idx in range(1, trade_model.rowCount()):
+                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
+            elif item.row() > 0 and new_state == Qt.CheckState.Checked:
+                trade_model.item(0).setCheckState(Qt.CheckState.Unchecked)
+            item.setCheckState(new_state)
+            update_trade_summary()
+
+        trade_combo.view().pressed.connect(toggle_trade_item)
+        trade_other_input.textChanged.connect(update_trade_summary)
+
+        def set_trade_selection(saved_trade):
+            saved = [x.strip().lower() for x in safe(saved_trade).split(",") if x.strip()]
+            if not saved:
+                trade_model.item(0).setCheckState(Qt.CheckState.Checked)
+                for idx in range(1, trade_model.rowCount()):
+                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
+                trade_other_input.clear()
+            else:
+                trade_model.item(0).setCheckState(Qt.CheckState.Unchecked)
+                known = {trade_model.item(i).text().lower(): i for i in range(1, trade_model.rowCount())}
+                other_saved = []
+                for idx in range(1, trade_model.rowCount()):
+                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
+                for trade in saved:
+                    if trade in known and trade != "other":
+                        trade_model.item(known[trade]).setCheckState(Qt.CheckState.Checked)
+                    elif trade == "other":
+                        trade_model.item(known[trade]).setCheckState(Qt.CheckState.Checked)
+                    elif trade not in known:
+                        # Backward compatibility for custom trade values already saved in older matrix records.
+                        trade_other_input.setText(trade)
+                        trade_model.item(known["other"]).setCheckState(Qt.CheckState.Checked)
+                if "other" not in saved and not any(x not in known for x in saved):
+                    trade_other_input.clear()
+            update_trade_summary()
+
         def reset_course_form():
             selected_course_id["value"] = None
             course_table.clearSelection()
             course_name.clear()
-            trade_combo.setCurrentIndex(0)
-            trade_combo.setEditText("All Trades")
+            set_trade_selection("")
+            trade_other_input.clear()
             department.setCurrentIndex(0)
             mandatory.setCurrentIndex(0)
             training_type.setCurrentIndex(0)
@@ -4214,10 +4307,17 @@ class MainWindow(QMainWindow):
 
         def load_courses():
             rows = db.fetchall("SELECT * FROM training_courses ORDER BY active DESC, course_name COLLATE NOCASE")
-            course_table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
+            display_rows = []
+            for row in rows:
+                saved_trades = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()]
+                if not saved_trades:
+                    saved_trades = ["All Trades"]
+                for trade_label in saved_trades:
+                    display_rows.append((row, trade_label))
+            course_table.setRowCount(len(display_rows))
+            for r, (row, trade_label) in enumerate(display_rows):
                 values = [
-                    row["id"], row["course_name"], row["designation"] or "All Trades",
+                    row["id"], row["course_name"], trade_label,
                     row["department"] or "All Departments", "Mandatory" if row["mandatory"] else "Recommended",
                     row["provider_type"] or "Internal", row["validity_months"] or 0,
                     row["requirement_source"] or "Company procedure / policy", "Active" if row["active"] else "Inactive"
@@ -4242,7 +4342,7 @@ class MainWindow(QMainWindow):
             selected_course_id["value"] = int(course_id)
             course_name.setText(safe(rec["course_name"]))
             saved_trade = safe(rec["designation"]).strip()
-            trade_combo.setEditText(saved_trade if saved_trade else "All Trades")
+            set_trade_selection(saved_trade)
             saved_dept = safe(rec["department"]).strip()
             if department.findText(saved_dept) < 0 and saved_dept:
                 department.addItem(saved_dept, saved_dept)
@@ -4264,10 +4364,16 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Training Matrix", "Enter a training course name.")
                 course_name.setFocus()
                 return
-            raw_trade = trade_combo.currentText().strip()
-            trades = "" if raw_trade.lower() in ("all trades", "all designations", "") else ", ".join(
-                dict.fromkeys(t.strip() for t in raw_trade.split(",") if t.strip())
-            )
+            trades_selected = checked_trades()
+            all_checked = bool(trade_model.item(0) and trade_model.item(0).checkState() == Qt.CheckState.Checked)
+            if not all_checked and not trades_selected:
+                QMessageBox.warning(self, "Training Matrix", "Select All Trades or at least one applicable trade.")
+                return
+            if any(trade_model.item(i).text() == "Other" and trade_model.item(i).checkState() == Qt.CheckState.Checked for i in range(1, trade_model.rowCount())) and not trade_other_input.text().strip():
+                QMessageBox.warning(self, "Training Matrix", "Enter the trade name in the Other trade box.")
+                trade_other_input.setFocus()
+                return
+            trades = "" if all_checked else ", ".join(dict.fromkeys(trades_selected))
             dept_text = department.currentText().strip()
             dept = "" if dept_text.lower() in ("all departments", "") else dept_text
             values = (
@@ -4304,12 +4410,19 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Training Matrix", "Select a course first.")
                 return
             course_id = course_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            history = db.fetchone("SELECT COUNT(*) AS n FROM training_records WHERE course_id=?", (course_id,))
+            has_history = bool(history and int(history["n"] or 0) > 0)
+            message = ("Training records exist for this course. Delete is not destructive: the course will be marked inactive and historical records retained. Continue?"
+                       if has_history else "Delete this training course from the matrix?")
             answer = QMessageBox.question(
-                self, "Deactivate Course", "Deactivate this course? Existing training records will be retained.",
+                self, "Delete Training Course", message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
             )
             if answer == QMessageBox.StandardButton.Yes:
-                db.execute("UPDATE training_courses SET active=0 WHERE id=?", (course_id,))
+                if has_history:
+                    db.execute("UPDATE training_courses SET active=0 WHERE id=?", (course_id,))
+                else:
+                    db.execute("DELETE FROM training_courses WHERE id=?", (course_id,))
                 reset_course_form()
                 load_courses()
 
@@ -4391,11 +4504,24 @@ class MainWindow(QMainWindow):
                 "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
             )
 
+        def expanded_course_entries(courses):
+            entries = []
+            for course in courses:
+                saved_trades = [x.strip() for x in safe(course["designation"]).split(",") if x.strip()]
+                if not saved_trades:
+                    saved_trades = [""]
+                for trade_label in saved_trades:
+                    entry = dict(course)
+                    entry["designation"] = trade_label
+                    entry["display_course_name"] = safe(course["course_name"]) if not trade_label else f"{safe(course['course_name'])} ({trade_label})"
+                    entries.append(entry)
+            return entries
+
         def load_register():
             employees = get_employees()
-            courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE")
+            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"))
             base_headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"]
-            headers = base_headers + [safe(c["course_name"]) for c in courses]
+            headers = base_headers + [safe(c["display_course_name"]) for c in courses]
             register_table.clear()
             register_table.setColumnCount(len(headers))
             register_table.setHorizontalHeaderLabels(headers)
@@ -4619,7 +4745,7 @@ class MainWindow(QMainWindow):
         def master_rows():
             result = []
             employees = get_employees()
-            courses = db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE")
+            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE"))
             for employee in employees:
                 applicable_found = False
                 for course in courses:
@@ -4631,15 +4757,15 @@ class MainWindow(QMainWindow):
                     result.append([
                         safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
                         safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
-                        safe(course["course_name"]), safe(course["provider_type"]), safe(course["requirement_source"]),
+                        safe(course["display_course_name"]), safe(course["provider_type"]), safe(course["requirement_source"]),
                         safe(record["training_date"]) if record else "", safe(record["expiry_date"]) if record else "",
-                        status, safe(record["certificate_no"]) if record else ""
+                        status, safe(record["certificate_no"]) if record else "", safe(record["attachment_path"]) if record else ""
                     ])
                 if not applicable_found:
                     result.append([
                         safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
                         safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
-                        "No applicable course configured", "", "", "", "", "N/A", ""
+                        "No applicable course configured", "", "", "", "", "N/A", "", ""
                     ])
             return result
 
@@ -4650,7 +4776,7 @@ class MainWindow(QMainWindow):
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(str(value or ""))
                     if c == 11:
-                        course = db.fetchone("SELECT * FROM training_courses WHERE course_name=?", (values[6],)) if values[6] != "No applicable course configured" else None
+                        course = {"provider_type": values[7]} if values[6] != "No applicable course configured" else None
                         set_status_style(item, values[11], course)
                     master_table.setItem(r, c, item)
             master_table.resizeRowsToContents()
@@ -4702,17 +4828,20 @@ class MainWindow(QMainWindow):
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
             employees = get_employees()
-            courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE")
+            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"))
             wb = Workbook()
             ws = wb.active
             ws.title = "Training Register"
-            headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"] + [safe(c["course_name"]) for c in courses]
+            headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"] + [safe(c["display_course_name"]) for c in courses]
             style_excel(ws, "HSE TRAINING REGISTER", headers)
+            register_attachment_links = []
             for employee in employees:
                 values = [safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]), safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"])]
+                employee_links = []
                 for course in courses:
                     if not course_applies(course, employee):
                         values.append("N/A")
+                        employee_links.append(None)
                         continue
                     record = latest_training(employee["id"], course["id"])
                     status = training_status(record, course)
@@ -4720,13 +4849,33 @@ class MainWindow(QMainWindow):
                         text_value = status + "\nTraining: " + safe(record["training_date"])
                         if safe(record["expiry_date"]):
                             text_value += "\nExpiry: " + safe(record["expiry_date"])
+                        attachment_path = safe(record["attachment_path"]).strip()
+                        if attachment_path:
+                            text_value += "\nAttachment: " + Path(attachment_path).name
                         values.append(text_value)
+                        employee_links.append(attachment_path or None)
                     else:
                         values.append("Training Required")
+                        employee_links.append(None)
                 ws.append(values)
+                register_attachment_links.append(employee_links)
             for col in range(1, len(headers) + 1):
                 ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 20 if col <= 6 else 24
             ws.freeze_panes = "G3"
+            logo_path = report_logo_path()
+            if logo_path and Path(logo_path).exists():
+                try:
+                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
+                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
+                except Exception:
+                    logging.exception("Unable to embed Training Register Excel logo")
+            # Preserve each original certificate attachment as a clickable link in its employee/course cell.
+            for row_offset, employee_links in enumerate(register_attachment_links, start=3):
+                for course_offset, attachment_path in enumerate(employee_links, start=7):
+                    if attachment_path:
+                        cell = ws.cell(row=row_offset, column=course_offset)
+                        cell.hyperlink = Path(attachment_path).resolve().as_uri() if Path(attachment_path).exists() else attachment_path
+                        cell.style = "Hyperlink"
             finish_excel(ws, headers)
             try:
                 wb.save(path)
@@ -4747,7 +4896,16 @@ class MainWindow(QMainWindow):
             ws.title = "Training Matrix"
             style_excel(ws, "HSE TRAINING MATRIX", headers)
             for row in rows:
-                ws.append([safe(row["course_name"]), safe(row["designation"]) or "All Trades", safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
+                trades_for_export = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()] or ["All Trades"]
+                for trade_label in trades_for_export:
+                    ws.append([safe(row["course_name"]), trade_label, safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
+            logo_path = report_logo_path()
+            if logo_path and Path(logo_path).exists():
+                try:
+                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
+                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
+                except Exception:
+                    logging.exception("Unable to embed Training Matrix Excel logo")
             finish_excel(ws, headers)
             try:
                 wb.save(path)
@@ -4769,6 +4927,22 @@ class MainWindow(QMainWindow):
             style_excel(ws, "MASTER TRAINING RECORD", headers)
             for row in rows:
                 ws.append(row)
+            logo_path = report_logo_path()
+            if logo_path and Path(logo_path).exists():
+                try:
+                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
+                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
+                except Exception:
+                    logging.exception("Unable to embed Master Training Record Excel logo")
+            attachment_col = headers.index("Attachment") + 1 if "Attachment" in headers else None
+            if attachment_col:
+                for row_idx in range(3, ws.max_row + 1):
+                    cell = ws.cell(row=row_idx, column=attachment_col)
+                    attachment_path = str(cell.value or "").strip()
+                    if attachment_path:
+                        cell.value = Path(attachment_path).name
+                        cell.hyperlink = Path(attachment_path).resolve().as_uri() if Path(attachment_path).exists() else attachment_path
+                        cell.style = "Hyperlink"
             finish_excel(ws, headers)
             try:
                 wb.save(path)
