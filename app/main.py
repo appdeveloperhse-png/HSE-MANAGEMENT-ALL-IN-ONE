@@ -4134,6 +4134,9 @@ class MainWindow(QMainWindow):
         safety_induction_date.setMaximumDate(QDate.currentDate().addYears(20))
         safety_induction_date.setToolTip("Set to 2000-01-01 if safety induction has not yet been completed.")
         add_employee_btn = QPushButton("Save Employee")
+        edit_employee_btn = QPushButton("Edit Selected Person")
+        delete_employee_btn = QPushButton("Delete Selected Person")
+        selected_employee_id = {"value": None}
         employee_form.addWidget(QLabel("Employee ID"), 0, 0)
         employee_form.addWidget(employee_id_input, 0, 1)
         employee_form.addWidget(QLabel("Employee name *"), 0, 2)
@@ -4146,7 +4149,9 @@ class MainWindow(QMainWindow):
         employee_form.addWidget(joining_date, 1, 3)
         employee_form.addWidget(QLabel("Safety induction date"), 1, 4)
         employee_form.addWidget(safety_induction_date, 1, 5)
-        employee_form.addWidget(add_employee_btn, 2, 5)
+        employee_form.addWidget(add_employee_btn, 2, 3)
+        employee_form.addWidget(edit_employee_btn, 2, 4)
+        employee_form.addWidget(delete_employee_btn, 2, 5)
         register_layout.addWidget(employee_box)
 
         register_toolbar = QHBoxLayout()
@@ -4188,12 +4193,14 @@ class MainWindow(QMainWindow):
         refresh_master_btn = QPushButton("Refresh Master Record")
         export_master_excel_btn = QPushButton("Export Master Record to Excel")
         export_master_word_btn = QPushButton("Export Master Record to Word")
-        for btn in (refresh_master_btn, export_master_excel_btn, export_master_word_btn):
+        delete_master_record_btn = QPushButton("Delete Selected Training Record")
+        for btn in (refresh_master_btn, export_master_excel_btn, export_master_word_btn, delete_master_record_btn):
             btn.setMinimumHeight(34)
         master_toolbar.addWidget(master_search, 1)
         master_toolbar.addWidget(refresh_master_btn)
         master_toolbar.addWidget(export_master_excel_btn)
         master_toolbar.addWidget(export_master_word_btn)
+        master_toolbar.addWidget(delete_master_record_btn)
         master_layout.addLayout(master_toolbar)
         master_table = QTableWidget()
         master_table.setColumnCount(14)
@@ -4307,17 +4314,12 @@ class MainWindow(QMainWindow):
 
         def load_courses():
             rows = db.fetchall("SELECT * FROM training_courses ORDER BY active DESC, course_name COLLATE NOCASE")
-            display_rows = []
-            for row in rows:
+            course_table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
                 saved_trades = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()]
-                if not saved_trades:
-                    saved_trades = ["All Trades"]
-                for trade_label in saved_trades:
-                    display_rows.append((row, trade_label))
-            course_table.setRowCount(len(display_rows))
-            for r, (row, trade_label) in enumerate(display_rows):
+                trade_display = "All Trades" if not saved_trades else "\n• " + "\n• ".join(saved_trades)
                 values = [
-                    row["id"], row["course_name"], trade_label,
+                    row["id"], row["course_name"], trade_display,
                     row["department"] or "All Departments", "Mandatory" if row["mandatory"] else "Recommended",
                     row["provider_type"] or "Internal", row["validity_months"] or 0,
                     row["requirement_source"] or "Company procedure / policy", "Active" if row["active"] else "Inactive"
@@ -4519,7 +4521,7 @@ class MainWindow(QMainWindow):
 
         def load_register():
             employees = get_employees()
-            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"))
+            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 OR EXISTS (SELECT 1 FROM training_records tr WHERE tr.course_id=training_courses.id) ORDER BY active DESC, course_name COLLATE NOCASE"))
             base_headers = ["Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date"]
             headers = base_headers + [safe(c["display_course_name"]) for c in courses]
             register_table.clear()
@@ -4539,12 +4541,13 @@ class MainWindow(QMainWindow):
                 for offset, course in enumerate(courses, start=6):
                     item = QTableWidgetItem()
                     item.setData(Qt.ItemDataRole.UserRole, int(course["id"]))
-                    if not course_applies(course, employee):
+                    record = latest_training(employee["id"], course["id"])
+                    applicable = course_applies(course, employee)
+                    if not applicable and not record:
                         item.setText("N/A")
-                        item.setToolTip("Not applicable to this employee's trade/department.")
+                        item.setToolTip("Not applicable to this employee's trade/department. You can still click to record optional/event training.")
                         set_status_style(item, "N/A", course)
                     else:
-                        record = latest_training(employee["id"], course["id"])
                         status = training_status(record, course)
                         if record:
                             training_date_text = safe(record["training_date"])
@@ -4557,11 +4560,11 @@ class MainWindow(QMainWindow):
                                 "Status: " + status + "\nTraining date: " + (training_date_text or "—") +
                                 "\nExpiry date: " + (expiry_text or "No expiry recorded") +
                                 "\nTraining type: " + safe(course["provider_type"]) +
-                                "\nClick to add a renewal record; previous records are retained."
+                                "\nClick to edit this training record; previous renewals are retained."
                             )
                         else:
                             item.setText("Training Required")
-                            item.setToolTip("No training record exists. Click to enter a completion date.")
+                            item.setToolTip("No training record exists. Click to enter a completion date, including for recommended or optional training.")
                         set_status_style(item, status, course)
                     register_table.setItem(r, offset, item)
             register_table.resizeRowsToContents()
@@ -4591,39 +4594,92 @@ class MainWindow(QMainWindow):
                 haystack = " ".join(register_table.item(r, c).text() for c in range(min(6, register_table.columnCount())) if register_table.item(r, c)).lower()
                 register_table.setRowHidden(r, bool(query) and query not in haystack)
 
-        def add_employee():
-            name = employee_name_input.text().strip()
-            emp_id = employee_id_input.text().strip()
-            dept = employee_department_input.currentText().strip()
-            trade = employee_trade_input.currentText().strip()
-            if dept.lower() == "select department":
-                dept = ""
-            if trade.lower() == "select trade":
-                trade = ""
-            if not name:
-                QMessageBox.warning(self, "Training Register", "Enter the employee name.")
-                employee_name_input.setFocus()
-                return
-            if emp_id and db.fetchone("SELECT id FROM employees WHERE lower(employee_id)=lower(?)", (emp_id,)):
-                QMessageBox.warning(self, "Training Register", "That employee ID already exists. Use the existing employee record or enter a different ID.")
-                employee_id_input.setFocus()
-                return
-            induction = safety_induction_date.date().toString("yyyy-MM-dd")
-            if induction == "2000-01-01":
-                induction = ""
-            db.execute(
-                "INSERT INTO employees (employee_id,name,designation,department,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,1)",
-                (emp_id, name, trade, dept, joining_date.date().toString("yyyy-MM-dd"), induction)
-            )
+        def reset_employee_form():
+            selected_employee_id["value"] = None
             employee_id_input.clear()
             employee_name_input.clear()
             employee_department_input.setCurrentIndex(0)
             employee_trade_input.setCurrentIndex(0)
             joining_date.setDate(QDate.currentDate())
             safety_induction_date.setDate(QDate(2000, 1, 1))
+            add_employee_btn.setText("Save Employee")
+
+        def select_employee_from_register(row, column=0):
+            if column >= 6:
+                return
+            item = register_table.item(row, 0)
+            if not item:
+                return
+            emp_db_id = item.data(Qt.ItemDataRole.UserRole)
+            employee = db.fetchone("SELECT * FROM employees WHERE id=?", (emp_db_id,))
+            if not employee:
+                return
+            selected_employee_id["value"] = int(emp_db_id)
+            employee_id_input.setText(safe(employee["employee_id"]))
+            employee_name_input.setText(safe(employee["name"]))
+            dept = safe(employee["department"])
+            trade = safe(employee["designation"])
+            if dept and employee_department_input.findText(dept) < 0:
+                employee_department_input.addItem(dept, dept)
+            if trade and employee_trade_input.findText(trade) < 0:
+                employee_trade_input.addItem(trade, trade)
+            employee_department_input.setCurrentText(dept or "Select department")
+            employee_trade_input.setCurrentText(trade or "Select trade")
+            joined = QDate.fromString(safe(employee["date_joining"]), "yyyy-MM-dd")
+            joining_date.setDate(joined if joined.isValid() else QDate.currentDate())
+            induction = QDate.fromString(safe(employee["safety_induction_date"]), "yyyy-MM-dd")
+            safety_induction_date.setDate(induction if induction.isValid() else QDate(2000, 1, 1))
+            add_employee_btn.setText("Update Employee")
+
+        def add_employee():
+            name = employee_name_input.text().strip()
+            emp_id = employee_id_input.text().strip()
+            dept = employee_department_input.currentText().strip()
+            trade = employee_trade_input.currentText().strip()
+            if dept.lower() == "select department": dept = ""
+            if trade.lower() == "select trade": trade = ""
+            if not name:
+                QMessageBox.warning(self, "Training Register", "Enter the employee name.")
+                employee_name_input.setFocus()
+                return
+            duplicate = db.fetchone("SELECT id FROM employees WHERE lower(employee_id)=lower(?) AND id<>COALESCE(?, -1)", (emp_id, selected_employee_id["value"])) if emp_id else None
+            if duplicate:
+                QMessageBox.warning(self, "Training Register", "That employee ID already exists. Enter a different ID.")
+                employee_id_input.setFocus()
+                return
+            induction = safety_induction_date.date().toString("yyyy-MM-dd")
+            if induction == "2000-01-01": induction = ""
+            values = (emp_id, name, trade, dept, joining_date.date().toString("yyyy-MM-dd"), induction)
+            if selected_employee_id["value"] is None:
+                db.execute("INSERT INTO employees (employee_id,name,designation,department,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,1)", values)
+                message = "Employee saved and training applicability refreshed."
+            else:
+                db.execute("UPDATE employees SET employee_id=?,name=?,designation=?,department=?,date_joining=?,safety_induction_date=? WHERE id=?", values + (selected_employee_id["value"],))
+                message = "Employee updated and training applicability refreshed."
+            reset_employee_form()
             load_register()
             load_master_record()
-            QMessageBox.information(self, "Training Register", "Employee saved and training applicability refreshed.")
+            QMessageBox.information(self, "Training Register", message)
+
+        def delete_selected_employee():
+            row = register_table.currentRow()
+            item = register_table.item(row, 0) if row >= 0 else None
+            emp_db_id = item.data(Qt.ItemDataRole.UserRole) if item else selected_employee_id["value"]
+            if emp_db_id is None:
+                QMessageBox.information(self, "Training Register", "Select a person in the register first.")
+                return
+            history = db.fetchone("SELECT COUNT(*) AS n FROM training_records WHERE employee_db_id=?", (emp_db_id,))
+            has_history = bool(history and int(history["n"] or 0))
+            message = ("This person has training history. The person will be marked inactive and all training records will be retained. Continue?" if has_history else "Delete this person from the training register?")
+            answer = QMessageBox.question(self, "Delete Person", message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes: return
+            if has_history:
+                db.execute("UPDATE employees SET active=0 WHERE id=?", (emp_db_id,))
+            else:
+                db.execute("DELETE FROM employees WHERE id=?", (emp_db_id,))
+            reset_employee_form()
+            load_register()
+            load_master_record()
 
         def edit_training_cell(row, column):
             if column < 6:
@@ -4635,8 +4691,8 @@ class MainWindow(QMainWindow):
             employee_db_id = employee_item.data(Qt.ItemDataRole.UserRole)
             course_id = course_item.data(Qt.ItemDataRole.UserRole)
             employee = db.fetchone("SELECT * FROM employees WHERE id=?", (employee_db_id,))
-            course = db.fetchone("SELECT * FROM training_courses WHERE id=? AND active=1", (course_id,))
-            if not employee or not course or not course_applies(course, employee):
+            course = db.fetchone("SELECT * FROM training_courses WHERE id=?", (course_id,))
+            if not employee or not course:
                 return
             record = latest_training(employee_db_id, course_id)
             dialog = QDialog(self)
@@ -4717,9 +4773,12 @@ class MainWindow(QMainWindow):
                 "Documents and Images (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)")[0] or attachment.text()))
             button_row = QHBoxLayout()
             save_btn = QPushButton("Save Training Record")
+            delete_training_btn = QPushButton("Delete Training Record")
+            delete_training_btn.setEnabled(bool(record))
             cancel_btn = QPushButton("Cancel")
             button_row.addStretch(1)
             button_row.addWidget(save_btn)
+            button_row.addWidget(delete_training_btn)
             button_row.addWidget(cancel_btn)
             dlg_layout.addLayout(button_row)
 
@@ -4729,16 +4788,27 @@ class MainWindow(QMainWindow):
                 if expiry_text and expiry_text < date_text:
                     QMessageBox.warning(dialog, "Training Register", "Expiry date cannot be before the training date.")
                     return
-                db.execute(
-                    """INSERT INTO training_records (employee_db_id,course_id,training_date,expiry_date,provider,certificate_no,attachment_path,notes)
-                    VALUES (?,?,?,?,?,?,?,?)""",
-                    (employee_db_id, course_id, date_text, expiry_text, provider.text().strip(), cert_no.text().strip(), attachment.text().strip(), notes.toPlainText().strip())
-                )
+                record_values = (date_text, expiry_text, provider.text().strip(), cert_no.text().strip(), attachment.text().strip(), notes.toPlainText().strip())
+                if record:
+                    db.execute("UPDATE training_records SET training_date=?,expiry_date=?,provider=?,certificate_no=?,attachment_path=?,notes=? WHERE id=?", record_values + (record["id"],))
+                else:
+                    db.execute("INSERT INTO training_records (employee_db_id,course_id,training_date,expiry_date,provider,certificate_no,attachment_path,notes) VALUES (?,?,?,?,?,?,?,?)", (employee_db_id, course_id) + record_values)
                 dialog.accept()
                 load_register()
                 load_master_record()
 
+            def delete_training_record():
+                if not record:
+                    return
+                answer = QMessageBox.question(dialog, "Delete Training Record", "Delete this employee's training record for this course? This cannot be undone.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if answer == QMessageBox.StandardButton.Yes:
+                    db.execute("DELETE FROM training_records WHERE id=?", (record["id"],))
+                    dialog.accept()
+                    load_register()
+                    load_master_record()
+
             save_btn.clicked.connect(save_training_record)
+            delete_training_btn.clicked.connect(delete_training_record)
             cancel_btn.clicked.connect(dialog.reject)
             dialog.exec()
 
@@ -4749,10 +4819,10 @@ class MainWindow(QMainWindow):
             for employee in employees:
                 applicable_found = False
                 for course in courses:
-                    if not course_applies(course, employee):
+                    record = latest_training(employee["id"], course["id"])
+                    if not course_applies(course, employee) and not record:
                         continue
                     applicable_found = True
-                    record = latest_training(employee["id"], course["id"])
                     status = training_status(record, course)
                     result.append([
                         safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
@@ -4775,12 +4845,36 @@ class MainWindow(QMainWindow):
             for r, values in enumerate(rows):
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(str(value or ""))
+                    if c == 9 and values[6] != "No applicable course configured":
+                        employee_match = db.fetchone("SELECT id FROM employees WHERE COALESCE(employee_id,'')=? AND name=? LIMIT 1", (values[0], values[1]))
+                        display_course = safe(values[6])
+                        course_name_base = display_course.split(" (", 1)[0]
+                        trade_suffix = display_course[len(course_name_base):].strip()
+                        trade_suffix = trade_suffix[1:-1].strip() if trade_suffix.startswith("(") and trade_suffix.endswith(")") else ""
+                        course_match = db.fetchone("SELECT id FROM training_courses WHERE course_name=? AND (COALESCE(designation,'')=? OR COALESCE(designation,'')='' OR designation LIKE ?) ORDER BY active DESC LIMIT 1", (course_name_base, trade_suffix, '%' + trade_suffix + '%'))
+                        if employee_match and course_match:
+                            rec_match = latest_training(employee_match["id"], course_match["id"])
+                            if rec_match:
+                                item.setData(Qt.ItemDataRole.UserRole, int(rec_match["id"]))
                     if c == 11:
                         course = {"provider_type": values[7]} if values[6] != "No applicable course configured" else None
                         set_status_style(item, values[11], course)
                     master_table.setItem(r, c, item)
             master_table.resizeRowsToContents()
             apply_master_filter()
+
+        def delete_selected_master_training_record():
+            row = master_table.currentRow()
+            item = master_table.item(row, 9) if row >= 0 else None
+            record_id = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if record_id is None:
+                QMessageBox.information(self, "Master Training Record", "Select a row with an existing training date first.")
+                return
+            answer = QMessageBox.question(self, "Delete Training Record", "Delete this training record? The employee and training course will remain.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                db.execute("DELETE FROM training_records WHERE id=?", (record_id,))
+                load_register()
+                load_master_record()
 
         def apply_master_filter(*args):
             query = master_search.text().strip().lower()
@@ -4828,7 +4922,7 @@ class MainWindow(QMainWindow):
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
             employees = get_employees()
-            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"))
+            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses WHERE active=1 OR EXISTS (SELECT 1 FROM training_records tr WHERE tr.course_id=training_courses.id) ORDER BY active DESC, course_name COLLATE NOCASE"))
             wb = Workbook()
             ws = wb.active
             ws.title = "Training Register"
@@ -4896,9 +4990,9 @@ class MainWindow(QMainWindow):
             ws.title = "Training Matrix"
             style_excel(ws, "HSE TRAINING MATRIX", headers)
             for row in rows:
-                trades_for_export = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()] or ["All Trades"]
-                for trade_label in trades_for_export:
-                    ws.append([safe(row["course_name"]), trade_label, safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
+                trades_for_export = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()]
+                trade_cell = "All Trades" if not trades_for_export else "\n• " + "\n• ".join(trades_for_export)
+                ws.append([safe(row["course_name"]), trade_cell, safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
             logo_path = report_logo_path()
             if logo_path and Path(logo_path).exists():
                 try:
@@ -5000,11 +5094,14 @@ class MainWindow(QMainWindow):
         refresh_matrix_btn.clicked.connect(load_courses)
         course_table.cellClicked.connect(select_course_row)
         add_employee_btn.clicked.connect(add_employee)
+        edit_employee_btn.clicked.connect(lambda: select_employee_from_register(register_table.currentRow(), 0) if register_table.currentRow() >= 0 else QMessageBox.information(self, "Training Register", "Select a person first."))
+        delete_employee_btn.clicked.connect(delete_selected_employee)
         refresh_register_btn.clicked.connect(load_register)
         export_register_btn.clicked.connect(export_training_register)
         register_search.textChanged.connect(apply_register_filter)
-        register_table.cellClicked.connect(edit_training_cell)
+        register_table.cellClicked.connect(lambda row, column: select_employee_from_register(row, column) if column < 6 else edit_training_cell(row, column))
         refresh_master_btn.clicked.connect(load_master_record)
+        delete_master_record_btn.clicked.connect(delete_selected_master_training_record)
         export_master_excel_btn.clicked.connect(export_master_excel)
         export_master_word_btn.clicked.connect(export_master_word)
         master_search.textChanged.connect(apply_master_filter)
