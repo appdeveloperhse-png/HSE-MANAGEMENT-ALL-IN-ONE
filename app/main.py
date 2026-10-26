@@ -42,7 +42,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.17"
+APP_VERSION = "1.4.19"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -411,6 +411,30 @@ class Database:
             id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, action TEXT,
             user_name TEXT, details TEXT, timestamp TEXT,
             FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)""")
+
+        # Observation multi-action + CAPA tracking link (additive only).
+        observation_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(observations)").fetchall()}
+        if "capa_required" not in observation_cols:
+            self.conn.execute("ALTER TABLE observations ADD COLUMN capa_required INTEGER DEFAULT 0")
+        if "capa_number" not in observation_cols:
+            self.conn.execute("ALTER TABLE observations ADD COLUMN capa_number TEXT DEFAULT ''")
+        if "corrective_actions_json" not in observation_cols:
+            self.conn.execute("ALTER TABLE observations ADD COLUMN corrective_actions_json TEXT DEFAULT '[]'")
+
+        capa_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(capa)").fetchall()}
+        capa_extra = {
+            "actions_json": "TEXT DEFAULT '[]'",
+            "approval_status": "TEXT DEFAULT 'Pending Approval'",
+            "approved_by": "TEXT DEFAULT ''",
+            "approved_date": "TEXT DEFAULT ''",
+            "completion_pct": "INTEGER DEFAULT 0",
+            "action_status": "TEXT DEFAULT 'Open'",
+            "observation_text": "TEXT DEFAULT ''",
+        }
+        for col, definition in capa_extra.items():
+            if col not in capa_cols:
+                self.conn.execute(f"ALTER TABLE capa ADD COLUMN {col} {definition}")
+
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -634,6 +658,144 @@ def overdue(target, status):
     except Exception:
         return False
 
+
+def parse_corrective_actions(source):
+    """Return a clean list of corrective-action strings from JSON, row, or legacy text."""
+    if source is None:
+        return []
+    if isinstance(source, (list, tuple)):
+        return [safe(x).strip() for x in source if safe(x).strip()]
+    if isinstance(source, dict) or hasattr(source, "keys"):
+        try:
+            raw = source["corrective_actions_json"] if "corrective_actions_json" in source.keys() else ""
+        except Exception:
+            raw = ""
+        actions = parse_corrective_actions(raw)
+        if actions:
+            return actions
+        try:
+            legacy = source["corrective_action"] if "corrective_action" in source.keys() else ""
+        except Exception:
+            legacy = ""
+        return parse_corrective_actions(legacy)
+    text_value = safe(source).strip()
+    if not text_value:
+        return []
+    if text_value.startswith("["):
+        try:
+            data = json.loads(text_value)
+            if isinstance(data, list):
+                out = []
+                for item in data:
+                    if isinstance(item, dict):
+                        val = safe(item.get("action") or item.get("text") or "").strip()
+                    else:
+                        val = safe(item).strip()
+                    if val:
+                        out.append(val)
+                if out:
+                    return out
+        except Exception:
+            pass
+    lines = []
+    for line in text_value.replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if len(line) > 2 and line[0].isdigit() and line[1] in ".)":
+            line = line[2:].strip()
+        elif ". " in line[:4] and line.split(".", 1)[0].isdigit():
+            line = line.split(".", 1)[1].strip()
+        lines.append(line)
+    return lines or ([text_value] if text_value else [])
+
+
+def format_corrective_actions_display(actions, numbered=True):
+    actions = parse_corrective_actions(actions)
+    if not actions:
+        return ""
+    if numbered:
+        return "\n".join(f"{i}. {a}" for i, a in enumerate(actions, 1))
+    return "\n".join(actions)
+
+
+def parse_capa_actions(source):
+    """CAPA action items: [{action, evidence: [paths], has_evidence: bool}]"""
+    if source is None:
+        return []
+    if isinstance(source, list):
+        items = source
+    else:
+        text_value = safe(source).strip()
+        if not text_value:
+            return []
+        try:
+            items = json.loads(text_value)
+        except Exception:
+            items = [{"action": a, "evidence": [], "has_evidence": False} for a in parse_corrective_actions(text_value)]
+    out = []
+    for item in items or []:
+        if isinstance(item, dict):
+            action = safe(item.get("action") or item.get("text") or "").strip()
+            evidence = item.get("evidence") or item.get("attachments") or []
+            if isinstance(evidence, str):
+                evidence = [evidence] if evidence.strip() else []
+            evidence = [safe(p) for p in evidence if safe(p).strip()]
+            has_ev = bool(item.get("has_evidence")) or any(Path(p).exists() for p in evidence)
+            if action:
+                out.append({"action": action, "evidence": evidence, "has_evidence": has_ev})
+        else:
+            action = safe(item).strip()
+            if action:
+                out.append({"action": action, "evidence": [], "has_evidence": False})
+    return out
+
+
+def capa_actions_completion(actions):
+    items = parse_capa_actions(actions)
+    total = len(items)
+    if total == 0:
+        return 0, 0, 0, "Open"
+    done = sum(1 for x in items if x.get("has_evidence") or x.get("evidence"))
+    pct = int(round(100 * done / total))
+    if done == 0:
+        status = "Open"
+    elif done < total:
+        status = "Pending"
+    else:
+        status = "CAPA Action Complete"
+    return done, total, pct, status
+
+
+def sync_observation_from_capa(capa_row):
+    """When CAPA tracking completes/approves, push status back to the linked observation only."""
+    ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "")
+    if not ref:
+        return
+    obs = db.fetchone("SELECT * FROM observations WHERE number=?", (ref,))
+    if not obs:
+        return
+    done, total, pct, action_status = capa_actions_completion(
+        capa_row["actions_json"] if "actions_json" in capa_row.keys() else "[]"
+    )
+    approval = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "")
+    new_status = safe(obs["status"])
+    comments = safe(obs["closeout_comments"]) if "closeout_comments" in obs.keys() else ""
+    note = f"CAPA {safe(capa_row['number'])}: {action_status} ({pct}%)"
+    if approval:
+        note += f" | Approval: {approval}"
+    if note not in comments:
+        comments = (comments + "\n" + note).strip() if comments else note
+    if action_status == "CAPA Action Complete" and approval in ("Approved", "CAPA Approved"):
+        new_status = "Closed"
+    elif action_status == "CAPA Action Complete":
+        new_status = "Pending Verification"
+    elif action_status == "Pending":
+        new_status = "In Progress"
+    db.execute(
+        "UPDATE observations SET status=?, closeout_comments=? WHERE id=?",
+        (new_status, comments, obs["id"])
+    )
 
 
 # ============================================================
@@ -1123,8 +1285,9 @@ OBSERVATION_EXPORT_FIELDS = [
     ("Observer Company", "observer_company"), ("Observation Type", "obs_type"),
     ("Category", "category"), ("Subcategory", "subcategory"),
     ("Observation Detail", "observation"),
-    ("Action Taken", "corrective_action"),
+    ("Action Taken", "__corrective_actions__"),
     ("Priority", "priority"), ("Target Date", "target_date"), ("Status", "status"),
+    ("CAPA Required", "__capa_required__"), ("CAPA No.", "capa_number"),
     ("Closeout Date", "closeout_date"), ("Closed By", "closed_by"),
     ("Verified By", "verified_by"), ("Verification Date", "verification_date"),
     ("Closeout Comments", "closeout_comments"), ("Verification", "verification"),
@@ -1150,8 +1313,18 @@ def observation_export_rows(record_ids=None):
                 value=serial
             elif key == "__attachments__":
                 value=attachment_names("observation_attachments", row["id"])
+            elif key == "__corrective_actions__":
+                value=format_corrective_actions_display(row)
+            elif key == "__capa_required__":
+                try:
+                    value = "Yes" if int(row["capa_required"] or 0) else "No"
+                except Exception:
+                    value = "No"
             else:
-                value=row[key]
+                try:
+                    value=row[key]
+                except Exception:
+                    value=""
             values.append(xml_safe(value))
         data.append(values)
     return columns, data, rows
@@ -1268,7 +1441,7 @@ def generate_observation_docx(path, record_ids=None):
             elif name == "Observation Detail":
                 cell.text=xml_safe(row["observation"])
             elif name == "Action Taken":
-                cell.text=xml_safe(row["corrective_action"])
+                cell.text=xml_safe(format_corrective_actions_display(row))
             elif name == "Responsible":
                 cell.text=xml_safe(row["responsible"])
             elif name == "Category":
@@ -1552,7 +1725,7 @@ def generate_observation_card_docx(observation_ids, path):
         cells = lt.add_row().cells
         cells[0].merge(cells[1])
         add_section_heading(cells[0], "Action Taken / Corrective Action", 7.0)
-        p = cells[0].add_paragraph(xml_safe(row["corrective_action"]) or "No action recorded.")
+        p = cells[0].add_paragraph(xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
         p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0); p.paragraph_format.line_spacing = 0.82
         for rr in p.runs: rr.font.size = Pt(7.2)
 
@@ -1634,7 +1807,7 @@ def generate_observation_card_docx(observation_ids, path):
         action_cells = rt.add_row().cells
         add_text(action_cells[0], "Action / Control", 6.2, True, WD_ALIGN_PARAGRAPH.CENTER)
         add_docx_cell_shading(action_cells[0], "F0F0F0")
-        add_text(action_cells[1], row["corrective_action"] or "No action recorded.", 6.2)
+        add_text(action_cells[1], format_corrective_actions_display(row) or "No action recorded.", 6.2)
         add_border(action_cells[0]); add_border(action_cells[1])
 
         # Keep the two nested tables visually compact and prevent row splitting.
@@ -1893,7 +2066,7 @@ class MainWindow(QMainWindow):
             "HSE Inspection Register",
             "Incident Investigation",
             "Audit Register",
-            "CAPA Register",
+            "CAPA Tracking Register",
             "Reports",
             "Master Data",
             "Training",
@@ -2048,7 +2221,7 @@ class MainWindow(QMainWindow):
         rows=db.fetchall("SELECT id,number,obs_date,obs_type,category,location,status,corrective_action FROM observations ORDER BY id DESC LIMIT 10")
         table.setRowCount(len(rows))
         for r,row in enumerate(rows):
-            vals=[str(r+1),row["number"],row["obs_date"],row["obs_type"],row["category"],row["location"],row["status"],row["corrective_action"]]
+            vals=[str(r+1),row["number"],row["obs_date"],row["obs_type"],row["category"],row["location"],row["status"],format_corrective_actions_display(row)]
             for c,v in enumerate(vals):
                 item=QTableWidgetItem(safe(v)); item.setToolTip(safe(v)); table.setItem(r,c,item)
         table.setAlternatingRowColors(True); table.setWordWrap(True)
@@ -2078,7 +2251,7 @@ class MainWindow(QMainWindow):
 
         table = QTableWidget()
         headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status",
-                   "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
+                   "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setColumnHidden(0, True)
@@ -2096,9 +2269,9 @@ class MainWindow(QMainWindow):
             query = "SELECT * FROM observations"
             clauses=[]; params=[]
             if term:
-                clauses.append("(number LIKE ? OR location LIKE ? OR responsible LIKE ? OR observation LIKE ? OR corrective_action LIKE ? OR category LIKE ?)")
+                clauses.append("(number LIKE ? OR location LIKE ? OR responsible LIKE ? OR observation LIKE ? OR corrective_action LIKE ? OR category LIKE ? OR COALESCE(capa_number,'') LIKE ?)")
                 like = f"%{term}%"
-                params.extend([like, like, like, like, like, like])
+                params.extend([like, like, like, like, like, like, like])
             if category_filter:
                 clauses.append("category=?"); params.append(category_filter)
             if clauses:
@@ -2108,9 +2281,19 @@ class MainWindow(QMainWindow):
             table.setRowCount(len(rows))
             for r, row in enumerate(rows):
                 attachments = attachment_names("observation_attachments", row["id"])
+                actions_text = format_corrective_actions_display(row)
+                try:
+                    capa_req = "Yes" if int(row["capa_required"] or 0) else "No"
+                except Exception:
+                    capa_req = "No"
+                try:
+                    capa_no = safe(row["capa_number"]) or "—"
+                except Exception:
+                    capa_no = "—"
                 values = [
                     row["id"], r + 1, row["number"], row["obs_date"], row["obs_type"], row["observation"], row["status"],
-                    row["location"], row["corrective_action"], row["target_date"], attachments or "No attachment"
+                    row["location"], actions_text, row["target_date"], capa_req, capa_no,
+                    attachments or "No attachment"
                 ]
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(safe(value))
@@ -2119,7 +2302,9 @@ class MainWindow(QMainWindow):
                 if overdue(row["target_date"], row["status"]):
                     table.item(r, 9).setForeground(Qt.GlobalColor.red)
                     table.item(r, 6).setForeground(Qt.GlobalColor.red)
-                table.setRowHeight(r, 48)
+                if capa_req == "Yes":
+                    table.item(r, 10).setForeground(Qt.GlobalColor.darkBlue)
+                table.setRowHeight(r, max(48, 18 + 16 * max(1, len(parse_corrective_actions(row)))))
 
         def selected_observation_ids(require_one=False):
             indexes = table.selectionModel().selectedRows(0) if table.selectionModel() else []
@@ -2256,8 +2441,8 @@ class MainWindow(QMainWindow):
     def observation_form(self, refresh):
         dialog = QDialog(self)
         dialog.setWindowTitle("New HSE Observation / Inspection")
-        dialog.resize(980, 760)
-        dialog.setMinimumSize(900, 650)
+        dialog.resize(980, 820)
+        dialog.setMinimumSize(900, 700)
         outer = QVBoxLayout(dialog)
 
         header = QLabel("HSE Inspection Observation")
@@ -2292,8 +2477,46 @@ class MainWindow(QMainWindow):
 
         observation = QTextEdit(); observation.setMinimumHeight(100)
         form.addRow("Observation Description:", observation)
-        corrective = QTextEdit(); corrective.setMinimumHeight(90)
-        form.addRow("Action Required / Corrective Action:", corrective)
+
+        actions_box = QGroupBox("Corrective Action(s) — add one or more")
+        actions_layout = QVBoxLayout(actions_box)
+        action_rows = []
+
+        def add_action_row(text=""):
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            idx = QLabel(str(len(action_rows) + 1) + ".")
+            idx.setFixedWidth(28)
+            te = QTextEdit()
+            te.setPlaceholderText("Corrective action required")
+            te.setFixedHeight(54)
+            if text:
+                te.setPlainText(text)
+            rem = QPushButton("Remove")
+            rem.setFixedWidth(80)
+            row_l.addWidget(idx)
+            row_l.addWidget(te, 1)
+            row_l.addWidget(rem)
+            actions_layout.insertWidget(max(0, actions_layout.count() - 1), row_w)
+            entry = {"widget": row_w, "edit": te, "label": idx}
+            action_rows.append(entry)
+
+            def remove():
+                if len(action_rows) <= 1:
+                    te.clear()
+                    return
+                action_rows.remove(entry)
+                row_w.deleteLater()
+                for i, e in enumerate(action_rows, 1):
+                    e["label"].setText(str(i) + ".")
+            rem.clicked.connect(remove)
+
+        add_btn = QPushButton("+ Add Corrective Action")
+        add_btn.clicked.connect(lambda: add_action_row())
+        actions_layout.addWidget(add_btn)
+        add_action_row()
+        form.addRow(actions_box)
 
         priority = QComboBox(); priority.addItems(PRIORITIES)
         form.addRow("Priority:", priority)
@@ -2301,6 +2524,18 @@ class MainWindow(QMainWindow):
         form.addRow("Target Completion Date:", target)
         status = QComboBox(); status.addItems(STATUSES)
         form.addRow("Status:", status)
+
+        capa_required = QComboBox()
+        capa_required.addItems(["No", "Yes"])
+        capa_required.setToolTip(
+            "Select Yes when formal CAPA tracking is required. All observation details and corrective actions "
+            "will be sent to the CAPA Tracking Register."
+        )
+        form.addRow("CAPA Required?:", capa_required)
+        capa_hint = QLabel("If Yes, observation details and every corrective action are created in CAPA Tracking Register.")
+        capa_hint.setStyleSheet("color:#245486;font-size:11px;")
+        capa_hint.setWordWrap(True)
+        form.addRow("", capa_hint)
 
         attachment_paths = []
         attachment_label = QLabel("No evidence files selected.")
@@ -2333,6 +2568,9 @@ class MainWindow(QMainWindow):
         outer.addWidget(buttons)
         cancel_button.clicked.connect(dialog.reject)
 
+        def collect_actions():
+            return [e["edit"].toPlainText().strip() for e in action_rows if e["edit"].toPlainText().strip()]
+
         def save():
             if not edits["location"].text().strip():
                 QMessageBox.warning(dialog, "Required", "Location is required.")
@@ -2340,29 +2578,89 @@ class MainWindow(QMainWindow):
             if not observation.toPlainText().strip():
                 QMessageBox.warning(dialog, "Required", "Observation description is required.")
                 return
+            actions = collect_actions()
+            if not actions:
+                QMessageBox.warning(dialog, "Required", "Add at least one corrective action.")
+                return
             try:
                 number = next_number("HSE-OBS", "observations")
+                need_capa = capa_required.currentText() == "Yes"
+                actions_json = json.dumps([{"action": a} for a in actions], ensure_ascii=False)
+                corrective_text = format_corrective_actions_display(actions)
                 db.execute("""
                     INSERT INTO observations (
                         number, obs_date, obs_time, project, company, location, area,
                         responsible, designation, employee_id, observer, observer_designation,
                         observer_id, observer_company, obs_type, category, subcategory,
-                        observation, corrective_action, priority, target_date, status, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        observation, corrective_action, corrective_actions_json, priority, target_date, status,
+                        capa_required, capa_number, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     number, observation_date.date().toString("yyyy-MM-dd"), now_time(), edits["project"].text(), edits["company"].text(),
                     edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
                     edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
                     edits["observer_designation"].text(), edits["observer_id"].text(),
                     edits["observer_company"].text(), obs_type.currentText(), category.currentText(),
-                    edits["subcategory"].text(), observation.toPlainText(), corrective.toPlainText(),
-                    priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(), datetime.now().isoformat()
+                    edits["subcategory"].text(), observation.toPlainText(), corrective_text, actions_json,
+                    priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(),
+                    1 if need_capa else 0, "", datetime.now().isoformat()
                 ))
                 row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
                 if row and attachment_paths:
                     copy_attachments(attachment_paths, number, "observation_attachments", row["id"])
+
+                capa_number = ""
+                if need_capa and row:
+                    capa_number = next_number("HSE-CAPA", "capa")
+                    finding_text = (
+                        f"Observation {number}\n"
+                        f"Type: {obs_type.currentText()} | Category: {category.currentText()}\n"
+                        f"Location: {edits['location'].text()}\n\n"
+                        f"{observation.toPlainText().strip()}"
+                    )
+                    capa_actions = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
+                    db.execute("""
+                        INSERT INTO capa (
+                            number, source, reference_number, finding, root_cause, corrective_action,
+                            preventive_action, responsible, priority, target_date, status,
+                            verification, closeout_evidence, created_at,
+                            actions_json, approval_status, approved_by, approved_date,
+                            completion_pct, action_status, observation_text
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        capa_number,
+                        "HSE Inspection",
+                        number,
+                        finding_text,
+                        "",
+                        corrective_text,
+                        "",
+                        edits["responsible"].text().strip(),
+                        priority.currentText(),
+                        target.date().toString("yyyy-MM-dd"),
+                        "Open",
+                        "",
+                        "",
+                        datetime.now().isoformat(),
+                        json.dumps(capa_actions, ensure_ascii=False),
+                        "Pending Approval",
+                        "",
+                        "",
+                        0,
+                        "Open",
+                        observation.toPlainText().strip(),
+                    ))
+                    db.execute("UPDATE observations SET capa_number=? WHERE id=?", (capa_number, row["id"]))
+
                 dialog.accept()
                 refresh()
+                if need_capa and capa_number:
+                    QMessageBox.information(
+                        self, "CAPA Tracking",
+                        f"Observation {number} saved.\n\n"
+                        f"CAPA Required = Yes\n"
+                        f"{len(actions)} corrective action(s) sent to CAPA Tracking Register as {capa_number}."
+                    )
             except Exception as e:
                 logging.exception("Observation save failed")
                 QMessageBox.critical(dialog, "Save Error", f"Unable to save observation.\n\n{e}")
@@ -3859,19 +4157,258 @@ class MainWindow(QMainWindow):
         except Exception as e: logging.exception("Audit PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
     def capa(self):
-        w,layout=self.page("CAPA Register")
-        toolbar=QHBoxLayout(); btns={}
-        for text in ["+ New CAPA","Delete Selected","Export CSV","Export Excel","Export PDF","Export Word"]:
-            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
-        layout.addLayout(toolbar)
-        table=QTableWidget(); headers=["ID","Number","Source","Reference","Priority","Responsible","Target Date","Status","Overdue","Attachments"]; table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
-        def load():
-            rows=db.fetchall("SELECT * FROM capa ORDER BY id DESC"); table.setRowCount(len(rows))
-            for r,row in enumerate(rows):
-                count=db.fetchone("SELECT COUNT(*) c FROM capa_attachments WHERE capa_id=?",(row["id"],))["c"]; vals=[row["id"],row["number"],row["source"],row["reference_number"],row["priority"],row["responsible"],row["target_date"],row["status"],"OVERDUE" if overdue(row["target_date"],row["status"]) else "",count]
-                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
-        btns["+ New CAPA"].clicked.connect(lambda:self.capa_form(load)); btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"capa","capa_attachments","CAPA",load)); btns["Export CSV"].clicked.connect(lambda:self.export_csv("capa")); btns["Export Excel"].clicked.connect(lambda:self.export_excel("capa")); btns["Export PDF"].clicked.connect(lambda:self.export_pdf("capa")); btns["Export Word"].clicked.connect(lambda:self.export_docx("capa")); load()
+        w, layout = self.page("CAPA Tracking Register")
+        info = QLabel(
+            "Tracks formal corrective actions from observations (CAPA Required = Yes). "
+            "Upload evidence against each corrective action. Completion % = actions with evidence ÷ total actions. "
+            "100% = CAPA Action Complete. Approval is separate (Approved / Not Approved)."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#245486;padding:4px;")
+        layout.addWidget(info)
 
+        toolbar = QHBoxLayout()
+        btns = {}
+        for text_label in ["+ New CAPA", "Manage Action Evidence", "Set Approval", "Delete Selected",
+                           "Export CSV", "Export Excel", "Export PDF", "Export Word"]:
+            b = QPushButton(text_label)
+            toolbar.addWidget(b)
+            btns[text_label] = b
+        layout.addLayout(toolbar)
+
+        table = QTableWidget()
+        headers = [
+            "ID", "S.No.", "CAPA No.", "Reference (Obs No.)", "Observed", "Corrective Action(s)",
+            "Evidence Progress", "Completion %", "Action Status", "Approval", "Approved By",
+            "Priority", "Responsible", "Target Date", "Overdue"
+        ]
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setColumnHidden(0, True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setWordWrap(True)
+        table.setAlternatingRowColors(True)
+        layout.addWidget(table)
+
+        def selected_capa_id():
+            r = table.currentRow()
+            if r < 0 or not table.item(r, 0):
+                QMessageBox.warning(self, "CAPA", "Select a CAPA record first.")
+                return None
+            return int(table.item(r, 0).text())
+
+        def load():
+            rows = db.fetchall("SELECT * FROM capa ORDER BY id DESC")
+            table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
+                done, total, pct, action_status = capa_actions_completion(actions)
+                try:
+                    approval = safe(row["approval_status"]) or "Pending Approval"
+                except Exception:
+                    approval = "Pending Approval"
+                try:
+                    approved_by = safe(row["approved_by"])
+                except Exception:
+                    approved_by = ""
+                try:
+                    observed = safe(row["observation_text"]) or safe(row["finding"])
+                except Exception:
+                    observed = safe(row["finding"])
+                progress = f"{done}/{total} with evidence" if total else "No actions"
+                actions_display = format_corrective_actions_display([a["action"] for a in actions])
+                vals = [
+                    row["id"], r + 1, row["number"], row["reference_number"], observed, actions_display,
+                    progress, f"{pct}%", action_status, approval, approved_by or "—",
+                    row["priority"], row["responsible"], row["target_date"],
+                    "OVERDUE" if overdue(row["target_date"], row["status"]) else ""
+                ]
+                for c, v in enumerate(vals):
+                    item = QTableWidgetItem(safe(v))
+                    item.setToolTip(safe(v))
+                    table.setItem(r, c, item)
+                status_item = table.item(r, 8)
+                if action_status == "CAPA Action Complete":
+                    status_item.setForeground(Qt.GlobalColor.darkGreen)
+                elif action_status == "Pending":
+                    status_item.setForeground(Qt.GlobalColor.darkYellow)
+                else:
+                    status_item.setForeground(Qt.GlobalColor.darkRed)
+                if safe(row["source"]) == "HSE Inspection":
+                    for c in range(table.columnCount()):
+                        if table.item(r, c):
+                            table.item(r, c).setBackground(QBrush(QColor("#E8F1FB")))
+                table.setRowHeight(r, max(52, 18 + 16 * max(1, len(actions))))
+            for row in rows:
+                actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else "[]")
+                done, total, pct, action_status = capa_actions_completion(actions)
+                db.execute(
+                    "UPDATE capa SET completion_pct=?, action_status=? WHERE id=?",
+                    (pct, action_status, row["id"])
+                )
+
+        def manage_evidence():
+            capa_id = selected_capa_id()
+            if capa_id is None:
+                return
+            row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
+            if not row:
+                return
+            actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else "[]")
+            if not actions:
+                actions = [{"action": a, "evidence": [], "has_evidence": False}
+                           for a in parse_corrective_actions(row["corrective_action"])]
+            if not actions:
+                QMessageBox.information(self, "CAPA", "No corrective actions are listed on this CAPA.")
+                return
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"CAPA Action Evidence — {row['number']}")
+            dialog.resize(900, 560)
+            v = QVBoxLayout(dialog)
+            v.addWidget(QLabel(
+                f"<b>{safe(row['number'])}</b> | Ref: {safe(row['reference_number'])}<br>"
+                f"Upload evidence for each corrective action. Completion is based on actions with at least one attachment."
+            ))
+            grid = QTableWidget()
+            grid.setColumnCount(4)
+            grid.setHorizontalHeaderLabels(["S.No.", "Corrective Action", "Evidence Files", "Attach"])
+            grid.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+            grid.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+            grid.setRowCount(len(actions))
+            grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+            def refresh_grid():
+                for i, action in enumerate(actions):
+                    grid.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                    grid.setItem(i, 1, QTableWidgetItem(action["action"]))
+                    names = ", ".join(Path(p).name for p in action.get("evidence") or []) or "No evidence"
+                    grid.setItem(i, 2, QTableWidgetItem(names))
+                    btn = QPushButton("Add Evidence")
+                    def make_handler(idx):
+                        def handler():
+                            paths, _ = QFileDialog.getOpenFileNames(
+                                dialog, "Select Evidence for Corrective Action",
+                                "",
+                                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt);;All Files (*)"
+                            )
+                            if not paths:
+                                return
+                            saved = []
+                            for path in paths:
+                                try:
+                                    source = Path(path)
+                                    if not source.exists():
+                                        continue
+                                    dest = ATTACH_DIR / f"{row['number']}_A{idx+1}_{source.name}"
+                                    counter = 1
+                                    while dest.exists():
+                                        dest = ATTACH_DIR / f"{row['number']}_A{idx+1}_{counter}_{source.name}"
+                                        counter += 1
+                                    shutil.copy2(source, dest)
+                                    saved.append(str(dest))
+                                    db.execute(
+                                        "INSERT INTO capa_attachments (capa_id,file_path,attachment_type) VALUES(?,?,?)",
+                                        (capa_id, str(dest), f"Action {idx+1} Evidence")
+                                    )
+                                except Exception:
+                                    logging.exception("CAPA action evidence save failed")
+                            if saved:
+                                actions[idx].setdefault("evidence", []).extend(saved)
+                                actions[idx]["has_evidence"] = True
+                                refresh_grid()
+                        return handler
+                    btn.clicked.connect(make_handler(i))
+                    grid.setCellWidget(i, 3, btn)
+                    grid.setRowHeight(i, 48)
+            refresh_grid()
+            v.addWidget(grid, 1)
+
+            def save_and_close():
+                done, total, pct, action_status = capa_actions_completion(actions)
+                db.execute(
+                    """UPDATE capa SET actions_json=?, completion_pct=?, action_status=?,
+                       corrective_action=?, status=? WHERE id=?""",
+                    (
+                        json.dumps(actions, ensure_ascii=False),
+                        pct,
+                        action_status,
+                        format_corrective_actions_display([a["action"] for a in actions]),
+                        "Closed" if action_status == "CAPA Action Complete" else ("In Progress" if pct > 0 else "Open"),
+                        capa_id,
+                    )
+                )
+                updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
+                if updated:
+                    sync_observation_from_capa(updated)
+                dialog.accept()
+                load()
+                QMessageBox.information(
+                    self, "CAPA Tracking",
+                    f"Evidence saved.\nCompletion: {pct}% ({done}/{total})\nStatus: {action_status}"
+                )
+
+            buttons = QDialogButtonBox()
+            save_b = buttons.addButton("Save Evidence / Update Status", QDialogButtonBox.ButtonRole.AcceptRole)
+            cancel_b = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+            save_b.clicked.connect(save_and_close)
+            cancel_b.clicked.connect(dialog.reject)
+            v.addWidget(buttons)
+            dialog.exec()
+
+        def set_approval():
+            capa_id = selected_capa_id()
+            if capa_id is None:
+                return
+            row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
+            if not row:
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"CAPA Approval — {row['number']}")
+            dialog.resize(420, 220)
+            form = QFormLayout(dialog)
+            approval = QComboBox()
+            approval.addItems(["Pending Approval", "Approved", "Not Approved", "Rejected"])
+            try:
+                approval.setCurrentText(safe(row["approval_status"]) or "Pending Approval")
+            except Exception:
+                pass
+            approved_by = QLineEdit(safe(row["approved_by"]) if "approved_by" in row.keys() else "")
+            form.addRow("CAPA Approval:", approval)
+            form.addRow("Approved By:", approved_by)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+            form.addRow(buttons)
+
+            def save_approval():
+                if approval.currentText() in ("Approved", "Not Approved", "Rejected") and not approved_by.text().strip():
+                    QMessageBox.warning(dialog, "Required", "Enter the name of the person approving / rejecting.")
+                    return
+                adate = today() if approval.currentText() != "Pending Approval" else ""
+                db.execute(
+                    "UPDATE capa SET approval_status=?, approved_by=?, approved_date=? WHERE id=?",
+                    (approval.currentText(), approved_by.text().strip(), adate, capa_id)
+                )
+                updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
+                if updated:
+                    sync_observation_from_capa(updated)
+                dialog.accept()
+                load()
+
+            buttons.accepted.connect(save_approval)
+            buttons.rejected.connect(dialog.reject)
+            dialog.exec()
+
+        btns["+ New CAPA"].clicked.connect(lambda: self.capa_form(load))
+        btns["Manage Action Evidence"].clicked.connect(manage_evidence)
+        btns["Set Approval"].clicked.connect(set_approval)
+        btns["Delete Selected"].clicked.connect(lambda: self.delete_selected_record(table, "capa", "capa_attachments", "CAPA", load))
+        btns["Export CSV"].clicked.connect(lambda: self.export_csv("capa"))
+        btns["Export Excel"].clicked.connect(lambda: self.export_excel("capa"))
+        btns["Export PDF"].clicked.connect(lambda: self.export_pdf("capa"))
+        btns["Export Word"].clicked.connect(lambda: self.export_docx("capa"))
+        load()
 
     def capa_form(self, refresh):
         dialog = QDialog(self)
@@ -3880,7 +4417,7 @@ class MainWindow(QMainWindow):
         dialog.setMinimumSize(900, 720)
         outer = QVBoxLayout(dialog)
 
-        title = QLabel("CORRECTIVE AND PREVENTIVE ACTION (CAPA)")
+        title = QLabel("CORRECTIVE AND PREVENTIVE ACTION (CAPA) TRACKING")
         title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
         outer.addWidget(title)
 
@@ -3890,29 +4427,42 @@ class MainWindow(QMainWindow):
 
         source = QComboBox(); source.addItems(CAPA_SOURCES); form.addRow("Source:", source)
         reference = QLineEdit(); form.addRow("Reference Number:", reference)
-        finding = QTextEdit(); finding.setMinimumHeight(90); form.addRow("Finding:", finding)
-        root = QTextEdit(); root.setMinimumHeight(90); form.addRow("Root Cause:", root)
-        corrective = QTextEdit(); corrective.setMinimumHeight(90); form.addRow("Corrective Action:", corrective)
-        preventive = QTextEdit(); preventive.setMinimumHeight(90); form.addRow("Preventive Action:", preventive)
+        finding = QTextEdit(); finding.setMinimumHeight(90); form.addRow("Finding / Observed:", finding)
+        root = QTextEdit(); root.setMinimumHeight(70); form.addRow("Root Cause:", root)
+
+        actions_box = QGroupBox("Corrective Action(s)")
+        actions_layout = QVBoxLayout(actions_box)
+        action_rows = []
+
+        def add_action_row(text=""):
+            row_w = QWidget()
+            row_l = QHBoxLayout(row_w)
+            row_l.setContentsMargins(0, 0, 0, 0)
+            te = QTextEdit(); te.setFixedHeight(50); te.setPlainText(text)
+            rem = QPushButton("Remove"); rem.setFixedWidth(80)
+            row_l.addWidget(te, 1); row_l.addWidget(rem)
+            actions_layout.insertWidget(max(0, actions_layout.count() - 1), row_w)
+            entry = {"widget": row_w, "edit": te}
+            action_rows.append(entry)
+            def remove():
+                if len(action_rows) <= 1:
+                    te.clear(); return
+                action_rows.remove(entry); row_w.deleteLater()
+            rem.clicked.connect(remove)
+
+        add_btn = QPushButton("+ Add Corrective Action")
+        add_btn.clicked.connect(lambda: add_action_row())
+        actions_layout.addWidget(add_btn)
+        add_action_row()
+        form.addRow(actions_box)
+
+        preventive = QTextEdit(); preventive.setMinimumHeight(70); form.addRow("Preventive Action:", preventive)
         responsible = QLineEdit(); form.addRow("Responsible Person:", responsible)
         priority = QComboBox(); priority.addItems(PRIORITIES); form.addRow("Priority:", priority)
-        target = QLineEdit(); form.addRow("Target Date:", target)
+        target = QLineEdit(); form.addRow("Target Date (YYYY-MM-DD):", target)
         status = QComboBox(); status.addItems(STATUSES); form.addRow("Status:", status)
-        verification = QTextEdit(); verification.setMinimumHeight(70); form.addRow("Verification:", verification)
-        evidence = QTextEdit(); evidence.setMinimumHeight(70); form.addRow("Closeout Evidence:", evidence)
-
-        attachment_paths = []; attachment_label = QLabel("No evidence files selected."); attachment_label.setWordWrap(True)
-        attach = QPushButton("Attach CAPA Evidence Files"); attach.setMinimumHeight(36)
-        def choose_files():
-            paths, _ = QFileDialog.getOpenFileNames(
-                dialog, "Select CAPA Evidence", "",
-                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
-            )
-            if paths:
-                attachment_paths.clear(); attachment_paths.extend(paths)
-                attachment_label.setText("\n".join(Path(p).name for p in paths))
-        attach.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments:", attach); form.addRow("Selected Files:", attachment_label)
+        verification = QTextEdit(); verification.setMinimumHeight(60); form.addRow("Verification:", verification)
+        evidence = QTextEdit(); evidence.setMinimumHeight(60); form.addRow("Closeout Evidence:", evidence)
 
         scroll_area.setWidget(content); outer.addWidget(scroll_area, 1)
         buttons = QDialogButtonBox()
@@ -3923,20 +4473,27 @@ class MainWindow(QMainWindow):
 
         def save():
             try:
+                actions = [e["edit"].toPlainText().strip() for e in action_rows if e["edit"].toPlainText().strip()]
+                if not actions:
+                    QMessageBox.warning(dialog, "Required", "Add at least one corrective action.")
+                    return
                 number = next_number("HSE-CAPA", "capa")
+                corrective_text = format_corrective_actions_display(actions)
+                capa_actions = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
                 db.execute("""
-                    INSERT INTO capa (number,source,reference_number,finding,root_cause,corrective_action,
-                        preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    INSERT INTO capa (
+                        number,source,reference_number,finding,root_cause,corrective_action,
+                        preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,
+                        actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     number, source.currentText(), reference.text(), finding.toPlainText(), root.toPlainText(),
-                    corrective.toPlainText(), preventive.toPlainText(), responsible.text(), priority.currentText(),
+                    corrective_text, preventive.toPlainText(), responsible.text(), priority.currentText(),
                     target.text(), status.currentText(), verification.toPlainText(), evidence.toPlainText(),
-                    datetime.now().isoformat()
+                    datetime.now().isoformat(),
+                    json.dumps(capa_actions, ensure_ascii=False),
+                    "Pending Approval", "", "", 0, "Open", finding.toPlainText()
                 ))
-                row = db.fetchone("SELECT id FROM capa WHERE number=?", (number,))
-                if row and attachment_paths:
-                    copy_attachments(attachment_paths, number, "capa_attachments", row["id"])
                 dialog.accept(); refresh()
             except Exception as e:
                 logging.exception("CAPA save failed")
@@ -5317,7 +5874,7 @@ class MainWindow(QMainWindow):
                 if record_ids:
                     obs_rows = [r for r in obs_rows if r["id"] in record_ids]
                 for serial, r in enumerate(obs_rows, 1):
-                    vals=[serial, r["number"], r["obs_date"], r["location"], r["obs_type"], r["category"], r["observation"], r["corrective_action"], r["responsible"], "", r["status"]]
+                    vals=[serial, r["number"], r["obs_date"], r["location"], r["obs_type"], r["category"], r["observation"], format_corrective_actions_display(r), r["responsible"], "", r["status"]]
                     ws.append([xml_safe(v) for v in vals])
                     excel_row=ws.max_row
                     evcell=ws.cell(excel_row,10)
@@ -5550,7 +6107,7 @@ class MainWindow(QMainWindow):
                     if not evidence:
                         evidence=[Paragraph("None",ps)]
                     wrap=lambda v: Paragraph(xml_safe(v).replace("\n","<br/>"), ps)
-                    pdf_data.append([wrap(serial),wrap(r["obs_date"]),wrap(r["location"]),wrap(r["obs_type"]),wrap(r["category"]),wrap(r["observation"]),wrap(r["corrective_action"]),wrap(r["responsible"]),evidence,wrap(r["status"])])
+                    pdf_data.append([wrap(serial),wrap(r["obs_date"]),wrap(r["location"]),wrap(r["obs_type"]),wrap(r["category"]),wrap(r["observation"]),wrap(format_corrective_actions_display(r)),wrap(r["responsible"]),evidence,wrap(r["status"])])
                 header_style=styles["Normal"]
                 header_style.fontSize=5.5; header_style.leading=6
                 pdf_data[0]=[Paragraph(x,header_style) for x in preferred]
