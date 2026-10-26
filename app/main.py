@@ -710,7 +710,7 @@ def parse_corrective_actions(source):
     return lines or ([text_value] if text_value else [])
 
 
-def format_corrective_actions_display(actions, numbered=True):
+def format_corrective_actions_display(actions, numbered=False):
     actions = parse_corrective_actions(actions)
     if not actions:
         return ""
@@ -1434,8 +1434,9 @@ def generate_observation_docx(path, record_ids=None):
                                 p2.add_run().add_picture(str(path2), width=Inches(0.38))
                             except Exception:
                                 pass
-                        run=p2.add_run(" " + path2.name)
-                        run.font.size=Pt(4.8)
+                        if not (path2.exists() and path2.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}):
+                            run=p2.add_run(" " + path2.name)
+                            run.font.size=Pt(4.8)
             elif name == "Observation Type":
                 cell.text=xml_safe(row["obs_type"])
             elif name == "Observation Detail":
@@ -4286,13 +4287,26 @@ class MainWindow(QMainWindow):
                     grid.setItem(i, 1, QTableWidgetItem(action["action"]))
                     names = ", ".join(Path(p).name for p in action.get("evidence") or []) or "No evidence"
                     grid.setItem(i, 2, QTableWidgetItem(names))
-                    btn = QPushButton("Add Evidence")
+                    btn = QPushButton("Add / Edit Evidence")
                     def make_handler(idx):
                         def handler():
+                            existing = actions[idx].get("evidence") or []
+                            if existing:
+                                choice = QMessageBox.question(
+                                    dialog, "Manage Evidence",
+                                    "Choose Yes to replace the current evidence files, or No to add more files.",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                                    QMessageBox.StandardButton.Yes
+                                )
+                                if choice == QMessageBox.StandardButton.Cancel:
+                                    return
+                                replace_existing = choice == QMessageBox.StandardButton.Yes
+                            else:
+                                replace_existing = False
                             paths, _ = QFileDialog.getOpenFileNames(
                                 dialog, "Select Evidence for Corrective Action",
                                 "",
-                                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt);;All Files (*)"
+                                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt);;All Files (*)"
                             )
                             if not paths:
                                 return
@@ -4316,7 +4330,16 @@ class MainWindow(QMainWindow):
                                 except Exception:
                                     logging.exception("CAPA action evidence save failed")
                             if saved:
-                                actions[idx].setdefault("evidence", []).extend(saved)
+                                if replace_existing:
+                                    old_paths = set(existing)
+                                    actions[idx]["evidence"] = saved
+                                    for old_path in old_paths:
+                                        try:
+                                            db.execute("DELETE FROM capa_attachments WHERE capa_id=? AND file_path=?", (capa_id, old_path))
+                                        except Exception:
+                                            logging.exception("Unable to update replaced CAPA evidence record")
+                                else:
+                                    actions[idx].setdefault("evidence", []).extend(saved)
                                 actions[idx]["has_evidence"] = True
                                 refresh_grid()
                         return handler
@@ -5962,6 +5985,19 @@ class MainWindow(QMainWindow):
                 self.show_export_success(path); return
             wb=Workbook(); ws=wb.active; ws.title=table_name[:31]; ws.append(columns)
             for row in data: ws.append([xml_safe(v) for v in row])
+            # Use the company logo selected in Settings without inserting rows or changing
+            # the report's column structure. The image is placed at the far-right header area.
+            logo_path=report_logo_path()
+            if logo_path and Path(logo_path).exists():
+                try:
+                    logo=XLImage(str(logo_path))
+                    scale=min(90/max(logo.width,1), 42/max(logo.height,1), 1)
+                    logo.width=max(1,int(logo.width*scale)); logo.height=max(1,int(logo.height*scale))
+                    logo.anchor=f"{ws.cell(1, max(1,len(columns)+1)).column_letter}1"
+                    ws.add_image(logo)
+                    ws.row_dimensions[1].height=max(ws.row_dimensions[1].height or 15, 34)
+                except Exception:
+                    logging.exception("Unable to embed company logo in Excel report")
             for cell in ws[1]:
                 cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True)
             ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
@@ -5982,21 +6018,34 @@ class MainWindow(QMainWindow):
             if attach_table:
                 ids=[r["id"] for r in db.fetchall(f"SELECT id FROM {table_name} ORDER BY id DESC") if not record_ids or r["id"] in record_ids]
                 aws=wb.create_sheet("Attachments")
-                aws.append(["Record ID","Record Number","File Name","Attachment Type","Stored File Path"])
+                aws.append(["Record ID","Record Number","File Name","Attachment Type","Stored File Path","Embedded Preview"])
                 for rid in ids:
                     rec=db.fetchone(f"SELECT number FROM {table_name} WHERE id=?",(rid,))
                     for a in attachment_rows(attach_table,rid):
                         fpath=safe(a["file_path"])
-                        aws.append([rid, safe(rec["number"]) if rec else "", Path(fpath).name, xml_safe(a["attachment_type"]), fpath])
-                        cell=aws.cell(aws.max_row,5)
+                        aws.append([rid, safe(rec["number"]) if rec else "", Path(fpath).name, xml_safe(a["attachment_type"]), fpath, ""])
+                        current_row=aws.max_row
+                        cell=aws.cell(current_row,5)
                         if fpath and Path(fpath).exists():
                             cell.hyperlink=Path(fpath).as_uri()
                             cell.style="Hyperlink"
+                            fp=Path(fpath)
+                            if fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif"}:
+                                try:
+                                    embedded=XLImage(str(fp))
+                                    scale=min(100/max(embedded.width,1), 65/max(embedded.height,1), 1)
+                                    embedded.width=max(1,int(embedded.width*scale)); embedded.height=max(1,int(embedded.height*scale))
+                                    embedded.anchor=f"F{current_row}"
+                                    aws.add_image(embedded)
+                                    aws.row_dimensions[current_row].height=52
+                                except Exception:
+                                    logging.exception("Unable to embed attachment preview in Excel report")
                 aws.freeze_panes="A2"; aws.auto_filter.ref=aws.dimensions
                 for column_cells in aws.columns:
                     letter=column_cells[0].column_letter
                     max_len=min(80,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
                     aws.column_dimensions[letter].width=max(12,max_len)
+                aws.column_dimensions["F"].width=18
             target=Path(path)
             temp=target.with_name(target.name + ".tmp.xlsx")
             try:
