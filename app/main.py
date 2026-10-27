@@ -354,7 +354,9 @@ class Database:
             "property_damage_cost": "TEXT DEFAULT ''",
             "organization": "TEXT DEFAULT ''",
             "procedure_reference": "TEXT DEFAULT ''",
-            "report_reference": "TEXT DEFAULT ''"
+            "report_reference": "TEXT DEFAULT ''",
+            "capa_required": "INTEGER DEFAULT 0",
+            "capa_number": "TEXT DEFAULT ''"
         }
         for col, definition in incident_extra.items():
             if col not in incident_cols:
@@ -476,6 +478,10 @@ db = Database()
 # ============================================================
 
 OBS_TYPES = [
+    "Walkthrough Observation",
+    "Routine Inspection",
+    "Client Observation",
+    "Internal Walkthrough",
     "Unsafe Act",
     "Unsafe Condition",
     "Good Observation",
@@ -1121,7 +1127,8 @@ def generate_incident_docx(incident_id, path):
         ("Company",row["company"] or company_name()),("Project",row["project"]),("Location",row["location"]),
         ("Department",row["department"]),("Activity",row["activity"]),("Incident Type",row["incident_type"]),
         ("Investigation Method",row["investigation_method"]),("Status",row["status"]),
-        ("Organisation",row["organization"]),("Report / Reference No.",row["report_reference"])
+        ("Organisation",row["organization"]),("Report / Reference No.",row["report_reference"]),
+        ("CAPA Tracking Reference", (safe(row["capa_number"]) + " — Accident Corrective Action Plan") if ("capa_number" in row.keys() and safe(row["capa_number"])) else "Not linked")
     ])
     try: details=json.loads(safe(row["investigation_details"]) or "{}")
     except Exception: details={}
@@ -1149,6 +1156,18 @@ def generate_incident_docx(incident_id, path):
         section_table(titleh,headers,vals)
     add_docx_boxed_section(doc,"Incident Description",row["description"],8)
     add_docx_boxed_section(doc,"Immediate Response / Action",row["immediate_action"],8)
+    incident_actions = details.get("corrective_actions", []) or []
+    if incident_actions:
+        doc.add_heading("Corrective Action Plan", 2)
+        action_table = doc.add_table(rows=1, cols=4)
+        for i, heading in enumerate(["Corrective Action", "Responsible Person", "Target Date", "Status"]):
+            action_table.rows[0].cells[i].text = heading
+        for action in incident_actions:
+            cells = action_table.add_row().cells
+            values = [action.get("action", ""), action.get("responsible", ""), action.get("target_date", ""), action.get("status", "Open")]
+            for i, value in enumerate(values):
+                cells[i].text = xml_safe(value)
+        style_docx_table(action_table, header=True, font_size=8)
     # Witness statements, including optional attachment and remark for each statement.
     witnesses=details.get("witness_statements",[]) or []
     if witnesses:
@@ -1651,6 +1670,18 @@ def generate_observation_card_docx(observation_ids, path):
         p.paragraph_format.space_after = Pt(0)
         r = p.add_run("HSE OBSERVATION AND STOP CARD")
         r.bold = True; r.font.size = Pt(13)
+        company_line = c.add_paragraph()
+        company_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        company_line.paragraph_format.space_after = Pt(0)
+        company_run = company_line.add_run(xml_safe(company_name()))
+        company_run.bold = True; company_run.font.size = Pt(8)
+        project_name = safe(db.setting("project_name", ""))
+        if project_name:
+            project_line = c.add_paragraph()
+            project_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            project_line.paragraph_format.space_after = Pt(0)
+            project_run = project_line.add_run("Project: " + xml_safe(project_name))
+            project_run.font.size = Pt(6.5)
 
         c = header.rows[0].cells[2]
         c.text = ""
@@ -2469,6 +2500,8 @@ class MainWindow(QMainWindow):
         for name in ["project", "company", "location", "area", "responsible", "designation", "employee_id",
                      "observer", "observer_designation", "observer_id", "observer_company"]:
             edit(name)
+        edits["project"].setText(safe(db.setting("project_name", "")))
+        edits["company"].setText(safe(db.setting("company_name", "")))
 
         obs_type = QComboBox(); obs_type.addItems(OBS_TYPES)
         form.addRow("Observation Type:", obs_type)
@@ -2739,7 +2772,9 @@ class MainWindow(QMainWindow):
         def add_edit(name,label=None,value=""):
             e=QLineEdit(safe(value)); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
         add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else "")
-        for name in ["incident_time","location","project","company","department","activity"]: add_edit(name,value=existing[name] if existing else "")
+        for name in ["incident_time","location","project","company","department","activity"]:
+            default_value = existing[name] if existing else (db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
+            add_edit(name,value=default_value)
         for name in ["supervisor","witnesses"]: add_edit(name,value=existing[name] if existing else "")
         incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); form.addRow("Type of Incident:",incident_type)
         description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else ""); form.addRow("Incident Description:",description)
@@ -3134,6 +3169,16 @@ class MainWindow(QMainWindow):
         for a in old_actions: add_ca(a)
         if not ca_rows: add_ca()
         form.addRow(ca_box)
+        incident_capa_required = QComboBox()
+        incident_capa_required.addItems(["No", "Yes"])
+        if existing and safe(existing["capa_number"] if "capa_number" in existing.keys() else ""):
+            incident_capa_required.setCurrentText("Yes")
+        incident_capa_required.setToolTip("When Yes, link the incident corrective action plan to the CAPA Tracking Register.")
+        form.addRow("Link Corrective Action Plan to CAPA Tracking?:", incident_capa_required)
+        capa_link_hint = QLabel("Yes creates or updates a CAPA Tracking Register record linked to this incident report and its corrective actions.")
+        capa_link_hint.setWordWrap(True)
+        capa_link_hint.setStyleSheet("color:#245486;font-size:11px;")
+        form.addRow("", capa_link_hint)
         # Witness statements: each statement can have its own attachment and remark.
         witness_box=QGroupBox("Witness Statements"); witness_lay=QVBoxLayout(witness_box); witness_rows=[]
         def add_witness(data=None):
@@ -3244,6 +3289,9 @@ class MainWindow(QMainWindow):
                 for _,a,r,t,st,att,lab in ca_rows:
                     if a.text().strip() or r.text().strip() or t.text().strip() or att:
                         actions.append({"action":a.text().strip(),"responsible":r.text().strip(),"target_date":t.text().strip(),"status":st.currentText(),"attachments":[]})
+                if incident_capa_required.currentText() == "Yes" and not any(safe(a.get("action", "")).strip() for a in actions):
+                    QMessageBox.warning(dialog, "Corrective Action Required", "Add at least one corrective action before linking this incident to CAPA Tracking.")
+                    return
                 details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
                 details["approval_signatures"]={key:{"name":vals[0].text().strip(),"position":vals[1].text().strip(),"signature":vals[2].text().strip(),"date":vals[3].text().strip()} for key,vals in approval_rows.items()}
                 if method.currentText()=="Fishbone / Ishikawa":
@@ -3310,6 +3358,70 @@ class MainWindow(QMainWindow):
                 # Persist the final corrective-action attachment names without altering legacy fields.
                 details["corrective_actions"] = actions
                 db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(details, ensure_ascii=False), rid))
+
+                # Keep the incident corrective action plan linked to the CAPA register,
+                # following the same single-record / multi-action structure as observations.
+                if incident_capa_required.currentText() == "Yes" and actions:
+                    incident_row = db.fetchone("SELECT * FROM incidents WHERE id=?", (rid,))
+                    linked_capa_no = safe(incident_row["capa_number"] if incident_row and "capa_number" in incident_row.keys() else "")
+                    if not linked_capa_no:
+                        linked_capa_no = next_number("HSE-CAPA", "capa")
+                    linked_actions = [{
+                        "action": safe(a.get("action", "")),
+                        "evidence": [str(ATTACH_DIR / safe(n)) for n in (a.get("attachments", []) or []) if safe(n)],
+                        "has_evidence": bool(a.get("attachments")),
+                        "responsible": safe(a.get("responsible", "")),
+                        "target_date": safe(a.get("target_date", "")),
+                        "status": safe(a.get("status", "Open")),
+                    } for a in actions if safe(a.get("action", "")).strip()]
+                    corrective_display = format_corrective_actions_display([a["action"] for a in linked_actions])
+                    incident_finding = (
+                        f"Incident Investigation Report: {number}\n"
+                        f"Incident Title: {safe(edits['incident_title'].text().strip())}\n"
+                        f"Incident Date: {safe(incident_row['incident_date']) if incident_row else today()}\n"
+                        f"Incident Type: {incident_type.currentText()}\n"
+                        f"Location: {edits['location'].text().strip()}\n\n"
+                        f"Incident Description: {description.toPlainText().strip()}"
+                    )
+                    old_capa = db.fetchone("SELECT id FROM capa WHERE number=?", (linked_capa_no,))
+                    capa_values = (
+                        "Incident Investigation",
+                        f"{number} — Accident Corrective Action Plan",
+                        incident_finding,
+                        "",
+                        corrective_display,
+                        "",
+                        "; ".join(sorted({safe(a.get("responsible", "")) for a in linked_actions if safe(a.get("responsible", "")).strip()})),
+                        "High",
+                        min([safe(a.get("target_date", "")) for a in linked_actions if safe(a.get("target_date", ""))] or [""]),
+                        "Open",
+                        "",
+                        "",
+                        datetime.now().isoformat(),
+                        json.dumps(linked_actions, ensure_ascii=False),
+                        "Pending Approval",
+                        "",
+                        "",
+                        0,
+                        "Open",
+                        incident_finding,
+                    )
+                    if old_capa:
+                        db.execute("""UPDATE capa SET source=?, reference_number=?, finding=?, root_cause=?, corrective_action=?,
+                            preventive_action=?, responsible=?, priority=?, target_date=?, status=?, verification=?,
+                            closeout_evidence=?, created_at=?, actions_json=?, approval_status=?, approved_by=?,
+                            approved_date=?, completion_pct=?, action_status=?, observation_text=? WHERE number=?""",
+                            capa_values + (linked_capa_no,))
+                    else:
+                        db.execute("""INSERT INTO capa (number, source, reference_number, finding, root_cause, corrective_action,
+                            preventive_action, responsible, priority, target_date, status, verification, closeout_evidence,
+                            created_at, actions_json, approval_status, approved_by, approved_date, completion_pct,
+                            action_status, observation_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (linked_capa_no,) + capa_values)
+                    db.execute("UPDATE incidents SET capa_required=1, capa_number=? WHERE id=?", (linked_capa_no, rid))
+                else:
+                    # Do not delete any previously-created CAPA history if the toggle is later changed to No.
+                    db.execute("UPDATE incidents SET capa_required=? WHERE id=?", (1 if (existing and safe(existing["capa_number"] if "capa_number" in existing.keys() else "")) else 0, rid))
                 dialog.accept(); refresh()
             except Exception as e: logging.exception("Incident save failed"); QMessageBox.critical(dialog,"Save Error",f"Unable to save investigation.\n\n{e}")
         save_draft.clicked.connect(lambda:save("Draft")); save_final.clicked.connect(lambda:save("Closed")); save_exit.clicked.connect(lambda:save("Draft")); dialog.exec()
@@ -4160,7 +4272,7 @@ class MainWindow(QMainWindow):
     def capa(self):
         w, layout = self.page("CAPA Tracking Register")
         info = QLabel(
-            "Tracks formal corrective actions from observations (CAPA Required = Yes). "
+            "Tracks formal corrective actions linked from HSE observations and incident investigations. "
             "Upload evidence against each corrective action. Completion % = actions with evidence ÷ total actions. "
             "100% = CAPA Action Complete. Approval is separate (Approved / Not Approved)."
         )
@@ -4179,7 +4291,7 @@ class MainWindow(QMainWindow):
 
         table = QTableWidget()
         headers = [
-            "ID", "S.No.", "CAPA No.", "Reference (Obs No.)", "Observed", "Corrective Action(s)",
+            "ID", "S.No.", "CAPA No.", "Reference (Observation / Incident)", "Finding / Incident Details", "Corrective Action(s)",
             "Evidence Progress", "Completion %", "Action Status", "Approval", "Approved By",
             "Priority", "Responsible", "Target Date", "Overdue"
         ]
