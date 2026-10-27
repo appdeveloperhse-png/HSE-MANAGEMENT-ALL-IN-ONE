@@ -456,9 +456,13 @@ class Database:
             if col not in response_cols:
                 self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
         finding_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_findings)").fetchall()}
-        for col, definition in {"source_schedule_id": "INTEGER", "source_item_no": "INTEGER", "procedure_name": "TEXT DEFAULT ''"}.items():
+        for col, definition in {"source_schedule_id": "INTEGER", "source_item_no": "INTEGER", "procedure_name": "TEXT DEFAULT ''", "capa_required": "INTEGER DEFAULT 0", "capa_number": "TEXT DEFAULT ''"}.items():
             if col not in finding_cols:
                 self.conn.execute(f"ALTER TABLE audit_findings ADD COLUMN {col} {definition}")
+        response_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_checklist_responses)").fetchall()}
+        for col, definition in {"capa_required": "INTEGER DEFAULT 0", "capa_number": "TEXT DEFAULT ''"}.items():
+            if col not in response_cols:
+                self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
         self.conn.commit()
 
         # Observation multi-action + CAPA tracking link (additive only).
@@ -3631,7 +3635,7 @@ class MainWindow(QMainWindow):
         # Built from the supplied Master Audit Prompt. Short summary checklists are
         # expanded with standard evidence/control checks so each procedure is usable
         # as a practical field checklist.
-        return {
+        procedures = {
             "Permit to Work (PTW) System": ("8.1, 8.1.2, 6.1, 7.2", [
                 "Correct type of permit selected","Scope of work clearly described and matches actual activity","JSA / Risk Assessment attached and relevant","All required isolations identified and completed","Gas testing completed within validity period","All authorized signatures present","SIMOPS conflict check completed","Permit displayed at work location","Workers understand permit conditions","Permit properly closed after completion","No expired permits still active","Supporting documents attached"]),
             "Hot Work Procedure": ("8.1, 8.1.2, 8.2", ["Hot Work Permit issued and valid","Gas test completed before start and periodically","Combustible materials removed or protected","Fire watch assigned, trained and present","Suitable fire extinguisher available","Fire watch continues after completion","Welding equipment in good condition with flashback arrestors","Area properly ventilated","Work stopped if conditions change","Permit closed and area inspected"]),
@@ -3673,7 +3677,30 @@ class MainWindow(QMainWindow):
             "Spill Response & Environmental Incident": ("8.2 + ISO 14001", ["Response plan available and current","Spill kits suitable and ready","Drills conducted and recorded","Reporting and escalation process followed","Drain and sensitive-area protection available","Waste from cleanup safely contained and disposed","Response roles and contacts understood","Incident causes and actions tracked"]),
             "Visitor & Short Service Employee Control": ("8.1.4", ["Induction completed before access","Escort provided where required","PPE issued and suitable","Access restrictions explained","Short-service employees identified","Close supervision provided for high-risk tasks","Emergency arrangements communicated","Visitor and training records maintained"]),
             "HSE Performance Monitoring & KPI": ("9.1", ["Leading and lagging indicators tracked","Data definitions and sources consistent","Trends analysed at planned intervals","Targets and performance reviewed by management","Underperformance triggers action","Actions have owners and due dates","Data accuracy and reporting timeliness checked","Effectiveness of actions reviewed"])
-        }
+                }
+        governance = [
+            "Document governance: approved owner, document number, revision history, effective date, review date and control of obsolete copies are defined and evidenced.",
+            "Purpose and applicability: scope, exclusions, interfaces, triggering conditions and boundaries of the procedure are explicit and consistent with actual work.",
+            "Roles and accountability: authority, responsibilities, competence requirements, handovers and escalation routes are assigned to roles and communicated.",
+            "Requirements register: applicable legal, client, contractual, ISO and internal requirements are identified, updated and traceable to procedure controls.",
+            "Risk methodology: task-specific hazards, risk assessment, hierarchy of controls and acceptance of residual risk are required before authorization.",
+            "Prerequisites and approvals: required permits, method statements, drawings, isolations, resources and approvals are defined as hold points before work begins.",
+            "Control design: steps, acceptance criteria, prohibited conditions, verification methods and stop-work triggers are clear, measurable and unambiguous.",
+            "Interfaces: contractor responsibilities, simultaneous operations, affected departments and emergency interfaces are addressed and coordinated.",
+            "Competence and communication: required training, authorization, briefing, acknowledgement and refresher requirements are defined and recorded.",
+            "Records and retention: mandatory forms, registers, certificates, logs, test records, retention periods and record owners are identified and retrievable.",
+            "Deviation and change control: deviations, abnormal conditions, temporary changes and revisions require authorization, risk review, communication and records.",
+            "Monitoring and assurance: inspections, audits, sampling, performance indicators, review frequency and accountable reviewers are defined.",
+            "Nonconformity and CAPA: containment, root-cause analysis, action ownership, due dates, effectiveness verification and closure authority are defined.",
+            "Management review: incidents, audit trends, lessons learned, KPI results and operational changes trigger documented review and procedure improvement."
+        ]
+        expanded = {}
+        for procedure, (clauses, specifics) in procedures.items():
+            criteria = list(governance)
+            for specific in specifics:
+                criteria.append(f"Procedure-specific control: the approved procedure defines the requirement, accountable role, verification/acceptance method and required objective record for {specific.lower()}.")
+            expanded[procedure] = (clauses, criteria)
+        return expanded
 
     def audit_planning_center(self):
         d=QDialog(self); d.setWindowTitle("Audit Planning, Inspection Checklists & Findings Register")
@@ -3685,7 +3712,7 @@ class MainWindow(QMainWindow):
         root=QVBoxLayout(d)
         heading=QLabel("HSE AUDIT PLANNING & ASSURANCE"); heading.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:8px;")
         root.addWidget(heading)
-        intro=QLabel("Risk-based audit schedule, procedure inspection checklists, compliance scoring, evidence references and a consolidated findings register.")
+        intro=QLabel("Risk-based internal audit schedule, procedure compliance audits, controlled-document and record sampling, clause-based findings, evidence traceability and corrective-action follow-up.")
         intro.setWordWrap(True); root.addWidget(intro)
         tabs=QTabWidget(); root.addWidget(tabs,1)
 
@@ -3781,131 +3808,144 @@ class MainWindow(QMainWindow):
 
         # ----- Internal audit checklist tab -----
         check=QWidget(); cl=QVBoxLayout(check)
-        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Select one or more scheduled procedure audits (Ctrl/Shift for multiple):"))
-        schedule_list=QListWidget(); schedule_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); schedule_list.setMinimumHeight(84); cl.addWidget(schedule_list)
-        load_btn=QPushButton("Load Selected Audit Checklists"); save_btn=QPushButton("Save Checklist & Update Findings Register"); export_checklist_btn=QPushButton("Export to Excel"); print_checklist_btn=QPushButton("Print Checklist")
-        cbar.addWidget(load_btn); cbar.addWidget(save_btn); cbar.addWidget(export_checklist_btn); cbar.addWidget(print_checklist_btn); cl.addLayout(cbar)
-        score=QLabel("Compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:5px;"); cl.addWidget(score)
-        checklist_table=QTableWidget(0,8); checklist_table.setHorizontalHeaderLabels(["Procedure / Audit Reference","#","Procedure Audit Criteria","ISO Clause","Result (Yes / No / N/A)","Audit Evidence / Comments","Evidence File","Responsible Person / Action Owner"]); checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        checklist_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(6,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(7,QHeaderView.ResizeMode.Stretch); cl.addWidget(checklist_table,1)
+        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Planned audits — select multiple using the tick-box dropdown:"))
+        schedule_combo=QComboBox(); schedule_combo.setEditable(True); schedule_combo.lineEdit().setReadOnly(True); schedule_combo.lineEdit().setPlaceholderText("Select planned audits…"); schedule_combo.setMinimumWidth(420); schedule_combo.setMinimumHeight(34); schedule_model=QStandardItemModel(schedule_combo); schedule_combo.setModel(schedule_model); cl.addWidget(schedule_combo)
+        def schedule_combo_summary():
+            count=sum(1 for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked)
+            schedule_combo.setCurrentText(f"{count} planned audit(s) selected" if count else "Select planned audits…")
+        def schedule_combo_changed(index):
+            item=schedule_model.item(index)
+            if item:
+                item.setCheckState(Qt.CheckState.Unchecked if item.checkState()==Qt.CheckState.Checked else Qt.CheckState.Checked)
+                schedule_combo_summary()
+        schedule_combo.activated.connect(schedule_combo_changed)
+        load_btn=QPushButton("Load Selected Checklists"); save_btn=QPushButton("Save Checklist & Update Findings"); export_checklist_btn=QPushButton("Export Excel"); export_word_btn=QPushButton("Export Word"); print_checklist_btn=QPushButton("Print Checklist")
+        for b in [load_btn,save_btn,export_checklist_btn,export_word_btn,print_checklist_btn]: cbar.addWidget(b)
+        cl.addLayout(cbar)
+        score=QLabel("Procedure compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:8px;background:#E8F0FA;border:1px solid #C7D7EA;"); cl.addWidget(score)
+        checklist_table=QTableWidget(0,11); checklist_table.setHorizontalHeaderLabels(["Audit Number","Procedure No.","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","CAPA Required"])
+        checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setTextElideMode(Qt.TextElideMode.ElideNone); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); checklist_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setMinimumHeight(440); checklist_table.verticalHeader().setDefaultSectionSize(118); checklist_table.verticalHeader().setMinimumSectionSize(90)
+        checklist_table.setStyleSheet("QTableWidget{gridline-color:#C9D3DF;font-size:10pt;} QTableWidget::item{padding:7px;} QHeaderView::section{background:#17365D;color:white;font-weight:bold;padding:8px;border:1px solid #D7E0EA;}")
+        for col,width in {0:150,1:105,2:220,3:480,4:115,5:145,6:150,7:300,8:245,9:245,10:140}.items(): checklist_table.setColumnWidth(col,width)
+        cl.addWidget(checklist_table,1)
         def load_checklist_schedule():
-            selected={it.data(Qt.ItemDataRole.UserRole) for it in schedule_list.selectedItems()}
-            schedule_list.clear()
+            selected={schedule_model.item(i).data(Qt.ItemDataRole.UserRole) for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked}
+            schedule_model.clear()
             for r in db.fetchall("SELECT id,procedure_name,planned_date,status FROM audit_schedule ORDER BY planned_date,id"):
-                it=QListWidgetItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}"); it.setData(Qt.ItemDataRole.UserRole,r["id"]); schedule_list.addItem(it)
-                if r["id"] in selected: it.setSelected(True)
+                item=QStandardItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}"); item.setData(r["id"],Qt.ItemDataRole.UserRole); item.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable); item.setCheckable(True); item.setCheckState(Qt.CheckState.Checked if r["id"] in selected else Qt.CheckState.Unchecked); schedule_model.appendRow(item)
+            schedule_combo.setCurrentIndex(-1); schedule_combo_summary()
         def selected_schedule_ids():
-            return [int(it.data(Qt.ItemDataRole.UserRole)) for it in schedule_list.selectedItems()]
+            return [int(schedule_model.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked]
         def add_checklist_row(sid, sr, n, item_text, clause, saved=None):
             row=checklist_table.rowCount(); checklist_table.insertRow(row)
-            proc=safe(sr["procedure_name"]); ref=f"{proc} | {safe(sr['planned_date'])}"
-            proc_item=QTableWidgetItem(ref); proc_item.setData(Qt.ItemDataRole.UserRole,sid); checklist_table.setItem(row,0,proc_item)
-            num_item=QTableWidgetItem(str(n)); num_item.setData(Qt.ItemDataRole.UserRole,sid); checklist_table.setItem(row,1,num_item)
-            # Keep criteria procedure-focused: assess documented controls, responsibilities, records and review, not just field performance.
-            checklist_table.setItem(row,2,QTableWidgetItem(item_text)); checklist_table.setItem(row,3,QTableWidgetItem(clause))
-            result=QComboBox(); result.addItems(["Yes","No","N/A"])
-            comments=QTextEdit(); comments.setPlaceholderText("Audit evidence reviewed, document / record reference, gap and rationale"); comments.setMaximumHeight(62)
-            evidence=QLineEdit(); evidence.setPlaceholderText("Evidence file path"); browse=QPushButton("Browse…"); browse.setMaximumWidth(80)
-            evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(0,0,0,0); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
+            proc=safe(sr["procedure_name"]); audit_id=ensure_internal_audit(sid,sr)
+            ar=db.fetchone("SELECT number FROM audits WHERE id=?",(audit_id,)); audit_no=safe(ar["number"]) if ar else f"IA-PLAN-{sid:04d}"
+            proc_no=f"PROC-{list(self._audit_procedure_library().keys()).index(proc)+1:02d}"
+            for col,val in enumerate([audit_no,proc_no,f"{proc}\nPlanned: {safe(sr['planned_date'])}",item_text]):
+                cell=QTableWidgetItem(safe(val)); cell.setTextAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter); checklist_table.setItem(row,col,cell)
+            checklist_table.item(row,0).setData(Qt.ItemDataRole.UserRole,sid); checklist_table.item(row,1).setData(Qt.ItemDataRole.UserRole,n)
+            clauses=[x.strip() for x in safe(clause).replace("+",",").split(",") if x.strip()]
+            checklist_table.setItem(row,4,QTableWidgetItem(clauses[0] if clauses else "—")); checklist_table.setItem(row,5,QTableWidgetItem("\n".join(clauses[1:]) if len(clauses)>1 else "—"))
+            result=QComboBox(); result.addItems(["Not Audited","Conforming","Nonconformity","N/A"])
+            comments=QTextEdit(); comments.setPlaceholderText("Record objective evidence: procedure/document ID and revision, sample/record reviewed, interview reference, gap and clause-based rationale."); comments.setMinimumHeight(72); comments.setMaximumHeight(112)
+            evidence=QLineEdit(); evidence.setPlaceholderText("Attachment path / evidence reference"); browse=QPushButton("Browse…"); browse.setMaximumWidth(82)
+            evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(3,3,3,3); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
             browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Audit Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
-            owner=QLineEdit(); owner.setPlaceholderText("Responsible person")
-            owner_host=QWidget(); owner_layout=QVBoxLayout(owner_host); owner_layout.setContentsMargins(0,0,0,0); owner_layout.addWidget(owner)
+            owner=QLineEdit(); owner.setPlaceholderText("Finding owner")
             due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy"); due.setDate(QDate.currentDate().addDays(30))
-            owner_layout.addWidget(QLabel("Target date for corrective action")); owner_layout.addWidget(due)
+            capa=QComboBox(); capa.addItems(["No","Yes"])
+            action_host=QWidget(); action_layout=QVBoxLayout(action_host); action_layout.setContentsMargins(3,3,3,3); action_layout.addWidget(owner); action_layout.addWidget(QLabel("Target date for compliance / corrective action")); action_layout.addWidget(due)
             if saved:
-                result.setCurrentText(safe(saved["result"])); comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"]))
+                old_result=safe(saved["result"]); result.setCurrentText({"Yes":"Conforming","No":"Nonconformity","N/A":"N/A"}.get(old_result,old_result if old_result in ["Not Audited","Conforming","Nonconformity","N/A"] else "Not Audited"))
+                comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"])); capa.setCurrentText("Yes" if ("capa_required" in saved.keys() and saved["capa_required"]) else "No")
                 try: due.setDate(QDate.fromString(safe(saved["target_date"]),"yyyy-MM-dd"))
                 except Exception: pass
-            checklist_table.setCellWidget(row,4,result); checklist_table.setCellWidget(row,5,comments); checklist_table.setCellWidget(row,6,evidence_host); checklist_table.setCellWidget(row,7,owner_host)
+            checklist_table.setCellWidget(row,6,result); checklist_table.setCellWidget(row,7,comments); checklist_table.setCellWidget(row,8,evidence_host); checklist_table.setCellWidget(row,9,action_host); checklist_table.setCellWidget(row,10,capa)
+            for col in range(checklist_table.columnCount()):
+                it=checklist_table.item(row,col)
+                if it: it.setToolTip(it.text())
             result.currentTextChanged.connect(lambda *_:update_score())
-            return due
         def load_checklist():
             ids=selected_schedule_ids(); checklist_table.setRowCount(0)
-            if not ids:
-                score.setText("Select one or more scheduled audits first."); return
+            if not ids: score.setText("Select one or more planned audits first."); return
             lib=self._audit_procedure_library()
             for sid in ids:
                 sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
                 if not sr: continue
                 proc=safe(sr["procedure_name"]); clause,items=lib.get(proc,("",[]))
                 saved={r["item_no"]:r for r in db.fetchall("SELECT * FROM audit_checklist_responses WHERE schedule_id=? ORDER BY item_no",(sid,))}
-                for n,item_text in enumerate(items,1): add_checklist_row(sid,sr,n,f"Does the approved procedure define clear requirements, responsibilities and records for: {item_text}?",clause,saved.get(n))
+                for n,item_text in enumerate(items,1): add_checklist_row(sid,sr,n,item_text,clause,saved.get(n))
             update_score()
         def update_score():
             yes=no=0
             for row in range(checklist_table.rowCount()):
-                w=checklist_table.cellWidget(row,4)
-                if not w:continue
-                if w.currentText()=="Yes":yes+=1
-                elif w.currentText()=="No":no+=1
+                w=checklist_table.cellWidget(row,6)
+                if not w: continue
+                if w.currentText()=="Conforming": yes+=1
+                elif w.currentText()=="Nonconformity": no+=1
             total=yes+no; pct=round(yes*100/total) if total else 0
-            score.setText(f"Audit compliance: {pct}%  |  Conforming: {yes}  |  Nonconformities / gaps: {no}  |  N/A excluded")
+            score.setText(f"Procedure compliance: {pct}%  |  Conforming: {yes}  |  Nonconformities: {no}  |  Not Audited / N/A excluded")
         def ensure_internal_audit(sid, sr):
-            linked=sr["linked_audit_id"]
-            audit=db.fetchone("SELECT id,audit_type FROM audits WHERE id=?",(linked,)) if linked else None
+            linked=sr["linked_audit_id"]; audit=db.fetchone("SELECT id,audit_type FROM audits WHERE id=?",(linked,)) if linked else None
             if audit and "internal audit" in safe(audit["audit_type"]).lower(): return linked
-            year=datetime.now().year
-            existing_nums=[safe(x["number"]) for x in db.fetchall("SELECT number FROM audits WHERE number LIKE ?",(f"IA-{year}-%",))]
-            nums=[]
+            year=datetime.now().year; existing_nums=[safe(x["number"]) for x in db.fetchall("SELECT number FROM audits WHERE number LIKE ?",(f"IA-{year}-%",))]; nums=[]
             for value in existing_nums:
                 try: nums.append(int(value.rsplit("-",1)[-1]))
                 except Exception: pass
-            number=f"IA-{year}-{max(nums+[0])+1:04d}"
-            audit_date=safe(sr["planned_date"]) or date.today().isoformat()
-            db.execute("INSERT INTO audits(number,audit_date,audit_type,standard,project,location,department,auditor,lead_auditor,auditee,scope,objective,criteria,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (number,audit_date,"Internal Audit","ISO 45001","", safe(sr["area"] if "area" in sr.keys() else ""), "HSE",safe(sr["owner"]),safe(sr["owner"]),"",f"Procedure audit: {safe(sr['procedure_name'])}","Verify procedure adequacy, implementation and effectiveness","Approved procedure, ISO 45001 and applicable requirements","Draft",datetime.now().isoformat(timespec="seconds")))
-            aid=db.fetchone("SELECT id FROM audits WHERE number=?",(number,))["id"]
-            db.execute("UPDATE audit_schedule SET linked_audit_id=?,updated_at=? WHERE id=?",(aid,datetime.now().isoformat(timespec="seconds"),sid))
-            return aid
+            number=f"IA-{year}-{max(nums+[0])+1:04d}"; audit_date=safe(sr["planned_date"]) or date.today().isoformat()
+            db.execute("INSERT INTO audits(number,audit_date,audit_type,standard,project,location,department,auditor,lead_auditor,auditee,scope,objective,criteria,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(number,audit_date,"Internal Audit","ISO 45001","",safe(sr["area"] if "area" in sr.keys() else ""),"HSE",safe(sr["owner"]),safe(sr["owner"]),"",f"Procedure compliance audit: {safe(sr['procedure_name'])}","Determine conformity, adequacy and effectiveness of the controlled procedure and associated records","Approved procedure, ISO 45001 and applicable legal/client/company requirements","Draft",datetime.now().isoformat(timespec="seconds")))
+            aid=db.fetchone("SELECT id FROM audits WHERE number=?",(number,))["id"]; db.execute("UPDATE audit_schedule SET linked_audit_id=?,updated_at=? WHERE id=?",(aid,datetime.now().isoformat(timespec="seconds"),sid)); return aid
         def save_checklist():
             ids=selected_schedule_ids()
-            if not ids:return QMessageBox.information(d,"Select Audits","Select one or more scheduled audits first.")
+            if not ids:return QMessageBox.information(d,"Select Audits","Select one or more planned audits from the tick-box dropdown first.")
             updated=[]
             for row in range(checklist_table.rowCount()):
-                proc_item=checklist_table.item(row,0); num_item=checklist_table.item(row,1)
-                sid=proc_item.data(Qt.ItemDataRole.UserRole); n=int(num_item.text()); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+                no_item=checklist_table.item(row,0); procno_item=checklist_table.item(row,1); criterion=checklist_table.item(row,3)
+                if not no_item or not procno_item or not criterion: continue
+                sid=no_item.data(Qt.ItemDataRole.UserRole); n=procno_item.data(Qt.ItemDataRole.UserRole)
+                if sid is None or n is None: continue
+                sid=int(sid); n=int(n); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
                 if not sr: continue
-                proc=safe(sr["procedure_name"]); clause,items=self._audit_procedure_library().get(proc,("",[])); item_text=checklist_table.item(row,2).text()
-                result=checklist_table.cellWidget(row,4).currentText(); comments=checklist_table.cellWidget(row,5).toPlainText().strip()
-                host=checklist_table.cellWidget(row,6); evidence=host.findChild(QLineEdit).text().strip() if host else ""
-                owner_host=checklist_table.cellWidget(row,7); owner_edit=owner_host.findChild(QLineEdit) if owner_host else None; responsible=owner_edit.text().strip() if owner_edit else ""
-                due_widget=owner_host.findChild(QDateEdit) if owner_host else None; target_date=due_widget.date().toString("yyyy-MM-dd") if due_widget else ""
-                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date",
-                    (sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date))
-                aid=ensure_internal_audit(sid,sr)
-                existing_f=db.fetchone("SELECT id,status FROM audit_findings WHERE source_schedule_id=? AND source_item_no=?",(sid,n))
+                proc=safe(sr["procedure_name"]); clause,items=self._audit_procedure_library().get(proc,("",[])); item_text=criterion.text()
+                result_widget=checklist_table.cellWidget(row,6); comments_widget=checklist_table.cellWidget(row,7); evidence_host=checklist_table.cellWidget(row,8); action_host=checklist_table.cellWidget(row,9); capa_widget=checklist_table.cellWidget(row,10)
+                ui_result=result_widget.currentText() if result_widget else "Not Audited"; result={"Conforming":"Yes","Nonconformity":"No","N/A":"N/A"}.get(ui_result,"Not Audited")
+                comments=comments_widget.toPlainText().strip() if comments_widget else ""; evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
+                owner_edit=action_host.findChild(QLineEdit) if action_host else None; responsible=owner_edit.text().strip() if owner_edit else ""; due_widget=action_host.findChild(QDateEdit) if action_host else None; target_date=due_widget.date().toString("yyyy-MM-dd") if due_widget else ""
+                capa_required=1 if capa_widget and capa_widget.currentText()=="Yes" else 0
+                existing_response=db.fetchone("SELECT capa_number FROM audit_checklist_responses WHERE schedule_id=? AND item_no=?",(sid,n)); capa_number=safe(existing_response["capa_number"]) if existing_response else ""
+                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date,capa_required,capa_number) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date,capa_required=excluded.capa_required,capa_number=CASE WHEN excluded.capa_number='' THEN audit_checklist_responses.capa_number ELSE excluded.capa_number END",(sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date,capa_required,capa_number))
+                aid=ensure_internal_audit(sid,sr); existing_f=db.fetchone("SELECT id,status,capa_number FROM audit_findings WHERE source_schedule_id=? AND source_item_no=?",(sid,n))
                 if result=="No":
-                    detail=f"Procedure audit criteria not met: {item_text}. Audit evidence / gap: {comments}".strip()
-                    corrective=f"Review and revise/implement procedure controls as applicable. Evidence: {evidence}".strip()
+                    detail=f"Procedure compliance nonconformity: {item_text}. Objective evidence / gap: {comments}".strip(); corrective=f"Analyse root cause; define and implement corrective action against the approved procedure; assign an owner and due date; verify effectiveness. Evidence: {evidence}".strip()
                     if existing_f:
-                        db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",
-                            (aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,datetime.now().isoformat(timespec="seconds"),existing_f["id"]))
+                        fid=existing_f["id"]; db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,capa_required=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",(aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,capa_required,datetime.now().isoformat(timespec="seconds"),fid))
                     else:
                         next_no=db.fetchone("SELECT COALESCE(MAX(finding_number),0)+1 AS n FROM audit_findings WHERE audit_id=?",(aid,))["n"]
-                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            (aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc))
-                elif existing_f:
-                    db.execute("UPDATE audit_findings SET status='Closed',verification='Checklist criterion subsequently marked conforming',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),existing_f["id"]))
+                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name,capa_required,capa_number) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc,capa_required,""))
+                        fid=db.fetchone("SELECT id FROM audit_findings WHERE source_schedule_id=? AND source_item_no=? ORDER BY id DESC LIMIT 1",(sid,n))["id"]
+                    if capa_required:
+                        fr=db.fetchone("SELECT capa_number FROM audit_findings WHERE id=?",(fid,)); capano=safe(fr["capa_number"]) if fr else ""
+                        if not capano:
+                            capano=next_number("HSE-CAPA","capa"); db.execute("INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(capano,"Internal Audit",f"{no_item.text()} / {proc} / Finding {n}",detail,"Pending root-cause analysis",corrective,"Review similar procedures and activities to prevent recurrence",responsible,"High",target_date,"Open",datetime.now().isoformat(timespec="seconds")))
+                            db.execute("UPDATE audit_findings SET capa_number=? WHERE id=?",(capano,fid)); db.execute("UPDATE audit_checklist_responses SET capa_number=? WHERE schedule_id=? AND item_no=?",(capano,sid,n))
                 updated.append(sid)
-            for sid in set(updated):
-                sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
-                if sr: db.execute("UPDATE audit_schedule SET status='Completed',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),sid))
+            for sid in set(updated):db.execute("UPDATE audit_schedule SET status='Completed',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),sid))
             update_score(); load_findings(); load_internal_register(); load_dashboard()
-            QMessageBox.information(d,"Checklist Saved","The procedure audit checklist was saved. Nonconforming criteria were added or updated in the Internal Audit Findings Register with responsible person and target date.")
+            QMessageBox.information(d,"Checklist Saved","Procedure compliance checklist saved. Nonconformities are listed in the Audit Findings Register; CAPA-required findings are linked to CAPA Tracking Register.")
         def checklist_html():
             rows=[]
             for row in range(checklist_table.rowCount()):
-                cells=[]
-                for col in range(4): cells.append(safe(checklist_table.item(row,col).text() if checklist_table.item(row,col) else ""))
-                result=checklist_table.cellWidget(row,4).currentText() if checklist_table.cellWidget(row,4) else ""
-                comments=checklist_table.cellWidget(row,5).toPlainText() if checklist_table.cellWidget(row,5) else ""
-                evidence=checklist_table.cellWidget(row,6).findChild(QLineEdit).text() if checklist_table.cellWidget(row,6) else ""
-                owner_host=checklist_table.cellWidget(row,7); owner=owner_host.findChild(QLineEdit).text() if owner_host else ""; due=owner_host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if owner_host and owner_host.findChild(QDateEdit) else ""
-                rows.append("<tr>"+"".join(f"<td>{v}</td>" for v in cells)+f"<td>{result}</td><td>{comments}</td><td>{evidence}</td><td>{owner}</td><td>{due}</td></tr>")
-            return "<h1>INTERNAL AUDIT CHECKLIST</h1><p>Procedure-based audit criteria, evidence, findings and corrective-action ownership.</p><table border='1' cellspacing='0' cellpadding='4'><tr><th>Procedure</th><th>No.</th><th>Audit Criteria</th><th>ISO Clause</th><th>Result</th><th>Evidence / Gap</th><th>Evidence File</th><th>Responsible</th><th>Target Date</th></tr>"+"".join(rows)+"</table>"
+                cells=[safe(checklist_table.item(row,c).text() if checklist_table.item(row,c) else "") for c in range(6)]
+                result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""
+                comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""
+                host=checklist_table.cellWidget(row,9); owner=host.findChild(QLineEdit).text() if host else ""; due=host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if host and host.findChild(QDateEdit) else ""; capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No"
+                rows.append("<tr>"+"".join(f"<td>{safe(v)}</td>" for v in cells)+f"<td>{safe(result)}</td><td>{safe(comments)}</td><td>{safe(evidence)}</td><td>{safe(owner)}</td><td>{safe(due)}</td><td>{safe(capa)}</td></tr>")
+            logo=report_logo_path(); logo_html=f'<p><img src="{logo}" width="120"></p>' if logo and Path(logo).exists() else ""
+            headers="<th>Audit No.</th><th>Procedure No.</th><th>Procedure / Date</th><th>Procedure Compliance Criteria</th><th>ISO Main Clause</th><th>Sub-clause(s)</th><th>Result</th><th>Objective Evidence / Gap</th><th>Evidence Attachment</th><th>Responsible Person</th><th>Target Date</th><th>CAPA Required</th>"
+            return f'<html><head><style>body{{font-family:Arial;font-size:9pt}}h1{{color:#17365D}}table{{border-collapse:collapse;width:100%}}th{{background:#17365D;color:white}}td,th{{border:1px solid #aab7c4;padding:6px;vertical-align:top;white-space:pre-wrap}}</style></head><body>{logo_html}<h1>{safe(company_name())} — INTERNAL AUDIT CHECKLIST</h1><p>Procedure conformity, adequacy, implementation and objective evidence.</p><table><tr>{headers}</tr>{"".join(rows)}</table></body></html>'
         def print_checklist():
             if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
-            printer=QPrinter(QPrinter.PrinterMode.HighResolution); dialog=QPrintDialog(printer,d)
+            printer=QPrinter(QPrinter.PrinterMode.HighResolution); printer.setPageOrientation(QPrinter.Orientation.Landscape); dialog=QPrintDialog(printer,d)
             if dialog.exec()==QDialog.DialogCode.Accepted:
                 doc=QTextDocument(); doc.setHtml(checklist_html()); doc.print_(printer)
         def export_checklist():
@@ -3913,33 +3953,48 @@ class MainWindow(QMainWindow):
             path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.xlsx","Excel Workbook (*.xlsx)")
             if not path:return
             try:
-                wb=Workbook(); ws=wb.active; ws.title="Internal Audit"
-                ws.merge_cells("A1:I1"); ws["A1"]="INTERNAL AUDIT — PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center")
-                ws.append(["Procedure / Audit Reference","No.","Procedure Audit Criteria","ISO Clause","Result","Audit Evidence / Gap","Evidence File","Responsible Person","Target Date"])
+                wb=Workbook(); ws=wb.active; ws.title="Procedure Audit"; ws.merge_cells("A1:L1"); ws["A1"]=f"{company_name()} — INTERNAL AUDIT / PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=15,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.append(["Audit Number","Procedure Number","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","CAPA Required"])
                 for row in range(checklist_table.rowCount()):
-                    owner_host=checklist_table.cellWidget(row,7); owner=owner_host.findChild(QLineEdit).text() if owner_host else ""; due=owner_host.findChild(QDateEdit).date().toString("yyyy-MM-dd") if owner_host and owner_host.findChild(QDateEdit) else ""
-                    ws.append([checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(4)]+[checklist_table.cellWidget(row,4).currentText(),checklist_table.cellWidget(row,5).toPlainText(),checklist_table.cellWidget(row,6).findChild(QLineEdit).text(),owner,due])
-                for cell in ws[2]: cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="4472C4"); cell.alignment=Alignment(wrap_text=True,vertical="top")
+                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)]; result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""; comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""; host=checklist_table.cellWidget(row,9); owner=host.findChild(QLineEdit).text() if host else ""; due=host.findChild(QDateEdit).date().toString("yyyy-MM-dd") if host and host.findChild(QDateEdit) else ""; capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No"; ws.append(vals+[result,comments,evidence,owner,due,capa])
+                for cell in ws[2]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="4472C4");cell.alignment=Alignment(wrap_text=True,vertical="center")
                 for row in ws.iter_rows(min_row=3):
-                    for cell in row: cell.alignment=Alignment(wrap_text=True,vertical="top")
-                for col,width in {"A":32,"B":7,"C":55,"D":15,"E":13,"F":42,"G":35,"H":24,"I":16}.items(): ws.column_dimensions[col].width=width
-                for rn in range(3,ws.max_row+1): ws.row_dimensions[rn].height=44
+                    for cell in row:cell.alignment=Alignment(wrap_text=True,vertical="top")
+                for col,width in {"A":19,"B":17,"C":30,"D":68,"E":18,"F":22,"G":20,"H":48,"I":35,"J":28,"K":17,"L":16}.items():ws.column_dimensions[col].width=width
+                ws.row_dimensions[1].height=32;ws.row_dimensions[2].height=42
+                for rn in range(3,ws.max_row+1):ws.row_dimensions[rn].height=86
                 try:
                     logo=report_logo_path()
-                    if logo and Path(logo).exists():
-                        img=XLImage(str(logo)); img.width=100; img.height=42; ws.add_image(img,"A2")
-                except Exception: logging.exception("Internal audit checklist logo embedding failed")
-                ws.freeze_panes="A3"; ws.auto_filter.ref=f"A2:I{ws.max_row}"; wb.save(path)
-                QMessageBox.information(d,"Export Complete","Internal audit checklist exported successfully.")
-            except Exception as exc:
-                logging.exception("Internal audit checklist export failed"); QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
-        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist); print_checklist_btn.clicked.connect(print_checklist)
+                    if logo and Path(logo).exists():img=XLImage(str(logo));img.width=95;img.height=38;ws.add_image(img,"A1")
+                except Exception:logging.exception("Audit checklist logo embedding failed")
+                ws.freeze_panes="A3";ws.auto_filter.ref=f"A2:L{ws.max_row}";wb.save(path);QMessageBox.information(d,"Export Complete","Procedure compliance audit checklist exported successfully.")
+            except Exception as exc:logging.exception("Audit checklist Excel export failed");QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
+        def export_checklist_word():
+            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
+            path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.docx","Word Document (*.docx)")
+            if not path:return
+            try:
+                doc=Document();sec=doc.sections[0];sec.orientation=WD_ORIENT.LANDSCAPE;sec.page_width,sec.page_height=sec.page_height,sec.page_width;sec.top_margin=Inches(.35);sec.bottom_margin=Inches(.35);sec.left_margin=Inches(.35);sec.right_margin=Inches(.35);hp=sec.header.paragraphs[0];hp.alignment=WD_ALIGN_PARAGRAPH.CENTER;logo=report_logo_path()
+                if logo and Path(logo).exists():
+                    try:hp.add_run().add_picture(logo,width=Inches(.9),height=Inches(.45))
+                    except Exception:logging.exception("Audit checklist Word logo failed")
+                p=doc.add_paragraph();p.alignment=WD_ALIGN_PARAGRAPH.CENTER;r=p.add_run(f"{company_name()}\nINTERNAL AUDIT — PROCEDURE COMPLIANCE CHECKLIST");r.bold=True;r.font.size=Pt(15)
+                table=doc.add_table(rows=1,cols=12);table.alignment=WD_TABLE_ALIGNMENT.CENTER;table.autofit=False;headers=["Audit No.","Procedure No.","Procedure / Date","Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person","Target Date","CAPA Required"]
+                for i,h in enumerate(headers):table.cell(0,i).text=h
+                for row in range(checklist_table.rowCount()):
+                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)];result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else "";comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else "";evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else "";host=checklist_table.cellWidget(row,9);owner=host.findChild(QLineEdit).text() if host else "";due=host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if host and host.findChild(QDateEdit) else "";capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No";cells=table.add_row().cells
+                    for i,v in enumerate(vals+[result,comments,evidence,owner,due,capa]):cells[i].text=safe(v);cells[i].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
+                style_docx_table(table,header=True,font_size=6);widths=[.75,.75,1.35,2.2,.65,.75,.8,1.6,1.25,1.1,.8,.75]
+                for row in table.rows:
+                    for i,c in enumerate(row.cells):c.width=Inches(widths[i])
+                doc.save(path);QMessageBox.information(d,"Export Complete","Word checklist exported successfully.")
+            except Exception as exc:logging.exception("Audit checklist Word export failed");QMessageBox.critical(d,"Export Failed",f"Unable to export Word checklist.\n\n{exc}")
+        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist); export_word_btn.clicked.connect(export_checklist_word); print_checklist_btn.clicked.connect(print_checklist)
         load_checklist_schedule(); tabs.addTab(check,"Internal Audit Checklist")
 
         # ----- Findings register tab -----
         findings=QWidget(); fvl=QVBoxLayout(findings)
         fbar=QHBoxLayout(); fbar.addWidget(QLabel("Internal Audit Findings Register — each saved nonconformity is traced to its procedure and checklist criterion")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
-        findings_table=QTableWidget(0,12); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); findings_table.setColumnHidden(10,True); findings_table.setColumnHidden(11,True); fvl.addWidget(findings_table,1)
+        findings_table=QTableWidget(0,13); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","CAPA Reference","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); findings_table.setColumnHidden(11,True); findings_table.setColumnHidden(12,True); fvl.addWidget(findings_table,1)
         def load_findings():
             rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
                 FROM audit_findings f JOIN audits a ON a.id=f.audit_id
@@ -3949,20 +4004,20 @@ class MainWindow(QMainWindow):
             elif finding_status_filter.currentText()=="Closed Findings": rows=[r for r in rows if safe(r["status"]).lower() in ("closed","verified")]
             findings_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
-                vals=[r["audit_ref"],r["procedure_name"] if "procedure_name" in r.keys() and r["procedure_name"] else (r["audit_title"] or ""),r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"],r["parent_audit_id"],r["id"]]
+                vals=[r["audit_ref"],r["procedure_name"] if "procedure_name" in r.keys() and r["procedure_name"] else (r["audit_title"] or ""),r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"],safe(r["capa_number"] if "capa_number" in r.keys() else ""),r["parent_audit_id"],r["id"]]
                 for c,v in enumerate(vals):
                     item=QTableWidgetItem(safe(v)); findings_table.setItem(i,c,item)
                     if vals[9]=="OVERDUE": item.setBackground(QColor("#FCE4D6"))
         def open_finding_audit():
             rr=findings_table.currentRow()
             if rr<0:return
-            aid=findings_table.item(rr,10).text()
+            aid=findings_table.item(rr,11).text()
             if aid:
                 d.accept(); self.audit_workspace(int(aid),self.audits)
         def close_selected_internal_findings():
             ids=[]
             for idx in findings_table.selectionModel().selectedRows():
-                item=findings_table.item(idx.row(),11)
+                item=findings_table.item(idx.row(),12)
                 if item and item.text().isdigit(): ids.append(int(item.text()))
             if not ids:return QMessageBox.information(d,"Select Findings","Select one or more findings to close.")
             if QMessageBox.question(d,"Close Findings",f"Mark {len(ids)} selected finding(s) as Closed? Use this only after corrective action is verified.")==QMessageBox.StandardButton.Yes:
