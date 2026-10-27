@@ -414,6 +414,39 @@ class Database:
             user_name TEXT, details TEXT, timestamp TEXT,
             FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)""")
 
+        # Audit planning and checklist tables are additive and isolated to the Audit module.
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS audit_schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            procedure_name TEXT NOT NULL,
+            risk_level TEXT DEFAULT 'Medium',
+            frequency TEXT DEFAULT 'Annual',
+            planned_date TEXT DEFAULT '',
+            owner TEXT DEFAULT '',
+            status TEXT DEFAULT 'Planned',
+            linked_audit_id INTEGER,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT '',
+            FOREIGN KEY(linked_audit_id) REFERENCES audits(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS audit_checklist_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schedule_id INTEGER NOT NULL,
+            item_no INTEGER NOT NULL,
+            procedure_name TEXT DEFAULT '',
+            iso_clause TEXT DEFAULT '',
+            checklist_item TEXT NOT NULL,
+            result TEXT DEFAULT 'N/A',
+            comments TEXT DEFAULT '',
+            evidence_path TEXT DEFAULT '',
+            updated_at TEXT DEFAULT '',
+            UNIQUE(schedule_id, item_no),
+            FOREIGN KEY(schedule_id) REFERENCES audit_schedule(id) ON DELETE CASCADE
+        );
+        """)
+        self.conn.commit()
+
         # Observation multi-action + CAPA tracking link (additive only).
         observation_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(observations)").fetchall()}
         if "capa_required" not in observation_cols:
@@ -3523,7 +3556,10 @@ class MainWindow(QMainWindow):
         new_btn=QPushButton("+ NEW AUDIT"); new_btn.setMinimumHeight(40); new_btn.setStyleSheet("font-weight:bold;padding:8px 18px;")
         settings_btn=QPushButton("Audit Settings")
         report_btn=QPushButton("Generate Report")
-        top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(new_btn); layout.addLayout(top)
+        planning_btn=QPushButton("Audit Schedule & Checklists")
+        planning_btn.setMinimumHeight(40)
+        planning_btn.setStyleSheet("font-weight:bold;padding:8px 14px;background:#E8F0FA;color:#17365D;")
+        top.addWidget(planning_btn); top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(new_btn); layout.addLayout(top)
 
         filters=QHBoxLayout()
         search=QLineEdit(); search.setPlaceholderText("Search reference, title, department, location or auditor..."); filters.addWidget(search,2)
@@ -3568,12 +3604,271 @@ class MainWindow(QMainWindow):
             if aid: self._audit_register_detail(aid)
             else: QMessageBox.information(self,"Select Audit","Select an audit from the register first.")
         new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings); report_btn.clicked.connect(generate_selected)
+        planning_btn.clicked.connect(self.audit_planning_center)
         table.cellDoubleClicked.connect(lambda *_:open_selected())
         table.cellClicked.connect(lambda row,col: self._audit_register_detail(table.item(row,0).data(Qt.ItemDataRole.UserRole)) if col==0 and table.item(row,0) else None)
         for ctl in [search,status,typ,dept]:
             if isinstance(ctl,QLineEdit): ctl.textChanged.connect(load)
             else: ctl.currentTextChanged.connect(load)
         load()
+
+
+    def _audit_procedure_library(self):
+        # Built from the supplied Master Audit Prompt. Short summary checklists are
+        # expanded with standard evidence/control checks so each procedure is usable
+        # as a practical field checklist.
+        return {
+            "Permit to Work (PTW) System": ("8.1, 8.1.2, 6.1, 7.2", [
+                "Correct type of permit selected","Scope of work clearly described and matches actual activity","JSA / Risk Assessment attached and relevant","All required isolations identified and completed","Gas testing completed within validity period","All authorized signatures present","SIMOPS conflict check completed","Permit displayed at work location","Workers understand permit conditions","Permit properly closed after completion","No expired permits still active","Supporting documents attached"]),
+            "Hot Work Procedure": ("8.1, 8.1.2, 8.2", ["Hot Work Permit issued and valid","Gas test completed before start and periodically","Combustible materials removed or protected","Fire watch assigned, trained and present","Suitable fire extinguisher available","Fire watch continues after completion","Welding equipment in good condition with flashback arrestors","Area properly ventilated","Work stopped if conditions change","Permit closed and area inspected"]),
+            "Confined Space Entry": ("8.1, 8.1.2, 8.2, 7.2", ["Space correctly classified","Entry Permit fully completed","Atmospheric testing done in correct sequence (O₂ → LEL → H₂S → CO)","Results within acceptable limits","Continuous monitoring during entry","All energy sources isolated and LOTO applied","Attendant present at all times","Rescue plan and equipment staged","Entrants wearing full body harness with retrieval line","Communication system tested","Entry log maintained","Forced ventilation operating if required"]),
+            "Lockout / Tagout (LOTO)": ("8.1, 8.1.2", ["All energy sources identified","Written isolation procedure available","Locks and tags applied by authorized persons","Each person has individual lock","Try-start verification performed","Isolation Certificate completed","Tags legible with name, date and reason","Group lockout box used when required","De-isolation done only after all locks removed","Equipment tested safe before return to service"]),
+            "Working at Height": ("8.1, 8.1.2, 7.2", ["Fall Protection Plan available","Hierarchy of controls applied","Full body harness inspected and valid","Anchor points rated and inspected","Correct lanyards / SRLs used","Scaffold / platform / MEWP inspected and tagged","Edge protection or hole covers in place","Tools tethered","Exclusion zone below work area","Rescue plan available"]),
+            "Lifting & Rigging / Crane Operations": ("8.1, 8.1.2, 7.2", ["Lift categorized correctly","Lift Plan approved for complex/critical lifts","Crane and lifting gear certified","Load chart available and followed","Riggers and banksman competent","Tag lines used","Exclusion zone enforced","No personnel under suspended load","Weather conditions suitable","Pre-lift checks completed"]),
+            "Excavation & Trenching": ("8.1, 8.1.2", ["Excavation Permit issued","Underground services located and marked","Soil type assessed","Protective system (shoring/sloping/benching) in place","Safe access and egress provided","Spoil placed at safe distance","Barricades and warning signs installed","Atmosphere tested if required","Daily inspection by competent person","Emergency rescue plan available"]),
+            "Scaffolding": ("8.1, 8.1.2, 7.2", ["Erected by competent scaffolders","Design available for complex scaffolds","Correctly tagged","Base plates, standards, ledgers, braces correct","Guardrails, mid-rails and toe boards complete","Platforms fully boarded","Safe access provided","Inspected before use and after alteration","No overloading","Adequate ties and bracing"]),
+            "Electrical Safety": ("8.1, 8.1.2, 7.2", ["Only competent electricians working","Live work controlled by permit","Temporary installations inspected","RCDs/ELCBs tested","Cables protected","LOTO applied for maintenance","Correct PPE used","Distribution boards locked and labeled","Earth leakage protection functional","No unauthorized modifications"]),
+            "Hazard Communication / Chemical Safety": ("8.1, 7.3, 6.1", ["Chemical register up to date","SDS available and accessible","All containers labeled","Secondary containment provided","Incompatible chemicals separated","Spill kits available","Workers trained on hazards","Correct PPE used","Emergency eye wash/shower available","Chemical waste disposal controlled"]),
+            "Personal Protective Equipment (PPE)": ("8.1, 7.1, 7.2", ["PPE selection matches identified hazards","PPE condition checked before use","Workers trained in correct use and limitations","PPE stored hygienically and protected from damage","Defective PPE quarantined and replaced","Fit testing completed where required","Issue and replacement records maintained","Supervision verifies consistent use"]),
+            "Job Safety Analysis (JSA) / Risk Assessment": ("6.1.2, 8.1", ["Assessment is task-specific and current","Workers involved in hazard identification","Routine and non-routine hazards identified","Controls follow the hierarchy of controls","Residual risk assessed and acceptable","Controls implemented at worksite","Changes trigger reassessment","Approvals and review records retained"]),
+            "Incident Reporting & Investigation": ("10.2, 9.1", ["Incidents and near misses reported promptly","Investigation team and responsibilities defined","Evidence and witness statements collected","Root cause analysis completed","Corrective actions assigned to responsible persons","Actions have target dates and priority","Corrective actions verified and closed","Lessons learned shared with relevant workers"]),
+            "Emergency Preparedness & Response": ("8.2", ["Emergency plan current and approved","Roles and responsibilities defined","Drills conducted and recorded","Emergency equipment inspected and available","Assembly points marked and communicated","Emergency contacts displayed and current","Drill findings tracked to closure","Workers and contractors know response actions"]),
+            "Fire Prevention & Protection": ("8.1, 8.2", ["Extinguishers inspected and accessible","Hot work controlled by permit","Flammable materials stored correctly","Detection and alarm systems functional","Escape routes and exits clear","Fire doors and emergency lighting serviceable","Workers know alarm and evacuation actions","Fire inspection findings tracked to closure"]),
+            "H₂S Safety": ("8.1, 7.2, 8.2", ["H₂S detectors calibrated and bump-tested","Escape masks available and inspected","Training and competency current","Alarm response and evacuation practiced","Wind direction indicators available where required","Muster points and escape routes identified","Rescue arrangements do not expose rescuers","Inspection and drill records maintained"]),
+            "Welding & Cutting": ("8.1", ["Cylinders secured upright and segregated","Flashback arrestors fitted correctly","Ventilation adequate for fumes","Hot work permit and gas testing completed","Correct welding PPE used","Welding leads and equipment inspected","Fire watch and extinguishers provided","Work area checked after completion"]),
+            "Pressure Testing": ("8.1", ["Approved pressure-test procedure available","Exclusion zone established and controlled","Pressure gauges calibrated and suitable","Relief devices installed and verified","Competent persons assigned","Test medium and pressure limits confirmed","Connections and restraints inspected","Depressurization and emergency arrangements defined"]),
+            "Dropped Objects Prevention": ("8.1", ["Tools tethered at height","Barricades established below work area","Tools and equipment checked before use","DROPS controls implemented and understood","Loose materials secured","Lifting baskets and storage arrangements inspected","Dropped-object hazards included in risk assessment","Inspections and corrective actions recorded"]),
+            "SIMOPS": ("8.1, 8.1.3", ["SIMOPS matrix available and current","Coordination meetings held and recorded","Single PTW authority or clear interface defined","Interface risks assessed","Conflicting activities identified and controlled","Work groups briefed on restrictions","Changes communicated to affected teams","SIMOPS actions tracked to closure"]),
+            "Contractor HSE Management": ("8.1.4, 7.2", ["Contractor prequalification completed","Induction completed before work","Competence and certificates verified","Risk assessments and method statements reviewed","Contractor performance monitored","Supervision and interfaces defined","Incidents and nonconformities reported","Corrective actions followed up"]),
+            "Management of Change (MOC)": ("8.1.3", ["Change described and classified","Change risk assessment completed","Required technical and HSE approvals obtained","Affected workers informed and trained","Documents and drawings updated","Temporary changes have expiry/review date","Pre-Startup Safety Review completed where required","Post-change effectiveness verified"]),
+            "Housekeeping": ("8.1", ["Walkways and access routes clear","Waste segregated correctly","Materials stored safely and secured","Spills cleaned promptly","Fire equipment and exits unobstructed","Cables and hoses routed safely","Scrap and sharp objects controlled","Housekeeping inspections and actions recorded"]),
+            "Waste Management & Environmental Controls": ("8.1 + ISO 14001", ["Waste segregated and labeled","Waste storage areas suitable and controlled","Licensed disposal and transfer records kept","Spill kits available and inspected","Emissions and discharges monitored where required","Hazardous waste handled by trained personnel","Environmental incidents reported","Waste records and corrective actions reviewed"]),
+            "Vehicle / Journey Management": ("8.1", ["Drivers licensed and competent","Pre-trip checks completed","Journey plans prepared for remote travel","Fatigue and driving hours controlled","Vehicle maintenance and inspection current","Seat belts and restraints used","Route and emergency communications confirmed","Journey completion and deviations monitored"]),
+            "Manual Handling": ("8.1, 6.1", ["Manual handling risk assessment completed","Mechanical aids used where practicable","Team lifting arrangements defined","Workers trained in safe handling","Load weight and route assessed","Storage heights and access suitable","High-risk or repetitive tasks reviewed","Injuries and improvement actions monitored"]),
+            "Noise & Hearing Conservation": ("8.1, 6.1", ["Noise exposure areas identified","Noise assessments current","Hearing protection suitable and used","Audiometry programme implemented where required","Equipment noise controls maintained","Workers informed of exposure risks","Hearing protection fit and condition checked","Records and corrective actions reviewed"]),
+            "Respiratory Protection": ("8.1, 7.2", ["Respirator selected for identified hazard","Fit testing completed where required","Medical clearance obtained where applicable","Inspection, cleaning and storage controlled","Filters replaced at defined intervals","Users trained in limitations and use","Emergency respiratory equipment checked","Records are current and accessible"]),
+            "First Aid & Medical Response": ("8.2, 7.1", ["Trained first aiders available for shift and location","First-aid kits stocked and inspected","Emergency numbers posted and current","Medical response and transport arrangements defined","Access routes for emergency response clear","Incident treatment records protected and maintained","First-aiders' training current","Deficiencies corrected promptly"]),
+            "Stop Work Authority": ("5.1, 5.4, 8.1", ["Workers know their right and duty to stop unsafe work","No-retaliation expectations communicated","Stop-work events recorded","Supervisors respond promptly to stop-work concerns","Work restarts only after hazards controlled","Lessons learned communicated","Contractors understand stop-work process","Trends and recurring issues reviewed"]),
+            "Training, Competency & Induction": ("7.2, 7.3", ["Training matrix available and current","Training and competency records current","High-risk tasks assigned only to competent persons","Induction covers site-specific hazards","Refresher training planned before expiry","Competence verified in practice","Training gaps assigned actions","Records retained and accessible"]),
+            "Ladders & Platforms": ("8.1", ["Ladders and platforms inspected before use","Correct ladder type and rating selected","Ladders secured against movement","Three points of contact maintained where applicable","Defective equipment tagged and removed","Ground and access conditions suitable","Work duration and alternatives considered","Inspection records and user training maintained"]),
+            "Radiography / NDT Safety": ("8.1", ["Controlled area established and secured","Barriers and warning signs displayed","Radiation monitoring and dosimetry provided","Competent and authorized operators assigned","Work permit and notification requirements met","Emergency arrangements available","Exposure equipment inspected and maintained","Survey and exposure records retained"]),
+            "Abrasive Blasting / Painting": ("8.1", ["Containment used to control dust and overspray","Respiratory protection suitable and fit-tested where required","Abrasive and coating hazards assessed","Ventilation and exposure controls adequate","Waste and spent abrasive controlled","Hoses, pots and pressure equipment inspected","PPE and decontamination arrangements suitable","Environmental and inspection records maintained"]),
+            "Pre-Startup Safety Review (PSSR)": ("8.1.3", ["PSSR checklist completed","Punch items categorized and closed or formally controlled","Equipment and safeguards verified against design","Operating procedures approved and available","Personnel trained before start-up","Permits and isolations status checked","Handover and authorization documented","Outstanding actions tracked to closure"]),
+            "Fatigue Management": ("8.1, 6.1", ["Working hours and rest periods controlled","Fitness-for-work checks conducted","Fatigue hazards assessed for critical tasks","Rest facilities and transport arrangements adequate","Workers know fatigue reporting process","Supervisors monitor signs of fatigue","Overtime and shift patterns reviewed","Fatigue-related events and actions analysed"]),
+            "Heat / Cold Stress": ("8.1", ["Work-rest regimes followed","Drinking water and hydration provided","Environmental conditions monitored","Shade, cooling or warming facilities available","Workers trained to recognize symptoms","Acclimatization and vulnerable workers considered","Emergency response for heat/cold illness defined","Records and corrective actions reviewed"]),
+            "Spill Response & Environmental Incident": ("8.2 + ISO 14001", ["Response plan available and current","Spill kits suitable and ready","Drills conducted and recorded","Reporting and escalation process followed","Drain and sensitive-area protection available","Waste from cleanup safely contained and disposed","Response roles and contacts understood","Incident causes and actions tracked"]),
+            "Visitor & Short Service Employee Control": ("8.1.4", ["Induction completed before access","Escort provided where required","PPE issued and suitable","Access restrictions explained","Short-service employees identified","Close supervision provided for high-risk tasks","Emergency arrangements communicated","Visitor and training records maintained"]),
+            "HSE Performance Monitoring & KPI": ("9.1", ["Leading and lagging indicators tracked","Data definitions and sources consistent","Trends analysed at planned intervals","Targets and performance reviewed by management","Underperformance triggers action","Actions have owners and due dates","Data accuracy and reporting timeliness checked","Effectiveness of actions reviewed"])
+        }
+
+    def audit_planning_center(self):
+        d=QDialog(self); d.setWindowTitle("Audit Planning, Inspection Checklists & Findings Register")
+        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint); d.setSizeGripEnabled(True)
+        screen=d.screen() or QApplication.primaryScreen()
+        if screen:
+            g=screen.availableGeometry(); d.setGeometry(g); d.setMinimumSize(min(700,g.width()),min(500,g.height()))
+        else: d.resize(1200,800)
+        root=QVBoxLayout(d)
+        heading=QLabel("HSE AUDIT PLANNING & ASSURANCE"); heading.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:8px;")
+        root.addWidget(heading)
+        intro=QLabel("Risk-based audit schedule, procedure inspection checklists, compliance scoring, evidence references and a consolidated findings register.")
+        intro.setWordWrap(True); root.addWidget(intro)
+        tabs=QTabWidget(); root.addWidget(tabs,1)
+
+        # ----- Schedule tab -----
+        sched=QWidget(); sl=QVBoxLayout(sched)
+        target_note=QLabel("Planning target: 4 procedure audits per month  |  High risk: every 6 months  |  Medium risk: annually  |  Low risk: every 18 months")
+        target_note.setWordWrap(True); target_note.setStyleSheet("padding:8px;background:#E8F0FA;color:#17365D;font-weight:bold;border:1px solid #C7D7EA;border-radius:4px;")
+        sl.addWidget(target_note)
+        sbar=QHBoxLayout(); add=QPushButton("+ New Scheduled Audit"); edit=QPushButton("Edit Selected"); delete=QPushButton("Delete Selected"); sbar.addWidget(add); sbar.addWidget(edit); sbar.addWidget(delete); sbar.addStretch(); sl.addLayout(sbar)
+        schedule_table=QTableWidget(0,9); schedule_table.setHorizontalHeaderLabels(["ID","Procedure / Audit Topic","Risk","Frequency","Planned Date","Owner","Status","Linked Audit","Notes"]); schedule_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); schedule_table.setAlternatingRowColors(True); schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); schedule_table.horizontalHeader().setStretchLastSection(True); sl.addWidget(schedule_table,1)
+        schedule_table.setColumnHidden(0,True)
+        proc_names=list(self._audit_procedure_library().keys())
+        def schedule_selected_id():
+            r=schedule_table.currentRow()
+            return int(schedule_table.item(r,0).text()) if r>=0 and schedule_table.item(r,0) else None
+        def load_schedule():
+            rows=db.fetchall("SELECT s.*,a.number AS audit_number FROM audit_schedule s LEFT JOIN audits a ON a.id=s.linked_audit_id ORDER BY s.planned_date,s.id")
+            schedule_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["id"],r["procedure_name"],r["risk_level"],r["frequency"],r["planned_date"],r["owner"],r["status"],r["audit_number"] or "",r["notes"]]
+                for c,v in enumerate(vals): schedule_table.setItem(i,c,QTableWidgetItem(safe(v)))
+                if safe(r["status"]).lower() in ("overdue","overdue - action required"):
+                    for c in range(schedule_table.columnCount()):
+                        schedule_table.item(i,c).setBackground(QColor("#FCE4D6"))
+        def edit_schedule(schedule_id=None):
+            row=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(schedule_id,)) if schedule_id else None
+            form=QDialog(d); form.setWindowTitle("Scheduled Audit Plan"); form.resize(700,580); fl=QFormLayout(form)
+            procedure=QComboBox(); procedure.addItems(proc_names)
+            risk=QComboBox(); risk.addItems(["High","Medium","Low"])
+            freq=QComboBox(); freq.addItems(["Every 6 months","Once per year","Every 18 months"])
+            planned=QDateEdit(); planned.setCalendarPopup(True); planned.setDisplayFormat("dd-MMM-yyyy"); planned.setDate(QDate.currentDate().addMonths(1))
+            owner=QLineEdit(); owner.setPlaceholderText("Audit owner / lead auditor")
+            stat=QComboBox(); stat.addItems(["Planned","In Progress","Completed","Deferred","Cancelled"])
+            linked=QComboBox(); linked.addItem("-- Not linked --",None)
+            for ar in db.fetchall("SELECT id,number,title FROM audits ORDER BY id DESC"):
+                linked.addItem(f"{safe(ar['number'])} — {safe(ar['title'])}",ar["id"])
+            notes=QTextEdit(); notes.setMaximumHeight(100)
+            fl.addRow("Procedure / Audit Topic",procedure); fl.addRow("Risk Level",risk); fl.addRow("Frequency",freq); fl.addRow("Planned Date",planned); fl.addRow("Owner / Lead Auditor",owner); fl.addRow("Plan Status",stat); fl.addRow("Link to Audit Record",linked); fl.addRow("Notes / Scope",notes)
+            def update_frequency():
+                freq.setCurrentText({"High":"Every 6 months","Medium":"Once per year","Low":"Every 18 months"}.get(risk.currentText(),"Once per year"))
+            risk.currentTextChanged.connect(update_frequency)
+            if row:
+                procedure.setCurrentText(safe(row["procedure_name"])); risk.setCurrentText(safe(row["risk_level"])); freq.setCurrentText(safe(row["frequency"])); owner.setText(safe(row["owner"])); stat.setCurrentText(safe(row["status"])); notes.setPlainText(safe(row["notes"]))
+                try: planned.setDate(QDate.fromString(safe(row["planned_date"]),"yyyy-MM-dd"))
+                except Exception: pass
+                idx=linked.findData(row["linked_audit_id"])
+                if idx>=0: linked.setCurrentIndex(idx)
+            buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(buttons)
+            def save_plan():
+                now=datetime.now().isoformat(timespec="seconds")
+                values=(procedure.currentText(),risk.currentText(),freq.currentText(),planned.date().toString("yyyy-MM-dd"),owner.text().strip(),stat.currentText(),linked.currentData(),notes.toPlainText().strip(),now)
+                if row:
+                    db.execute("UPDATE audit_schedule SET procedure_name=?,risk_level=?,frequency=?,planned_date=?,owner=?,status=?,linked_audit_id=?,notes=?,updated_at=? WHERE id=?",values+(schedule_id,))
+                else:
+                    db.execute("INSERT INTO audit_schedule(procedure_name,risk_level,frequency,planned_date,owner,status,linked_audit_id,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",values)
+                form.accept()
+            buttons.accepted.connect(save_plan); buttons.rejected.connect(form.reject)
+            if form.exec()==QDialog.DialogCode.Accepted: load_schedule()
+        add.clicked.connect(lambda:edit_schedule())
+        edit.clicked.connect(lambda:edit_schedule(schedule_selected_id()) if schedule_selected_id() else QMessageBox.information(d,"Select Plan","Select a scheduled audit first."))
+        def delete_plan():
+            sid=schedule_selected_id()
+            if not sid:return
+            if QMessageBox.question(d,"Delete Scheduled Audit","Delete the selected schedule and its saved checklist responses? Existing Audit Register records and findings will not be deleted.")==QMessageBox.StandardButton.Yes:
+                db.execute("DELETE FROM audit_schedule WHERE id=?",(sid,)); load_schedule(); load_checklist_schedule()
+        delete.clicked.connect(delete_plan)
+        load_schedule(); tabs.addTab(sched,"Audit Schedule")
+
+        # ----- Checklist tab -----
+        check=QWidget(); cl=QVBoxLayout(check)
+        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Scheduled procedure:"))
+        schedule_combo=QComboBox(); cbar.addWidget(schedule_combo,1)
+        load_btn=QPushButton("Load Checklist"); save_btn=QPushButton("Save Checklist"); export_checklist_btn=QPushButton("Export Checklist to Excel")
+        cbar.addWidget(load_btn); cbar.addWidget(save_btn); cbar.addWidget(export_checklist_btn); cl.addLayout(cbar)
+        score=QLabel("Compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:5px;"); cl.addWidget(score)
+        checklist_table=QTableWidget(0,6); checklist_table.setHorizontalHeaderLabels(["#","Audit Checkpoint / Requirement","ISO Clause","Result (Yes / No / N/A)","Comments","Evidence Attachment / File"]); checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); cl.addWidget(checklist_table,1)
+        def load_checklist_schedule():
+            current=schedule_combo.currentData()
+            schedule_combo.blockSignals(True); schedule_combo.clear()
+            for r in db.fetchall("SELECT id,procedure_name,planned_date,status FROM audit_schedule ORDER BY planned_date,id"):
+                schedule_combo.addItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}",r["id"])
+            if current is not None:
+                idx=schedule_combo.findData(current)
+                if idx>=0:schedule_combo.setCurrentIndex(idx)
+            schedule_combo.blockSignals(False)
+        def load_checklist():
+            sid=schedule_combo.currentData()
+            checklist_table.setRowCount(0)
+            if sid is None:
+                score.setText("Create or select a scheduled audit first."); return
+            sr=db.fetchone("SELECT procedure_name FROM audit_schedule WHERE id=?",(sid,))
+            if not sr:return
+            lib=self._audit_procedure_library(); proc=safe(sr["procedure_name"]); clause,items=lib.get(proc,("",[]))
+            saved={r["item_no"]:r for r in db.fetchall("SELECT * FROM audit_checklist_responses WHERE schedule_id=? ORDER BY item_no",(sid,))}
+            for n,item_text in enumerate(items,1):
+                row=checklist_table.rowCount(); checklist_table.insertRow(row)
+                checklist_table.setItem(row,0,QTableWidgetItem(str(n))); checklist_table.setItem(row,1,QTableWidgetItem(item_text)); checklist_table.setItem(row,2,QTableWidgetItem(clause))
+                result=QComboBox(); result.addItems(["Yes","No","N/A"])
+                comments=QLineEdit(); comments.setPlaceholderText("Comments / evidence reviewed")
+                evidence=QLineEdit(); evidence.setPlaceholderText("Optional photo or evidence file")
+                browse=QPushButton("Browse…"); browse.setMaximumWidth(86)
+                evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(0,0,0,0); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
+                browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Checklist Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
+                if n in saved:
+                    result.setCurrentText(safe(saved[n]["result"])); comments.setText(safe(saved[n]["comments"])); evidence.setText(safe(saved[n]["evidence_path"]))
+                checklist_table.setCellWidget(row,3,result); checklist_table.setCellWidget(row,4,comments); checklist_table.setCellWidget(row,5,evidence_host)
+            update_score()
+        def update_score():
+            yes=no=0
+            for row in range(checklist_table.rowCount()):
+                w=checklist_table.cellWidget(row,3)
+                if not w:continue
+                if w.currentText()=="Yes":yes+=1
+                elif w.currentText()=="No":no+=1
+            total=yes+no
+            pct=round(yes*100/total) if total else 0
+            score.setText(f"Compliance: {pct}%  |  Compliant: {yes}  |  Non-compliant: {no}  |  N/A excluded")
+        def save_checklist():
+            sid=schedule_combo.currentData()
+            if sid is None:return QMessageBox.information(d,"Select Schedule","Select a scheduled audit first.")
+            sr=db.fetchone("SELECT procedure_name FROM audit_schedule WHERE id=?",(sid,))
+            proc=safe(sr["procedure_name"]) if sr else ""
+            clause,items=self._audit_procedure_library().get(proc,("",[]))
+            for row in range(checklist_table.rowCount()):
+                n=int(checklist_table.item(row,0).text()); item_text=checklist_table.item(row,1).text()
+                result=checklist_table.cellWidget(row,3).currentText()
+                comments=checklist_table.cellWidget(row,4).text().strip()
+                evidence_host=checklist_table.cellWidget(row,5)
+                evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
+                db.execute("""INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at)
+                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at""",
+                    (sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds")))
+            update_score()
+            QMessageBox.information(d,"Checklist Saved","Inspection checklist responses, comments and evidence references have been saved.")
+        def export_checklist():
+            sid=schedule_combo.currentData()
+            if sid is None:return QMessageBox.information(d,"Select Schedule","Select a scheduled audit first.")
+            sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+            if not sr:return
+            path,_=QFileDialog.getSaveFileName(d,"Export Inspection Checklist",f"{safe(sr['procedure_name']).replace('/','-')}_Checklist.xlsx","Excel Workbook (*.xlsx)")
+            if not path:return
+            try:
+                wb=Workbook(); ws=wb.active; ws.title="Inspection Checklist"
+                ws.merge_cells("A1:F1"); ws["A1"]="HSE AUDIT / INSPECTION CHECKLIST"; ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center")
+                ws.append(["Procedure",safe(sr["procedure_name"]),"Risk",safe(sr["risk_level"]),"Planned Date",safe(sr["planned_date"])])
+                ws.append(["ISO Clause","","Owner",safe(sr["owner"]),"Status",safe(sr["status"])])
+                ws.append(["No.","Audit Checkpoint / Requirement","ISO Clause","Result","Comments","Evidence Attachment / File"])
+                for row in range(checklist_table.rowCount()):
+                    no=checklist_table.item(row,0).text(); item_text=checklist_table.item(row,1).text(); clause=checklist_table.item(row,2).text()
+                    result=checklist_table.cellWidget(row,3).currentText(); comments=checklist_table.cellWidget(row,4).text()
+                    host=checklist_table.cellWidget(row,5); evidence=host.findChild(QLineEdit).text() if host else ""
+                    ws.append([no,item_text,clause,result,comments,evidence])
+                for cell in ws[4]:
+                    cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="4472C4"); cell.alignment=Alignment(wrap_text=True,vertical="top")
+                for row in ws.iter_rows(min_row=5):
+                    for cell in row: cell.alignment=Alignment(wrap_text=True,vertical="top")
+                for col,width in {"A":8,"B":58,"C":18,"D":18,"E":42,"F":42}.items(): ws.column_dimensions[col].width=width
+                for rn in range(5,ws.max_row+1): ws.row_dimensions[rn].height=34
+                try:
+                    logo=report_logo_path()
+                    if logo and Path(logo).exists():
+                        img=XLImage(str(logo)); img.width=110; img.height=48; ws.add_image(img,"A2")
+                except Exception: logging.exception("Audit checklist logo embedding failed")
+                ws.freeze_panes="A5"; ws.auto_filter.ref=f"A4:F{ws.max_row}"
+                wb.save(path)
+                QMessageBox.information(d,"Export Complete","Inspection checklist exported successfully.")
+            except Exception as exc:
+                logging.exception("Audit checklist export failed"); QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
+        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist)
+        schedule_combo.currentIndexChanged.connect(lambda *_:load_checklist())
+        load_checklist_schedule(); tabs.addTab(check,"Inspection Checklist")
+
+        # ----- Findings register tab -----
+        findings=QWidget(); fvl=QVBoxLayout(findings)
+        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Consolidated findings from the Audit Register")); refresh_findings=QPushButton("Refresh"); fbar.addStretch(); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
+        findings_table=QTableWidget(0,10); findings_table.setHorizontalHeaderLabels(["Audit Ref","Audit Title","Finding #","Finding Type","Clause","Finding Detail","Corrective Action","Responsible","Target Date","Status"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); fvl.addWidget(findings_table,1)
+        def load_findings():
+            rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
+                FROM audit_findings f JOIN audits a ON a.id=f.audit_id ORDER BY
+                CASE WHEN lower(COALESCE(f.status,''))='closed' THEN 1 ELSE 0 END,
+                f.target_date,a.id,f.finding_number""")
+            findings_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["audit_ref"],r["audit_title"],r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"]]
+                for c,v in enumerate(vals):
+                    item=QTableWidgetItem(safe(v)); item.setData(Qt.ItemDataRole.UserRole,r["parent_audit_id"]); findings_table.setItem(i,c,item)
+                    if vals[-1]=="OVERDUE": item.setBackground(QColor("#FCE4D6"))
+        def open_finding_audit():
+            rr=findings_table.currentRow()
+            if rr<0:return
+            aid=findings_table.item(rr,0).data(Qt.ItemDataRole.UserRole)
+            d.accept()
+            self.audit_workspace(aid, self.audits)
+        refresh_findings.clicked.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
+        load_findings(); tabs.addTab(findings,"Findings Register")
+        close=QPushButton("Close"); close.clicked.connect(d.accept); root.addWidget(close)
+        d.exec()
 
     def _audit_register_detail(self, audit_id):
         a, fs = self._audit_report_data(audit_id)
