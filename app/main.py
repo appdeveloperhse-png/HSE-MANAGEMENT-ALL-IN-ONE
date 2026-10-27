@@ -11,7 +11,7 @@ from datetime import datetime, date
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QRectF, QDate
-from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel
+from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel, QTextDocument
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLineEdit, QTextEdit, QPushButton, QLabel,
@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QTabWidget, QListWidgetItem,
     QGridLayout
 )
+from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -419,6 +420,7 @@ class Database:
         CREATE TABLE IF NOT EXISTS audit_schedule (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             procedure_name TEXT NOT NULL,
+            area TEXT DEFAULT '',
             risk_level TEXT DEFAULT 'Medium',
             frequency TEXT DEFAULT 'Annual',
             planned_date TEXT DEFAULT '',
@@ -445,6 +447,18 @@ class Database:
             FOREIGN KEY(schedule_id) REFERENCES audit_schedule(id) ON DELETE CASCADE
         );
         """)
+        # Additional internal-audit traceability fields (additive, Audit module only).
+        schedule_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_schedule)").fetchall()}
+        if "area" not in schedule_cols:
+            self.conn.execute("ALTER TABLE audit_schedule ADD COLUMN area TEXT DEFAULT ''")
+        response_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_checklist_responses)").fetchall()}
+        for col, definition in {"responsible": "TEXT DEFAULT ''", "target_date": "TEXT DEFAULT ''"}.items():
+            if col not in response_cols:
+                self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
+        finding_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_findings)").fetchall()}
+        for col, definition in {"source_schedule_id": "INTEGER", "source_item_no": "INTEGER", "procedure_name": "TEXT DEFAULT ''"}.items():
+            if col not in finding_cols:
+                self.conn.execute(f"ALTER TABLE audit_findings ADD COLUMN {col} {definition}")
         self.conn.commit()
 
         # Observation multi-action + CAPA tracking link (additive only).
@@ -3556,7 +3570,7 @@ class MainWindow(QMainWindow):
         new_btn=QPushButton("+ NEW AUDIT"); new_btn.setMinimumHeight(40); new_btn.setStyleSheet("font-weight:bold;padding:8px 18px;")
         settings_btn=QPushButton("Audit Settings")
         report_btn=QPushButton("Generate Report")
-        planning_btn=QPushButton("Audit Schedule & Checklists")
+        planning_btn=QPushButton("Internal Audit Center")
         planning_btn.setMinimumHeight(40)
         planning_btn.setStyleSheet("font-weight:bold;padding:8px 14px;background:#E8F0FA;color:#17365D;")
         top.addWidget(planning_btn); top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(new_btn); layout.addLayout(top)
@@ -3680,18 +3694,29 @@ class MainWindow(QMainWindow):
         target_note=QLabel("Planning target: 4 procedure audits per month  |  High risk: every 6 months  |  Medium risk: annually  |  Low risk: every 18 months")
         target_note.setWordWrap(True); target_note.setStyleSheet("padding:8px;background:#E8F0FA;color:#17365D;font-weight:bold;border:1px solid #C7D7EA;border-radius:4px;")
         sl.addWidget(target_note)
-        sbar=QHBoxLayout(); add=QPushButton("+ New Scheduled Audit"); edit=QPushButton("Edit Selected"); delete=QPushButton("Delete Selected"); sbar.addWidget(add); sbar.addWidget(edit); sbar.addWidget(delete); sbar.addStretch(); sl.addLayout(sbar)
-        schedule_table=QTableWidget(0,9); schedule_table.setHorizontalHeaderLabels(["ID","Procedure / Audit Topic","Risk","Frequency","Planned Date","Owner","Status","Linked Audit","Notes"]); schedule_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); schedule_table.setAlternatingRowColors(True); schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); schedule_table.horizontalHeader().setStretchLastSection(True); sl.addWidget(schedule_table,1)
+        sbar=QHBoxLayout(); add=QPushButton("+ New Scheduled Audit"); edit=QPushButton("Edit Selected"); reschedule=QPushButton("Reschedule Selected Dates"); delete=QPushButton("Delete Selected"); sbar.addWidget(add); sbar.addWidget(edit); sbar.addWidget(reschedule); sbar.addWidget(delete); sbar.addStretch(); sl.addLayout(sbar)
+        schedule_table=QTableWidget(0,10); schedule_table.setHorizontalHeaderLabels(["ID","Procedure / Audit Topic","Audit Area","Risk","Frequency","Planned Date","Owner","Status","Linked Audit","Notes"]); schedule_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); schedule_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); schedule_table.setAlternatingRowColors(True); schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); schedule_table.horizontalHeader().setStretchLastSection(True); sl.addWidget(schedule_table,1)
         schedule_table.setColumnHidden(0,True)
         proc_names=list(self._audit_procedure_library().keys())
+        def schedule_selected_ids():
+            ids=[]
+            for idx in schedule_table.selectionModel().selectedRows():
+                item=schedule_table.item(idx.row(),0)
+                if item:
+                    try: ids.append(int(item.text()))
+                    except Exception: pass
+            if not ids and schedule_table.currentRow()>=0 and schedule_table.item(schedule_table.currentRow(),0):
+                try: ids=[int(schedule_table.item(schedule_table.currentRow(),0).text())]
+                except Exception: pass
+            return list(dict.fromkeys(ids))
         def schedule_selected_id():
-            r=schedule_table.currentRow()
-            return int(schedule_table.item(r,0).text()) if r>=0 and schedule_table.item(r,0) else None
+            ids=schedule_selected_ids()
+            return ids[0] if ids else None
         def load_schedule():
             rows=db.fetchall("SELECT s.*,a.number AS audit_number FROM audit_schedule s LEFT JOIN audits a ON a.id=s.linked_audit_id ORDER BY s.planned_date,s.id")
             schedule_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
-                vals=[r["id"],r["procedure_name"],r["risk_level"],r["frequency"],r["planned_date"],r["owner"],r["status"],r["audit_number"] or "",r["notes"]]
+                vals=[r["id"],r["procedure_name"],r["area"] if "area" in r.keys() else "",r["risk_level"],r["frequency"],r["planned_date"],r["owner"],r["status"],r["audit_number"] or "",r["notes"]]
                 for c,v in enumerate(vals): schedule_table.setItem(i,c,QTableWidgetItem(safe(v)))
                 if safe(r["status"]).lower() in ("overdue","overdue - action required"):
                     for c in range(schedule_table.columnCount()):
@@ -3703,18 +3728,19 @@ class MainWindow(QMainWindow):
             risk=QComboBox(); risk.addItems(["High","Medium","Low"])
             freq=QComboBox(); freq.addItems(["Every 6 months","Once per year","Every 18 months"])
             planned=QDateEdit(); planned.setCalendarPopup(True); planned.setDisplayFormat("dd-MMM-yyyy"); planned.setDate(QDate.currentDate().addMonths(1))
+            area=QLineEdit(); area.setPlaceholderText("Worksite, department or audited area")
             owner=QLineEdit(); owner.setPlaceholderText("Audit owner / lead auditor")
             stat=QComboBox(); stat.addItems(["Planned","In Progress","Completed","Deferred","Cancelled"])
             linked=QComboBox(); linked.addItem("-- Not linked --",None)
             for ar in db.fetchall("SELECT id,number,title FROM audits ORDER BY id DESC"):
                 linked.addItem(f"{safe(ar['number'])} — {safe(ar['title'])}",ar["id"])
             notes=QTextEdit(); notes.setMaximumHeight(100)
-            fl.addRow("Procedure / Audit Topic",procedure); fl.addRow("Risk Level",risk); fl.addRow("Frequency",freq); fl.addRow("Planned Date",planned); fl.addRow("Owner / Lead Auditor",owner); fl.addRow("Plan Status",stat); fl.addRow("Link to Audit Record",linked); fl.addRow("Notes / Scope",notes)
+            fl.addRow("Procedure / Audit Topic",procedure); fl.addRow("Audit Area / Department",area); fl.addRow("Risk Level",risk); fl.addRow("Frequency",freq); fl.addRow("Planned Date",planned); fl.addRow("Owner / Lead Auditor",owner); fl.addRow("Plan Status",stat); fl.addRow("Link to Audit Record",linked); fl.addRow("Notes / Scope",notes)
             def update_frequency():
                 freq.setCurrentText({"High":"Every 6 months","Medium":"Once per year","Low":"Every 18 months"}.get(risk.currentText(),"Once per year"))
             risk.currentTextChanged.connect(update_frequency)
             if row:
-                procedure.setCurrentText(safe(row["procedure_name"])); risk.setCurrentText(safe(row["risk_level"])); freq.setCurrentText(safe(row["frequency"])); owner.setText(safe(row["owner"])); stat.setCurrentText(safe(row["status"])); notes.setPlainText(safe(row["notes"]))
+                procedure.setCurrentText(safe(row["procedure_name"])); area.setText(safe(row["area"] if "area" in row.keys() else "")); risk.setCurrentText(safe(row["risk_level"])); freq.setCurrentText(safe(row["frequency"])); owner.setText(safe(row["owner"])); stat.setCurrentText(safe(row["status"])); notes.setPlainText(safe(row["notes"]))
                 try: planned.setDate(QDate.fromString(safe(row["planned_date"]),"yyyy-MM-dd"))
                 except Exception: pass
                 idx=linked.findData(row["linked_audit_id"])
@@ -3722,151 +3748,265 @@ class MainWindow(QMainWindow):
             buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(buttons)
             def save_plan():
                 now=datetime.now().isoformat(timespec="seconds")
-                values=(procedure.currentText(),risk.currentText(),freq.currentText(),planned.date().toString("yyyy-MM-dd"),owner.text().strip(),stat.currentText(),linked.currentData(),notes.toPlainText().strip(),now)
+                values=(procedure.currentText(),area.text().strip(),risk.currentText(),freq.currentText(),planned.date().toString("yyyy-MM-dd"),owner.text().strip(),stat.currentText(),linked.currentData(),notes.toPlainText().strip(),now)
                 if row:
-                    db.execute("UPDATE audit_schedule SET procedure_name=?,risk_level=?,frequency=?,planned_date=?,owner=?,status=?,linked_audit_id=?,notes=?,updated_at=? WHERE id=?",values+(schedule_id,))
+                    db.execute("UPDATE audit_schedule SET procedure_name=?,area=?,risk_level=?,frequency=?,planned_date=?,owner=?,status=?,linked_audit_id=?,notes=?,updated_at=? WHERE id=?",values+(schedule_id,))
                 else:
-                    db.execute("INSERT INTO audit_schedule(procedure_name,risk_level,frequency,planned_date,owner,status,linked_audit_id,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",values)
+                    db.execute("INSERT INTO audit_schedule(procedure_name,area,risk_level,frequency,planned_date,owner,status,linked_audit_id,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",values)
                 form.accept()
             buttons.accepted.connect(save_plan); buttons.rejected.connect(form.reject)
-            if form.exec()==QDialog.DialogCode.Accepted: load_schedule()
+            if form.exec()==QDialog.DialogCode.Accepted:
+                load_schedule(); load_checklist_schedule()
         add.clicked.connect(lambda:edit_schedule())
         edit.clicked.connect(lambda:edit_schedule(schedule_selected_id()) if schedule_selected_id() else QMessageBox.information(d,"Select Plan","Select a scheduled audit first."))
+        def reschedule_plans():
+            ids=schedule_selected_ids()
+            if not ids:return QMessageBox.information(d,"Select Plans","Select one or more scheduled audits first.")
+            form=QDialog(d); form.setWindowTitle("Reschedule Selected Audits"); fl=QFormLayout(form)
+            dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); dt.setDate(QDate.currentDate().addMonths(1)); fl.addRow(f"New planned date for {len(ids)} selected audit(s)",dt)
+            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(bb)
+            bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
+            if form.exec()==QDialog.DialogCode.Accepted:
+                for sid in ids: db.execute("UPDATE audit_schedule SET planned_date=?,updated_at=? WHERE id=?",(dt.date().toString("yyyy-MM-dd"),datetime.now().isoformat(timespec="seconds"),sid))
+                load_schedule(); load_checklist_schedule()
         def delete_plan():
-            sid=schedule_selected_id()
-            if not sid:return
-            if QMessageBox.question(d,"Delete Scheduled Audit","Delete the selected schedule and its saved checklist responses? Existing Audit Register records and findings will not be deleted.")==QMessageBox.StandardButton.Yes:
-                db.execute("DELETE FROM audit_schedule WHERE id=?",(sid,)); load_schedule(); load_checklist_schedule()
+            ids=schedule_selected_ids()
+            if not ids:return QMessageBox.information(d,"Select Plans","Select one or more scheduled audits first.")
+            if QMessageBox.question(d,"Delete Scheduled Audits",f"Delete {len(ids)} selected schedule(s) and their saved checklist responses? Existing Audit Register records and findings will not be deleted.")==QMessageBox.StandardButton.Yes:
+                for sid in ids: db.execute("DELETE FROM audit_schedule WHERE id=?",(sid,))
+                load_schedule(); load_checklist_schedule()
+        reschedule.clicked.connect(reschedule_plans)
         delete.clicked.connect(delete_plan)
         load_schedule(); tabs.addTab(sched,"Audit Schedule")
 
-        # ----- Checklist tab -----
+        # ----- Internal audit checklist tab -----
         check=QWidget(); cl=QVBoxLayout(check)
-        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Scheduled procedure:"))
-        schedule_combo=QComboBox(); cbar.addWidget(schedule_combo,1)
-        load_btn=QPushButton("Load Checklist"); save_btn=QPushButton("Save Checklist"); export_checklist_btn=QPushButton("Export Checklist to Excel")
-        cbar.addWidget(load_btn); cbar.addWidget(save_btn); cbar.addWidget(export_checklist_btn); cl.addLayout(cbar)
+        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Select one or more scheduled procedure audits (Ctrl/Shift for multiple):"))
+        schedule_list=QListWidget(); schedule_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); schedule_list.setMinimumHeight(84); cl.addWidget(schedule_list)
+        load_btn=QPushButton("Load Selected Audit Checklists"); save_btn=QPushButton("Save Checklist & Update Findings Register"); export_checklist_btn=QPushButton("Export to Excel"); print_checklist_btn=QPushButton("Print Checklist")
+        cbar.addWidget(load_btn); cbar.addWidget(save_btn); cbar.addWidget(export_checklist_btn); cbar.addWidget(print_checklist_btn); cl.addLayout(cbar)
         score=QLabel("Compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:5px;"); cl.addWidget(score)
-        checklist_table=QTableWidget(0,6); checklist_table.setHorizontalHeaderLabels(["#","Audit Checkpoint / Requirement","ISO Clause","Result (Yes / No / N/A)","Comments","Evidence Attachment / File"]); checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); cl.addWidget(checklist_table,1)
+        checklist_table=QTableWidget(0,8); checklist_table.setHorizontalHeaderLabels(["Procedure / Audit Reference","#","Procedure Audit Criteria","ISO Clause","Result (Yes / No / N/A)","Audit Evidence / Comments","Evidence File","Responsible Person / Action Owner"]); checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        checklist_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeMode.ResizeToContents); checklist_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(6,QHeaderView.ResizeMode.Stretch); checklist_table.horizontalHeader().setSectionResizeMode(7,QHeaderView.ResizeMode.Stretch); cl.addWidget(checklist_table,1)
         def load_checklist_schedule():
-            current=schedule_combo.currentData()
-            schedule_combo.blockSignals(True); schedule_combo.clear()
+            selected={it.data(Qt.ItemDataRole.UserRole) for it in schedule_list.selectedItems()}
+            schedule_list.clear()
             for r in db.fetchall("SELECT id,procedure_name,planned_date,status FROM audit_schedule ORDER BY planned_date,id"):
-                schedule_combo.addItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}",r["id"])
-            if current is not None:
-                idx=schedule_combo.findData(current)
-                if idx>=0:schedule_combo.setCurrentIndex(idx)
-            schedule_combo.blockSignals(False)
+                it=QListWidgetItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}"); it.setData(Qt.ItemDataRole.UserRole,r["id"]); schedule_list.addItem(it)
+                if r["id"] in selected: it.setSelected(True)
+        def selected_schedule_ids():
+            return [int(it.data(Qt.ItemDataRole.UserRole)) for it in schedule_list.selectedItems()]
+        def add_checklist_row(sid, sr, n, item_text, clause, saved=None):
+            row=checklist_table.rowCount(); checklist_table.insertRow(row)
+            proc=safe(sr["procedure_name"]); ref=f"{proc} | {safe(sr['planned_date'])}"
+            proc_item=QTableWidgetItem(ref); proc_item.setData(Qt.ItemDataRole.UserRole,sid); checklist_table.setItem(row,0,proc_item)
+            num_item=QTableWidgetItem(str(n)); num_item.setData(Qt.ItemDataRole.UserRole,sid); checklist_table.setItem(row,1,num_item)
+            # Keep criteria procedure-focused: assess documented controls, responsibilities, records and review, not just field performance.
+            checklist_table.setItem(row,2,QTableWidgetItem(item_text)); checklist_table.setItem(row,3,QTableWidgetItem(clause))
+            result=QComboBox(); result.addItems(["Yes","No","N/A"])
+            comments=QTextEdit(); comments.setPlaceholderText("Audit evidence reviewed, document / record reference, gap and rationale"); comments.setMaximumHeight(62)
+            evidence=QLineEdit(); evidence.setPlaceholderText("Evidence file path"); browse=QPushButton("Browse…"); browse.setMaximumWidth(80)
+            evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(0,0,0,0); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
+            browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Audit Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
+            owner=QLineEdit(); owner.setPlaceholderText("Responsible person")
+            owner_host=QWidget(); owner_layout=QVBoxLayout(owner_host); owner_layout.setContentsMargins(0,0,0,0); owner_layout.addWidget(owner)
+            due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy"); due.setDate(QDate.currentDate().addDays(30))
+            owner_layout.addWidget(QLabel("Target date for corrective action")); owner_layout.addWidget(due)
+            if saved:
+                result.setCurrentText(safe(saved["result"])); comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"]))
+                try: due.setDate(QDate.fromString(safe(saved["target_date"]),"yyyy-MM-dd"))
+                except Exception: pass
+            checklist_table.setCellWidget(row,4,result); checklist_table.setCellWidget(row,5,comments); checklist_table.setCellWidget(row,6,evidence_host); checklist_table.setCellWidget(row,7,owner_host)
+            result.currentTextChanged.connect(lambda *_:update_score())
+            return due
         def load_checklist():
-            sid=schedule_combo.currentData()
-            checklist_table.setRowCount(0)
-            if sid is None:
-                score.setText("Create or select a scheduled audit first."); return
-            sr=db.fetchone("SELECT procedure_name FROM audit_schedule WHERE id=?",(sid,))
-            if not sr:return
-            lib=self._audit_procedure_library(); proc=safe(sr["procedure_name"]); clause,items=lib.get(proc,("",[]))
-            saved={r["item_no"]:r for r in db.fetchall("SELECT * FROM audit_checklist_responses WHERE schedule_id=? ORDER BY item_no",(sid,))}
-            for n,item_text in enumerate(items,1):
-                row=checklist_table.rowCount(); checklist_table.insertRow(row)
-                checklist_table.setItem(row,0,QTableWidgetItem(str(n))); checklist_table.setItem(row,1,QTableWidgetItem(item_text)); checklist_table.setItem(row,2,QTableWidgetItem(clause))
-                result=QComboBox(); result.addItems(["Yes","No","N/A"])
-                comments=QLineEdit(); comments.setPlaceholderText("Comments / evidence reviewed")
-                evidence=QLineEdit(); evidence.setPlaceholderText("Optional photo or evidence file")
-                browse=QPushButton("Browse…"); browse.setMaximumWidth(86)
-                evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(0,0,0,0); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
-                browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Checklist Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
-                if n in saved:
-                    result.setCurrentText(safe(saved[n]["result"])); comments.setText(safe(saved[n]["comments"])); evidence.setText(safe(saved[n]["evidence_path"]))
-                checklist_table.setCellWidget(row,3,result); checklist_table.setCellWidget(row,4,comments); checklist_table.setCellWidget(row,5,evidence_host)
+            ids=selected_schedule_ids(); checklist_table.setRowCount(0)
+            if not ids:
+                score.setText("Select one or more scheduled audits first."); return
+            lib=self._audit_procedure_library()
+            for sid in ids:
+                sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+                if not sr: continue
+                proc=safe(sr["procedure_name"]); clause,items=lib.get(proc,("",[]))
+                saved={r["item_no"]:r for r in db.fetchall("SELECT * FROM audit_checklist_responses WHERE schedule_id=? ORDER BY item_no",(sid,))}
+                for n,item_text in enumerate(items,1): add_checklist_row(sid,sr,n,f"Does the approved procedure define clear requirements, responsibilities and records for: {item_text}?",clause,saved.get(n))
             update_score()
         def update_score():
             yes=no=0
             for row in range(checklist_table.rowCount()):
-                w=checklist_table.cellWidget(row,3)
+                w=checklist_table.cellWidget(row,4)
                 if not w:continue
                 if w.currentText()=="Yes":yes+=1
                 elif w.currentText()=="No":no+=1
-            total=yes+no
-            pct=round(yes*100/total) if total else 0
-            score.setText(f"Compliance: {pct}%  |  Compliant: {yes}  |  Non-compliant: {no}  |  N/A excluded")
+            total=yes+no; pct=round(yes*100/total) if total else 0
+            score.setText(f"Audit compliance: {pct}%  |  Conforming: {yes}  |  Nonconformities / gaps: {no}  |  N/A excluded")
+        def ensure_internal_audit(sid, sr):
+            linked=sr["linked_audit_id"]
+            audit=db.fetchone("SELECT id,audit_type FROM audits WHERE id=?",(linked,)) if linked else None
+            if audit and "internal audit" in safe(audit["audit_type"]).lower(): return linked
+            year=datetime.now().year
+            existing_nums=[safe(x["number"]) for x in db.fetchall("SELECT number FROM audits WHERE number LIKE ?",(f"IA-{year}-%",))]
+            nums=[]
+            for value in existing_nums:
+                try: nums.append(int(value.rsplit("-",1)[-1]))
+                except Exception: pass
+            number=f"IA-{year}-{max(nums+[0])+1:04d}"
+            audit_date=safe(sr["planned_date"]) or date.today().isoformat()
+            db.execute("INSERT INTO audits(number,audit_date,audit_type,standard,project,location,department,auditor,lead_auditor,auditee,scope,objective,criteria,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (number,audit_date,"Internal Audit","ISO 45001","", safe(sr["area"] if "area" in sr.keys() else ""), "HSE",safe(sr["owner"]),safe(sr["owner"]),"",f"Procedure audit: {safe(sr['procedure_name'])}","Verify procedure adequacy, implementation and effectiveness","Approved procedure, ISO 45001 and applicable requirements","Draft",datetime.now().isoformat(timespec="seconds")))
+            aid=db.fetchone("SELECT id FROM audits WHERE number=?",(number,))["id"]
+            db.execute("UPDATE audit_schedule SET linked_audit_id=?,updated_at=? WHERE id=?",(aid,datetime.now().isoformat(timespec="seconds"),sid))
+            return aid
         def save_checklist():
-            sid=schedule_combo.currentData()
-            if sid is None:return QMessageBox.information(d,"Select Schedule","Select a scheduled audit first.")
-            sr=db.fetchone("SELECT procedure_name FROM audit_schedule WHERE id=?",(sid,))
-            proc=safe(sr["procedure_name"]) if sr else ""
-            clause,items=self._audit_procedure_library().get(proc,("",[]))
+            ids=selected_schedule_ids()
+            if not ids:return QMessageBox.information(d,"Select Audits","Select one or more scheduled audits first.")
+            updated=[]
             for row in range(checklist_table.rowCount()):
-                n=int(checklist_table.item(row,0).text()); item_text=checklist_table.item(row,1).text()
-                result=checklist_table.cellWidget(row,3).currentText()
-                comments=checklist_table.cellWidget(row,4).text().strip()
-                evidence_host=checklist_table.cellWidget(row,5)
-                evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
-                db.execute("""INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at)
-                    VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at""",
-                    (sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds")))
-            update_score()
-            QMessageBox.information(d,"Checklist Saved","Inspection checklist responses, comments and evidence references have been saved.")
+                proc_item=checklist_table.item(row,0); num_item=checklist_table.item(row,1)
+                sid=proc_item.data(Qt.ItemDataRole.UserRole); n=int(num_item.text()); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+                if not sr: continue
+                proc=safe(sr["procedure_name"]); clause,items=self._audit_procedure_library().get(proc,("",[])); item_text=checklist_table.item(row,2).text()
+                result=checklist_table.cellWidget(row,4).currentText(); comments=checklist_table.cellWidget(row,5).toPlainText().strip()
+                host=checklist_table.cellWidget(row,6); evidence=host.findChild(QLineEdit).text().strip() if host else ""
+                owner_host=checklist_table.cellWidget(row,7); owner_edit=owner_host.findChild(QLineEdit) if owner_host else None; responsible=owner_edit.text().strip() if owner_edit else ""
+                due_widget=owner_host.findChild(QDateEdit) if owner_host else None; target_date=due_widget.date().toString("yyyy-MM-dd") if due_widget else ""
+                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date",
+                    (sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date))
+                aid=ensure_internal_audit(sid,sr)
+                existing_f=db.fetchone("SELECT id,status FROM audit_findings WHERE source_schedule_id=? AND source_item_no=?",(sid,n))
+                if result=="No":
+                    detail=f"Procedure audit criteria not met: {item_text}. Audit evidence / gap: {comments}".strip()
+                    corrective=f"Review and revise/implement procedure controls as applicable. Evidence: {evidence}".strip()
+                    if existing_f:
+                        db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",
+                            (aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,datetime.now().isoformat(timespec="seconds"),existing_f["id"]))
+                    else:
+                        next_no=db.fetchone("SELECT COALESCE(MAX(finding_number),0)+1 AS n FROM audit_findings WHERE audit_id=?",(aid,))["n"]
+                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            (aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc))
+                elif existing_f:
+                    db.execute("UPDATE audit_findings SET status='Closed',verification='Checklist criterion subsequently marked conforming',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),existing_f["id"]))
+                updated.append(sid)
+            for sid in set(updated):
+                sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+                if sr: db.execute("UPDATE audit_schedule SET status='Completed',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),sid))
+            update_score(); load_findings(); load_internal_register(); load_dashboard()
+            QMessageBox.information(d,"Checklist Saved","The procedure audit checklist was saved. Nonconforming criteria were added or updated in the Internal Audit Findings Register with responsible person and target date.")
+        def checklist_html():
+            rows=[]
+            for row in range(checklist_table.rowCount()):
+                cells=[]
+                for col in range(4): cells.append(safe(checklist_table.item(row,col).text() if checklist_table.item(row,col) else ""))
+                result=checklist_table.cellWidget(row,4).currentText() if checklist_table.cellWidget(row,4) else ""
+                comments=checklist_table.cellWidget(row,5).toPlainText() if checklist_table.cellWidget(row,5) else ""
+                evidence=checklist_table.cellWidget(row,6).findChild(QLineEdit).text() if checklist_table.cellWidget(row,6) else ""
+                owner_host=checklist_table.cellWidget(row,7); owner=owner_host.findChild(QLineEdit).text() if owner_host else ""; due=owner_host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if owner_host and owner_host.findChild(QDateEdit) else ""
+                rows.append("<tr>"+"".join(f"<td>{v}</td>" for v in cells)+f"<td>{result}</td><td>{comments}</td><td>{evidence}</td><td>{owner}</td><td>{due}</td></tr>")
+            return "<h1>INTERNAL AUDIT CHECKLIST</h1><p>Procedure-based audit criteria, evidence, findings and corrective-action ownership.</p><table border='1' cellspacing='0' cellpadding='4'><tr><th>Procedure</th><th>No.</th><th>Audit Criteria</th><th>ISO Clause</th><th>Result</th><th>Evidence / Gap</th><th>Evidence File</th><th>Responsible</th><th>Target Date</th></tr>"+"".join(rows)+"</table>"
+        def print_checklist():
+            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
+            printer=QPrinter(QPrinter.PrinterMode.HighResolution); dialog=QPrintDialog(printer,d)
+            if dialog.exec()==QDialog.DialogCode.Accepted:
+                doc=QTextDocument(); doc.setHtml(checklist_html()); doc.print_(printer)
         def export_checklist():
-            sid=schedule_combo.currentData()
-            if sid is None:return QMessageBox.information(d,"Select Schedule","Select a scheduled audit first.")
-            sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
-            if not sr:return
-            path,_=QFileDialog.getSaveFileName(d,"Export Inspection Checklist",f"{safe(sr['procedure_name']).replace('/','-')}_Checklist.xlsx","Excel Workbook (*.xlsx)")
+            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
+            path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.xlsx","Excel Workbook (*.xlsx)")
             if not path:return
             try:
-                wb=Workbook(); ws=wb.active; ws.title="Inspection Checklist"
-                ws.merge_cells("A1:F1"); ws["A1"]="HSE AUDIT / INSPECTION CHECKLIST"; ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center")
-                ws.append(["Procedure",safe(sr["procedure_name"]),"Risk",safe(sr["risk_level"]),"Planned Date",safe(sr["planned_date"])])
-                ws.append(["ISO Clause","","Owner",safe(sr["owner"]),"Status",safe(sr["status"])])
-                ws.append(["No.","Audit Checkpoint / Requirement","ISO Clause","Result","Comments","Evidence Attachment / File"])
+                wb=Workbook(); ws=wb.active; ws.title="Internal Audit"
+                ws.merge_cells("A1:I1"); ws["A1"]="INTERNAL AUDIT — PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=16,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center")
+                ws.append(["Procedure / Audit Reference","No.","Procedure Audit Criteria","ISO Clause","Result","Audit Evidence / Gap","Evidence File","Responsible Person","Target Date"])
                 for row in range(checklist_table.rowCount()):
-                    no=checklist_table.item(row,0).text(); item_text=checklist_table.item(row,1).text(); clause=checklist_table.item(row,2).text()
-                    result=checklist_table.cellWidget(row,3).currentText(); comments=checklist_table.cellWidget(row,4).text()
-                    host=checklist_table.cellWidget(row,5); evidence=host.findChild(QLineEdit).text() if host else ""
-                    ws.append([no,item_text,clause,result,comments,evidence])
-                for cell in ws[4]:
-                    cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="4472C4"); cell.alignment=Alignment(wrap_text=True,vertical="top")
-                for row in ws.iter_rows(min_row=5):
+                    owner_host=checklist_table.cellWidget(row,7); owner=owner_host.findChild(QLineEdit).text() if owner_host else ""; due=owner_host.findChild(QDateEdit).date().toString("yyyy-MM-dd") if owner_host and owner_host.findChild(QDateEdit) else ""
+                    ws.append([checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(4)]+[checklist_table.cellWidget(row,4).currentText(),checklist_table.cellWidget(row,5).toPlainText(),checklist_table.cellWidget(row,6).findChild(QLineEdit).text(),owner,due])
+                for cell in ws[2]: cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="4472C4"); cell.alignment=Alignment(wrap_text=True,vertical="top")
+                for row in ws.iter_rows(min_row=3):
                     for cell in row: cell.alignment=Alignment(wrap_text=True,vertical="top")
-                for col,width in {"A":8,"B":58,"C":18,"D":18,"E":42,"F":42}.items(): ws.column_dimensions[col].width=width
-                for rn in range(5,ws.max_row+1): ws.row_dimensions[rn].height=34
+                for col,width in {"A":32,"B":7,"C":55,"D":15,"E":13,"F":42,"G":35,"H":24,"I":16}.items(): ws.column_dimensions[col].width=width
+                for rn in range(3,ws.max_row+1): ws.row_dimensions[rn].height=44
                 try:
                     logo=report_logo_path()
                     if logo and Path(logo).exists():
-                        img=XLImage(str(logo)); img.width=110; img.height=48; ws.add_image(img,"A2")
-                except Exception: logging.exception("Audit checklist logo embedding failed")
-                ws.freeze_panes="A5"; ws.auto_filter.ref=f"A4:F{ws.max_row}"
-                wb.save(path)
-                QMessageBox.information(d,"Export Complete","Inspection checklist exported successfully.")
+                        img=XLImage(str(logo)); img.width=100; img.height=42; ws.add_image(img,"A2")
+                except Exception: logging.exception("Internal audit checklist logo embedding failed")
+                ws.freeze_panes="A3"; ws.auto_filter.ref=f"A2:I{ws.max_row}"; wb.save(path)
+                QMessageBox.information(d,"Export Complete","Internal audit checklist exported successfully.")
             except Exception as exc:
-                logging.exception("Audit checklist export failed"); QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
-        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist)
-        schedule_combo.currentIndexChanged.connect(lambda *_:load_checklist())
-        load_checklist_schedule(); tabs.addTab(check,"Inspection Checklist")
+                logging.exception("Internal audit checklist export failed"); QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
+        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist); print_checklist_btn.clicked.connect(print_checklist)
+        load_checklist_schedule(); tabs.addTab(check,"Internal Audit Checklist")
 
         # ----- Findings register tab -----
         findings=QWidget(); fvl=QVBoxLayout(findings)
-        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Consolidated findings from the Audit Register")); refresh_findings=QPushButton("Refresh"); fbar.addStretch(); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
-        findings_table=QTableWidget(0,10); findings_table.setHorizontalHeaderLabels(["Audit Ref","Audit Title","Finding #","Finding Type","Clause","Finding Detail","Corrective Action","Responsible","Target Date","Status"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); fvl.addWidget(findings_table,1)
+        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Internal Audit Findings Register — each saved nonconformity is traced to its procedure and checklist criterion")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
+        findings_table=QTableWidget(0,12); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); findings_table.setColumnHidden(10,True); findings_table.setColumnHidden(11,True); fvl.addWidget(findings_table,1)
         def load_findings():
             rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
-                FROM audit_findings f JOIN audits a ON a.id=f.audit_id ORDER BY
-                CASE WHEN lower(COALESCE(f.status,''))='closed' THEN 1 ELSE 0 END,
-                f.target_date,a.id,f.finding_number""")
+                FROM audit_findings f JOIN audits a ON a.id=f.audit_id
+                WHERE f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%'
+                ORDER BY CASE WHEN lower(COALESCE(f.status,''))='closed' THEN 1 ELSE 0 END,f.target_date,a.id,f.finding_number""")
+            if finding_status_filter.currentText()=="Open Findings": rows=[r for r in rows if safe(r["status"]).lower() not in ("closed","verified")]
+            elif finding_status_filter.currentText()=="Closed Findings": rows=[r for r in rows if safe(r["status"]).lower() in ("closed","verified")]
             findings_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
-                vals=[r["audit_ref"],r["audit_title"],r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"]]
+                vals=[r["audit_ref"],r["procedure_name"] if "procedure_name" in r.keys() and r["procedure_name"] else (r["audit_title"] or ""),r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"],r["parent_audit_id"],r["id"]]
                 for c,v in enumerate(vals):
-                    item=QTableWidgetItem(safe(v)); item.setData(Qt.ItemDataRole.UserRole,r["parent_audit_id"]); findings_table.setItem(i,c,item)
-                    if vals[-1]=="OVERDUE": item.setBackground(QColor("#FCE4D6"))
+                    item=QTableWidgetItem(safe(v)); findings_table.setItem(i,c,item)
+                    if vals[9]=="OVERDUE": item.setBackground(QColor("#FCE4D6"))
         def open_finding_audit():
             rr=findings_table.currentRow()
             if rr<0:return
-            aid=findings_table.item(rr,0).data(Qt.ItemDataRole.UserRole)
-            d.accept()
-            self.audit_workspace(aid, self.audits)
-        refresh_findings.clicked.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
-        load_findings(); tabs.addTab(findings,"Findings Register")
+            aid=findings_table.item(rr,10).text()
+            if aid:
+                d.accept(); self.audit_workspace(int(aid),self.audits)
+        def close_selected_internal_findings():
+            ids=[]
+            for idx in findings_table.selectionModel().selectedRows():
+                item=findings_table.item(idx.row(),11)
+                if item and item.text().isdigit(): ids.append(int(item.text()))
+            if not ids:return QMessageBox.information(d,"Select Findings","Select one or more findings to close.")
+            if QMessageBox.question(d,"Close Findings",f"Mark {len(ids)} selected finding(s) as Closed? Use this only after corrective action is verified.")==QMessageBox.StandardButton.Yes:
+                for fid in ids: db.execute("UPDATE audit_findings SET status='Closed',verification='Closed from Internal Audit Findings Register',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),fid))
+                load_findings(); load_internal_register(); load_dashboard()
+        close_selected_findings.clicked.connect(close_selected_internal_findings)
+        refresh_findings.clicked.connect(load_findings); finding_status_filter.currentTextChanged.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
+        load_findings(); tabs.addTab(findings,"Internal Audit Findings")
+
+        # ----- Internal audit register / master data / dashboard -----
+        dash=QWidget(); dl=QVBoxLayout(dash); dl.addWidget(QLabel("INTERNAL AUDIT PERFORMANCE DASHBOARD"))
+        dashboard_summary=QLabel(); dashboard_summary.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;padding:10px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dashboard_summary.setWordWrap(True); dl.addWidget(dashboard_summary)
+        dashboard_table=QTableWidget(0,5); dashboard_table.setHorizontalHeaderLabels(["Procedure","Audit Area","Risk Level","Planned Audits","Open Findings"]); dashboard_table.setAlternatingRowColors(True); dashboard_table.horizontalHeader().setStretchLastSection(True); dl.addWidget(dashboard_table,1)
+        def load_dashboard():
+            total=db.fetchone("SELECT COUNT(*) c FROM audit_schedule") ["c"]
+            open_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'open')) NOT IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
+            closed_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'')) IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
+            dashboard_summary.setText(f"Scheduled procedure audits: {total}    |    Open findings: {open_count}    |    Closed findings: {closed_count}")
+            rows=db.fetchall("SELECT procedure_name,area,risk_level,COUNT(*) AS planned FROM audit_schedule GROUP BY procedure_name,area,risk_level ORDER BY risk_level,area,procedure_name")
+            dashboard_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                op=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE procedure_name=? AND lower(COALESCE(status,'open')) NOT IN ('closed','verified')",(r["procedure_name"],))["c"]
+                for c,v in enumerate([r["procedure_name"],r["area"],r["risk_level"],r["planned"],op]): dashboard_table.setItem(i,c,QTableWidgetItem(safe(v)))
+        load_dashboard(); tabs.addTab(dash,"Audit Dashboard")
+
+        reg=QWidget(); rvl=QVBoxLayout(reg); rbar=QHBoxLayout(); rbar.addWidget(QLabel("Internal Audit Register — select multiple rows to review the master tracking list")); rrefresh=QPushButton("Refresh"); rbar.addStretch(); rbar.addWidget(rrefresh); rvl.addLayout(rbar)
+        reg_table=QTableWidget(0,10); reg_table.setHorizontalHeaderLabels(["Audit Ref","Procedure / Audit Title","Audit Area","Audit Date","Auditor","Open Findings","Closed Findings","Audit Status","Audit ID","Linked Schedule"]); reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); reg_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); reg_table.setAlternatingRowColors(True); reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); reg_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); reg_table.horizontalHeader().setStretchLastSection(True); reg_table.setColumnHidden(8,True); rvl.addWidget(reg_table,1)
+        def load_internal_register():
+            rows=db.fetchall("SELECT a.*,s.procedure_name AS scheduled_procedure,s.area AS scheduled_area,s.id AS schedule_ref FROM audits a LEFT JOIN audit_schedule s ON s.linked_audit_id=a.id WHERE lower(COALESCE(a.audit_type,'')) LIKE '%internal%' ORDER BY a.audit_date DESC,a.id DESC")
+            reg_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                aid=r["id"]; op=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=? AND lower(COALESCE(status,'open')) NOT IN ('closed','verified')",(aid,))["c"]; closed=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=? AND lower(COALESCE(status,'')) IN ('closed','verified')",(aid,))["c"]
+                vals=[r["number"],r["scheduled_procedure"] or r["title"] or r["scope"],r["scheduled_area"] or r["location"],r["audit_date"],r["auditor"] or r["lead_auditor"],op,closed,r["status"],aid,r["schedule_ref"] or ""]
+                for c,v in enumerate(vals): reg_table.setItem(i,c,QTableWidgetItem(safe(v)))
+        rrefresh.clicked.connect(load_internal_register); reg_table.cellDoubleClicked.connect(lambda *_: (d.accept(), self.audit_workspace(int(reg_table.item(reg_table.currentRow(),8).text()),self.audits)) if reg_table.currentRow()>=0 else None)
+        load_internal_register(); tabs.addTab(reg,"Internal Audit Register")
+
+        master=QWidget(); mvl=QVBoxLayout(master); mvl.addWidget(QLabel("AUDIT MASTER DATA — PROCEDURE LIBRARY, ISO CLAUSES AND RISK-BASED FREQUENCY"))
+        master_table=QTableWidget(0,4); master_table.setHorizontalHeaderLabels(["Procedure / Audit Topic","Applicable ISO Clauses","Checklist Criteria Count","Default Risk Frequency"]); master_table.setAlternatingRowColors(True); master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); master_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch); master_table.horizontalHeader().setStretchLastSection(True); mvl.addWidget(master_table,1)
+        for proc,(clause,items) in self._audit_procedure_library().items():
+            rr=master_table.rowCount(); master_table.insertRow(rr)
+            risk="Every 6 months (High) / Annual (Medium) / Every 18 months (Low)"
+            for c,v in enumerate([proc,clause,len(items),risk]): master_table.setItem(rr,c,QTableWidgetItem(safe(v)))
+        tabs.addTab(master,"Audit Master Data")
         close=QPushButton("Close"); close.clicked.connect(d.accept); root.addWidget(close)
         d.exec()
 
@@ -3899,7 +4039,14 @@ class MainWindow(QMainWindow):
         info=QLabel("Select the audit type before opening the Audit Workspace."); info.setWordWrap(True); lay.addWidget(info)
         combo=QComboBox(); combo.addItems(self._audit_types()); lay.addWidget(combo)
         buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); lay.addWidget(buttons)
-        buttons.accepted.connect(lambda:(d.accept(), self.audit_workspace(None,refresh,combo.currentText())))
+        def continue_with_type():
+            chosen=combo.currentText()
+            d.accept()
+            if "internal audit" in chosen.lower():
+                self.audit_planning_center()
+            else:
+                self.audit_workspace(None,refresh,chosen)
+        buttons.accepted.connect(continue_with_type)
         buttons.rejected.connect(d.reject); d.exec()
 
     def audit_workspace(self, audit_id=None, refresh=None, selected_type=None):
