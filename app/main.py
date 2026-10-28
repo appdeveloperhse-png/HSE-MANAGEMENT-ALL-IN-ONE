@@ -463,6 +463,46 @@ class Database:
         for col, definition in {"capa_required": "INTEGER DEFAULT 0", "capa_number": "TEXT DEFAULT ''"}.items():
             if col not in response_cols:
                 self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
+
+        # Audit-only additive workflow tables. Existing records and CAPA tables are preserved.
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS audit_procedure_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, procedure_id TEXT DEFAULT '', title TEXT NOT NULL,
+            document_number TEXT DEFAULT '', issuing_organization TEXT DEFAULT '', site_contract TEXT DEFAULT '',
+            revision TEXT DEFAULT '', effective_date TEXT DEFAULT '', review_date TEXT DEFAULT '',
+            clause_references TEXT DEFAULT '', owner TEXT DEFAULT '', applicability TEXT DEFAULT '',
+            approval_status TEXT DEFAULT 'Draft checklist pending review', source_file TEXT DEFAULT '',
+            checklist_json TEXT DEFAULT '[]', revision_history TEXT DEFAULT '', active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS audit_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_id INTEGER NOT NULL, document_path TEXT DEFAULT '',
+            recipients TEXT DEFAULT '', revision INTEGER DEFAULT 1, issued_at TEXT DEFAULT '', issued_by TEXT DEFAULT '',
+            FOREIGN KEY(schedule_id) REFERENCES audit_schedule(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS audit_finding_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, finding_id INTEGER NOT NULL, action TEXT NOT NULL,
+            old_status TEXT DEFAULT '', new_status TEXT DEFAULT '', comments TEXT DEFAULT '', evidence_path TEXT DEFAULT '',
+            user_name TEXT DEFAULT '', timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(finding_id) REFERENCES audit_findings(id) ON DELETE CASCADE
+        );
+        """)
+        for col, definition in {
+            "severity": "TEXT DEFAULT 'Medium'", "capa_reason": "TEXT DEFAULT ''",
+            "verification_status": "TEXT DEFAULT 'Pending Verification'", "auditee_response": "TEXT DEFAULT ''",
+            "closure_date": "TEXT DEFAULT ''", "finding_reference": "TEXT DEFAULT ''"
+        }.items():
+            if col not in finding_cols:
+                self.conn.execute(f"ALTER TABLE audit_findings ADD COLUMN {col} {definition}")
+        response_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_checklist_responses)").fetchall()}
+        for col, definition in {
+            "severity": "TEXT DEFAULT 'Medium'", "capa_reason": "TEXT DEFAULT ''",
+            "finding_classification": "TEXT DEFAULT 'Minor Nonconformity'",
+            "auditee_response": "TEXT DEFAULT ''", "procedure_revision": "TEXT DEFAULT ''"
+        }.items():
+            if col not in response_cols:
+                self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_findings_schedule_item ON audit_findings(source_schedule_id, source_item_no)")
         self.conn.commit()
 
         # Observation multi-action + CAPA tracking link (additive only).
@@ -3700,6 +3740,19 @@ class MainWindow(QMainWindow):
             for specific in specifics:
                 criteria.append(f"Procedure-specific control: the approved procedure defines the requirement, accountable role, verification/acceptance method and required objective record for {specific.lower()}.")
             expanded[procedure] = (clauses, criteria)
+        # Audit-specific custom procedure records extend the starter library without changing
+        # any other module. Custom checklists are not represented as officially verified unless reviewed.
+        try:
+            for record in db.fetchall("SELECT * FROM audit_procedure_records WHERE active=1 ORDER BY title"):
+                try:
+                    custom_items = json.loads(safe(record["checklist_json"]) or "[]")
+                    if not isinstance(custom_items, list): custom_items = []
+                except Exception:
+                    custom_items = []
+                if custom_items:
+                    expanded[safe(record["title"])] = (safe(record["clause_references"]) or "Company procedure review", [str(x) for x in custom_items if str(x).strip()])
+        except Exception:
+            logging.exception("Unable to load custom Audit Procedure Library records")
         return expanded
 
     def audit_planning_center(self):
@@ -3846,18 +3899,22 @@ class MainWindow(QMainWindow):
             checklist_table.item(row,0).setData(Qt.ItemDataRole.UserRole,sid); checklist_table.item(row,1).setData(Qt.ItemDataRole.UserRole,n)
             clauses=[x.strip() for x in safe(clause).replace("+",",").split(",") if x.strip()]
             checklist_table.setItem(row,4,QTableWidgetItem(clauses[0] if clauses else "—")); checklist_table.setItem(row,5,QTableWidgetItem("\n".join(clauses[1:]) if len(clauses)>1 else "—"))
-            result=QComboBox(); result.addItems(["Not Audited","Conforming","Nonconformity","N/A"])
+            result=QComboBox(); result.addItems(["Not Audited","Conforming","Nonconformity","N/A","Positive Observation","Opportunity for Improvement"])
             comments=QTextEdit(); comments.setPlaceholderText("Record objective evidence: procedure/document ID and revision, sample/record reviewed, interview reference, gap and clause-based rationale."); comments.setMinimumHeight(72); comments.setMaximumHeight(112)
             evidence=QLineEdit(); evidence.setPlaceholderText("Attachment path / evidence reference"); browse=QPushButton("Browse…"); browse.setMaximumWidth(82)
             evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(3,3,3,3); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
             browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Audit Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
-            owner=QLineEdit(); owner.setPlaceholderText("Finding owner")
+            owner=QLineEdit(); owner.setPlaceholderText("Finding owner / responsible person")
             due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy"); due.setDate(QDate.currentDate().addDays(30))
+            severity=QComboBox(); severity.addItems(["Low","Medium","High","Critical"])
+            capa_reason=QLineEdit(); capa_reason.setPlaceholderText("If CAPA = No, enter authorized justification")
             capa=QComboBox(); capa.addItems(["No","Yes"])
-            action_host=QWidget(); action_layout=QVBoxLayout(action_host); action_layout.setContentsMargins(3,3,3,3); action_layout.addWidget(owner); action_layout.addWidget(QLabel("Target date for compliance / corrective action")); action_layout.addWidget(due)
+            action_host=QWidget(); action_layout=QVBoxLayout(action_host); action_layout.setContentsMargins(3,3,3,3); action_layout.addWidget(owner); action_layout.addWidget(QLabel("Target date for compliance / corrective action")); action_layout.addWidget(due); action_layout.addWidget(QLabel("Finding severity")); action_layout.addWidget(severity); action_layout.addWidget(capa_reason)
             if saved:
                 old_result=safe(saved["result"]); result.setCurrentText({"Yes":"Conforming","No":"Nonconformity","N/A":"N/A"}.get(old_result,old_result if old_result in ["Not Audited","Conforming","Nonconformity","N/A"] else "Not Audited"))
                 comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"])); capa.setCurrentText("Yes" if ("capa_required" in saved.keys() and saved["capa_required"]) else "No")
+                if "severity" in saved.keys(): severity.setCurrentText(safe(saved["severity"]) or "Medium")
+                if "capa_reason" in saved.keys(): capa_reason.setText(safe(saved["capa_reason"]))
                 try: due.setDate(QDate.fromString(safe(saved["target_date"]),"yyyy-MM-dd"))
                 except Exception: pass
             checklist_table.setCellWidget(row,6,result); checklist_table.setCellWidget(row,7,comments); checklist_table.setCellWidget(row,8,evidence_host); checklist_table.setCellWidget(row,9,action_host); checklist_table.setCellWidget(row,10,capa)
@@ -3912,21 +3969,32 @@ class MainWindow(QMainWindow):
                 comments=comments_widget.toPlainText().strip() if comments_widget else ""; evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
                 owner_edit=action_host.findChild(QLineEdit) if action_host else None; responsible=owner_edit.text().strip() if owner_edit else ""; due_widget=action_host.findChild(QDateEdit) if action_host else None; target_date=due_widget.date().toString("yyyy-MM-dd") if due_widget else ""
                 capa_required=1 if capa_widget and capa_widget.currentText()=="Yes" else 0
+                severity_widget=action_host.findChild(QComboBox) if action_host else None
+                severity_value=severity_widget.currentText() if severity_widget else "Medium"
+                action_line_edits=action_host.findChildren(QLineEdit) if action_host else []
+                capa_reason_value=action_line_edits[1].text().strip() if len(action_line_edits)>1 else ""
+                if ui_result=="Nonconformity" and (not comments or not evidence):
+                    QMessageBox.warning(d,"Finding Evidence Required",f"For nonconformity in {proc}, enter objective evidence/gap and an evidence reference or attachment path before saving."); return
+                if ui_result=="Nonconformity" and not responsible:
+                    QMessageBox.warning(d,"Finding Owner Required",f"Assign a responsible person for the finding in {proc}."); return
+                if ui_result=="Nonconformity" and not capa_required and not capa_reason_value:
+                    QMessageBox.warning(d,"CAPA Justification Required",f"Explain why CAPA is not required for the nonconformity in {proc}."); return
                 existing_response=db.fetchone("SELECT capa_number FROM audit_checklist_responses WHERE schedule_id=? AND item_no=?",(sid,n)); capa_number=safe(existing_response["capa_number"]) if existing_response else ""
-                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date,capa_required,capa_number) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date,capa_required=excluded.capa_required,capa_number=CASE WHEN excluded.capa_number='' THEN audit_checklist_responses.capa_number ELSE excluded.capa_number END",(sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date,capa_required,capa_number))
+                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date,capa_required,capa_number,severity,capa_reason,finding_classification) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date,capa_required=excluded.capa_required,capa_number=CASE WHEN excluded.capa_number='' THEN audit_checklist_responses.capa_number ELSE excluded.capa_number END,severity=excluded.severity,capa_reason=excluded.capa_reason,finding_classification=excluded.finding_classification",(sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date,capa_required,capa_number,severity_value,capa_reason_value,"Minor Nonconformity"))
                 aid=ensure_internal_audit(sid,sr); existing_f=db.fetchone("SELECT id,status,capa_number FROM audit_findings WHERE source_schedule_id=? AND source_item_no=?",(sid,n))
                 if result=="No":
                     detail=f"Procedure compliance nonconformity: {item_text}. Objective evidence / gap: {comments}".strip(); corrective=f"Analyse root cause; define and implement corrective action against the approved procedure; assign an owner and due date; verify effectiveness. Evidence: {evidence}".strip()
                     if existing_f:
-                        fid=existing_f["id"]; db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,capa_required=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",(aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,capa_required,datetime.now().isoformat(timespec="seconds"),fid))
+                        fid=existing_f["id"]; db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,capa_required=?,severity=?,capa_reason=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",(aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,capa_required,severity_value,capa_reason_value,datetime.now().isoformat(timespec="seconds"),fid))
                     else:
                         next_no=db.fetchone("SELECT COALESCE(MAX(finding_number),0)+1 AS n FROM audit_findings WHERE audit_id=?",(aid,))["n"]
-                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name,capa_required,capa_number) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc,capa_required,""))
+                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name,capa_required,capa_number,severity,capa_reason,finding_reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc,capa_required,"",severity_value,capa_reason_value,f"AF-{datetime.now().year}-{aid:04d}-{next_no:03d}"))
                         fid=db.fetchone("SELECT id FROM audit_findings WHERE source_schedule_id=? AND source_item_no=? ORDER BY id DESC LIMIT 1",(sid,n))["id"]
+                    db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Checklist finding saved",safe(existing_f["status"]) if existing_f else "","Open",capa_reason_value,evidence,safe(db.setting("current_user", "") or "System User"),datetime.now().isoformat(timespec="seconds")))
                     if capa_required:
                         fr=db.fetchone("SELECT capa_number FROM audit_findings WHERE id=?",(fid,)); capano=safe(fr["capa_number"]) if fr else ""
                         if not capano:
-                            capano=next_number("HSE-CAPA","capa"); db.execute("INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(capano,"Internal Audit",f"{no_item.text()} / {proc} / Finding {n}",detail,"Pending root-cause analysis",corrective,"Review similar procedures and activities to prevent recurrence",responsible,"High",target_date,"Open",datetime.now().isoformat(timespec="seconds")))
+                            capano=next_number("HSE-CAPA","capa"); db.execute("INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(capano,"Audit",f"{no_item.text()} / {proc} / Finding {n}",detail,"",corrective,"",responsible,severity_value,target_date,"Open",datetime.now().isoformat(timespec="seconds")))
                             db.execute("UPDATE audit_findings SET capa_number=? WHERE id=?",(capano,fid)); db.execute("UPDATE audit_checklist_responses SET capa_number=? WHERE schedule_id=? AND item_no=?",(capano,sid,n))
                 updated.append(sid)
             for sid in set(updated):db.execute("UPDATE audit_schedule SET status='Completed',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),sid))
@@ -4020,8 +4088,21 @@ class MainWindow(QMainWindow):
                 item=findings_table.item(idx.row(),12)
                 if item and item.text().isdigit(): ids.append(int(item.text()))
             if not ids:return QMessageBox.information(d,"Select Findings","Select one or more findings to close.")
-            if QMessageBox.question(d,"Close Findings",f"Mark {len(ids)} selected finding(s) as Closed? Use this only after corrective action is verified.")==QMessageBox.StandardButton.Yes:
-                for fid in ids: db.execute("UPDATE audit_findings SET status='Closed',verification='Closed from Internal Audit Findings Register',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),fid))
+            if QMessageBox.question(d,"Close Findings",f"Review and close {len(ids)} selected finding(s)? CAPA-required findings can only close after the linked CAPA is completed.")==QMessageBox.StandardButton.Yes:
+                now=datetime.now().isoformat(timespec="seconds")
+                for fid in ids:
+                    fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
+                    if not fr: continue
+                    if fr["capa_required"]:
+                        cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
+                        if not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed"):
+                            QMessageBox.warning(d,"CAPA Not Closed",f"Finding {safe(fr['finding_reference']) or fid} requires CAPA. Close it only after the linked CAPA is completed in the existing CAPA Tracking Register.")
+                            return
+                    elif not safe(fr["capa_reason"]):
+                        QMessageBox.warning(d,"Disposition Required",f"Finding {safe(fr['finding_reference']) or fid} has CAPA Required = No but no authorized justification. Edit the checklist disposition before closure.")
+                        return
+                    db.execute("UPDATE audit_findings SET status='Closed',verification_status='Verified',closure_date=?,verification='Verified from Internal Audit Findings Register',updated_at=? WHERE id=?",(date.today().isoformat(),now,fid))
+                    db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,user_name,timestamp) VALUES(?,?,?,?,?,?,?)",(fid,"Finding closed",safe(fr["status"]),"Closed","Closed after CAPA/disposition validation",safe(db.setting("current_user", "") or "System User"),now))
                 load_findings(); load_internal_register(); load_dashboard()
         close_selected_findings.clicked.connect(close_selected_internal_findings)
         refresh_findings.clicked.connect(load_findings); finding_status_filter.currentTextChanged.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
@@ -4062,6 +4143,139 @@ class MainWindow(QMainWindow):
             risk="Every 6 months (High) / Annual (Medium) / Every 18 months (Low)"
             for c,v in enumerate([proc,clause,len(items),risk]): master_table.setItem(rr,c,QTableWidgetItem(safe(v)))
         tabs.addTab(master,"Audit Master Data")
+
+        # Audit notifications are generated from the existing schedule and retain revisions.
+        notifications=QWidget(); nvl=QVBoxLayout(notifications)
+        nvl.addWidget(QLabel("AUDIT NOTIFICATIONS — generated from planned audits; each issued revision is retained."))
+        nt=QTableWidget(0,7); nt.setHorizontalHeaderLabels(["Schedule ID","Procedure / Audit","Area / Site","Planned Date","Lead Auditor","Status","Latest Notification"])
+        nt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); nt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); nt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        nt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); nt.horizontalHeader().setStretchLastSection(True); nvl.addWidget(nt,1)
+        nbar=QHBoxLayout(); nrefresh=QPushButton("Refresh"); ngen=QPushButton("Generate Word Notification"); nbar.addWidget(nrefresh); nbar.addWidget(ngen); nbar.addStretch(); nvl.addLayout(nbar)
+        def load_notifications():
+            rows=db.fetchall("SELECT s.*, (SELECT document_path FROM audit_notifications n WHERE n.schedule_id=s.id ORDER BY n.id DESC LIMIT 1) AS latest FROM audit_schedule s ORDER BY s.planned_date,s.id")
+            nt.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["id"],r["procedure_name"],r["area"],r["planned_date"],r["owner"],r["status"],Path(safe(r["latest"])).name if safe(r["latest"]) else "Not issued"]
+                for c,v in enumerate(vals): nt.setItem(i,c,QTableWidgetItem(safe(v)))
+        def generate_notification():
+            rr=nt.currentRow()
+            if rr<0: return QMessageBox.information(d,"Select Scheduled Audit","Select a scheduled audit first.")
+            sid=int(nt.item(rr,0).text()); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
+            if not sr: return
+            form=QDialog(d); form.setWindowTitle("Audit Notification Details"); form.resize(560,340); ff=QFormLayout(form)
+            recipients=QLineEdit(); recipients.setPlaceholderText("To recipients; separate multiple names/emails with semicolons")
+            cc=QLineEdit(); cc.setPlaceholderText("CC recipients (optional)")
+            scope=QTextEdit(); scope.setPlainText(f"Review conformity, adequacy, implementation and effectiveness of the controlled procedure: {safe(sr['procedure_name'])}. Review the current approved procedure, revision history, responsibilities, risk controls, competence, required records, monitoring and corrective-action closure."); scope.setMaximumHeight(100)
+            ff.addRow("To:",recipients); ff.addRow("CC:",cc); ff.addRow("Scope / documents required:",scope)
+            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
+            if form.exec()!=QDialog.DialogCode.Accepted:return
+            path,_=QFileDialog.getSaveFileName(d,"Save Audit Notification",f"Audit_Notification_{sid}.docx","Word Document (*.docx)")
+            if not path:return
+            try:
+                doc=Document(); sec=doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55); sec.left_margin=Inches(.65); sec.right_margin=Inches(.65)
+                hp=sec.header.paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; logo=report_logo_path()
+                if logo and Path(logo).exists(): hp.add_run().add_picture(logo,width=Inches(1.0),height=Inches(.5))
+                p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; run=p.add_run(f"{company_name()}\nINTERNAL HSE AUDIT NOTIFICATION"); run.bold=True; run.font.size=Pt(16)
+                linked=db.fetchone("SELECT number,title,audit_date FROM audits WHERE id=?",(sr["linked_audit_id"],)) if sr["linked_audit_id"] else None
+                data=[("Document Number",f"{document_prefix()}-AUD-NOT-{sid:04d}"),("Audit Reference",safe(linked["number"]) if linked else f"IA-PLAN-{sid:04d}"),("Audit Title",safe(linked["title"]) if linked else safe(sr["procedure_name"])),("Procedure",safe(sr["procedure_name"])),("Area / Site",safe(sr["area"])),("Planned Date",safe(sr["planned_date"])),("Lead Auditor",safe(sr["owner"])),("Audit Status",safe(sr["status"])),("To",recipients.text().strip()),("CC",cc.text().strip())]
+                table=doc.add_table(rows=0,cols=2); table.style="Table Grid"
+                for k,v in data:
+                    cells=table.add_row().cells; cells[0].text=k; cells[1].text=v
+                doc.add_heading("Audit Scope and Documents Required",level=2); doc.add_paragraph(scope.toPlainText())
+                doc.add_paragraph("Please make the current approved procedure and revision history, applicable legal/client/ISO requirements, relevant risk assessments, competence records, implementation records, monitoring results, previous findings and corrective-action evidence available. The audit will use controlled-document sampling, interviews and objective evidence to evaluate procedure compliance.")
+                doc.add_paragraph("Prepared by: ____________________     Reviewed / Approved by: ____________________     Date: ______________")
+                doc.save(path)
+                revision=db.fetchone("SELECT COALESCE(MAX(revision),0)+1 AS n FROM audit_notifications WHERE schedule_id=?",(sid,))["n"]
+                db.execute("INSERT INTO audit_notifications(schedule_id,document_path,recipients,revision,issued_at,issued_by) VALUES(?,?,?,?,?,?)",(sid,path,recipients.text().strip()+("; CC: "+cc.text().strip() if cc.text().strip() else ""),revision,datetime.now().isoformat(timespec="seconds"),safe(db.setting("current_user", "") or "System User")))
+                if sr["linked_audit_id"]: self._audit_log(sr["linked_audit_id"],"Audit notification generated",f"Revision {revision}: {path}")
+                load_notifications(); QMessageBox.information(d,"Notification Generated",f"Word audit notification saved. Revision: {revision}\n\n{path}")
+            except Exception as exc: logging.exception("Audit notification generation failed"); QMessageBox.critical(d,"Notification Failed",str(exc))
+        nrefresh.clicked.connect(load_notifications); ngen.clicked.connect(generate_notification); load_notifications(); tabs.addTab(notifications,"Audit Notifications")
+
+        # Verification is driven by the existing Audit Findings Register and reads CAPA status
+        # from the existing capa table; no parallel CAPA register is created.
+        verify=QWidget(); vvl=QVBoxLayout(verify); vvl.addWidget(QLabel("VERIFICATION & CLOSEOUT — CAPA status is read from the existing CAPA Tracking Register data."))
+        vt=QTableWidget(0,9); vt.setHorizontalHeaderLabels(["Finding Ref","Audit Ref","Procedure","Finding / Evidence","Responsible","Target Date","CAPA Ref","CAPA Status","Finding Status"])
+        vt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); vt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); vt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        vt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); vt.horizontalHeader().setStretchLastSection(True); vvl.addWidget(vt,1)
+        vbar=QHBoxLayout(); vrefresh=QPushButton("Refresh Findings"); vreview=QPushButton("Review / Verify Selected Finding"); vbar.addWidget(vrefresh); vbar.addWidget(vreview); vbar.addStretch(); vvl.addLayout(vbar)
+        def load_verification():
+            rows=db.fetchall("SELECT f.*,a.number AS audit_ref FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%' ORDER BY CASE WHEN lower(COALESCE(f.status,'')) IN ('closed','verified') THEN 1 ELSE 0 END,f.target_date")
+            vt.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(r["capa_number"]),)) if safe(r["capa_number"]) else None
+                ref=safe(r["finding_reference"]) or f"AF-{int(r['id']):05d}"
+                vals=[ref,r["audit_ref"],r["procedure_name"],r["finding_detail"] or r["observation"],r["responsible"],r["target_date"],r["capa_number"],safe(cr["status"]) if cr else ("Not Required" if not r["capa_required"] else "CAPA link missing"),r["status"]]
+                for c,v in enumerate(vals): vt.setItem(i,c,QTableWidgetItem(safe(v)))
+                vt.item(i,0).setData(Qt.ItemDataRole.UserRole,int(r["id"]))
+        def verify_selected_finding():
+            rr=vt.currentRow()
+            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding first.")
+            fid=vt.item(rr,0).data(Qt.ItemDataRole.UserRole); fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
+            if not fr:return
+            form=QDialog(d); form.setWindowTitle("Finding Verification / Closeout"); form.resize(600,360); ff=QFormLayout(form)
+            action=QComboBox(); action.addItems(["Pending Verification","Action in Progress","Pending Response","Closed","Return for Action"])
+            action.setCurrentText(safe(fr["status"]) if safe(fr["status"]) in ["Pending Verification","Action in Progress","Pending Response","Closed","Return for Action"] else "Pending Verification")
+            comments=QTextEdit(); comments.setPlaceholderText("Record verification comments, evidence reviewed, and reasons for rejection or return.")
+            evidence=QLineEdit(); evidence.setPlaceholderText("Evidence file path / reference (optional)"); browse=QPushButton("Browse…")
+            browse.clicked.connect(lambda: evidence.setText(QFileDialog.getOpenFileName(form,"Select Verification Evidence","","Evidence Files (*.*)")[0] or evidence.text()))
+            evhost=QWidget(); eh=QHBoxLayout(evhost); eh.setContentsMargins(0,0,0,0); eh.addWidget(evidence); eh.addWidget(browse)
+            ff.addRow("New finding status:",action); ff.addRow("Verification comments:",comments); ff.addRow("Evidence:",evhost)
+            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
+            if form.exec()!=QDialog.DialogCode.Accepted:return
+            new_status=action.currentText(); cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
+            if new_status=="Closed" and fr["capa_required"] and (not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed")):
+                return QMessageBox.warning(d,"CAPA Not Closed","This finding requires CAPA. The linked record in the existing CAPA Tracking Register must reach its approved completed/closed status before the audit finding can be closed.")
+            if new_status=="Closed" and not fr["capa_required"] and not safe(fr["capa_reason"]):
+                return QMessageBox.warning(d,"Disposition Required","An authorized reason for not requiring CAPA must be recorded before this finding can be closed.")
+            now=datetime.now().isoformat(timespec="seconds"); close_date=date.today().isoformat() if new_status=="Closed" else ""
+            db.execute("UPDATE audit_findings SET status=?,verification=?,verification_status=?,closure_date=?,updated_at=? WHERE id=?",(new_status,comments.toPlainText().strip(),"Verified" if new_status=="Closed" else "Pending Verification",close_date,now,fid))
+            db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Finding verification updated",safe(fr["status"]),new_status,comments.toPlainText().strip(),evidence.text().strip(),safe(db.setting("current_user", "") or "System User"),now))
+            load_verification(); load_findings(); load_internal_register(); load_dashboard(); QMessageBox.information(d,"Verification Saved","Finding verification history was recorded.")
+        vrefresh.clicked.connect(load_verification); vreview.clicked.connect(verify_selected_finding); load_verification(); tabs.addTab(verify,"Verification & Closeout")
+
+        # Editable custom procedure records are Audit-only. New checklists are labelled by their
+        # declared source/approval status and do not claim to be verified external requirements.
+        proc_admin=QWidget(); pvl=QVBoxLayout(proc_admin); pvl.addWidget(QLabel("PROCEDURE LIBRARY — verify company/client source documents before approving checklist criteria."))
+        pt=QTableWidget(0,8); pt.setHorizontalHeaderLabels(["Procedure ID","Title","Document No.","Revision","Clauses","Owner","Source / Approval Status","Active"])
+        pt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); pt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); pt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        pt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); pt.horizontalHeader().setStretchLastSection(True); pvl.addWidget(pt,1)
+        pbar=QHBoxLayout(); padd=QPushButton("Add / Edit Procedure"); pdel=QPushButton("Deactivate Selected"); pref=QPushButton("Refresh"); pbar.addWidget(padd); pbar.addWidget(pdel); pbar.addWidget(pref); pbar.addStretch(); pvl.addLayout(pbar)
+        def load_proc_admin():
+            rows=db.fetchall("SELECT * FROM audit_procedure_records ORDER BY title"); pt.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["procedure_id"],r["title"],r["document_number"],r["revision"],r["clause_references"],r["owner"],r["approval_status"],"Yes" if r["active"] else "No"]
+                for c,v in enumerate(vals):pt.setItem(i,c,QTableWidgetItem(safe(v)))
+                pt.item(i,0).setData(Qt.ItemDataRole.UserRole,int(r["id"]))
+        def edit_proc_record():
+            rr=pt.currentRow(); pid=pt.item(rr,0).data(Qt.ItemDataRole.UserRole) if rr>=0 and pt.item(rr,0) else None
+            rec=db.fetchone("SELECT * FROM audit_procedure_records WHERE id=?",(pid,)) if pid else None
+            form=QDialog(d); form.setWindowTitle("Audit Procedure Library Record"); form.resize(700,650); ff=QFormLayout(form)
+            fields={k:QLineEdit() for k in ["procedure_id","title","document_number","issuing_organization","site_contract","revision","effective_date","review_date","clause_references","owner","applicability","source_file"]}
+            for k,w in fields.items(): ff.addRow(k.replace("_"," ").title()+":",w)
+            approval=QComboBox(); approval.addItems(["Draft checklist pending review","Company-controlled procedure","Official verified requirement","Approved"]); ff.addRow("Source / approval status:",approval)
+            checklist=QTextEdit(); checklist.setPlaceholderText("One procedure-compliance audit criterion per line; include document control, responsibilities, controls, records, monitoring and corrective-action requirements."); ff.addRow("Checklist criteria (one per line):",checklist)
+            if rec:
+                for k,w in fields.items():w.setText(safe(rec[k]))
+                approval.setCurrentText(safe(rec["approval_status"]))
+                try:checklist.setPlainText("\n".join(json.loads(safe(rec["checklist_json"]) or "[]")))
+                except Exception:pass
+            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
+            if form.exec()!=QDialog.DialogCode.Accepted:return
+            title=fields["title"].text().strip(); items=[x.strip() for x in checklist.toPlainText().splitlines() if x.strip()]
+            if not title or not items:return QMessageBox.warning(d,"Required Fields","Enter a procedure title and at least one checklist criterion.")
+            vals=[fields[k].text().strip() for k in fields]+[approval.currentText(),json.dumps(items,ensure_ascii=False),datetime.now().isoformat(timespec="seconds")]
+            if rec:db.execute("UPDATE audit_procedure_records SET procedure_id=?,title=?,document_number=?,issuing_organization=?,site_contract=?,revision=?,effective_date=?,review_date=?,clause_references=?,owner=?,applicability=?,source_file=?,approval_status=?,checklist_json=?,updated_at=? WHERE id=?",tuple(vals)+(pid,))
+            else:db.execute("INSERT INTO audit_procedure_records(procedure_id,title,document_number,issuing_organization,site_contract,revision,effective_date,review_date,clause_references,owner,applicability,source_file,approval_status,checklist_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",tuple(vals))
+            load_proc_admin(); load_dashboard(); load_checklist_schedule()
+        def deactivate_proc_record():
+            rr=pt.currentRow()
+            if rr<0:return QMessageBox.information(d,"Select Procedure","Select a custom procedure first.")
+            pid=pt.item(rr,0).data(Qt.ItemDataRole.UserRole)
+            if QMessageBox.question(d,"Deactivate Procedure","Deactivate this custom procedure? Existing audits and saved findings will be retained.")==QMessageBox.StandardButton.Yes:
+                db.execute("UPDATE audit_procedure_records SET active=0,updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),pid));load_proc_admin()
+        padd.clicked.connect(edit_proc_record); pdel.clicked.connect(deactivate_proc_record); pref.clicked.connect(load_proc_admin); load_proc_admin(); tabs.addTab(proc_admin,"Procedure Library")
+
         close=QPushButton("Close"); close.clicked.connect(d.accept); root.addWidget(close)
         d.exec()
 
@@ -4311,8 +4525,9 @@ class MainWindow(QMainWindow):
                 else:
                     db.execute("UPDATE audits SET number=?,audit_date=?,audit_type=?,title=?,standard=?,department=?,location=?,scope=?,criteria=?,auditor=?,auditor_position=?,auditor_date=?,reviewer=?,reviewer_position=?,reviewer_date=?,approver=?,approver_position=?,approver_date=?,status=?,updated_at=?,submitted_at=? WHERE id=?", (ref_value,)+vals+(existing["id"],))
                     self._audit_log(existing["id"],"Audit submitted" if final else "Audit saved", "Status: Submitted" if final else "Status: Draft")
-                    db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
-                # If newly created, there are no finding rows yet; always write current finding state.
+                    # Preserve existing findings. They are updated individually below so linked CAPA
+                    # records, checklist-originated findings, evidence and audit history are not orphaned.
+                # If newly created, there are no finding rows yet; write current finding state.
                 # Preserve the currently listed finding attachments while rebuilding the
                 # finding rows. Removing an attachment from the UI therefore removes it
                 # from the saved audit on the next draft save.
@@ -4324,13 +4539,24 @@ class MainWindow(QMainWindow):
                             candidate=x["attachments"].item(i).text()
                             if Path(candidate).exists(): kept.append(candidate)
                         preserved_attachments.append((n,kept))
-                if existing and db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=?",(existing["id"],))["c"]>0:
-                    db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
+                prior_manual_findings = db.fetchall("SELECT id,status,capa_number FROM audit_findings WHERE audit_id=? AND source_schedule_id IS NULL",(existing["id"],)) if existing else []
+                visible_existing_ids = {int(x["data"]["id"]) for x in finding_widgets if x.get("data") is not None and "id" in x["data"].keys()}
                 for n,x in enumerate(finding_widgets,1):
                     pid=None
-                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,close_out_evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now,now))
-                    fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
+                    prior=x.get("data")
+                    fid=int(prior["id"]) if prior is not None and "id" in prior.keys() else None
+                    prior_row=db.fetchone("SELECT source_schedule_id FROM audit_findings WHERE id=? AND audit_id=?",(fid,existing["id"])) if fid else None
+                    # Checklist-originated findings are managed by the checklist workflow. Do not
+                    # overwrite or recreate them from the general Audit Workspace.
+                    if prior_row and prior_row["source_schedule_id"] is not None:
+                        continue
+                    values=(n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now)
+                    if fid:
+                        db.execute("UPDATE audit_findings SET finding_number=?,finding_standard=?,clause=?,sub_clause=?,finding_type=?,finding_detail=?,observation=?,corrective_action=?,responsible=?,responsible_person_id=?,location=?,target_date=?,status=?,close_out_evidence=?,updated_at=? WHERE id=? AND audit_id=?",values+(fid,existing["id"]))
+                        db.execute("DELETE FROM audit_attachments WHERE audit_id=? AND finding_id=?",(existing["id"],fid))
+                    else:
+                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,close_out_evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(existing["id"],)+values)
+                        fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
                     paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
                     for fp in paths:
                         try:
@@ -4343,6 +4569,13 @@ class MainWindow(QMainWindow):
                                 self._audit_attachment_copy([fp],reference.text(),existing["id"],fid,db.setting("current_user","") or "System User")
                         except Exception:
                             logging.exception("Unable to preserve audit finding attachment")
+                # A finding removed from the editor is never physically deleted. Keep its history
+                # and CAPA relationship, and flag it for controlled review/cancellation instead.
+                for prior_finding in prior_manual_findings:
+                    if int(prior_finding["id"]) not in visible_existing_ids:
+                        old_status=safe(prior_finding["status"])
+                        db.execute("UPDATE audit_findings SET status='Cancellation Pending Review',updated_at=? WHERE id=?",(now,prior_finding["id"]))
+                        db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,user_name,timestamp) VALUES(?,?,?,?,?,?,?)",(prior_finding["id"],"Cancellation requested from Audit Workspace",old_status,"Cancellation Pending Review","Finding retained to preserve audit history and any CAPA relationship; authorized review is required.",safe(db.setting("current_user", "") or "System User"),now))
                 # General attachments already saved independently.
                 existing=db.fetchone("SELECT * FROM audits WHERE id=?",(existing["id"],))
                 if refresh: refresh()
