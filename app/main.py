@@ -490,7 +490,8 @@ class Database:
         for col, definition in {
             "severity": "TEXT DEFAULT 'Medium'", "capa_reason": "TEXT DEFAULT ''",
             "verification_status": "TEXT DEFAULT 'Pending Verification'", "auditee_response": "TEXT DEFAULT ''",
-            "closure_date": "TEXT DEFAULT ''", "finding_reference": "TEXT DEFAULT ''"
+            "closure_date": "TEXT DEFAULT ''", "finding_reference": "TEXT DEFAULT ''",
+            "closeout_approver": "TEXT DEFAULT ''", "closeout_approval_status": "TEXT DEFAULT 'Pending Approval'"
         }.items():
             if col not in finding_cols:
                 self.conn.execute(f"ALTER TABLE audit_findings ADD COLUMN {col} {definition}")
@@ -3612,12 +3613,14 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:6px;")
         top.addWidget(title); top.addStretch()
         new_btn=QPushButton("+ NEW AUDIT"); new_btn.setMinimumHeight(40); new_btn.setStyleSheet("font-weight:bold;padding:8px 18px;")
+        edit_btn=QPushButton("Edit Selected Audit")
+        delete_btn=QPushButton("Delete Selected Audit")
         settings_btn=QPushButton("Audit Settings")
         report_btn=QPushButton("Generate Report")
         planning_btn=QPushButton("Internal Audit Center")
         planning_btn.setMinimumHeight(40)
         planning_btn.setStyleSheet("font-weight:bold;padding:8px 14px;background:#E8F0FA;color:#17365D;")
-        top.addWidget(planning_btn); top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(new_btn); layout.addLayout(top)
+        top.addWidget(planning_btn); top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(edit_btn); top.addWidget(delete_btn); top.addWidget(new_btn); layout.addLayout(top)
 
         filters=QHBoxLayout()
         search=QLineEdit(); search.setPlaceholderText("Search reference, title, department, location or auditor..."); filters.addWidget(search,2)
@@ -3661,7 +3664,28 @@ class MainWindow(QMainWindow):
             aid=selected_id()
             if aid: self._audit_register_detail(aid)
             else: QMessageBox.information(self,"Select Audit","Select an audit from the register first.")
-        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings); report_btn.clicked.connect(generate_selected)
+        def edit_selected_audit():
+            aid=selected_id()
+            if not aid: return QMessageBox.information(self,"Select Audit","Select an audit to edit first.")
+            self.audit_workspace(aid,load,allow_edit=True)
+        def delete_selected_audit():
+            aid=selected_id()
+            if not aid: return QMessageBox.information(self,"Select Audit","Select an audit to delete first.")
+            ar=db.fetchone("SELECT number,title FROM audits WHERE id=?",(aid,))
+            if not ar: return load()
+            answer=QMessageBox.question(self,"Delete Audit",f"Delete audit {safe(ar['number'])} — {safe(ar['title'])}?\n\nIts audit findings, evidence and audit history will be removed. Any linked CAPA record will be retained in the existing CAPA Tracking Register.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+            if answer!=QMessageBox.StandardButton.Yes: return
+            try:
+                db.execute("UPDATE audit_schedule SET linked_audit_id=NULL,updated_at=? WHERE linked_audit_id=?",(datetime.now().isoformat(timespec="seconds"),aid))
+                db.execute("DELETE FROM audit_finding_history WHERE finding_id IN (SELECT id FROM audit_findings WHERE audit_id=?)",(aid,))
+                db.execute("DELETE FROM audit_attachments WHERE audit_id=?",(aid,))
+                db.execute("DELETE FROM audit_findings WHERE audit_id=?",(aid,))
+                db.execute("DELETE FROM audit_history WHERE audit_id=?",(aid,))
+                db.execute("DELETE FROM audits WHERE id=?",(aid,))
+                load(); QMessageBox.information(self,"Audit Deleted","Selected audit deleted. Existing CAPA records were retained.")
+            except Exception as exc:
+                logging.exception("Audit deletion failed"); QMessageBox.critical(self,"Delete Failed",f"Could not delete the selected audit.\n\n{exc}")
+        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings); report_btn.clicked.connect(generate_selected); edit_btn.clicked.connect(edit_selected_audit); delete_btn.clicked.connect(delete_selected_audit)
         planning_btn.clicked.connect(self.audit_planning_center)
         table.cellDoubleClicked.connect(lambda *_:open_selected())
         table.cellClicked.connect(lambda row,col: self._audit_register_detail(table.item(row,0).data(Qt.ItemDataRole.UserRole)) if col==0 and table.item(row,0) else None)
@@ -3736,10 +3760,16 @@ class MainWindow(QMainWindow):
         ]
         expanded = {}
         for procedure, (clauses, specifics) in procedures.items():
-            criteria = list(governance)
+            criteria = list(governance[:5])
             for specific in specifics:
-                criteria.append(f"Procedure-specific control: the approved procedure defines the requirement, accountable role, verification/acceptance method and required objective record for {specific.lower()}.")
-            expanded[procedure] = (clauses, criteria)
+                criteria.append(f"Procedure-specific control: verify {specific.lower()} against the current approved {procedure.lower()} procedure and retain objective evidence.")
+            seed = list(specifics) or ["required controls", "assigned responsibilities", "records and monitoring"]
+            pad_index = 0
+            while len(criteria) < 15:
+                specific = seed[pad_index % len(seed)]
+                criteria.append(f"Implementation sample: select a recent work activity and verify that {specific.lower()} was implemented, recorded and reviewed for {procedure.lower()}.")
+                pad_index += 1
+            expanded[procedure] = (clauses, criteria[:15])
         # Audit-specific custom procedure records extend the starter library without changing
         # any other module. Custom checklists are not represented as officially verified unless reviewed.
         try:
@@ -3876,10 +3906,10 @@ class MainWindow(QMainWindow):
         for b in [load_btn,save_btn,export_checklist_btn,export_word_btn,print_checklist_btn]: cbar.addWidget(b)
         cl.addLayout(cbar)
         score=QLabel("Procedure compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:8px;background:#E8F0FA;border:1px solid #C7D7EA;"); cl.addWidget(score)
-        checklist_table=QTableWidget(0,11); checklist_table.setHorizontalHeaderLabels(["Audit Number","Procedure No.","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","CAPA Required"])
+        checklist_table=QTableWidget(0,14); checklist_table.setHorizontalHeaderLabels(["Audit Number","Procedure No.","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","Severity","CAPA Required","CAPA Not Required Justification"])
         checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setTextElideMode(Qt.TextElideMode.ElideNone); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); checklist_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setMinimumHeight(440); checklist_table.verticalHeader().setDefaultSectionSize(118); checklist_table.verticalHeader().setMinimumSectionSize(90)
         checklist_table.setStyleSheet("QTableWidget{gridline-color:#C9D3DF;font-size:10pt;} QTableWidget::item{padding:7px;} QHeaderView::section{background:#17365D;color:white;font-weight:bold;padding:8px;border:1px solid #D7E0EA;}")
-        for col,width in {0:150,1:105,2:220,3:480,4:115,5:145,6:150,7:300,8:245,9:245,10:140}.items(): checklist_table.setColumnWidth(col,width)
+        for col,width in {0:150,1:105,2:220,3:420,4:115,5:155,6:150,7:280,8:230,9:210,10:135,11:105,12:120,13:230}.items(): checklist_table.setColumnWidth(col,width)
         cl.addWidget(checklist_table,1)
         def load_checklist_schedule():
             selected={schedule_model.item(i).data(Qt.ItemDataRole.UserRole) for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked}
@@ -3909,7 +3939,6 @@ class MainWindow(QMainWindow):
             severity=QComboBox(); severity.addItems(["Low","Medium","High","Critical"])
             capa_reason=QLineEdit(); capa_reason.setPlaceholderText("If CAPA = No, enter authorized justification")
             capa=QComboBox(); capa.addItems(["No","Yes"])
-            action_host=QWidget(); action_layout=QVBoxLayout(action_host); action_layout.setContentsMargins(3,3,3,3); action_layout.addWidget(owner); action_layout.addWidget(QLabel("Target date for compliance / corrective action")); action_layout.addWidget(due); action_layout.addWidget(QLabel("Finding severity")); action_layout.addWidget(severity); action_layout.addWidget(capa_reason)
             if saved:
                 old_result=safe(saved["result"]); result.setCurrentText({"Yes":"Conforming","No":"Nonconformity","N/A":"N/A"}.get(old_result,old_result if old_result in ["Not Audited","Conforming","Nonconformity","N/A"] else "Not Audited"))
                 comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"])); capa.setCurrentText("Yes" if ("capa_required" in saved.keys() and saved["capa_required"]) else "No")
@@ -3917,7 +3946,7 @@ class MainWindow(QMainWindow):
                 if "capa_reason" in saved.keys(): capa_reason.setText(safe(saved["capa_reason"]))
                 try: due.setDate(QDate.fromString(safe(saved["target_date"]),"yyyy-MM-dd"))
                 except Exception: pass
-            checklist_table.setCellWidget(row,6,result); checklist_table.setCellWidget(row,7,comments); checklist_table.setCellWidget(row,8,evidence_host); checklist_table.setCellWidget(row,9,action_host); checklist_table.setCellWidget(row,10,capa)
+            checklist_table.setCellWidget(row,6,result); checklist_table.setCellWidget(row,7,comments); checklist_table.setCellWidget(row,8,evidence_host); checklist_table.setCellWidget(row,9,owner); checklist_table.setCellWidget(row,10,due); checklist_table.setCellWidget(row,11,severity); checklist_table.setCellWidget(row,12,capa); checklist_table.setCellWidget(row,13,capa_reason)
             for col in range(checklist_table.columnCount()):
                 it=checklist_table.item(row,col)
                 if it: it.setToolTip(it.text())
@@ -3964,15 +3993,13 @@ class MainWindow(QMainWindow):
                 sid=int(sid); n=int(n); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
                 if not sr: continue
                 proc=safe(sr["procedure_name"]); clause,items=self._audit_procedure_library().get(proc,("",[])); item_text=criterion.text()
-                result_widget=checklist_table.cellWidget(row,6); comments_widget=checklist_table.cellWidget(row,7); evidence_host=checklist_table.cellWidget(row,8); action_host=checklist_table.cellWidget(row,9); capa_widget=checklist_table.cellWidget(row,10)
+                result_widget=checklist_table.cellWidget(row,6); comments_widget=checklist_table.cellWidget(row,7); evidence_host=checklist_table.cellWidget(row,8); owner_edit=checklist_table.cellWidget(row,9); due_widget=checklist_table.cellWidget(row,10); severity_widget=checklist_table.cellWidget(row,11); capa_widget=checklist_table.cellWidget(row,12); capa_reason_widget=checklist_table.cellWidget(row,13)
                 ui_result=result_widget.currentText() if result_widget else "Not Audited"; result={"Conforming":"Yes","Nonconformity":"No","N/A":"N/A"}.get(ui_result,"Not Audited")
                 comments=comments_widget.toPlainText().strip() if comments_widget else ""; evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
-                owner_edit=action_host.findChild(QLineEdit) if action_host else None; responsible=owner_edit.text().strip() if owner_edit else ""; due_widget=action_host.findChild(QDateEdit) if action_host else None; target_date=due_widget.date().toString("yyyy-MM-dd") if due_widget else ""
+                responsible=owner_edit.text().strip() if isinstance(owner_edit,QLineEdit) else ""; target_date=due_widget.date().toString("yyyy-MM-dd") if isinstance(due_widget,QDateEdit) else ""
                 capa_required=1 if capa_widget and capa_widget.currentText()=="Yes" else 0
-                severity_widget=action_host.findChild(QComboBox) if action_host else None
-                severity_value=severity_widget.currentText() if severity_widget else "Medium"
-                action_line_edits=action_host.findChildren(QLineEdit) if action_host else []
-                capa_reason_value=action_line_edits[1].text().strip() if len(action_line_edits)>1 else ""
+                severity_value=severity_widget.currentText() if isinstance(severity_widget,QComboBox) else "Medium"
+                capa_reason_value=capa_reason_widget.text().strip() if isinstance(capa_reason_widget,QLineEdit) else ""
                 if ui_result=="Nonconformity" and (not comments or not evidence):
                     QMessageBox.warning(d,"Finding Evidence Required",f"For nonconformity in {proc}, enter objective evidence/gap and an evidence reference or attachment path before saving."); return
                 if ui_result=="Nonconformity" and not responsible:
@@ -4006,10 +4033,10 @@ class MainWindow(QMainWindow):
                 cells=[safe(checklist_table.item(row,c).text() if checklist_table.item(row,c) else "") for c in range(6)]
                 result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""
                 comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""
-                host=checklist_table.cellWidget(row,9); owner=host.findChild(QLineEdit).text() if host else ""; due=host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if host and host.findChild(QDateEdit) else ""; capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No"
-                rows.append("<tr>"+"".join(f"<td>{safe(v)}</td>" for v in cells)+f"<td>{safe(result)}</td><td>{safe(comments)}</td><td>{safe(evidence)}</td><td>{safe(owner)}</td><td>{safe(due)}</td><td>{safe(capa)}</td></tr>")
+                owner_w=checklist_table.cellWidget(row,9); due_w=checklist_table.cellWidget(row,10); sev_w=checklist_table.cellWidget(row,11); capa_w=checklist_table.cellWidget(row,12); reason_w=checklist_table.cellWidget(row,13); owner=owner_w.text() if isinstance(owner_w,QLineEdit) else ""; due=due_w.date().toString("dd-MMM-yyyy") if isinstance(due_w,QDateEdit) else ""; severity=sev_w.currentText() if isinstance(sev_w,QComboBox) else ""; capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No"; reason=reason_w.text() if isinstance(reason_w,QLineEdit) else ""
+                rows.append("<tr>"+"".join(f"<td>{safe(v)}</td>" for v in cells)+f"<td>{safe(result)}</td><td>{safe(comments)}</td><td>{safe(evidence)}</td><td>{safe(owner)}</td><td>{safe(due)}</td><td>{safe(severity)}</td><td>{safe(capa)}</td><td>{safe(reason)}</td></tr>")
             logo=report_logo_path(); logo_html=f'<p><img src="{logo}" width="120"></p>' if logo and Path(logo).exists() else ""
-            headers="<th>Audit No.</th><th>Procedure No.</th><th>Procedure / Date</th><th>Procedure Compliance Criteria</th><th>ISO Main Clause</th><th>Sub-clause(s)</th><th>Result</th><th>Objective Evidence / Gap</th><th>Evidence Attachment</th><th>Responsible Person</th><th>Target Date</th><th>CAPA Required</th>"
+            headers="<th>Audit No.</th><th>Procedure No.</th><th>Procedure / Date</th><th>Procedure Compliance Criteria</th><th>ISO Main Clause</th><th>Sub-clause(s)</th><th>Result</th><th>Objective Evidence / Gap</th><th>Evidence Attachment</th><th>Responsible Person</th><th>Target Date</th><th>Severity</th><th>CAPA Required</th><th>CAPA Not Required Justification</th>"
             return f'<html><head><style>body{{font-family:Arial;font-size:9pt}}h1{{color:#17365D}}table{{border-collapse:collapse;width:100%}}th{{background:#17365D;color:white}}td,th{{border:1px solid #aab7c4;padding:6px;vertical-align:top;white-space:pre-wrap}}</style></head><body>{logo_html}<h1>{safe(company_name())} — INTERNAL AUDIT CHECKLIST</h1><p>Procedure conformity, adequacy, implementation and objective evidence.</p><table><tr>{headers}</tr>{"".join(rows)}</table></body></html>'
         def print_checklist():
             if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
@@ -4021,20 +4048,20 @@ class MainWindow(QMainWindow):
             path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.xlsx","Excel Workbook (*.xlsx)")
             if not path:return
             try:
-                wb=Workbook(); ws=wb.active; ws.title="Procedure Audit"; ws.merge_cells("A1:L1"); ws["A1"]=f"{company_name()} — INTERNAL AUDIT / PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=15,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.append(["Audit Number","Procedure Number","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","CAPA Required"])
+                wb=Workbook(); ws=wb.active; ws.title="Procedure Audit"; ws.merge_cells("A1:N1"); ws["A1"]=f"{company_name()} — INTERNAL AUDIT / PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=15,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.append(["Audit Number","Procedure Number","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","Severity","CAPA Required","CAPA Not Required Justification"])
                 for row in range(checklist_table.rowCount()):
-                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)]; result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""; comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""; host=checklist_table.cellWidget(row,9); owner=host.findChild(QLineEdit).text() if host else ""; due=host.findChild(QDateEdit).date().toString("yyyy-MM-dd") if host and host.findChild(QDateEdit) else ""; capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No"; ws.append(vals+[result,comments,evidence,owner,due,capa])
+                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)]; result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""; comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""; owner_w=checklist_table.cellWidget(row,9); due_w=checklist_table.cellWidget(row,10); sev_w=checklist_table.cellWidget(row,11); capa_w=checklist_table.cellWidget(row,12); reason_w=checklist_table.cellWidget(row,13); owner=owner_w.text() if isinstance(owner_w,QLineEdit) else ""; due=due_w.date().toString("yyyy-MM-dd") if isinstance(due_w,QDateEdit) else ""; sev=sev_w.currentText() if isinstance(sev_w,QComboBox) else ""; capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No"; reason=reason_w.text() if isinstance(reason_w,QLineEdit) else ""; ws.append(vals+[result,comments,evidence,owner,due,sev,capa,reason])
                 for cell in ws[2]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="4472C4");cell.alignment=Alignment(wrap_text=True,vertical="center")
                 for row in ws.iter_rows(min_row=3):
                     for cell in row:cell.alignment=Alignment(wrap_text=True,vertical="top")
-                for col,width in {"A":19,"B":17,"C":30,"D":68,"E":18,"F":22,"G":20,"H":48,"I":35,"J":28,"K":17,"L":16}.items():ws.column_dimensions[col].width=width
+                for col,width in {"A":19,"B":17,"C":30,"D":68,"E":18,"F":22,"G":20,"H":48,"I":35,"J":28,"K":17,"L":14,"M":16,"N":35}.items():ws.column_dimensions[col].width=width
                 ws.row_dimensions[1].height=32;ws.row_dimensions[2].height=42
                 for rn in range(3,ws.max_row+1):ws.row_dimensions[rn].height=86
                 try:
                     logo=report_logo_path()
                     if logo and Path(logo).exists():img=XLImage(str(logo));img.width=95;img.height=38;ws.add_image(img,"A1")
                 except Exception:logging.exception("Audit checklist logo embedding failed")
-                ws.freeze_panes="A3";ws.auto_filter.ref=f"A2:L{ws.max_row}";wb.save(path);QMessageBox.information(d,"Export Complete","Procedure compliance audit checklist exported successfully.")
+                ws.freeze_panes="A3";ws.auto_filter.ref=f"A2:N{ws.max_row}";wb.save(path);QMessageBox.information(d,"Export Complete","Procedure compliance audit checklist exported successfully.")
             except Exception as exc:logging.exception("Audit checklist Excel export failed");QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
         def export_checklist_word():
             if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
@@ -4043,15 +4070,15 @@ class MainWindow(QMainWindow):
             try:
                 doc=Document();sec=doc.sections[0];sec.orientation=WD_ORIENT.LANDSCAPE;sec.page_width,sec.page_height=sec.page_height,sec.page_width;sec.top_margin=Inches(.35);sec.bottom_margin=Inches(.35);sec.left_margin=Inches(.35);sec.right_margin=Inches(.35);hp=sec.header.paragraphs[0];hp.alignment=WD_ALIGN_PARAGRAPH.CENTER;logo=report_logo_path()
                 if logo and Path(logo).exists():
-                    try:hp.add_run().add_picture(logo,width=Inches(.9),height=Inches(.45))
+                    try:hp.add_run().add_picture(str(logo),width=Inches(.9),height=Inches(.45))
                     except Exception:logging.exception("Audit checklist Word logo failed")
                 p=doc.add_paragraph();p.alignment=WD_ALIGN_PARAGRAPH.CENTER;r=p.add_run(f"{company_name()}\nINTERNAL AUDIT — PROCEDURE COMPLIANCE CHECKLIST");r.bold=True;r.font.size=Pt(15)
-                table=doc.add_table(rows=1,cols=12);table.alignment=WD_TABLE_ALIGNMENT.CENTER;table.autofit=False;headers=["Audit No.","Procedure No.","Procedure / Date","Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person","Target Date","CAPA Required"]
+                table=doc.add_table(rows=1,cols=14);table.alignment=WD_TABLE_ALIGNMENT.CENTER;table.autofit=False;headers=["Audit No.","Procedure No.","Procedure / Date","Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person","Target Date","Severity","CAPA Required","CAPA Not Required Justification"]
                 for i,h in enumerate(headers):table.cell(0,i).text=h
                 for row in range(checklist_table.rowCount()):
-                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)];result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else "";comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else "";evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else "";host=checklist_table.cellWidget(row,9);owner=host.findChild(QLineEdit).text() if host else "";due=host.findChild(QDateEdit).date().toString("dd-MMM-yyyy") if host and host.findChild(QDateEdit) else "";capa=checklist_table.cellWidget(row,10).currentText() if checklist_table.cellWidget(row,10) else "No";cells=table.add_row().cells
-                    for i,v in enumerate(vals+[result,comments,evidence,owner,due,capa]):cells[i].text=safe(v);cells[i].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
-                style_docx_table(table,header=True,font_size=6);widths=[.75,.75,1.35,2.2,.65,.75,.8,1.6,1.25,1.1,.8,.75]
+                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)];result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else "";comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else "";evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else "";owner_w=checklist_table.cellWidget(row,9);due_w=checklist_table.cellWidget(row,10);sev_w=checklist_table.cellWidget(row,11);capa_w=checklist_table.cellWidget(row,12);reason_w=checklist_table.cellWidget(row,13);owner=owner_w.text() if isinstance(owner_w,QLineEdit) else "";due=due_w.date().toString("dd-MMM-yyyy") if isinstance(due_w,QDateEdit) else "";sev=sev_w.currentText() if isinstance(sev_w,QComboBox) else "";capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No";reason=reason_w.text() if isinstance(reason_w,QLineEdit) else "";cells=table.add_row().cells
+                    for i,v in enumerate(vals+[result,comments,evidence,owner,due,sev,capa,reason]):cells[i].text=safe(v);cells[i].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
+                style_docx_table(table,header=True,font_size=6);widths=[.65,.65,1.1,1.65,.55,.6,.65,1.25,1.0,.9,.65,.55,.65,1.0]
                 for row in table.rows:
                     for i,c in enumerate(row.cells):c.width=Inches(widths[i])
                 doc.save(path);QMessageBox.information(d,"Export Complete","Word checklist exported successfully.")
@@ -4061,7 +4088,7 @@ class MainWindow(QMainWindow):
 
         # ----- Findings register tab -----
         findings=QWidget(); fvl=QVBoxLayout(findings)
-        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Internal Audit Findings Register — each saved nonconformity is traced to its procedure and checklist criterion")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
+        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Internal Audit Findings Register — each saved nonconformity is traced to its procedure and checklist criterion")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); edit_finding_btn=QPushButton("Edit Selected Finding"); delete_finding_btn=QPushButton("Delete Selected Finding"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(edit_finding_btn); fbar.addWidget(delete_finding_btn); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
         findings_table=QTableWidget(0,13); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","CAPA Reference","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); findings_table.horizontalHeader().setStretchLastSection(True); findings_table.setColumnHidden(11,True); findings_table.setColumnHidden(12,True); fvl.addWidget(findings_table,1)
         def load_findings():
             rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
@@ -4104,19 +4131,76 @@ class MainWindow(QMainWindow):
                     db.execute("UPDATE audit_findings SET status='Closed',verification_status='Verified',closure_date=?,verification='Verified from Internal Audit Findings Register',updated_at=? WHERE id=?",(date.today().isoformat(),now,fid))
                     db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,user_name,timestamp) VALUES(?,?,?,?,?,?,?)",(fid,"Finding closed",safe(fr["status"]),"Closed","Closed after CAPA/disposition validation",safe(db.setting("current_user", "") or "System User"),now))
                 load_findings(); load_internal_register(); load_dashboard()
-        close_selected_findings.clicked.connect(close_selected_internal_findings)
+        def edit_selected_finding():
+            rr=findings_table.currentRow()
+            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding to edit first.")
+            fid=int(findings_table.item(rr,12).text()); fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
+            if not fr:return
+            form=QDialog(d); form.setWindowTitle("Edit Audit Finding"); form.resize(650,520); ff=QFormLayout(form)
+            detail=QTextEdit(); detail.setPlainText(safe(fr["finding_detail"] or fr["observation"]))
+            corrective=QTextEdit(); corrective.setPlainText(safe(fr["corrective_action"]))
+            responsible=QLineEdit(safe(fr["responsible"])); due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy")
+            try: due.setDate(QDate.fromString(safe(fr["target_date"]),"yyyy-MM-dd"))
+            except Exception: due.setDate(QDate.currentDate().addDays(30))
+            severity=QComboBox(); severity.addItems(["Low","Medium","High","Critical"]); severity.setCurrentText(safe(fr["severity"]) or "Medium")
+            status_edit=QComboBox(); status_edit.addItems(["Open","In Progress","Pending Verification","Closed"]); status_edit.setCurrentText(safe(fr["status"]) if safe(fr["status"]) in ["Open","In Progress","Pending Verification","Closed"] else "Open")
+            ff.addRow("Finding detail / evidence gap:",detail); ff.addRow("Corrective action:",corrective); ff.addRow("Responsible person:",responsible); ff.addRow("Target date:",due); ff.addRow("Severity:",severity); ff.addRow("Status:",status_edit)
+            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
+            if form.exec()!=QDialog.DialogCode.Accepted:return
+            if status_edit.currentText()=="Closed":
+                linked_capa=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
+                if fr["capa_required"] and (not linked_capa or safe(linked_capa["status"]).lower() not in ("closed","verified","complete","completed")):
+                    return QMessageBox.warning(form,"CAPA Not Closed","Complete the linked CAPA in the existing CAPA Tracking Register before closing this finding.")
+                if not fr["capa_required"] and not safe(fr["capa_reason"]):
+                    return QMessageBox.warning(form,"Disposition Required","Record an authorized reason for not requiring CAPA before closing this finding.")
+            now=datetime.now().isoformat(timespec="seconds")
+            db.execute("UPDATE audit_findings SET finding_detail=?,observation=?,corrective_action=?,responsible=?,target_date=?,severity=?,status=?,updated_at=? WHERE id=?",(detail.toPlainText().strip(),detail.toPlainText().strip(),corrective.toPlainText().strip(),responsible.text().strip(),due.date().toString("yyyy-MM-dd"),severity.currentText(),status_edit.currentText(),now,fid))
+            # Keep the existing linked CAPA record synchronized without creating another CAPA.
+            if safe(fr["capa_number"]):
+                db.execute("UPDATE capa SET finding=?,corrective_action=?,responsible=?,priority=?,target_date=? WHERE number=?",(detail.toPlainText().strip(),corrective.toPlainText().strip(),responsible.text().strip(),severity.currentText(),due.date().toString("yyyy-MM-dd"),safe(fr["capa_number"])))
+            load_findings(); load_verification(); load_dashboard()
+        def delete_selected_finding():
+            ids=[]
+            for idx in findings_table.selectionModel().selectedRows():
+                it=findings_table.item(idx.row(),12)
+                if it and it.text().isdigit():ids.append(int(it.text()))
+            if not ids and findings_table.currentRow()>=0 and findings_table.item(findings_table.currentRow(),12):ids=[int(findings_table.item(findings_table.currentRow(),12).text())]
+            if not ids:return QMessageBox.information(d,"Select Finding","Select one or more findings to delete first.")
+            if QMessageBox.question(d,"Delete Audit Finding",f"Delete {len(ids)} selected audit finding(s)? Any linked CAPA records will remain in the existing CAPA Tracking Register.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            for fid in ids:
+                db.execute("DELETE FROM audit_finding_history WHERE finding_id=?",(fid,)); db.execute("DELETE FROM audit_attachments WHERE finding_id=?",(fid,)); db.execute("DELETE FROM audit_findings WHERE id=?",(fid,))
+            load_findings(); load_verification(); load_dashboard()
+        close_selected_findings.clicked.connect(close_selected_internal_findings); edit_finding_btn.clicked.connect(edit_selected_finding); delete_finding_btn.clicked.connect(delete_selected_finding)
         refresh_findings.clicked.connect(load_findings); finding_status_filter.currentTextChanged.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
         load_findings(); tabs.addTab(findings,"Internal Audit Findings")
 
         # ----- Internal audit register / master data / dashboard -----
         dash=QWidget(); dl=QVBoxLayout(dash); dl.addWidget(QLabel("INTERNAL AUDIT PERFORMANCE DASHBOARD"))
         dashboard_summary=QLabel(); dashboard_summary.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;padding:10px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dashboard_summary.setWordWrap(True); dl.addWidget(dashboard_summary)
+        class AuditDashboardCharts(QWidget):
+            def __init__(self,parent=None):
+                super().__init__(parent); self.audit_counts=[]; self.finding_counts=[0,0]; self.setMinimumHeight(250); self.setMaximumHeight(300)
+            def set_data(self,audit_counts,open_findings,closed_findings):
+                self.audit_counts=list(audit_counts); self.finding_counts=[int(open_findings),int(closed_findings)]; self.update()
+            def paintEvent(self,event):
+                painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.fillRect(self.rect(),QColor("#FFFFFF")); painter.setPen(QColor("#17365D")); painter.setFont(QFont("Arial",11,QFont.Weight.Bold)); painter.drawText(18,25,"AUDIT STATUS — BAR GRAPH"); painter.drawText(max(360,self.width()//2),25,"FINDINGS — STATUS DISTRIBUTION")
+                chart_left=QRectF(18,42,max(280,self.width()//2-35),190); painter.setPen(QPen(QColor("#D5DEE8"),1)); painter.drawRect(chart_left)
+                data=self.audit_counts or [("No data",0)]; maxv=max([x[1] for x in data]+[1]); usable=max(1,len(data)); bar_h=min(24,max(12,int((chart_left.height()-18)/usable)-5));
+                for idx,(label,value) in enumerate(data[:6]):
+                    y=chart_left.top()+12+idx*(bar_h+5); width=max(0,(chart_left.width()-130)*float(value)/maxv); painter.setPen(QColor("#34495E")); painter.setFont(QFont("Arial",8)); painter.drawText(int(chart_left.left()+6),int(y+bar_h-3),str(label)[:18]); painter.fillRect(QRectF(chart_left.left()+112,y,width,bar_h),QColor("#4472C4")); painter.setPen(QColor("#17365D")); painter.drawText(int(chart_left.left()+116+width),int(y+bar_h-3),str(value))
+                pie_center_x=max(360,self.width()//2)+self.width()//4; pie_center_y=132; radius=76; total=sum(self.finding_counts); colors=[QColor("#4472C4"),QColor("#70AD47")]; start=0
+                for idx,value in enumerate(self.finding_counts):
+                    span=int(360*value/total) if total else (180 if idx==0 else 180); painter.setBrush(colors[idx]); painter.setPen(QPen(QColor("#FFFFFF"),2)); painter.drawPie(QRectF(pie_center_x-radius,pie_center_y-radius,radius*2,radius*2),start*16,span*16); start+=span
+                painter.setPen(QColor("#34495E")); painter.setFont(QFont("Arial",9)); painter.drawText(pie_center_x-90,230,f"Open: {self.finding_counts[0]}     Closed: {self.finding_counts[1]}")
+        dashboard_charts=AuditDashboardCharts(); dl.addWidget(dashboard_charts)
         dashboard_table=QTableWidget(0,5); dashboard_table.setHorizontalHeaderLabels(["Procedure","Audit Area","Risk Level","Planned Audits","Open Findings"]); dashboard_table.setAlternatingRowColors(True); dashboard_table.horizontalHeader().setStretchLastSection(True); dl.addWidget(dashboard_table,1)
         def load_dashboard():
             total=db.fetchone("SELECT COUNT(*) c FROM audit_schedule") ["c"]
             open_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'open')) NOT IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
             closed_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'')) IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
             dashboard_summary.setText(f"Scheduled procedure audits: {total}    |    Open findings: {open_count}    |    Closed findings: {closed_count}")
+            audit_status_rows=db.fetchall("SELECT status,COUNT(*) AS n FROM audit_schedule GROUP BY status ORDER BY status")
+            dashboard_charts.set_data([(safe(x["status"]) or "Unspecified",int(x["n"])) for x in audit_status_rows],open_count,closed_count)
             rows=db.fetchall("SELECT procedure_name,area,risk_level,COUNT(*) AS planned FROM audit_schedule GROUP BY procedure_name,area,risk_level ORDER BY risk_level,area,procedure_name")
             dashboard_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
@@ -4134,7 +4218,7 @@ class MainWindow(QMainWindow):
                 vals=[r["number"],r["scheduled_procedure"] or r["title"] or r["scope"],r["scheduled_area"] or r["location"],r["audit_date"],r["auditor"] or r["lead_auditor"],op,closed,r["status"],aid,r["schedule_ref"] or ""]
                 for c,v in enumerate(vals): reg_table.setItem(i,c,QTableWidgetItem(safe(v)))
         rrefresh.clicked.connect(load_internal_register); reg_table.cellDoubleClicked.connect(lambda *_: (d.accept(), self.audit_workspace(int(reg_table.item(reg_table.currentRow(),8).text()),self.audits)) if reg_table.currentRow()>=0 else None)
-        load_internal_register(); tabs.addTab(reg,"Internal Audit Register")
+        load_internal_register()
 
         master=QWidget(); mvl=QVBoxLayout(master); mvl.addWidget(QLabel("AUDIT MASTER DATA — PROCEDURE LIBRARY, ISO CLAUSES AND RISK-BASED FREQUENCY"))
         master_table=QTableWidget(0,4); master_table.setHorizontalHeaderLabels(["Procedure / Audit Topic","Applicable ISO Clauses","Checklist Criteria Count","Default Risk Frequency"]); master_table.setAlternatingRowColors(True); master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); master_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch); master_table.horizontalHeader().setStretchLastSection(True); mvl.addWidget(master_table,1)
@@ -4142,7 +4226,7 @@ class MainWindow(QMainWindow):
             rr=master_table.rowCount(); master_table.insertRow(rr)
             risk="Every 6 months (High) / Annual (Medium) / Every 18 months (Low)"
             for c,v in enumerate([proc,clause,len(items),risk]): master_table.setItem(rr,c,QTableWidgetItem(safe(v)))
-        tabs.addTab(master,"Audit Master Data")
+        # Audit Master Data is intentionally kept out of the user-facing tab set to reduce confusion.
 
         # Audit notifications are generated from the existing schedule and retain revisions.
         notifications=QWidget(); nvl=QVBoxLayout(notifications)
@@ -4174,7 +4258,7 @@ class MainWindow(QMainWindow):
             try:
                 doc=Document(); sec=doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55); sec.left_margin=Inches(.65); sec.right_margin=Inches(.65)
                 hp=sec.header.paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; logo=report_logo_path()
-                if logo and Path(logo).exists(): hp.add_run().add_picture(logo,width=Inches(1.0),height=Inches(.5))
+                if logo and Path(logo).exists(): hp.add_run().add_picture(str(logo),width=Inches(1.0),height=Inches(.5))
                 p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; run=p.add_run(f"{company_name()}\nINTERNAL HSE AUDIT NOTIFICATION"); run.bold=True; run.font.size=Pt(16)
                 linked=db.fetchone("SELECT number,title,audit_date FROM audits WHERE id=?",(sr["linked_audit_id"],)) if sr["linked_audit_id"] else None
                 data=[("Document Number",f"{document_prefix()}-AUD-NOT-{sid:04d}"),("Audit Reference",safe(linked["number"]) if linked else f"IA-PLAN-{sid:04d}"),("Audit Title",safe(linked["title"]) if linked else safe(sr["procedure_name"])),("Procedure",safe(sr["procedure_name"])),("Area / Site",safe(sr["area"])),("Planned Date",safe(sr["planned_date"])),("Lead Auditor",safe(sr["owner"])),("Audit Status",safe(sr["status"])),("To",recipients.text().strip()),("CC",cc.text().strip())]
@@ -4184,7 +4268,8 @@ class MainWindow(QMainWindow):
                 doc.add_heading("Audit Scope and Documents Required",level=2); doc.add_paragraph(scope.toPlainText())
                 doc.add_paragraph("Please make the current approved procedure and revision history, applicable legal/client/ISO requirements, relevant risk assessments, competence records, implementation records, monitoring results, previous findings and corrective-action evidence available. The audit will use controlled-document sampling, interviews and objective evidence to evaluate procedure compliance.")
                 doc.add_paragraph("Prepared by: ____________________     Reviewed / Approved by: ____________________     Date: ______________")
-                doc.save(path)
+                # python-docx expects a filename/path or a binary file handle; always pass a plain path string.
+                doc.save(str(path))
                 revision=db.fetchone("SELECT COALESCE(MAX(revision),0)+1 AS n FROM audit_notifications WHERE schedule_id=?",(sid,))["n"]
                 db.execute("INSERT INTO audit_notifications(schedule_id,document_path,recipients,revision,issued_at,issued_by) VALUES(?,?,?,?,?,?)",(sid,path,recipients.text().strip()+("; CC: "+cc.text().strip() if cc.text().strip() else ""),revision,datetime.now().isoformat(timespec="seconds"),safe(db.setting("current_user", "") or "System User")))
                 if sr["linked_audit_id"]: self._audit_log(sr["linked_audit_id"],"Audit notification generated",f"Revision {revision}: {path}")
@@ -4195,18 +4280,39 @@ class MainWindow(QMainWindow):
         # Verification is driven by the existing Audit Findings Register and reads CAPA status
         # from the existing capa table; no parallel CAPA register is created.
         verify=QWidget(); vvl=QVBoxLayout(verify); vvl.addWidget(QLabel("VERIFICATION & CLOSEOUT — CAPA status is read from the existing CAPA Tracking Register data."))
-        vt=QTableWidget(0,9); vt.setHorizontalHeaderLabels(["Finding Ref","Audit Ref","Procedure","Finding / Evidence","Responsible","Target Date","CAPA Ref","CAPA Status","Finding Status"])
+        vt=QTableWidget(0,11); vt.setHorizontalHeaderLabels(["Finding Ref","Audit Ref","Procedure","Finding / Evidence","Responsible","Target Date","CAPA Ref","CAPA Status","Finding Status","Closeout Evidence","Approved By"] )
         vt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); vt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); vt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         vt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); vt.horizontalHeader().setStretchLastSection(True); vvl.addWidget(vt,1)
-        vbar=QHBoxLayout(); vrefresh=QPushButton("Refresh Findings"); vreview=QPushButton("Review / Verify Selected Finding"); vbar.addWidget(vrefresh); vbar.addWidget(vreview); vbar.addStretch(); vvl.addLayout(vbar)
+        vbar=QHBoxLayout(); vrefresh=QPushButton("Refresh Findings"); vreview=QPushButton("Review / Verify Selected Finding"); vadd_evidence=QPushButton("Add Closeout Evidence"); vbar.addWidget(vrefresh); vbar.addWidget(vreview); vbar.addWidget(vadd_evidence); vbar.addStretch(); vvl.addLayout(vbar)
+        def save_closeout_status(fid,value):
+            fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
+            if not fr:return
+            if value=="Closed":
+                cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
+                if fr["capa_required"] and (not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed")):
+                    QMessageBox.warning(d,"CAPA Not Closed","This finding requires its linked CAPA to be completed in the existing CAPA Tracking Register before closure."); load_verification(); return
+                if not fr["capa_required"] and not safe(fr["capa_reason"]):
+                    QMessageBox.warning(d,"Disposition Required","Record an authorized reason for not requiring CAPA before closure."); load_verification(); return
+            now=datetime.now().isoformat(timespec="seconds")
+            mapped={"Approved":"Pending Verification","Rejected":"Action in Progress","Closed":"Closed"}.get(value,value)
+            db.execute("UPDATE audit_findings SET closeout_approval_status=?,status=?,verification_status=?,closure_date=?,updated_at=? WHERE id=?",(value,mapped,"Verified" if value=="Closed" else "Pending Verification",date.today().isoformat() if value=="Closed" else "",now,fid))
+            load_findings(); load_internal_register(); load_dashboard()
+        def save_closeout_approver(fid,value):
+            if value=="Select Role": return
+            db.execute("UPDATE audit_findings SET closeout_approver=?,updated_at=? WHERE id=?",(value,datetime.now().isoformat(timespec="seconds"),fid))
         def load_verification():
             rows=db.fetchall("SELECT f.*,a.number AS audit_ref FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%' ORDER BY CASE WHEN lower(COALESCE(f.status,'')) IN ('closed','verified') THEN 1 ELSE 0 END,f.target_date")
             vt.setRowCount(len(rows))
             for i,r in enumerate(rows):
                 cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(r["capa_number"]),)) if safe(r["capa_number"]) else None
                 ref=safe(r["finding_reference"]) or f"AF-{int(r['id']):05d}"
-                vals=[ref,r["audit_ref"],r["procedure_name"],r["finding_detail"] or r["observation"],r["responsible"],r["target_date"],r["capa_number"],safe(cr["status"]) if cr else ("Not Required" if not r["capa_required"] else "CAPA link missing"),r["status"]]
+                vals=[ref,r["audit_ref"],r["procedure_name"],r["finding_detail"] or r["observation"],r["responsible"],r["target_date"],r["capa_number"],safe(cr["status"]) if cr else ("Not Required" if not r["capa_required"] else "CAPA link missing")]
                 for c,v in enumerate(vals): vt.setItem(i,c,QTableWidgetItem(safe(v)))
+                status_cell=QComboBox(); status_cell.addItems(["Pending Verification","Action in Progress","Pending Approval","Approved","Rejected","Closed"]); current_status=safe(r["closeout_approval_status"]) if "closeout_approval_status" in r.keys() else "Pending Approval"
+                if current_status not in [status_cell.itemText(j) for j in range(status_cell.count())]: current_status="Pending Approval"
+                status_cell.setCurrentText(current_status); status_cell.currentTextChanged.connect(lambda value,fid=int(r["id"]): save_closeout_status(fid,value)); vt.setCellWidget(i,8,status_cell)
+                evidence_btn=QPushButton("Add / View Evidence"); evidence_btn.setToolTip(safe(r["closeout_evidence"] if "closeout_evidence" in r.keys() else "")); evidence_btn.clicked.connect(lambda checked=False,fid=int(r["id"]): add_closeout_evidence_for_id(fid)); vt.setCellWidget(i,9,evidence_btn)
+                approver=QComboBox(); approver.addItems(["Select Role","Lead Auditor","Supervisor","Manager"]); approver.setCurrentText(safe(r["closeout_approver"]) if "closeout_approver" in r.keys() and safe(r["closeout_approver"]) else "Select Role"); approver.currentTextChanged.connect(lambda value,fid=int(r["id"]): save_closeout_approver(fid,value)); vt.setCellWidget(i,10,approver)
                 vt.item(i,0).setData(Qt.ItemDataRole.UserRole,int(r["id"]))
         def verify_selected_finding():
             rr=vt.currentRow()
@@ -4232,7 +4338,19 @@ class MainWindow(QMainWindow):
             db.execute("UPDATE audit_findings SET status=?,verification=?,verification_status=?,closure_date=?,updated_at=? WHERE id=?",(new_status,comments.toPlainText().strip(),"Verified" if new_status=="Closed" else "Pending Verification",close_date,now,fid))
             db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Finding verification updated",safe(fr["status"]),new_status,comments.toPlainText().strip(),evidence.text().strip(),safe(db.setting("current_user", "") or "System User"),now))
             load_verification(); load_findings(); load_internal_register(); load_dashboard(); QMessageBox.information(d,"Verification Saved","Finding verification history was recorded.")
-        vrefresh.clicked.connect(load_verification); vreview.clicked.connect(verify_selected_finding); load_verification(); tabs.addTab(verify,"Verification & Closeout")
+        def add_closeout_evidence_for_id(fid):
+            path,_=QFileDialog.getOpenFileName(d,"Select Closeout Evidence","","Evidence Files (*.*)")
+            if not path:return
+            fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
+            if not fr:return
+            saved=self._audit_attachment_copy([path],safe(fr["finding_reference"]) or f"F{fid}",fr["audit_id"],fid,safe(db.setting("current_user","") or "System User"))
+            db.execute("UPDATE audit_findings SET closeout_evidence=?,updated_at=? WHERE id=?",((safe(fr["closeout_evidence"]) + "\n" if "closeout_evidence" in fr.keys() and safe(fr["closeout_evidence"]) else "") + (saved[0] if saved else path),datetime.now().isoformat(timespec="seconds"),fid))
+            load_verification()
+        def add_closeout_evidence():
+            rr=vt.currentRow()
+            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding row first.")
+            fid=vt.item(rr,0).data(Qt.ItemDataRole.UserRole); add_closeout_evidence_for_id(fid)
+        vrefresh.clicked.connect(load_verification); vreview.clicked.connect(verify_selected_finding); vadd_evidence.clicked.connect(add_closeout_evidence); load_verification(); tabs.addTab(verify,"Verification & Closeout")
 
         # Editable custom procedure records are Audit-only. New checklists are labelled by their
         # declared source/approval status and do not claim to be verified external requirements.
@@ -4318,9 +4436,9 @@ class MainWindow(QMainWindow):
         buttons.accepted.connect(continue_with_type)
         buttons.rejected.connect(d.reject); d.exec()
 
-    def audit_workspace(self, audit_id=None, refresh=None, selected_type=None):
+    def audit_workspace(self, audit_id=None, refresh=None, selected_type=None, allow_edit=False):
         existing=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)) if audit_id else None
-        if existing and existing["status"]=="Submitted": readonly=True
+        if existing and existing["status"]=="Submitted" and not allow_edit: readonly=True
         else: readonly=False
         d=QDialog(self); d.setWindowTitle("Audit Workspace")
         d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
