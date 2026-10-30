@@ -7785,7 +7785,7 @@ class MainWindow(QMainWindow):
 # EMBEDDED PTW MODULE (self-contained in main.py)
 # ============================================================
 
-PERMIT_TYPES = ["Cold Work Permit", "Hot Work Permit", "Radiography Permit", "Other"]
+PERMIT_TYPES = ["Hot Work Permit", "Cold Work Permit", "Confined Space Entry Permit", "Excavation Permit", "Electrical Work Permit", "Mechanical Work Permit", "Radiography Permit", "Lifting Permit", "Work at Height Permit", "Road Closure Permit", "Other"]
 WORKFLOWS = ["PTW", "CPW", "e-PTW / EPTW"]
 PTW_STATUSES = ["Draft", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
 CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
@@ -7810,6 +7810,11 @@ class PTWModule(QWidget):
         self.host = parent_window
         self.db = db
         self.selected_permit_id = None
+        self.editing_certificate_id = None
+        self.editing_renewal_id = None
+        self.editing_document_id = None
+        self.editing_closure_id = None
+        self.editing_suspension_event_id = None
         self.form_fields = {}
         self._ensure_schema()
         self._build_ui()
@@ -7918,6 +7923,8 @@ class PTWModule(QWidget):
             "loto_equipment": "TEXT DEFAULT ''",
             "loto_number": "TEXT DEFAULT ''",
             "renewal_of_permit_id": "INTEGER",
+            "approved_by": "TEXT DEFAULT ''",
+            "approval_date": "TEXT DEFAULT ''",
         }
         for col, definition in ptw_extra_cols.items():
             if col not in existing_cols:
@@ -7954,24 +7961,20 @@ class PTWModule(QWidget):
         heading = QLabel("PERMIT TO WORK (PTW) MANAGEMENT")
         heading.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:7px;")
         root.addWidget(heading)
-        notice = QLabel("Configure workflows and requirements against the approved site procedure. A saved or submitted application does not authorize work.")
+        notice = QLabel("Complete each PTW record against the approved client/site procedure. A saved or approved application does not by itself authorize work to start.")
         notice.setWordWrap(True)
         notice.setStyleSheet("padding:8px;background:#FFF4D6;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
         root.addWidget(notice)
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
-        self.dashboard_tab = QWidget(); self.tabs.addTab(self.dashboard_tab, "PTW Dashboard"); self._build_dashboard()
         self.application_tab = QWidget(); self.tabs.addTab(self.application_tab, "New Permit Application"); self._build_application()
         self.register_tab = QWidget(); self.tabs.addTab(self.register_tab, "Permit Register"); self._build_register()
         self.revalidation_tab = QWidget(); self.tabs.addTab(self.revalidation_tab, "Daily Revalidation"); self._build_revalidation()
         self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "Supporting Certificates"); self._build_certificates()
         self.renewal_tab = QWidget(); self.tabs.addTab(self.renewal_tab, "Renewal / Extension"); self._build_renewals()
-        self.handover_tab = QWidget(); self.tabs.addTab(self.handover_tab, "Shift Handover"); self._build_handovers()
         self.suspension_tab = QWidget(); self.tabs.addTab(self.suspension_tab, "Suspension / Restart"); self._build_suspension()
         self.closure_tab = QWidget(); self.tabs.addTab(self.closure_tab, "Permit Closure"); self._build_closure()
         self.documents_tab = QWidget(); self.tabs.addTab(self.documents_tab, "Attachments / Safety Documents"); self._build_documents()
-        self.reports_tab = QWidget(); self.tabs.addTab(self.reports_tab, "Reports / Audit Trail"); self._build_reports()
-        self.config_tab = QWidget(); self.tabs.addTab(self.config_tab, "PTW Configuration"); self._build_config()
 
     def _table(self, headers, parent_layout):
         t = QTableWidget(); t.setColumnCount(len(headers)); t.setHorizontalHeaderLabels(headers)
@@ -8007,6 +8010,7 @@ class PTWModule(QWidget):
         self.form_fields["planned_start"] = QDateTimeEdit(QDateTime.currentDateTime()); self.form_fields["planned_start"].setCalendarPopup(True); self.form_fields["planned_start"].setDisplayFormat("yyyy-MM-dd HH:mm"); form.addRow("Planned Start *",self.form_fields["planned_start"])
         self.form_fields["planned_end"] = QDateTimeEdit(QDateTime.currentDateTime().addSecs(12*3600)); self.form_fields["planned_end"].setCalendarPopup(True); self.form_fields["planned_end"].setDisplayFormat("yyyy-MM-dd HH:mm"); form.addRow("Planned End *",self.form_fields["planned_end"])
         self.form_fields["permit_type"] = QComboBox(); self.form_fields["permit_type"].addItems(PERMIT_TYPES); form.addRow("Type of Permit *",self.form_fields["permit_type"])
+        self.form_fields["approved_by"] = QLineEdit(); self.form_fields["approved_by"].setPlaceholderText("Name of authorized approver"); form.addRow("Approved By", self.form_fields["approved_by"])
         line("location","Facility / Site Location",True)
         line("project_number","Project Number")
         line("jsa_number","JSA Number")
@@ -8015,19 +8019,26 @@ class PTWModule(QWidget):
 
         docs_box=QGroupBox("2. Supporting Documents")
         docs_layout=QVBoxLayout(docs_box)
-        self.support_doc_list=QListWidget(); self.support_doc_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        for label in ["ECC / Excavation Clearance","Confined Space Entry","Electrical / Isolation Certificate","Mechanical Isolation / LOTO","Gas Test Record","Lifting Plan","Work at Height / Rescue","Radiography Supporting Document","Other Activity Document"]:
-            QListWidgetItem(label,self.support_doc_list)
-        self.form_fields["supporting_document_types"]=self.support_doc_list
-        docs_layout.addWidget(QLabel("Select one or more documents applicable to this activity (Ctrl/Shift for multiple):")); docs_layout.addWidget(self.support_doc_list)
-        self.form_fields["supporting_document_reference"]=QLineEdit(); self.form_fields["supporting_document_reference"].setPlaceholderText("Enter document numbers / references, separated by commas")
-        docs_layout.addWidget(QLabel("Document Number / Reference(s)")); docs_layout.addWidget(self.form_fields["supporting_document_reference"])
+        docs_hint=QLabel("Add each applicable certificate/document separately. Select Other to enter its document name.")
+        docs_hint.setWordWrap(True); docs_layout.addWidget(docs_hint)
+        self.support_doc_rows=[]
+        self.support_doc_container=QWidget(); self.support_doc_layout=QVBoxLayout(self.support_doc_container); self.support_doc_layout.setContentsMargins(0,0,0,0)
+        docs_layout.addWidget(self.support_doc_container)
+        add_doc=QPushButton("+ Add Supporting Document"); add_doc.clicked.connect(self._add_support_doc_row); docs_layout.addWidget(add_doc)
+        self.form_fields["supporting_document_types"] = self.support_doc_container
+        self.form_fields["supporting_document_reference"] = self.support_doc_container
+        self._add_support_doc_row()
         root.addWidget(docs_box)
 
         loto_box=QGroupBox("3. LOTO Details")
-        loto=QFormLayout(loto_box)
-        self.form_fields["loto_equipment"]=QLineEdit(); loto.addRow("Plant / Equipment to be Isolated",self.form_fields["loto_equipment"])
-        self.form_fields["loto_number"]=QLineEdit(); loto.addRow("LOTO Number",self.form_fields["loto_number"])
+        loto=QVBoxLayout(loto_box)
+        loto.addWidget(QLabel("Add a separate row for every isolation / LOTO point."))
+        self.loto_rows=[]
+        self.loto_container=QWidget(); self.loto_layout=QVBoxLayout(self.loto_container); self.loto_layout.setContentsMargins(0,0,0,0); loto.addWidget(self.loto_container)
+        add_loto=QPushButton("+ Add LOTO / Isolation Point"); add_loto.clicked.connect(self._add_loto_row); loto.addWidget(add_loto)
+        self.form_fields["loto_equipment"] = self.loto_container
+        self.form_fields["loto_number"] = self.loto_container
+        self._add_loto_row()
         root.addWidget(loto_box)
 
         work_box=QGroupBox("4. Work Details and Permit Holder")
@@ -8050,9 +8061,9 @@ class PTWModule(QWidget):
         self.renewal_check.toggled.connect(self.renewal_previous.setEnabled); self.renewal_previous.setEnabled(False)
         root.addWidget(renewal_box)
 
-        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Permit"); submit=QPushButton("Submit Permit"); clear=QPushButton("Clear Form")
-        self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); clear.clicked.connect(self._clear_form)
-        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(clear); btns.addStretch(); outer.addLayout(btns)
+        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Permit"); submit=QPushButton("Submit Permit"); approve=QPushButton("Approve Permit"); clear=QPushButton("Clear Form")
+        self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); approve.clicked.connect(self._approve_application); clear.clicked.connect(self._clear_form)
+        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(approve); btns.addWidget(clear); btns.addStretch(); outer.addLayout(btns)
 
     def _build_revalidation(self):
         lay=QVBoxLayout(self.revalidation_tab)
@@ -8064,7 +8075,7 @@ class PTWModule(QWidget):
         self.reval_table.setAlternatingRowColors(True); self.reval_table.setWordWrap(True); self.reval_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.reval_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.Stretch)
         lay.addWidget(self.reval_table,1)
-        row=QHBoxLayout(); save=QPushButton("Save Daily Revalidation"); save.clicked.connect(self._save_revalidation); row.addWidget(save); row.addStretch(); lay.addLayout(row)
+        row=QHBoxLayout(); save=QPushButton("Save Daily Revalidation"); delete=QPushButton("Delete Selected Day Record"); save.clicked.connect(self._save_revalidation); delete.clicked.connect(self._delete_revalidation_day); row.addWidget(save); row.addWidget(delete); row.addStretch(); lay.addLayout(row)
         self.reval_summary=QLabel("Days issued: 0 | Days worked: 0"); lay.addWidget(self.reval_summary)
 
     def _build_register(self):
@@ -8073,31 +8084,31 @@ class PTWModule(QWidget):
         self.reg_status=QComboBox(); self.reg_status.addItems(["All Statuses"]+PTW_STATUSES)
         self.reg_type=QComboBox(); self.reg_type.addItems(["All Types"]+PERMIT_TYPES)
         filters.addWidget(self.reg_search,2); filters.addWidget(self.reg_status); filters.addWidget(self.reg_type); lay.addLayout(filters)
-        headers=["Permit No.","Previous Permit","Company","Client","Subcontractor","Permit Type","Facility / Location","Project No.","JSA No.","Method Statement No.","Supporting Docs","Document Ref.","LOTO Equipment","LOTO No.","Work Details","Holder Name","Holder Company","Holder ID","Planned Start","Planned End","Days Issued","Days Worked","Status"]
+        headers=["Permit No.","Previous Permit","Company","Client","Subcontractor","Permit Type","Facility / Location","Project No.","JSA No.","Method Statement No.","Supporting Docs","Document Ref.","LOTO Equipment","LOTO No.","Work Details","Holder Name","Holder Company","Holder ID","Planned Start","Planned End","Days Issued","Days Worked","Approved By","Approval Date","Status"]
         self.permit_table=self._table(headers,lay)
         self.permit_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.permit_table.horizontalHeader().setSectionResizeMode(14,QHeaderView.ResizeMode.Stretch)
         self.permit_table.setWordWrap(True); self.permit_table.setMinimumHeight(260)
         row=QHBoxLayout()
-        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Export Register",self._export_csv),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
+        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Approve Selected",self._approve_selected),("Export Register",self._export_csv),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
             b=QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         row.addStretch(); lay.addLayout(row)
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
 
     def _build_certificates(self):
         lay=QVBoxLayout(self.cert_tab); f=QFormLayout(); lay.addLayout(f)
-        self.cert_permit=QComboBox(); self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_responsible=QLineEdit(); self.cert_valid_until=QLineEdit(); self.cert_valid_until.setPlaceholderText("YYYY-MM-DD HH:MM (if applicable)")
+        self.cert_permit=QComboBox(); self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_responsible=QLineEdit(); self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.cert_status=QComboBox(); self.cert_status.addItems(["Draft","Submitted","Approved","Valid","Expired","Suspended","Closed","Rejected"])
         self.cert_verification=QComboBox(); self.cert_verification.addItems(["Pending","Verified","Rejected"])
         self.cert_comments=QLineEdit(); f.addRow("Parent Permit",self.cert_permit); f.addRow("Certificate Type",self.cert_type); f.addRow("Responsible Person",self.cert_responsible); f.addRow("Valid Until",self.cert_valid_until); f.addRow("Status",self.cert_status); f.addRow("Verification",self.cert_verification); f.addRow("Comments",self.cert_comments)
-        btn=QHBoxLayout(); add=QPushButton("Add Certificate"); edit=QPushButton("Update Selected"); attach=QPushButton("Attach Certificate File"); add.clicked.connect(self._add_certificate); edit.clicked.connect(self._update_certificate); attach.clicked.connect(self._attach_certificate); btn.addWidget(add); btn.addWidget(edit); btn.addWidget(attach); btn.addStretch(); lay.addLayout(btn)
+        btn=QHBoxLayout(); add=QPushButton("Add Certificate"); edit=QPushButton("Update Selected"); delete=QPushButton("Delete Selected"); attach=QPushButton("Attach Certificate File"); add.clicked.connect(self._add_certificate); edit.clicked.connect(self._update_certificate); delete.clicked.connect(self._delete_certificate); attach.clicked.connect(self._attach_certificate); load=QPushButton("Load Selected for Edit"); load.clicked.connect(self._load_certificate_for_edit); btn.addWidget(add); btn.addWidget(load); btn.addWidget(edit); btn.addWidget(delete); btn.addWidget(attach); btn.addStretch(); lay.addLayout(btn)
         self.cert_table=self._table(["Reference","Permit","Certificate Type","Responsible Person","Valid Until","Status","Verification","File","Comments"],lay)
 
     def _build_renewals(self):
         lay=QVBoxLayout(self.renewal_tab); form=QFormLayout(); lay.addLayout(form)
-        self.renew_permit=QComboBox(); self.renew_reason=QLineEdit(); self.renew_start=QLineEdit(); self.renew_end=QLineEdit(); self.renew_reinspection=QComboBox(); self.renew_reinspection.addItems(["Not required by configured procedure","Required - pending","Completed"]); self.renew_gas=QComboBox(); self.renew_gas.addItems(["Not required by configured procedure","Required - pending","Completed"]); self.renew_person=QLineEdit()
+        self.renew_permit=QComboBox(); self.renew_reason=QLineEdit(); self.renew_start=QDateTimeEdit(QDateTime.currentDateTime()); self.renew_start.setCalendarPopup(True); self.renew_start.setDisplayFormat("yyyy-MM-dd HH:mm"); self.renew_end=QDateTimeEdit(QDateTime.currentDateTime().addSecs(12*3600)); self.renew_end.setCalendarPopup(True); self.renew_end.setDisplayFormat("yyyy-MM-dd HH:mm"); self.renew_reinspection=QComboBox(); self.renew_reinspection.addItems(["Not required by configured procedure","Required - pending","Completed"]); self.renew_gas=QComboBox(); self.renew_gas.addItems(["Not required by configured procedure","Required - pending","Completed"]); self.renew_person=QLineEdit()
         for label,w in [("Permit",self.renew_permit),("Reason",self.renew_reason),("Proposed Start (YYYY-MM-DD HH:MM)",self.renew_start),("Proposed End (YYYY-MM-DD HH:MM)",self.renew_end),("Reinspection",self.renew_reinspection),("Gas Retest",self.renew_gas),("Responsible Person",self.renew_person)]: form.addRow(label,w)
-        btn=QPushButton("Record Renewal Request"); btn.clicked.connect(self._add_renewal); lay.addWidget(btn)
+        row=QHBoxLayout(); btn=QPushButton("Record Renewal Request"); load=QPushButton("Load Selected for Edit"); update=QPushButton("Update Selected Renewal"); delete=QPushButton("Delete Selected Renewal"); btn.clicked.connect(self._add_renewal); load.clicked.connect(self._load_selected_renewal); update.clicked.connect(self._update_selected_renewal); delete.clicked.connect(self._delete_selected_renewal); row.addWidget(btn); row.addWidget(load); row.addWidget(update); row.addWidget(delete); lay.addLayout(row)
         self.renewal_table=self._table(["Permit","Previous Start","Previous End","Proposed Start","Proposed End","Reason","Status","Reinspection","Gas Retest","Created"],lay)
 
     def _build_handovers(self):
@@ -8111,23 +8122,27 @@ class PTWModule(QWidget):
         lay=QVBoxLayout(self.suspension_tab); form=QFormLayout(); lay.addLayout(form)
         self.susp_permit=QComboBox(); self.susp_action=QComboBox(); self.susp_action.addItems(["Suspend Permit","Request Restart","Authorize Restart"]); self.susp_reason=QTextEdit(); self.susp_reason.setMaximumHeight(90); self.susp_rechecks=QLineEdit(); self.susp_actor=QLineEdit(); self.susp_evidence=QLineEdit(); browse=QPushButton("Browse Evidence"); browse.clicked.connect(lambda:self._choose_into(self.susp_evidence))
         form.addRow("Permit",self.susp_permit); form.addRow("Action",self.susp_action); form.addRow("Reason / Site Conditions",self.susp_reason); form.addRow("Required Rechecks Completed (describe)",self.susp_rechecks); form.addRow("Responsible User",self.susp_actor); evidence_row=QHBoxLayout(); evidence_row.addWidget(self.susp_evidence); evidence_row.addWidget(browse); form.addRow("Evidence File",evidence_row)
-        btn=QPushButton("Record Action"); btn.clicked.connect(self._suspension_action); lay.addWidget(btn)
+        row=QHBoxLayout(); btn=QPushButton("Record Action"); load=QPushButton("Load Selected for Edit"); update=QPushButton("Update Selected Action"); delete=QPushButton("Delete Selected Action Record"); btn.clicked.connect(self._suspension_action); load.clicked.connect(self._load_selected_suspension); update.clicked.connect(self._update_selected_suspension); delete.clicked.connect(self._delete_selected_suspension); row.addWidget(btn); row.addWidget(load); row.addWidget(update); row.addWidget(delete); lay.addLayout(row)
         self.susp_table=self._table(["Permit","Event","Previous Status","New Status","Details","Actor","Evidence","Timestamp"],lay)
 
     def _build_closure(self):
-        lay=QVBoxLayout(self.closure_tab); form=QFormLayout(); lay.addLayout(form)
+        lay=QVBoxLayout(self.closure_tab); scroll=QScrollArea(); scroll.setWidgetResizable(True); lay.addWidget(scroll,1); body=QWidget(); scroll.setWidget(body); form=QFormLayout(body); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.close_permit=QComboBox(); self.close_work=QComboBox(); self.close_work.addItems(["Not confirmed","Completed"]); self.close_inspection=QComboBox(); self.close_inspection.addItems(["Pending","Completed","Not applicable per procedure"]); self.close_tools=QComboBox(); self.close_tools.addItems(["Pending","Removed / confirmed","Not applicable per procedure"]); self.close_people=QComboBox(); self.close_people.addItems(["Pending","Accounted for / confirmed","Not applicable per procedure"]); self.close_plant=QComboBox(); self.close_plant.addItems(["Pending","Handed back","Not applicable per procedure"]); self.close_isolation=QComboBox(); self.close_isolation.addItems(["Pending","Disposition confirmed","Not applicable per procedure"]); self.close_reinstatement=QComboBox(); self.close_reinstatement.addItems(["Pending","Verified","Not applicable per procedure"]); self.close_performing=QLineEdit(); self.close_issuer=QLineEdit(); self.close_comments=QTextEdit(); self.close_comments.setMaximumHeight(70); self.close_evidence=QLineEdit(); browse=QPushButton("Browse Evidence"); browse.clicked.connect(lambda:self._choose_into(self.close_evidence))
         for label,w in [("Permit",self.close_permit),("Work Completion Declaration",self.close_work),("Worksite Inspection",self.close_inspection),("Tools / Materials Removed",self.close_tools),("Personnel Accounted For",self.close_people),("Plant / Equipment Hand-back",self.close_plant),("Isolation Disposition",self.close_isolation),("Reinstatement Verification",self.close_reinstatement),("Performing Authority Acknowledgement",self.close_performing),("Permit Issuer / Area Authority Approval",self.close_issuer),("Closure Comments",self.close_comments)]: form.addRow(label,w)
         ev=QHBoxLayout(); ev.addWidget(self.close_evidence); ev.addWidget(browse); form.addRow("Closure Evidence",ev)
-        btn=QPushButton("Submit Closure for Verification"); btn.clicked.connect(self._submit_closure); lay.addWidget(btn)
+        for w in [self.close_permit,self.close_work,self.close_inspection,self.close_tools,self.close_people,self.close_plant,self.close_isolation,self.close_reinstatement]:
+            w.setMaxVisibleItems(7); w.setMinimumContentsLength(24); w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            w.view().setMinimumWidth(300); w.view().setMaximumHeight(240)
+        btn=QPushButton("Submit Closure for Verification"); btn.clicked.connect(self._submit_closure); form.addRow(btn)
         self.closure_table=self._table(["Permit","Work Complete","Inspection","Tools","Personnel","Hand-back","Isolation","Reinstatement","Status","Closure Date"],lay)
+        editb=QPushButton("Load / Update Selected Closure"); delb=QPushButton("Delete Selected Closure"); editb.clicked.connect(self._load_selected_closure); delb.clicked.connect(self._delete_selected_closure); updateb=QPushButton("Save Closure Changes"); updateb.clicked.connect(self._update_selected_closure); lay.addWidget(editb); lay.addWidget(updateb); lay.addWidget(delb)
 
     def _build_documents(self):
         lay=QVBoxLayout(self.documents_tab); form=QFormLayout(); lay.addLayout(form)
         self.doc_permit=QComboBox(); self.doc_type=QComboBox(); self.doc_type.addItems(["JSA / JHA","Method Statement","Drawing","Risk Assessment","Gas Test Record","Isolation / LOTO","Lifting Plan","Rescue Plan","Toolbox Talk","Other"]); self.doc_desc=QLineEdit(); self.doc_path=QLineEdit(); browse=QPushButton("Choose File"); browse.clicked.connect(lambda:self._choose_into(self.doc_path)); form.addRow("Permit",self.doc_permit); form.addRow("Document Type",self.doc_type); form.addRow("Description",self.doc_desc); row=QHBoxLayout(); row.addWidget(self.doc_path); row.addWidget(browse); form.addRow("File",row)
         btn=QPushButton("Attach Document"); btn.clicked.connect(self._add_document); lay.addWidget(btn)
         self.doc_table=self._table(["Permit","Document Type","Filename","Description","Uploaded By","Uploaded At","Path"],lay)
-        openb=QPushButton("Open Selected Document"); openb.clicked.connect(self._open_document); lay.addWidget(openb)
+        openrow=QHBoxLayout(); openb=QPushButton("Open Selected Document"); load_doc=QPushButton("Load Selected for Edit"); update_doc=QPushButton("Update Selected Document"); deldoc=QPushButton("Delete Selected Document"); openb.clicked.connect(self._open_document); load_doc.clicked.connect(self._load_selected_document); update_doc.clicked.connect(self._update_selected_document); deldoc.clicked.connect(self._delete_document); openrow.addWidget(openb); openrow.addWidget(load_doc); openrow.addWidget(update_doc); openrow.addWidget(deldoc); lay.addLayout(openrow)
 
     def _build_reports(self):
         lay=QVBoxLayout(self.reports_tab); row=QHBoxLayout(); refresh=QPushButton("Refresh Audit Trail"); refresh.clicked.connect(self.refresh_all); row.addWidget(refresh); row.addStretch(); lay.addLayout(row)
@@ -8140,6 +8155,142 @@ class PTWModule(QWidget):
         for label,w in [("Permit Type Name",self.cfg_type),("Workflow Profile",self.cfg_profile),("Default Validity Hours (configure to site procedure)",self.cfg_validity),("Procedure Name",self.cfg_proc),("Procedure Number",self.cfg_procno),("Procedure Revision",self.cfg_procrev),("Effective Date",self.cfg_effective),("Expiry Warning Hours",self.cfg_expiry),("Approval Roles (semicolon separated)",self.cfg_roles),("Default Required Certificate Types (semicolon separated)",self.cfg_required_certs)]: form.addRow(label,w)
         btn=QPushButton("Save / Update Permit Type and Configuration"); btn.clicked.connect(self._save_config); lay.addWidget(btn)
         self.config_table=self._table(["Permit Type","Active","Workflow","Validity Hours","Procedure","Number","Revision","Effective Date"],lay)
+
+    def _add_support_doc_row(self, selected="", other_name="", reference=""):
+        row=QHBoxLayout(); typ=QComboBox(); typ.addItems(["Select document"]+[x for x in ["ECC / Excavation Clearance","Confined Space Entry","Electrical / Isolation Certificate","Mechanical Isolation / LOTO","Gas Test Record","Lifting Plan","Work at Height / Rescue","Radiography Supporting Document","Other"]]);
+        ix=typ.findText(selected); typ.setCurrentIndex(ix if ix>=0 else 0)
+        other=QLineEdit(); other.setPlaceholderText("Enter document name (Other)"); other.setText(other_name); other.setVisible(typ.currentText()=="Other")
+        ref=QLineEdit(); ref.setPlaceholderText("Document number / reference"); ref.setText(reference)
+        typ.currentTextChanged.connect(lambda value,w=other:w.setVisible(value=="Other"))
+        remove=QPushButton("Remove"); remove.clicked.connect(lambda _=False,t=typ:self._remove_dynamic_row(t,self.support_doc_rows,self.support_doc_layout))
+        row.addWidget(typ,2); row.addWidget(other,2); row.addWidget(ref,2); row.addWidget(remove)
+        self.support_doc_layout.addLayout(row); self.support_doc_rows.append((typ,other,ref))
+
+    def _add_loto_row(self, equipment="", number=""):
+        row=QHBoxLayout(); eq=QLineEdit(); eq.setPlaceholderText("Plant / equipment to isolate"); eq.setText(equipment); no=QLineEdit(); no.setPlaceholderText("LOTO / isolation number"); no.setText(number)
+        remove=QPushButton("Remove"); remove.clicked.connect(lambda _=False,w=eq:self._remove_dynamic_row(w,self.loto_rows,self.loto_layout))
+        row.addWidget(eq,2); row.addWidget(no,1); row.addWidget(remove); self.loto_layout.addLayout(row); self.loto_rows.append((eq,no))
+
+    def _remove_dynamic_row(self, widget, collection, layout):
+        for i,item in enumerate(collection):
+            if widget in item:
+                collection.pop(i); break
+        for i in reversed(range(layout.count())):
+            child=layout.itemAt(i)
+            if child.layout():
+                widgets=[]
+                for j in range(child.layout().count()):
+                    w=child.layout().itemAt(j).widget()
+                    if w: widgets.append(w)
+                if widget in widgets:
+                    while child.layout().count():
+                        it=child.layout().takeAt(0)
+                        if it.widget(): it.widget().deleteLater()
+                    layout.removeItem(child); break
+        if not collection:
+            if layout is self.support_doc_layout:self._add_support_doc_row()
+            else:self._add_loto_row()
+
+    def _set_dynamic_values(self, key, value, refs=""):
+        if key=="supporting_document_types":
+            while self.support_doc_layout.count():
+                item=self.support_doc_layout.takeAt(0)
+                child=item.layout()
+                if child:
+                    while child.count():
+                        sub=child.takeAt(0)
+                        if sub.widget(): sub.widget().deleteLater()
+                elif item.widget(): item.widget().deleteLater()
+            self.support_doc_rows=[]
+            names=[x.strip() for x in _s(value).split(";") if x.strip()]
+            refs_list=[x.strip() for x in _s(refs).split(";")]
+            known=["ECC / Excavation Clearance","Confined Space Entry","Electrical / Isolation Certificate","Mechanical Isolation / LOTO","Gas Test Record","Lifting Plan","Work at Height / Rescue","Radiography Supporting Document","Other"]
+            for i,name in enumerate(names):
+                is_other=name not in known
+                self._add_support_doc_row("Other" if is_other else name,name if is_other else "",refs_list[i] if i<len(refs_list) else "")
+            if not self.support_doc_rows:self._add_support_doc_row()
+        elif key=="loto_equipment":
+            while self.loto_layout.count():
+                item=self.loto_layout.takeAt(0); child=item.layout()
+                if child:
+                    while child.count():
+                        sub=child.takeAt(0)
+                        if sub.widget(): sub.widget().deleteLater()
+                elif item.widget(): item.widget().deleteLater()
+            self.loto_rows=[]
+            eqs=[x.strip() for x in _s(value).split(";") if x.strip()]
+            nums=[x.strip() for x in _s(refs).split(";")]
+            for i,eq in enumerate(eqs): self._add_loto_row(eq,nums[i] if i<len(nums) else "")
+            if not self.loto_rows:self._add_loto_row()
+
+    def _approve_application(self):
+        if not self.selected_permit_id:
+            self._save_permit("Draft")
+            if not self.selected_permit_id:return
+        pid=self.selected_permit_id; r=self._permit_row(pid)
+        if r and r["status"] in ("Draft","Returned for Correction"):
+            self._save_permit("Draft")
+            r=self._permit_row(pid)
+        approver=self.form_fields["approved_by"].text().strip()
+        if not approver:return QMessageBox.warning(self,"Approver Required","Enter the authorized approver name before approving this permit.")
+        if not r or not r["performing_company"] or not r["location"] or not r["work_scope"] or not r["permit_holder"] or not r["planned_start"] or not r["planned_end"]:
+            return QMessageBox.warning(self,"Application Incomplete","Complete company, location, work scope, permit holder and planned start/end dates before approving.")
+        if r["status"] not in ("Draft","Submitted","Returned for Correction","Approved"):
+            return QMessageBox.warning(self,"Approval Not Allowed","Only a saved draft/submitted permit can be approved here.")
+        self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(approver,_now(),_now(),pid))
+        self._event(pid,"Permit approved",r["status"],"Approved",f"Approved by {approver}")
+        self.refresh_all(); self.tabs.setCurrentWidget(self.register_tab)
+        QMessageBox.information(self,"Permit Approved",f"Permit {r['permit_number']} approved by {approver}. It is now available for Daily Revalidation.")
+
+    def _approve_selected(self):
+        pid=self._selected_id(); r=self._permit_row(pid)
+        if not r:return QMessageBox.information(self,"Select Permit","Select a permit row first.")
+        name,ok=QInputDialog.getText(self,"Approve Permit","Approved by:",text=_s(r["approved_by"]))
+        if not ok:return
+        if not name.strip():return QMessageBox.warning(self,"Approver Required","Enter the approver name.")
+        self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(name.strip(),_now(),_now(),pid)); self._event(pid,"Permit approved",r["status"],"Approved",f"Approved by {name.strip()}"); self.refresh_all()
+
+    def _delete_selected_permit(self):
+        pid=self._selected_id(); r=self._permit_row(pid)
+        if not r:return QMessageBox.information(self,"Select Permit","Select a permit row first.")
+        ans=QMessageBox.question(self,"Delete Permit",f"Delete {r['permit_number']} and its PTW-only linked records? This cannot be undone.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+        if ans!=QMessageBox.StandardButton.Yes:return
+        for table in ["ptw_daily_revalidation","ptw_certificates","ptw_approvals","ptw_events","ptw_renewals","ptw_handovers","ptw_closures","ptw_documents"]: self.db.execute(f"DELETE FROM {table} WHERE permit_id=?",(pid,))
+        self.db.execute("DELETE FROM ptw_permits WHERE id=?",(pid,)); self.selected_permit_id=None; self.refresh_all()
+
+    def _delete_certificate(self):
+        row=self.cert_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
+        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole); c=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        if not c:return
+        if QMessageBox.question(self,"Delete Certificate",f"Delete certificate {c['certificate_ref']}?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_certificates WHERE id=?",(cid,)); self._event(c["permit_id"],"Supporting certificate deleted",details=c["certificate_ref"]); self.refresh_all()
+
+    def _load_selected_closure(self):
+        row=self.closure_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Closure","Select a closure row first.")
+        cid=self.closure_table.item(row,0).data(Qt.ItemDataRole.UserRole); c=self.db.fetchone("SELECT * FROM ptw_closures WHERE id=?",(cid,))
+        if not c:return
+        self.editing_closure_id=cid; self.close_permit.setCurrentIndex(self.close_permit.findData(c["permit_id"]))
+        for w,key in [(self.close_work,"work_complete"),(self.close_inspection,"site_inspection"),(self.close_tools,"tools_removed"),(self.close_people,"personnel_accounted"),(self.close_plant,"plant_handover"),(self.close_isolation,"isolation_disposition"),(self.close_reinstatement,"reinstatement")]:
+            ix=w.findText(_s(c[key])); w.setCurrentIndex(ix if ix>=0 else 0)
+        self.close_performing.setText(_s(c["performing_ack"])); self.close_issuer.setText(_s(c["issuer_approval"])); self.close_comments.setPlainText(_s(c["closure_comments"])); self.close_evidence.setText(_s(c["evidence_path"]))
+        self.closure_edit_loaded=True
+
+    def _update_selected_closure(self):
+        if not self.editing_closure_id:return QMessageBox.information(self,"Load Closure","Load a closure record first.")
+        c=self.db.fetchone("SELECT * FROM ptw_closures WHERE id=?",(self.editing_closure_id,))
+        if not c:return
+        self.db.execute("UPDATE ptw_closures SET work_complete=?,site_inspection=?,tools_removed=?,personnel_accounted=?,plant_handover=?,isolation_disposition=?,reinstatement=?,performing_ack=?,issuer_approval=?,closure_comments=?,evidence_path=? WHERE id=?",(self.close_work.currentText(),self.close_inspection.currentText(),self.close_tools.currentText(),self.close_people.currentText(),self.close_plant.currentText(),self.close_isolation.currentText(),self.close_reinstatement.currentText(),self.close_performing.text().strip(),self.close_issuer.text().strip(),self.close_comments.toPlainText(),self.close_evidence.text().strip(),self.editing_closure_id))
+        self._event(c["permit_id"],"Closure record updated"); self.editing_closure_id=None; self.refresh_all()
+
+    def _delete_selected_closure(self):
+        row=self.closure_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Closure","Select a closure row first.")
+        cid=self.closure_table.item(row,0).data(Qt.ItemDataRole.UserRole); c=self.db.fetchone("SELECT * FROM ptw_closures WHERE id=?",(cid,))
+        if not c:return
+        if QMessageBox.question(self,"Delete Closure","Delete the selected closure record?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_closures WHERE id=?",(cid,)); self._event(c["permit_id"],"Closure record deleted"); self.refresh_all()
 
     def _actor(self):
         return _s(self.db.setting("current_user", "") or self.db.setting("username", "") or "Application User")
@@ -8158,7 +8309,15 @@ class PTWModule(QWidget):
         if isinstance(w,QLineEdit): return w.text().strip()
         if isinstance(w,QTextEdit): return w.toPlainText().strip()
         if isinstance(w,QComboBox): return w.currentText().strip()
-        if isinstance(w,QListWidget): return "; ".join(item.text() for item in w.selectedItems())
+        if key in ("supporting_document_types", "supporting_document_reference"):
+            docs=[]
+            for typ,other,ref in self.support_doc_rows:
+                name=other.text().strip() if typ.currentText()=="Other" else typ.currentText()
+                if name and name!="Select document": docs.append((name,ref.text().strip()))
+            return "; ".join(x[0] for x in docs) if key=="supporting_document_types" else "; ".join(x[1] for x in docs)
+        if key in ("loto_equipment", "loto_number"):
+            vals=[(eq.text().strip(),no.text().strip()) for eq,no in self.loto_rows]
+            return "; ".join(x[0] if key=="loto_equipment" else x[1] for x in vals if x[0] or x[1])
         if isinstance(w,QSpinBox): return w.value()
         if isinstance(w,QDateTimeEdit): return w.dateTime().toString("yyyy-MM-dd HH:mm")
         return ""
@@ -8169,17 +8328,33 @@ class PTWModule(QWidget):
             if isinstance(w,QLineEdit): w.clear()
             elif isinstance(w,QTextEdit): w.clear()
             elif isinstance(w,QComboBox): w.setCurrentIndex(0)
-            elif isinstance(w,QListWidget):
-                for i in range(w.count()): w.item(i).setSelected(False)
             elif isinstance(w,QSpinBox): w.setValue(0)
+        self._set_dynamic_values("supporting_document_types", "", "")
+        self._set_dynamic_values("loto_equipment", "", "")
         self.form_fields["planned_start"].setDateTime(QDateTime.currentDateTime())
         self.form_fields["planned_end"].setDateTime(QDateTime.currentDateTime().addSecs(12*3600))
         if hasattr(self,"renewal_check"):
             self.renewal_check.setChecked(False); self.renewal_previous.setCurrentIndex(0)
         self.save_draft_btn.setText("Save Permit")
 
+    def _sync_application_supporting_certificates(self, permit_id, types_text, refs_text):
+        names=[x.strip() for x in _s(types_text).split(";") if x.strip()]
+        refs=[x.strip() for x in _s(refs_text).split(";")]
+        permit=self._permit_row(permit_id)
+        if not permit:return
+        now=_now()
+        for i,name in enumerate(names):
+            ref_text=refs[i] if i<len(refs) else ""
+            exists=self.db.fetchone("SELECT id FROM ptw_certificates WHERE permit_id=? AND certificate_type=? AND comments=? LIMIT 1",(permit_id,name,ref_text))
+            if exists:continue
+            n=self.db.fetchone("SELECT COUNT(*) AS n FROM ptw_certificates WHERE permit_id=?",(permit_id,))["n"]+1
+            cert_ref=f"{permit['permit_number']}-CERT-{n:02d}"
+            self.db.execute("INSERT OR IGNORE INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,'Draft','','','Pending',?,?,?)",(cert_ref,permit_id,name,ref_text,now,now))
+
     def _save_permit(self, status="Draft"):
         values={k:self._form_value(k) for k in self.form_fields}
+        if any(t.currentText()=="Other" and not other.text().strip() for t,other,ref in self.support_doc_rows):
+            QMessageBox.warning(self,"Document Name Required","When Other is selected, enter the supporting document name."); return
         if not values.get("performing_company") or not values.get("location") or not values.get("work_scope"):
             QMessageBox.warning(self,"Required Information","Enter the company / contractor, facility location and work details / scope."); return
         if values["planned_end"] <= values["planned_start"]:
@@ -8204,6 +8379,8 @@ class PTWModule(QWidget):
             number=self._next_number(); values.update(permit_number=number,revision=1,created_by=self._actor(),created_at=now)
             cols=list(values.keys()); cur=self.db.execute("INSERT INTO ptw_permits("+", ".join(cols)+") VALUES("+", ".join("?" for _ in cols)+")",[values[c] for c in cols]); pid=cur.lastrowid
             self.selected_permit_id=pid; self._event(pid,"Permit created","",status,"New permit application saved.")
+        self._sync_application_supporting_certificates(pid, values.get("supporting_document_types", ""), values.get("supporting_document_reference", ""))
+        self.db.conn.commit()
         self.refresh_all(); self.tabs.setCurrentWidget(self.register_tab)
         QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. This does not authorize work.")
 
@@ -8223,14 +8400,19 @@ class PTWModule(QWidget):
     def _set_combo_permits(self, combo, include_all=False):
         current=combo.currentData(); combo.clear()
         if include_all: combo.addItem("All Permits", None)
-        rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
+        if combo is getattr(self, "reval_permit", None):
+            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status='Approved' ORDER BY id DESC")
+        else:
+            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
         for r in rows: combo.addItem(f"{r['permit_number']} — {r['permit_type']} ({r['status']})",r["id"])
         if current is not None:
             idx=combo.findData(current)
             if idx>=0: combo.setCurrentIndex(idx)
 
     def _refresh_combo_lists(self):
-        for c in [self.cert_permit,self.renew_permit,self.hand_permit,self.susp_permit,self.close_permit,self.doc_permit,self.reval_permit]: self._set_combo_permits(c)
+        for name in ["cert_permit","renew_permit","susp_permit","close_permit","doc_permit","reval_permit"]:
+            c=getattr(self,name,None)
+            if c is not None:self._set_combo_permits(c)
         if hasattr(self,"renewal_previous"):
             current=self.renewal_previous.currentData(); self.renewal_previous.clear(); self.renewal_previous.addItem("Select previous permit",None)
             for r in self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC"):
@@ -8271,7 +8453,7 @@ class PTWModule(QWidget):
             dayrows=self.db.fetchall("SELECT day_status FROM ptw_daily_revalidation WHERE permit_id=?",(r["id"],))
             worked=sum(1 for d in dayrows if d["day_status"]=="Revalidated")
             data.append(dict(r,previous_permit=previous["permit_number"] if previous else "",days_issued=issued,days_worked=worked))
-        fields=["permit_number","previous_permit","performing_company","client_authority","subcontractor","permit_type","location","project_number","jsa_number","method_statement_number","supporting_document_types","supporting_document_reference","loto_equipment","loto_number","work_scope","permit_holder","permit_holder_company","permit_holder_employee_id","planned_start","planned_end","days_issued","days_worked","status"]
+        fields=["permit_number","previous_permit","performing_company","client_authority","subcontractor","permit_type","location","project_number","jsa_number","method_statement_number","supporting_document_types","supporting_document_reference","loto_equipment","loto_number","work_scope","permit_holder","permit_holder_company","permit_holder_employee_id","planned_start","planned_end","days_issued","days_worked","approved_by","approval_date","status"]
         self._fill_table(self.permit_table,data,fields)
 
     def refresh_all(self):
@@ -8293,7 +8475,8 @@ class PTWModule(QWidget):
             if h and h["status"]=="Pending": pending_handover+=1
             c=self.db.fetchone("SELECT status FROM ptw_closures WHERE permit_id=? ORDER BY id DESC LIMIT 1",(r["id"],))
             if r["status"]=="Pending Closure" or (c and c["status"]=="Pending"): pending_closure+=1
-        self.dashboard_summary.setText("   |   ".join([f"Total permits: {len(rows)}",f"Active: {counts['Issued / Active']}",f"Draft: {counts['Draft']}",f"Pending approval: {counts['Submitted']+counts['Under Review']}",f"Expiring soon: {expiring}",f"Expired: {expired}",f"Suspended: {counts['Suspended']}",f"Pending handovers: {pending_handover}",f"Pending closures: {pending_closure}",f"Missing configured certificates: {missing}"]))
+        if hasattr(self, "dashboard_summary"):
+            self.dashboard_summary.setText("   |   ".join([f"Total permits: {len(rows)}",f"Active: {counts['Issued / Active']}",f"Draft: {counts['Draft']}",f"Pending approval: {counts['Submitted']+counts['Under Review']}",f"Expiring soon: {expiring}",f"Expired: {expired}",f"Suspended: {counts['Suspended']}",f"Pending handovers: {pending_handover}",f"Pending closures: {pending_closure}",f"Missing configured certificates: {missing}"]))
         drows=[]
         for r in rows:
             action="Review application" if r["status"] in ("Submitted","Under Review") else "Revalidate expired permit" if r["status"]=="Expired" else "Complete required checks" if r["status"] in ("Draft","Suspended","Pending Closure") else "Monitor expiry"
@@ -8304,7 +8487,8 @@ class PTWModule(QWidget):
                     elif end<=now+timedelta(hours=warning): action="Expiring soon — review"
                 except Exception: pass
             drows.append(dict(r, action=action))
-        self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
+        if hasattr(self, "dashboard_table"):
+            self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
         self._refresh_combo_lists(); self._refresh_other_tables()
         if hasattr(self,"reval_permit"): self._load_revalidation_days()
 
@@ -8324,7 +8508,9 @@ class PTWModule(QWidget):
         pid=self.reval_permit.currentData(); self.reval_table.setRowCount(0)
         r=self._permit_row(pid)
         if not r:
-            self.reval_info.setText("Select a permit to view its planned dates and daily revalidation record."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
+            self.reval_info.setText("Select an approved permit to view its planned dates and daily revalidation record."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
+        if r["status"] != "Approved":
+            self.reval_info.setText("Only permits with Approved status are available for Daily Revalidation."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
         try:
             start=datetime.fromisoformat(r["planned_start"]).date(); end=datetime.fromisoformat(r["planned_end"]).date()
         except Exception:
@@ -8365,17 +8551,85 @@ class PTWModule(QWidget):
         self.db.conn.commit(); self.refresh_register(); self.reval_summary.setText(f"Days issued: {self.reval_table.rowCount()} | Days worked (revalidated): {worked}")
         QMessageBox.information(self,"Daily Revalidation Saved",f"Daily revalidation entries saved for {r['permit_number']}.")
 
+    def _delete_revalidation_day(self):
+        row=self.reval_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Day","Select a daily revalidation row first.")
+        pid=self.reval_permit.currentData(); item=self.reval_table.item(row,0)
+        if not pid or not item:return
+        day=item.text()
+        if QMessageBox.question(self,"Delete Daily Record",f"Delete the revalidation record for {day}?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_daily_revalidation WHERE permit_id=? AND work_date=?",(pid,day)); self._event(pid,"Daily revalidation record deleted",details=day); self.refresh_all()
+
+    def _load_selected_renewal(self):
+        row=self.renewal_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Renewal","Select a renewal row first.")
+        rid=self.renewal_table.item(row,0).data(Qt.ItemDataRole.UserRole); r=self.db.fetchone("SELECT * FROM ptw_renewals WHERE id=?",(rid,))
+        if not r:return
+        self.editing_renewal_id=rid; self.renew_permit.setCurrentIndex(self.renew_permit.findData(r["permit_id"]))
+        self.renew_reason.setText(_s(r["reason"]))
+        for w,key in [(self.renew_start,"proposed_start"),(self.renew_end,"proposed_end")]:
+            dt=QDateTime.fromString(_s(r[key]),"yyyy-MM-dd HH:mm")
+            if dt.isValid():w.setDateTime(dt)
+        for w,key in [(self.renew_reinspection,"reinspection"),(self.renew_gas,"gas_retest")]:
+            ix=w.findText(_s(r[key])); w.setCurrentIndex(ix if ix>=0 else 0)
+        self.renew_person.setText(_s(r["responsible_person"]))
+
+    def _update_selected_renewal(self):
+        if not self.editing_renewal_id:return QMessageBox.information(self,"Load Renewal","Load a renewal row for editing first.")
+        r=self.db.fetchone("SELECT * FROM ptw_renewals WHERE id=?",(self.editing_renewal_id,))
+        if not r:return
+        start=self.renew_start.dateTime().toString("yyyy-MM-dd HH:mm"); end=self.renew_end.dateTime().toString("yyyy-MM-dd HH:mm")
+        if datetime.fromisoformat(end)<=datetime.fromisoformat(start):return QMessageBox.warning(self,"Invalid Date","Proposed end must be later than proposed start.")
+        self.db.execute("UPDATE ptw_renewals SET permit_id=?,reason=?,proposed_start=?,proposed_end=?,reinspection=?,gas_retest=?,responsible_person=? WHERE id=?",(self.renew_permit.currentData(),self.renew_reason.text().strip(),start,end,self.renew_reinspection.currentText(),self.renew_gas.currentText(),self.renew_person.text().strip(),self.editing_renewal_id))
+        self._event(r["permit_id"],"Renewal request updated"); self.editing_renewal_id=None; self.refresh_all()
+
+    def _delete_selected_renewal(self):
+        row=self.renewal_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Renewal","Select a renewal row first.")
+        rid=self.renewal_table.item(row,0).data(Qt.ItemDataRole.UserRole); r=self.db.fetchone("SELECT * FROM ptw_renewals WHERE id=?",(rid,))
+        if not r:return
+        if QMessageBox.question(self,"Delete Renewal","Delete the selected renewal request?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_renewals WHERE id=?",(rid,)); self._event(r["permit_id"],"Renewal request deleted"); self.refresh_all()
+
+    def _load_selected_suspension(self):
+        row=self.susp_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Action","Select a suspension/restart record first.")
+        eid=self.susp_table.item(row,0).data(Qt.ItemDataRole.UserRole); e=self.db.fetchone("SELECT * FROM ptw_events WHERE id=?",(eid,))
+        if not e:return
+        self.editing_suspension_event_id=eid
+        ix=self.susp_permit.findData(e["permit_id"]); self.susp_permit.setCurrentIndex(ix if ix>=0 else 0)
+        action_map={"Permit suspended":"Suspend Permit","Restart requested":"Request Restart","Permit restarted":"Authorize Restart"}
+        ix=self.susp_action.findText(action_map.get(e["event_type"],"Suspend Permit")); self.susp_action.setCurrentIndex(ix if ix>=0 else 0)
+        self.susp_reason.setPlainText(_s(e["details"])); self.susp_actor.setText(_s(e["actor"])); self.susp_evidence.setText(_s(e["attachment_path"]))
+
+    def _update_selected_suspension(self):
+        if not self.editing_suspension_event_id:return QMessageBox.information(self,"Load Action","Load a suspension/restart record first.")
+        e=self.db.fetchone("SELECT * FROM ptw_events WHERE id=?",(self.editing_suspension_event_id,))
+        if not e:return
+        details=self.susp_reason.toPlainText().strip()
+        if not details:return QMessageBox.warning(self,"Reason Required","Enter the reason / site conditions.")
+        self.db.execute("UPDATE ptw_events SET details=?,actor=?,attachment_path=? WHERE id=?",(details,self.susp_actor.text().strip() or self._actor(),self.susp_evidence.text().strip(),self.editing_suspension_event_id))
+        self.editing_suspension_event_id=None; self.refresh_all()
+
+    def _delete_selected_suspension(self):
+        row=self.susp_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Action","Select a suspension/restart record first.")
+        eid=self.susp_table.item(row,0).data(Qt.ItemDataRole.UserRole); e=self.db.fetchone("SELECT * FROM ptw_events WHERE id=?",(eid,))
+        if not e:return
+        if QMessageBox.question(self,"Delete Action Record","Delete the selected PTW suspension/restart event from its workspace?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_events WHERE id=?",(eid,)); self.refresh_all()
+
     def _refresh_other_tables(self):
         if hasattr(self,"cert_table"):
             self._fill_table(self.cert_table,self.db.fetchall("SELECT c.*,p.permit_number FROM ptw_certificates c JOIN ptw_permits p ON p.id=c.permit_id ORDER BY c.id DESC"),["certificate_ref","permit_number","certificate_type","responsible_person","valid_until","status","verification_status","attachment_path","comments"])
+        if hasattr(self,"renewal_table"):
             self._fill_table(self.renewal_table,self.db.fetchall("SELECT r.*,p.permit_number FROM ptw_renewals r JOIN ptw_permits p ON p.id=r.permit_id ORDER BY r.id DESC"),["permit_number","previous_start","previous_end","proposed_start","proposed_end","reason","status","reinspection","gas_retest","created_at"])
-            self._fill_table(self.handover_table,self.db.fetchall("SELECT h.*,p.permit_number FROM ptw_handovers h JOIN ptw_permits p ON p.id=h.permit_id ORDER BY h.id DESC"),["permit_number","outgoing_person","incoming_person","shift_name","work_remaining","outstanding_hazards","gas_test_status","isolation_status","status","created_at"])
+        if hasattr(self,"susp_table"):
             self._fill_table(self.susp_table,self.db.fetchall("SELECT e.*,p.permit_number FROM ptw_events e JOIN ptw_permits p ON p.id=e.permit_id WHERE e.event_type IN ('Permit suspended','Restart requested','Permit restarted') ORDER BY e.id DESC"),["permit_number","event_type","previous_status","new_status","details","actor","attachment_path","created_at"])
+        if hasattr(self,"closure_table"):
             self._fill_table(self.closure_table,self.db.fetchall("SELECT c.*,p.permit_number FROM ptw_closures c JOIN ptw_permits p ON p.id=c.permit_id ORDER BY c.id DESC"),["permit_number","work_complete","site_inspection","tools_removed","personnel_accounted","plant_handover","isolation_disposition","reinstatement","status","created_at"])
+        if hasattr(self,"doc_table"):
             self._fill_table(self.doc_table,self.db.fetchall("SELECT d.*,p.permit_number FROM ptw_documents d JOIN ptw_permits p ON p.id=d.permit_id ORDER BY d.id DESC"),["permit_number","document_type","file_path","description","uploaded_by","uploaded_at","file_path"])
-            self._fill_table(self.event_table,self.db.fetchall("SELECT e.*,p.permit_number FROM ptw_events e JOIN ptw_permits p ON p.id=e.permit_id ORDER BY e.id DESC LIMIT 1000"),["permit_number","event_type","previous_status","new_status","details","actor","created_at"])
-            self._fill_table(self.config_table,self.db.fetchall("SELECT * FROM ptw_permit_types ORDER BY name"),["name","active","workflow_profile","validity_hours","procedure_name","procedure_number","procedure_revision","effective_date"])
-
     def _setting(self,key,default=""):
         r=self.db.fetchone("SELECT value FROM ptw_settings WHERE key=?",(key,)); return r["value"] if r else default
 
@@ -8389,13 +8643,12 @@ class PTWModule(QWidget):
             elif isinstance(w,QTextEdit): w.setPlainText(_s(val))
             elif isinstance(w,QComboBox):
                 i=w.findText(_s(val)); w.setCurrentIndex(i if i>=0 else 0)
-            elif isinstance(w,QListWidget):
-                wanted={x.strip() for x in _s(val).split(";") if x.strip()}
-                for i in range(w.count()): w.item(i).setSelected(w.item(i).text() in wanted)
             elif isinstance(w,QSpinBox): w.setValue(int(val or 0))
             elif isinstance(w,QDateTimeEdit):
                 dt=QDateTime.fromString(_s(val),"yyyy-MM-dd HH:mm")
                 if dt.isValid(): w.setDateTime(dt)
+        self._set_dynamic_values("supporting_document_types", r["supporting_document_types"], r["supporting_document_reference"])
+        self._set_dynamic_values("loto_equipment", r["loto_equipment"], r["loto_number"])
         linked_id = r["renewal_of_permit_id"] if "renewal_of_permit_id" in r.keys() else None
         self.renewal_check.setChecked(bool(linked_id))
         idx=self.renewal_previous.findData(linked_id)
@@ -8430,6 +8683,7 @@ class PTWModule(QWidget):
         status="Approved" if decision=="Approve stage" else ("Returned for Correction" if decision=="Return for correction" else "Cancelled")
         # An approval decision alone does not issue a permit.
         self.db.execute("INSERT INTO ptw_approvals(permit_id,stage,user_id,user_name,role_name,decision,comments,document_revision,approval_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,role.strip(),self._actor(),self._actor(),role.strip(),decision,comments.strip(),r["revision"],f"PTW-APR-{pid}-{_stamp()}",_now()))
+        if status=="Approved": self.db.execute("UPDATE ptw_permits SET approved_by=?,approval_date=? WHERE id=?",(self._actor(),_now(),pid))
         self._change_status(pid,status,f"Approval stage: {role}. Decision: {decision}. {comments}")
 
     def _issue_selected(self):
@@ -8461,17 +8715,31 @@ class PTWModule(QWidget):
         if pid is None:return QMessageBox.warning(self,"Permit Required","Create a permit before adding a supporting certificate.")
         number=self._permit_row(pid)["permit_number"]
         ref=f"{number}-CERT-{self.db.fetchone('SELECT COUNT(*) n FROM ptw_certificates WHERE permit_id=?',(pid,))['n']+1:02d}"
-        now=_now(); self.db.execute("INSERT INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(ref,pid,self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.text().strip(),self.cert_verification.currentText(),self.cert_comments.text().strip(),now,now))
+        now=_now(); self.db.execute("INSERT INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(ref,pid,self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),self.cert_comments.text().strip(),now,now))
         self._event(pid,"Supporting certificate added",details=f"{ref}: {self.cert_type.currentText()}"); self.refresh_all()
 
     def _update_certificate(self):
         row=self.cert_table.currentRow()
         if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
-        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
+        cid=self.editing_certificate_id or self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
         cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
         if not cert:return
-        self.db.execute("UPDATE ptw_certificates SET status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",(self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.text().strip(),self.cert_verification.currentText(),self.cert_comments.text().strip(),_now(),cid))
-        self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"]); self.refresh_all()
+        self.db.execute("UPDATE ptw_certificates SET permit_id=?,certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",(self.cert_permit.currentData(),self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),self.cert_comments.text().strip(),_now(),cid))
+        self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"]); self.editing_certificate_id=None; self.refresh_all()
+
+    def _load_certificate_for_edit(self):
+        row=self.cert_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
+        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole); c=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        if not c:return
+        self.editing_certificate_id=cid; self.cert_permit.setCurrentIndex(self.cert_permit.findData(c["permit_id"]))
+        ix=self.cert_type.findText(c["certificate_type"]); self.cert_type.setCurrentIndex(ix if ix>=0 else 0)
+        self.cert_responsible.setText(_s(c["responsible_person"]))
+        dt=QDateTime.fromString(_s(c["valid_until"]),"yyyy-MM-dd HH:mm")
+        if dt.isValid():self.cert_valid_until.setDateTime(dt)
+        for w,key in [(self.cert_status,"status"),(self.cert_verification,"verification_status")]:
+            ix=w.findText(_s(c[key])); w.setCurrentIndex(ix if ix>=0 else 0)
+        self.cert_comments.setText(_s(c["comments"]))
 
     def _attach_certificate(self):
         row=self.cert_table.currentRow()
@@ -8484,7 +8752,7 @@ class PTWModule(QWidget):
     def _add_renewal(self):
         pid=self.renew_permit.currentData(); r=self._permit_row(pid)
         if not r:return QMessageBox.warning(self,"Permit Required","Select a permit.")
-        start=self.renew_start.text().strip(); end=self.renew_end.text().strip(); reason=self.renew_reason.text().strip()
+        start=self.renew_start.dateTime().toString("yyyy-MM-dd HH:mm"); end=self.renew_end.dateTime().toString("yyyy-MM-dd HH:mm"); reason=self.renew_reason.text().strip()
         if not reason or not start or not end:return QMessageBox.warning(self,"Required Information","Enter a reason and proposed start/end.")
         try:
             if datetime.fromisoformat(end)<=datetime.fromisoformat(start): raise ValueError()
@@ -8554,6 +8822,33 @@ class PTWModule(QWidget):
         if not pid:return QMessageBox.warning(self,"Permit Required","Select a permit.")
         if not path or not Path(path).is_file():return QMessageBox.warning(self,"File Required","Choose an existing file.")
         dest=self._copy_attachment(path,pid); self.db.execute("INSERT INTO ptw_documents(permit_id,document_type,file_path,description,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",(pid,self.doc_type.currentText(),str(dest),self.doc_desc.text().strip(),self._actor(),_now())); self._event(pid,"Safety document attached",details=self.doc_type.currentText()+": "+Path(path).name,attachment=str(dest)); self.doc_path.clear(); self.refresh_all()
+
+    def _load_selected_document(self):
+        row=self.doc_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Document","Select a document row first.")
+        did=self.doc_table.item(row,0).data(Qt.ItemDataRole.UserRole); d=self.db.fetchone("SELECT * FROM ptw_documents WHERE id=?",(did,))
+        if not d:return
+        self.editing_document_id=did; self.doc_permit.setCurrentIndex(self.doc_permit.findData(d["permit_id"]))
+        ix=self.doc_type.findText(_s(d["document_type"])); self.doc_type.setCurrentIndex(ix if ix>=0 else 0)
+        self.doc_desc.setText(_s(d["description"])); self.doc_path.setText(_s(d["file_path"]))
+
+    def _update_selected_document(self):
+        if not self.editing_document_id:return QMessageBox.information(self,"Load Document","Load a document row for editing first.")
+        d=self.db.fetchone("SELECT * FROM ptw_documents WHERE id=?",(self.editing_document_id,))
+        if not d:return
+        path=self.doc_path.text().strip()
+        if not path or not Path(path).is_file():return QMessageBox.warning(self,"File Required","Choose an existing document file.")
+        dest=self._copy_attachment(path,d["permit_id"]) if path!=d["file_path"] else Path(path)
+        self.db.execute("UPDATE ptw_documents SET permit_id=?,document_type=?,file_path=?,description=?,uploaded_by=?,uploaded_at=? WHERE id=?",(self.doc_permit.currentData(),self.doc_type.currentText(),str(dest),self.doc_desc.text().strip(),self._actor(),_now(),self.editing_document_id))
+        self._event(d["permit_id"],"PTW document updated",details=self.doc_type.currentText()); self.editing_document_id=None; self.refresh_all()
+
+    def _delete_document(self):
+        row=self.doc_table.currentRow()
+        if row<0:return QMessageBox.information(self,"Select Document","Select a document row first.")
+        did=self.doc_table.item(row,0).data(Qt.ItemDataRole.UserRole); d=self.db.fetchone("SELECT * FROM ptw_documents WHERE id=?",(did,))
+        if not d:return
+        if QMessageBox.question(self,"Delete Document","Delete the selected PTW attachment record?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+        self.db.execute("DELETE FROM ptw_documents WHERE id=?",(did,)); self._event(d["permit_id"],"PTW document record deleted",details=d["document_type"]); self.refresh_all()
 
     def _open_document(self):
         row=self.doc_table.currentRow()
