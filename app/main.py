@@ -7798,7 +7798,7 @@ PERMIT_TYPES = [
     "Blasting Permit", "Other"
 ]
 WORKFLOWS = ["PTW", "CPW", "e-PTW / EPTW"]
-PTW_STATUSES = ["Draft", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
+PTW_STATUSES = ["Draft", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
 CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
 
 
@@ -7954,6 +7954,10 @@ class PTWModule(QWidget):
         );
         CREATE INDEX IF NOT EXISTS idx_ptw_daily_permit_date ON ptw_daily_revalidation(permit_id, work_date);
         """)
+        daily_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(ptw_daily_revalidation)").fetchall()}
+        for col in ("permit_holder", "permit_authority"):
+            if col not in daily_cols:
+                self.db.conn.execute(f"ALTER TABLE ptw_daily_revalidation ADD COLUMN {col} TEXT DEFAULT ''")
         self.db.conn.commit()
         for name in PERMIT_TYPES:
             self.db.conn.execute("INSERT OR IGNORE INTO ptw_permit_types(name,active,workflow_profile,validity_hours,updated_at) VALUES(?,1,'PTW',12,?)", (name, _now()))
@@ -7979,6 +7983,8 @@ class PTWModule(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
         self.application_tab = QWidget(); self.tabs.addTab(self.application_tab, "New Permit Application"); self._build_application()
+        self.review_tab = QWidget(); self.tabs.addTab(self.review_tab, "Permit Review & Approval"); self._build_review_approval()
+        self.issue_tab = QWidget(); self.tabs.addTab(self.issue_tab, "Permit Issue Authority"); self._build_issue_authority()
         self.register_tab = QWidget(); self.tabs.addTab(self.register_tab, "Permit Register"); self._build_register()
         self.revalidation_tab = QWidget(); self.tabs.addTab(self.revalidation_tab, "Daily Revalidation"); self._build_revalidation()
         self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "Supporting Certificates"); self._build_certificates()
@@ -8021,7 +8027,6 @@ class PTWModule(QWidget):
         self.form_fields["planned_start"] = QDateTimeEdit(QDateTime.currentDateTime()); self.form_fields["planned_start"].setCalendarPopup(True); self.form_fields["planned_start"].setDisplayFormat("yyyy-MM-dd HH:mm"); form.addRow("Planned Start *",self.form_fields["planned_start"])
         self.form_fields["planned_end"] = QDateTimeEdit(QDateTime.currentDateTime().addSecs(12*3600)); self.form_fields["planned_end"].setCalendarPopup(True); self.form_fields["planned_end"].setDisplayFormat("yyyy-MM-dd HH:mm"); form.addRow("Planned End *",self.form_fields["planned_end"])
         self.form_fields["permit_type"] = QComboBox(); self.form_fields["permit_type"].addItems(PERMIT_TYPES); form.addRow("Type of Permit *",self.form_fields["permit_type"])
-        self.form_fields["approved_by"] = QLineEdit(); self.form_fields["approved_by"].setPlaceholderText("Name of authorized approver"); form.addRow("Approved By", self.form_fields["approved_by"])
         line("location","Facility / Site Location",True)
         line("project_number","Project Number")
         line("jsa_number","JSA Number")
@@ -8080,28 +8085,23 @@ class PTWModule(QWidget):
         self.renewal_check.toggled.connect(self.renewal_previous.setEnabled); self.renewal_previous.setEnabled(False)
         root.addWidget(renewal_box)
 
-        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Permit"); submit=QPushButton("Submit Permit"); approve=QPushButton("Approve Permit"); clear=QPushButton("Clear Form")
-        self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); approve.clicked.connect(self._approve_application); clear.clicked.connect(self._clear_form)
-        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(approve); btns.addWidget(clear); btns.addStretch(); root.addLayout(btns)
-        issue_box=QGroupBox("6. Approval Summary and Permit Issue")
-        issue_layout=QVBoxLayout(issue_box)
-        self.application_permit_summary=QLabel("Save and approve the application to display the permit summary here.")
+        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Draft"); submit=QPushButton("Submit for Review"); clear=QPushButton("Clear Form")
+        self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); clear.clicked.connect(self._clear_form)
+        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(clear); btns.addStretch(); root.addLayout(btns)
+        self.application_permit_summary=QLabel("Save a draft or submit the application for review.")
         self.application_permit_summary.setWordWrap(True)
         self.application_permit_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
-        issue_layout.addWidget(self.application_permit_summary)
-        self.issue_application_button=QPushButton("Issue Approved Permit")
-        self.issue_application_button.setMinimumHeight(38)
-        self.issue_application_button.setEnabled(False)
-        self.issue_application_button.clicked.connect(lambda _checked=False: self._issue_application_permit())
-        issue_layout.addWidget(self.issue_application_button)
-        root.addWidget(issue_box)
+        root.addWidget(self.application_permit_summary)
         self._update_application_permit_summary()
 
     def _build_revalidation(self):
         lay=QVBoxLayout(self.revalidation_tab)
         top=QFormLayout(); lay.addLayout(top)
         self.reval_permit=QComboBox(); self.reval_permit.currentIndexChanged.connect(self._load_revalidation_days)
+        self.reval_holder=QLineEdit(); self.reval_authority=QLineEdit()
         top.addRow("Select Permit from Register",self.reval_permit)
+        top.addRow("Permit Holder Name",self.reval_holder)
+        top.addRow("Permit Authority",self.reval_authority)
         self.reval_info=QLabel("Select a permit to view its planned dates and daily revalidation record."); self.reval_info.setWordWrap(True); lay.addWidget(self.reval_info)
         self.reval_table=QTableWidget(); self.reval_table.setColumnCount(4); self.reval_table.setHorizontalHeaderLabels(["Date","Day","Daily Status","Comments"])
         self.reval_table.setAlternatingRowColors(True); self.reval_table.setWordWrap(True); self.reval_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -8109,6 +8109,35 @@ class PTWModule(QWidget):
         lay.addWidget(self.reval_table,1)
         row=QHBoxLayout(); save=QPushButton("Save Daily Revalidation"); delete=QPushButton("Delete Selected Day Record"); save.clicked.connect(self._save_revalidation); delete.clicked.connect(self._delete_revalidation_day); row.addWidget(save); row.addWidget(delete); row.addStretch(); lay.addLayout(row)
         self.reval_summary=QLabel("Days issued: 0 | Days worked: 0"); lay.addWidget(self.reval_summary)
+
+    def _build_review_approval(self):
+        lay=QVBoxLayout(self.review_tab)
+        intro=QLabel("Independent reviewer / approver workspace. Only submitted applications awaiting review are listed here.")
+        intro.setWordWrap(True); lay.addWidget(intro)
+        form=QFormLayout(); lay.addLayout(form)
+        self.review_permit=QComboBox(); self.review_permit.currentIndexChanged.connect(self._refresh_review_summary)
+        self.review_summary=QLabel("Select a submitted permit to review its details."); self.review_summary.setWordWrap(True)
+        self.review_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        self.reviewed_by=QLineEdit(); self.review_comments=QTextEdit(); self.review_comments.setMaximumHeight(75)
+        form.addRow("Submitted Permit",self.review_permit); lay.addWidget(self.review_summary)
+        form.addRow("Reviewed / Approved By",self.reviewed_by); form.addRow("Review Comments",self.review_comments)
+        row=QHBoxLayout(); approve=QPushButton("Approve Application"); return_btn=QPushButton("Return for Correction")
+        approve.clicked.connect(lambda _checked=False:self._review_decision(True)); return_btn.clicked.connect(lambda _checked=False:self._review_decision(False))
+        row.addWidget(approve); row.addWidget(return_btn); row.addStretch(); lay.addLayout(row)
+        self.review_table=self._table(["Permit","Company","Permit Type","Location","Applicant","Submitted","Status"],lay)
+
+    def _build_issue_authority(self):
+        lay=QVBoxLayout(self.issue_tab)
+        intro=QLabel("Permit issuing authority workspace. Only approved permits are listed. Review the permit summary before issuing authorization to work.")
+        intro.setWordWrap(True); lay.addWidget(intro)
+        form=QFormLayout(); lay.addLayout(form)
+        self.issue_permit=QComboBox(); self.issue_permit.currentIndexChanged.connect(self._refresh_issue_summary)
+        self.issue_summary=QLabel("Select an approved permit to review its details."); self.issue_summary.setWordWrap(True)
+        self.issue_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        self.issued_by=QLineEdit(); self.issued_by.setPlaceholderText("Authorized permit issuer name")
+        form.addRow("Approved Permit",self.issue_permit); lay.addWidget(self.issue_summary); form.addRow("Issued By / Permit Authority",self.issued_by)
+        issue=QPushButton("Issue Permit / Authorize Work"); issue.setMinimumHeight(40); issue.clicked.connect(lambda _checked=False:self._issue_from_authority_tab()); lay.addWidget(issue)
+        self.issue_table=self._table(["Permit","Company","Permit Type","Location","Permit Holder","Approved By","Approval Date","Status"],lay)
 
     def _build_register(self):
         lay=QVBoxLayout(self.register_tab); filters=QHBoxLayout()
@@ -8122,14 +8151,14 @@ class PTWModule(QWidget):
         self.permit_table.horizontalHeader().setSectionResizeMode(14,QHeaderView.ResizeMode.Stretch)
         self.permit_table.setWordWrap(True); self.permit_table.setMinimumHeight(260)
         row=QHBoxLayout()
-        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Approve Selected",self._approve_selected),("Export Register",self._export_csv),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
+        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Issue Selected",self._issue_selected_from_register),("Export Register",self._export_csv),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
             b=QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         row.addStretch(); lay.addLayout(row)
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
 
     def _build_certificates(self):
         lay=QVBoxLayout(self.cert_tab); f=QFormLayout(); lay.addLayout(f)
-        self.cert_permit=QComboBox(); self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_responsible=QLineEdit(); self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.cert_permit=QComboBox(); self.cert_permit.currentIndexChanged.connect(self._refresh_certificates_for_selected_permit); self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_responsible=QLineEdit(); self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm")
         self.cert_status=QComboBox(); self.cert_status.addItems(["Draft","Submitted","Approved","Valid","Expired","Suspended","Closed","Rejected"])
         self.cert_verification=QComboBox(); self.cert_verification.addItems(["Pending","Verified","Rejected"])
         self.cert_comments=QLineEdit(); f.addRow("Parent Permit",self.cert_permit); f.addRow("Certificate Type",self.cert_type); f.addRow("Responsible Person",self.cert_responsible); f.addRow("Valid Until",self.cert_valid_until); f.addRow("Status",self.cert_status); f.addRow("Verification",self.cert_verification); f.addRow("Comments",self.cert_comments)
@@ -8151,11 +8180,18 @@ class PTWModule(QWidget):
         self.handover_table=self._table(["Permit","Outgoing","Incoming","Shift","Work Remaining","Hazards","Gas","Isolation","Status","Created"],lay)
 
     def _build_suspension(self):
-        lay=QVBoxLayout(self.suspension_tab); form=QFormLayout(); lay.addLayout(form)
-        self.susp_permit=QComboBox(); self.susp_action=QComboBox(); self.susp_action.addItems(["Suspend","Hold","Restart"]); self.susp_action.currentTextChanged.connect(self._refresh_suspension_permits); self.susp_reason=QTextEdit(); self.susp_reason.setMaximumHeight(90); self.susp_rechecks=QLineEdit(); self.susp_actor=QLineEdit(); self.susp_evidence=QLineEdit(); browse=QPushButton("Browse Evidence"); browse.clicked.connect(lambda:self._choose_into(self.susp_evidence))
-        form.addRow("Permit",self.susp_permit); form.addRow("Action",self.susp_action); form.addRow("Reason / Site Conditions",self.susp_reason); form.addRow("Required Rechecks Completed (describe)",self.susp_rechecks); form.addRow("Responsible User",self.susp_actor); evidence_row=QHBoxLayout(); evidence_row.addWidget(self.susp_evidence); evidence_row.addWidget(browse); form.addRow("Evidence File",evidence_row)
-        row=QHBoxLayout(); btn=QPushButton("Record Action"); load=QPushButton("Load Selected for Edit"); update=QPushButton("Update Selected Action"); delete=QPushButton("Delete Selected Action Record"); btn.clicked.connect(self._suspension_action); load.clicked.connect(self._load_selected_suspension); update.clicked.connect(self._update_selected_suspension); delete.clicked.connect(self._delete_selected_suspension); row.addWidget(btn); row.addWidget(load); row.addWidget(update); row.addWidget(delete); lay.addLayout(row)
-        self.susp_table=self._table(["Permit","Event","Previous Status","New Status","Details","Actor","Evidence","Timestamp"],lay)
+        lay=QVBoxLayout(self.suspension_tab)
+        info=QLabel("Select any permit, record the reason, attach supporting evidence if available, choose Suspend, On Hold or Restart, then submit.")
+        info.setWordWrap(True); lay.addWidget(info)
+        form=QFormLayout(); lay.addLayout(form)
+        self.susp_permit=QComboBox(); self.susp_action=QComboBox(); self.susp_action.addItems(["Suspend", "On Hold", "Restart"])
+        self.susp_reason=QTextEdit(); self.susp_reason.setMaximumHeight(85)
+        self.susp_actor=QLineEdit(); self.susp_actor.setPlaceholderText("Responsible person / user")
+        self.susp_evidence=QLineEdit(); browse=QPushButton("Browse Evidence"); browse.clicked.connect(lambda:self._choose_into(self.susp_evidence))
+        evidence_row=QHBoxLayout(); evidence_row.addWidget(self.susp_evidence); evidence_row.addWidget(browse)
+        form.addRow("Select Permit",self.susp_permit); form.addRow("Reason",self.susp_reason); form.addRow("Evidence Attachment",evidence_row); form.addRow("Action",self.susp_action); form.addRow("Recorded By",self.susp_actor)
+        submit=QPushButton("Submit Suspension / Hold / Restart"); submit.setMinimumHeight(38); submit.clicked.connect(lambda _checked=False:self._suspension_action()); lay.addWidget(submit)
+        self.susp_table=self._table(["Permit","Event","Previous Status","New Status","Reason","Recorded By","Evidence","Timestamp"],lay)
 
     def _build_closure(self):
         lay=QVBoxLayout(self.closure_tab)
@@ -8289,34 +8325,86 @@ class PTWModule(QWidget):
     def _update_application_permit_summary(self):
         if not hasattr(self, "application_permit_summary"):
             return
-        pid = self.selected_permit_id
-        permit = self._permit_row(pid)
+        permit = self._permit_row(self.selected_permit_id)
         if not permit:
-            self.application_permit_summary.setText("Save and approve the application to display the permit summary here.")
-            self.issue_application_button.setEnabled(False)
+            self.application_permit_summary.setText("Save a draft or submit the application for review.")
             return
-        summary = (f"Permit: {permit['permit_number']}\n"
-                   f"Type: {permit['permit_type']} | Status: {permit['status']}\n"
-                   f"Company: {permit['performing_company']} | Location: {permit['location']}\n"
-                   f"Permit Holder: {permit['permit_holder']} | Approved By: {permit['approved_by']}\n"
-                   f"Planned: {permit['planned_start']} to {permit['planned_end']}\n"
-                   f"Supporting Documents: {permit['supporting_document_types'] or 'None'}\n"
-                   f"LOTO Points: {permit['loto_equipment'] or 'None'}")
-        self.application_permit_summary.setText(summary)
-        self.issue_application_button.setEnabled(permit["status"] == "Approved")
-        if permit["status"] == "Issued / Active":
-            self.issue_application_button.setText("Permit Issued — Active")
-            self.issue_application_button.setEnabled(False)
+        self.application_permit_summary.setText(
+            f"Permit: {permit['permit_number']} | Status: {permit['status']}\n"
+            f"Company: {permit['performing_company']} | Location: {permit['location']}\n"
+            f"Permit Holder: {permit['permit_holder']} | Planned: {permit['planned_start']} to {permit['planned_end']}\n"
+            f"Supporting Documents: {permit['supporting_document_types'] or 'None'}")
+
+    def _refresh_review_summary(self, *_args):
+        if not hasattr(self, "review_permit"):
+            return
+        pid=self.review_permit.currentData(); r=self._permit_row(pid)
+        if not r:
+            self.review_summary.setText("Select a submitted permit to review its details."); return
+        self.review_summary.setText(f"Permit: {r['permit_number']} | {r['status']}\nType: {r['permit_type']} | Company: {r['performing_company']}\nLocation: {r['location']} | Work: {r['work_scope']}\nApplicant: {r['applicant_name']} | Holder: {r['permit_holder']}\nPlanned: {r['planned_start']} to {r['planned_end']}\nSupporting Documents: {r['supporting_document_types'] or 'None'} | LOTO: {r['loto_equipment'] or 'None'}")
+
+    def _refresh_issue_summary(self, *_args):
+        if not hasattr(self, "issue_permit"):
+            return
+        pid=self.issue_permit.currentData(); r=self._permit_row(pid)
+        if not r:
+            self.issue_summary.setText("Select an approved permit to review its details."); return
+        self.issue_summary.setText(f"Permit: {r['permit_number']} | Status: {r['status']}\nType: {r['permit_type']} | Company: {r['performing_company']}\nLocation: {r['location']} | Work: {r['work_scope']}\nPermit Holder: {r['permit_holder']} | Approved By: {r['approved_by']}\nApproval Date: {r['approval_date']} | Validity: {r['planned_start']} to {r['planned_end']}\nSupporting Documents: {r['supporting_document_types'] or 'None'} | LOTO: {r['loto_equipment'] or 'None'}")
+
+    def _review_decision(self, approve):
+        pid=self.review_permit.currentData(); r=self._permit_row(pid)
+        if not r:
+            return QMessageBox.warning(self,"Permit Required","Select a submitted application.")
+        if r["status"] not in ("Submitted", "Under Review"):
+            return QMessageBox.warning(self,"Review Not Available","Only submitted applications can be reviewed here.")
+        reviewer=self.reviewed_by.text().strip()
+        if not reviewer:
+            return QMessageBox.warning(self,"Reviewer Required","Enter the authorized reviewer / approver name.")
+        comments=self.review_comments.toPlainText().strip()
+        if approve:
+            new_status="Approved"
+            self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(reviewer,_now(),_now(),pid))
+            decision="Approved"
         else:
-            self.issue_application_button.setText("Issue Approved Permit")
+            new_status="Returned for Correction"
+            self.db.execute("UPDATE ptw_permits SET status=?,updated_at=? WHERE id=?",(new_status,_now(),pid))
+            decision="Returned for Correction"
+        self.db.execute("INSERT INTO ptw_approvals(permit_id,stage,user_name,role_name,decision,comments,document_revision,created_at) VALUES(?,?,?,?,?,?,?,?)",(pid,"Application Review",reviewer,"Permit Reviewer / Approver",decision,comments,int(r["revision"] or 1),_now()))
+        self._event(pid,"Permit application review",r["status"],new_status,f"{decision} by {reviewer}. {comments}")
+        self.db.conn.commit(); self.refresh_all()
+        QMessageBox.information(self,"Review Recorded",f"Permit {r['permit_number']} is now {new_status}.")
 
-    def _issue_application_permit(self):
-        if not self.selected_permit_id:
-            return QMessageBox.information(self, "Select Permit", "Save or load the permit application first.")
-        self._issue_permit_id(self.selected_permit_id)
-        self._update_application_permit_summary()
+    def _refresh_issue_authority(self):
+        if not hasattr(self,"issue_permit"):
+            return
+        current=self.issue_permit.currentData(); self.issue_permit.blockSignals(True); self.issue_permit.clear(); self.issue_permit.addItem("Select approved permit",None)
+        rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status='Approved' ORDER BY id DESC")
+        for r in rows:self.issue_permit.addItem(f"{r['permit_number']} — {r['permit_type']} ({r['status']})",r["id"])
+        idx=self.issue_permit.findData(current); self.issue_permit.setCurrentIndex(idx if idx>=0 else 0); self.issue_permit.blockSignals(False); self._refresh_issue_summary()
 
-    def _issue_permit_id(self, pid):
+    def _issue_from_authority_tab(self):
+        pid=self.issue_permit.currentData(); issuer=self.issued_by.text().strip()
+        if not pid:
+            return QMessageBox.warning(self,"Permit Required","Select an approved permit.")
+        if not issuer:
+            return QMessageBox.warning(self,"Issuer Required","Enter the authorized permit issuer / authority name.")
+        self._issue_permit_id(pid,issuer)
+        self.refresh_all()
+
+    def _issue_selected_from_register(self):
+        pid=self._selected_id()
+        if not pid:
+            return QMessageBox.information(self,"Select Permit","Select a permit row first.")
+        r=self._permit_row(pid)
+        if not r or r["status"]!="Approved":
+            return QMessageBox.warning(self,"Approval Required","Only approved permits can be issued. Use the Permit Issue Authority tab.")
+        self.tabs.setCurrentWidget(self.issue_tab)
+        idx=self.issue_permit.findData(pid)
+        if idx<0:self._refresh_issue_authority(); idx=self.issue_permit.findData(pid)
+        if idx>=0:self.issue_permit.setCurrentIndex(idx)
+        self._refresh_issue_summary()
+
+    def _issue_permit_id(self, pid, issuer=""):
         permit = self._permit_row(pid)
         if not permit:
             return QMessageBox.information(self, "Select Permit", "The selected permit could not be found.")
@@ -8335,28 +8423,15 @@ class PTWModule(QWidget):
                 return QMessageBox.warning(self, "Expired", "The planned end date/time has passed. Update the permit validity before issue.")
         except Exception:
             return QMessageBox.warning(self, "Invalid Date", "The permit validity dates are invalid.")
-        self._change_status(pid, "Issued / Active", "Permit issued after approval. Permit is now active.")
+        issuer = issuer.strip() or self._actor()
+        self.db.execute("UPDATE ptw_permits SET permit_issuer=?,updated_at=? WHERE id=?",(issuer,_now(),pid))
+        self._change_status(pid, "Issued / Active", f"Permit issued by {issuer}. Permit is now active.")
         QMessageBox.information(self, "Permit Issued", f"Permit {permit['permit_number']} is now Issued / Active and available in Suspension / Restart.")
 
     def _approve_application(self):
-        if not self.selected_permit_id:
-            self._save_permit("Draft")
-            if not self.selected_permit_id:return
-        pid=self.selected_permit_id; r=self._permit_row(pid)
-        if r and r["status"] in ("Draft","Returned for Correction"):
-            self._save_permit("Draft")
-            r=self._permit_row(pid)
-        approver=self.form_fields["approved_by"].text().strip()
-        if not approver:return QMessageBox.warning(self,"Approver Required","Enter the authorized approver name before approving this permit.")
-        if not r or not r["performing_company"] or not r["location"] or not r["work_scope"] or not r["permit_holder"] or not r["planned_start"] or not r["planned_end"]:
-            return QMessageBox.warning(self,"Application Incomplete","Complete company, location, work scope, permit holder and planned start/end dates before approving.")
-        if r["status"] not in ("Draft","Submitted","Returned for Correction","Approved"):
-            return QMessageBox.warning(self,"Approval Not Allowed","Only a saved draft/submitted permit can be approved here.")
-        self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(approver,_now(),_now(),pid))
-        self._event(pid,"Permit approved",r["status"],"Approved",f"Approved by {approver}")
-        self.refresh_all(); self.tabs.setCurrentWidget(self.application_tab)
-        self._update_application_permit_summary()
-        QMessageBox.information(self,"Permit Approved",f"Permit {r['permit_number']} approved by {approver}. Review the summary and use Issue Approved Permit when ready.")
+        self.tabs.setCurrentWidget(self.review_tab)
+        self._refresh_authority_workflows()
+        QMessageBox.information(self,"Separate Approval","Permit applications are submitted by the applicant and approved separately in the Permit Review & Approval tab.")
 
     def _approve_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
@@ -8505,10 +8580,7 @@ class PTWModule(QWidget):
         QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. Work is not authorized until the permit is approved and issued.")
 
     def _submit_permit(self):
-        if self.selected_permit_id:
-            self._save_permit("Submitted")
-        else:
-            self._save_permit("Submitted")
+        self._save_permit("Submitted")
 
     def _selected_id(self, table=None):
         t=table or self.permit_table; row=t.currentRow()
@@ -8524,11 +8596,9 @@ class PTWModule(QWidget):
         if include_all:
             combo.addItem("All Permits", None)
         if combo is getattr(self, "reval_permit", None):
-            rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status='Approved' ORDER BY id DESC")
+            rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status='Issued / Active' ORDER BY id DESC")
         elif combo is getattr(self, "susp_permit", None):
-            action = self.susp_action.currentText() if hasattr(self, "susp_action") else "Suspend Permit"
-            required_status = "Issued / Active" if action == "Suspend Permit" else "Suspended"
-            rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status=? ORDER BY id DESC", (required_status,))
+            rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
         else:
             rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
         combo.addItem("Select permit", None)
@@ -8541,12 +8611,20 @@ class PTWModule(QWidget):
     def _refresh_suspension_permits(self, *_args):
         if hasattr(self, "susp_permit"):
             self._set_combo_permits(self.susp_permit)
-            if self.susp_permit.count() <= 1:
-                action = self.susp_action.currentText()
-                expected = "Issued / Active" if action == "Suspend Permit" else "Suspended"
-                self.susp_permit.setToolTip(f"No permits currently have status: {expected}")
-            else:
-                self.susp_permit.setToolTip("Select a permit matching the selected action.")
+            self.susp_permit.setToolTip("All permits are listed. The selected action is validated against the permit's current status when submitted.")
+
+    def _refresh_certificates_for_selected_permit(self, *_args):
+        if not hasattr(self, "cert_table"):
+            return
+        permit_id = self.cert_permit.currentData() if hasattr(self, "cert_permit") else None
+        if not permit_id:
+            self.cert_table.setRowCount(0)
+            return
+        rows = self.db.fetchall(
+            "SELECT c.*,p.permit_number FROM ptw_certificates c JOIN ptw_permits p ON p.id=c.permit_id WHERE c.permit_id=? ORDER BY c.id DESC",
+            (permit_id,)
+        )
+        self._fill_table(self.cert_table, rows, ["certificate_ref","permit_number","certificate_type","responsible_person","valid_until","status","verification_status","attachment_path","comments"])
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -8641,7 +8719,7 @@ class PTWModule(QWidget):
             drows.append(dict(r, action=action))
         if hasattr(self, "dashboard_table"):
             self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
-        self._refresh_combo_lists(); self._refresh_other_tables()
+        self._refresh_combo_lists(); self._refresh_other_tables(); self._refresh_authority_workflows()
         if hasattr(self,"reval_permit"): self._load_revalidation_days()
 
     def _open_revalidation_selected(self):
@@ -8661,8 +8739,10 @@ class PTWModule(QWidget):
         r=self._permit_row(pid)
         if not r:
             self.reval_info.setText("Select an approved permit to view its planned dates and daily revalidation record."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
-        if r["status"] != "Approved":
-            self.reval_info.setText("Only permits with Approved status are available for Daily Revalidation."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
+        if r["status"] != "Issued / Active":
+            self.reval_info.setText("Only issued / active permits are available for Daily Revalidation."); self.reval_summary.setText("Days issued: 0 | Days worked: 0"); return
+        self.reval_holder.setText(_s(r["permit_holder"]))
+        self.reval_authority.setText(_s(r["permit_issuer"] or r["performing_authority"]))
         try:
             start=datetime.fromisoformat(r["planned_start"]).date(); end=datetime.fromisoformat(r["planned_end"]).date()
         except Exception:
@@ -8671,6 +8751,10 @@ class PTWModule(QWidget):
             self.reval_info.setText("Permit end date is earlier than start date. Correct the permit dates first."); return
         issued=(end-start).days+1
         existing={x["work_date"]:x for x in self.db.fetchall("SELECT * FROM ptw_daily_revalidation WHERE permit_id=?",(pid,))}
+        if existing:
+            latest=existing[sorted(existing.keys())[-1]]
+            self.reval_holder.setText(_s(latest["permit_holder"]) or _s(r["permit_holder"]))
+            self.reval_authority.setText(_s(latest["permit_authority"]) or _s(r["permit_issuer"] or r["performing_authority"]))
         days=(end-start).days+1
         self.reval_table.setRowCount(days)
         statuses=["Pending","Revalidated","Suspended","No Work","On Hold","Rejected"]
@@ -8692,12 +8776,16 @@ class PTWModule(QWidget):
     def _save_revalidation(self):
         pid=self.reval_permit.currentData(); r=self._permit_row(pid)
         if not r:return QMessageBox.warning(self,"Permit Required","Select a permit from the Permit Register.")
+        if not self.reval_holder.text().strip():
+            return QMessageBox.warning(self,"Permit Holder Required","Enter the permit holder name before saving daily revalidation.")
+        if not self.reval_authority.text().strip():
+            return QMessageBox.warning(self,"Permit Authority Required","Enter the permit authority before saving daily revalidation.")
         now=_now(); worked=0
         for i in range(self.reval_table.rowCount()):
             date_item=self.reval_table.item(i,0); status_widget=self.reval_table.cellWidget(i,2); comment_item=self.reval_table.item(i,3)
             if not date_item or not status_widget: continue
             day=date_item.text(); status=status_widget.currentText(); comments=comment_item.text().strip() if comment_item else ""
-            self.db.execute("INSERT INTO ptw_daily_revalidation(permit_id,work_date,day_status,comments,recorded_by,recorded_at) VALUES(?,?,?,?,?,?) ON CONFLICT(permit_id,work_date) DO UPDATE SET day_status=excluded.day_status,comments=excluded.comments,recorded_by=excluded.recorded_by,recorded_at=excluded.recorded_at",(pid,day,status,comments,self._actor(),now))
+            self.db.execute("INSERT INTO ptw_daily_revalidation(permit_id,work_date,day_status,comments,recorded_by,recorded_at,permit_holder,permit_authority) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(permit_id,work_date) DO UPDATE SET day_status=excluded.day_status,comments=excluded.comments,recorded_by=excluded.recorded_by,recorded_at=excluded.recorded_at,permit_holder=excluded.permit_holder,permit_authority=excluded.permit_authority",(pid,day,status,comments,self._actor(),now,self.reval_holder.text().strip(),self.reval_authority.text().strip()))
             if status=="Revalidated":worked+=1
             self._event(pid,"Daily permit revalidation",r["status"],r["status"],f"{day}: {status}. {comments}")
         self.db.conn.commit(); self.refresh_register(); self.reval_summary.setText(f"Days issued: {self.reval_table.rowCount()} | Days worked (revalidated): {worked}")
@@ -8750,8 +8838,8 @@ class PTWModule(QWidget):
         if not e:return
         self.editing_suspension_event_id=eid
         ix=self.susp_permit.findData(e["permit_id"]); self.susp_permit.setCurrentIndex(ix if ix>=0 else 0)
-        action_map={"Permit suspended":"Suspend Permit","Restart requested":"Request Restart","Permit restarted":"Authorize Restart"}
-        ix=self.susp_action.findText(action_map.get(e["event_type"],"Suspend Permit")); self.susp_action.setCurrentIndex(ix if ix>=0 else 0)
+        action_map={"Permit suspended":"Suspend","Permit placed on hold":"On Hold","Restart requested":"Restart","Permit restarted":"Restart"}
+        ix=self.susp_action.findText(action_map.get(e["event_type"],"Suspend")); self.susp_action.setCurrentIndex(ix if ix>=0 else 0)
         self.susp_reason.setPlainText(_s(e["details"])); self.susp_actor.setText(_s(e["actor"])); self.susp_evidence.setText(_s(e["attachment_path"]))
 
     def _update_selected_suspension(self):
@@ -8771,13 +8859,24 @@ class PTWModule(QWidget):
         if QMessageBox.question(self,"Delete Action Record","Delete the selected PTW suspension/restart event from its workspace?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
         self.db.execute("DELETE FROM ptw_events WHERE id=?",(eid,)); self.refresh_all()
 
+    def _refresh_authority_workflows(self):
+        if hasattr(self,"review_permit"):
+            current=self.review_permit.currentData(); self.review_permit.blockSignals(True); self.review_permit.clear(); self.review_permit.addItem("Select submitted permit",None)
+            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status IN ('Submitted','Under Review') ORDER BY id DESC")
+            for r in rows:self.review_permit.addItem(f"{r['permit_number']} — {r['permit_type']} ({r['status']})",r["id"])
+            idx=self.review_permit.findData(current); self.review_permit.setCurrentIndex(idx if idx>=0 else 0); self.review_permit.blockSignals(False); self._refresh_review_summary()
+            self._fill_table(self.review_table,self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,applicant_name,created_at,status,id FROM ptw_permits WHERE status IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC"),["permit_number","performing_company","permit_type","location","applicant_name","created_at","status"])
+        self._refresh_issue_authority()
+        if hasattr(self,"issue_table"):
+            self._fill_table(self.issue_table,self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,permit_holder,approved_by,approval_date,status,id FROM ptw_permits WHERE status IN ('Approved','Issued / Active') ORDER BY id DESC"),["permit_number","performing_company","permit_type","location","permit_holder","approved_by","approval_date","status"])
+
     def _refresh_other_tables(self):
         if hasattr(self,"cert_table"):
-            self._fill_table(self.cert_table,self.db.fetchall("SELECT c.*,p.permit_number FROM ptw_certificates c JOIN ptw_permits p ON p.id=c.permit_id ORDER BY c.id DESC"),["certificate_ref","permit_number","certificate_type","responsible_person","valid_until","status","verification_status","attachment_path","comments"])
+            self._refresh_certificates_for_selected_permit()
         if hasattr(self,"renewal_table"):
             self._fill_table(self.renewal_table,self.db.fetchall("SELECT r.*,p.permit_number FROM ptw_renewals r JOIN ptw_permits p ON p.id=r.permit_id ORDER BY r.id DESC"),["permit_number","previous_start","previous_end","proposed_start","proposed_end","reason","status","reinspection","gas_retest","created_at"])
         if hasattr(self,"susp_table"):
-            self._fill_table(self.susp_table,self.db.fetchall("SELECT e.*,p.permit_number FROM ptw_events e JOIN ptw_permits p ON p.id=e.permit_id WHERE e.event_type IN ('Permit suspended','Restart requested','Permit restarted') ORDER BY e.id DESC"),["permit_number","event_type","previous_status","new_status","details","actor","attachment_path","created_at"])
+            self._fill_table(self.susp_table,self.db.fetchall("SELECT e.*,p.permit_number FROM ptw_events e JOIN ptw_permits p ON p.id=e.permit_id WHERE e.event_type IN ('Permit suspended','Permit placed on hold','Restart requested','Permit restarted') ORDER BY e.id DESC"),["permit_number","event_type","previous_status","new_status","details","actor","attachment_path","created_at"])
         if hasattr(self,"closure_table"):
             self._fill_table(self.closure_table,self.db.fetchall("SELECT c.*,p.permit_number FROM ptw_closures c JOIN ptw_permits p ON p.id=c.permit_id ORDER BY c.id DESC"),["permit_number","work_complete","site_inspection","tools_removed","personnel_accounted","plant_handover","isolation_disposition","reinstatement","status","created_at"])
         if hasattr(self,"doc_table"):
@@ -8933,23 +9032,33 @@ class PTWModule(QWidget):
         self._event(pid,"Shift handover recorded",r["status"],r["status"],f"Outgoing: {self.hand_out.text().strip()}; incoming: {self.hand_in.text().strip()}; status: {status}"); self.refresh_all()
 
     def _suspension_action(self):
-        pid=self.susp_permit.currentData(); r=self._permit_row(pid)
-        if not r:return QMessageBox.warning(self,"Permit Required","Select a permit.")
+        pid=self.susp_permit.currentData(); permit=self._permit_row(pid)
+        if not permit:
+            return QMessageBox.warning(self,"Permit Required","Select a permit.")
         action=self.susp_action.currentText(); reason=self.susp_reason.toPlainText().strip(); evidence=self.susp_evidence.text().strip()
-        if not reason:return QMessageBox.warning(self,"Reason Required","Enter the reason and relevant site conditions.")
+        if not reason:
+            return QMessageBox.warning(self,"Reason Required","Enter the reason before submitting this action.")
+        old_status=permit["status"]
         actor=self.susp_actor.text().strip() or self._actor()
-        if action=="Suspend Permit":
-            if r["status"]!="Issued / Active":return QMessageBox.warning(self,"Invalid State","Only an active permit can be suspended.")
-            self._change_status(pid,"Suspended",reason); self._event(pid,"Permit suspended","Issued / Active","Suspended",reason,evidence)
-        elif action=="Request Restart":
-            if r["status"]!="Suspended":return QMessageBox.warning(self,"Invalid State","Only suspended permits can request restart.")
-            if not self.susp_rechecks.text().strip():return QMessageBox.warning(self,"Rechecks Required","Describe completed site/safety rechecks. Never invent gas readings or approvals.")
-            self._event(pid,"Restart requested","Suspended","Suspended",reason+" Rechecks: "+self.susp_rechecks.text().strip(),evidence)
+        if action == "Suspend":
+            if old_status not in ("Issued / Active", "On Hold"):
+                return QMessageBox.warning(self,"Action Not Allowed","Only an issued/active or on-hold permit can be suspended.")
+            new_status="Suspended"; event_type="Permit suspended"
+        elif action == "On Hold":
+            if old_status not in ("Issued / Active", "Suspended"):
+                return QMessageBox.warning(self,"Action Not Allowed","Only an issued/active or suspended permit can be put on hold.")
+            new_status="On Hold"; event_type="Permit placed on hold"
         else:
-            if r["status"]!="Suspended":return QMessageBox.warning(self,"Invalid State","Only suspended permits can be restarted.")
-            if not self.susp_rechecks.text().strip():return QMessageBox.warning(self,"Rechecks Required","Describe completed site/safety rechecks.")
-            self._change_status(pid,"Issued / Active","Permit restarted after recorded rechecks and authorized confirmation: "+reason); self._event(pid,"Permit restarted","Suspended","Issued / Active",reason+" Rechecks: "+self.susp_rechecks.text().strip(),evidence)
+            if old_status not in ("Suspended", "On Hold"):
+                return QMessageBox.warning(self,"Action Not Allowed","Only a suspended or on-hold permit can be restarted.")
+            new_status="Issued / Active"; event_type="Permit restarted"
+        self.db.execute("UPDATE ptw_permits SET status=?,updated_at=? WHERE id=?",(new_status,_now(),pid))
+        self.db.execute("INSERT INTO ptw_events(permit_id,event_type,previous_status,new_status,details,actor,attachment_path,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                        (pid,event_type,old_status,new_status,reason,actor,evidence,_now()))
+        self.db.conn.commit()
+        self.susp_reason.clear(); self.susp_evidence.clear(); self.susp_actor.clear()
         self.refresh_all()
+        QMessageBox.information(self,"PTW Status Updated",f"Permit {permit['permit_number']} status changed to {new_status}.")
 
     def _close_permit_simple(self):
         pid = self.close_permit.currentData()
