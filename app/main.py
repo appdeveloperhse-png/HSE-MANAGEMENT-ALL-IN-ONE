@@ -8035,7 +8035,11 @@ class PTWModule(QWidget):
         self.support_doc_rows=[]
         self.support_doc_container=QWidget(); self.support_doc_layout=QVBoxLayout(self.support_doc_container); self.support_doc_layout.setContentsMargins(0,0,0,0)
         docs_layout.addWidget(self.support_doc_container)
-        add_doc=QPushButton("+ Add Supporting Document"); add_doc.clicked.connect(self._add_support_doc_row); docs_layout.addWidget(add_doc)
+        self.add_support_doc_button=QPushButton("+ Add Supporting Document")
+        self.add_support_doc_button.setMinimumHeight(34)
+        self.add_support_doc_button.setAutoDefault(False)
+        self.add_support_doc_button.clicked.connect(lambda _checked=False: self._add_support_doc_row())
+        docs_layout.addWidget(self.add_support_doc_button)
         self.form_fields["supporting_document_types"] = self.support_doc_container
         self.form_fields["supporting_document_reference"] = self.support_doc_container
         self._add_support_doc_row()
@@ -8046,7 +8050,11 @@ class PTWModule(QWidget):
         loto.addWidget(QLabel("Add a separate row for every isolation / LOTO point."))
         self.loto_rows=[]
         self.loto_container=QWidget(); self.loto_layout=QVBoxLayout(self.loto_container); self.loto_layout.setContentsMargins(0,0,0,0); loto.addWidget(self.loto_container)
-        add_loto=QPushButton("+ Add LOTO / Isolation Point"); add_loto.clicked.connect(self._add_loto_row); loto.addWidget(add_loto)
+        self.add_loto_button=QPushButton("+ Add LOTO / Isolation Point")
+        self.add_loto_button.setMinimumHeight(34)
+        self.add_loto_button.setAutoDefault(False)
+        self.add_loto_button.clicked.connect(lambda _checked=False: self._add_loto_row())
+        loto.addWidget(self.add_loto_button)
         self.form_fields["loto_equipment"] = self.loto_container
         self.form_fields["loto_number"] = self.loto_container
         self._add_loto_row()
@@ -8074,7 +8082,20 @@ class PTWModule(QWidget):
 
         btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Permit"); submit=QPushButton("Submit Permit"); approve=QPushButton("Approve Permit"); clear=QPushButton("Clear Form")
         self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); approve.clicked.connect(self._approve_application); clear.clicked.connect(self._clear_form)
-        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(approve); btns.addWidget(clear); btns.addStretch(); outer.addLayout(btns)
+        btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(approve); btns.addWidget(clear); btns.addStretch(); root.addLayout(btns)
+        issue_box=QGroupBox("6. Approval Summary and Permit Issue")
+        issue_layout=QVBoxLayout(issue_box)
+        self.application_permit_summary=QLabel("Save and approve the application to display the permit summary here.")
+        self.application_permit_summary.setWordWrap(True)
+        self.application_permit_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        issue_layout.addWidget(self.application_permit_summary)
+        self.issue_application_button=QPushButton("Issue Approved Permit")
+        self.issue_application_button.setMinimumHeight(38)
+        self.issue_application_button.setEnabled(False)
+        self.issue_application_button.clicked.connect(lambda _checked=False: self._issue_application_permit())
+        issue_layout.addWidget(self.issue_application_button)
+        root.addWidget(issue_box)
+        self._update_application_permit_summary()
 
     def _build_revalidation(self):
         lay=QVBoxLayout(self.revalidation_tab)
@@ -8137,16 +8158,23 @@ class PTWModule(QWidget):
         self.susp_table=self._table(["Permit","Event","Previous Status","New Status","Details","Actor","Evidence","Timestamp"],lay)
 
     def _build_closure(self):
-        lay=QVBoxLayout(self.closure_tab); scroll=QScrollArea(); scroll.setWidgetResizable(True); lay.addWidget(scroll,1); body=QWidget(); scroll.setWidget(body); form=QFormLayout(body); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.close_permit=QComboBox(); self.close_work=QComboBox(); self.close_work.addItems(["Not confirmed","Completed"]); self.close_inspection=QComboBox(); self.close_inspection.addItems(["Pending","Completed","Not applicable per procedure"]); self.close_tools=QComboBox(); self.close_tools.addItems(["Pending","Removed / confirmed","Not applicable per procedure"]); self.close_people=QComboBox(); self.close_people.addItems(["Pending","Accounted for / confirmed","Not applicable per procedure"]); self.close_plant=QComboBox(); self.close_plant.addItems(["Pending","Handed back","Not applicable per procedure"]); self.close_isolation=QComboBox(); self.close_isolation.addItems(["Pending","Disposition confirmed","Not applicable per procedure"]); self.close_reinstatement=QComboBox(); self.close_reinstatement.addItems(["Pending","Verified","Not applicable per procedure"]); self.close_performing=QLineEdit(); self.close_issuer=QLineEdit(); self.close_comments=QTextEdit(); self.close_comments.setMaximumHeight(70); self.close_evidence=QLineEdit(); browse=QPushButton("Browse Evidence"); browse.clicked.connect(lambda:self._choose_into(self.close_evidence))
-        for label,w in [("Permit",self.close_permit),("Work Completion Declaration",self.close_work),("Worksite Inspection",self.close_inspection),("Tools / Materials Removed",self.close_tools),("Personnel Accounted For",self.close_people),("Plant / Equipment Hand-back",self.close_plant),("Isolation Disposition",self.close_isolation),("Reinstatement Verification",self.close_reinstatement),("Performing Authority Acknowledgement",self.close_performing),("Permit Issuer / Area Authority Approval",self.close_issuer),("Closure Comments",self.close_comments)]: form.addRow(label,w)
-        ev=QHBoxLayout(); ev.addWidget(self.close_evidence); ev.addWidget(browse); form.addRow("Closure Evidence",ev)
-        for w in [self.close_permit,self.close_work,self.close_inspection,self.close_tools,self.close_people,self.close_plant,self.close_isolation,self.close_reinstatement]:
-            w.setMaxVisibleItems(7); w.setMinimumContentsLength(24); w.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-            w.view().setMinimumWidth(300); w.view().setMaximumHeight(240)
-        btn=QPushButton("Submit Closure for Verification"); btn.clicked.connect(self._submit_closure); form.addRow(btn)
+        lay=QVBoxLayout(self.closure_tab)
+        info=QLabel("Select the permit, confirm the work is complete, then close it. This action is available regardless of the permit's current status.")
+        info.setWordWrap(True)
+        info.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        lay.addWidget(info)
+        form=QFormLayout()
+        self.close_permit=QComboBox()
+        self.close_permit.setMinimumWidth(360)
+        self.close_confirm_check=QCheckBox("I confirm the work is complete and the permit can be closed.")
+        form.addRow("Select Permit",self.close_permit)
+        form.addRow("Confirmation",self.close_confirm_check)
+        lay.addLayout(form)
+        close_btn=QPushButton("Close Selected Permit")
+        close_btn.setMinimumHeight(40)
+        close_btn.clicked.connect(lambda _checked=False: self._close_permit_simple())
+        lay.addWidget(close_btn)
         self.closure_table=self._table(["Permit","Work Complete","Inspection","Tools","Personnel","Hand-back","Isolation","Reinstatement","Status","Closure Date"],lay)
-        editb=QPushButton("Load / Update Selected Closure"); delb=QPushButton("Delete Selected Closure"); editb.clicked.connect(self._load_selected_closure); delb.clicked.connect(self._delete_selected_closure); updateb=QPushButton("Save Closure Changes"); updateb.clicked.connect(self._update_selected_closure); lay.addWidget(editb); lay.addWidget(updateb); lay.addWidget(delb)
 
     def _build_documents(self):
         lay=QVBoxLayout(self.documents_tab); form=QFormLayout(); lay.addLayout(form)
@@ -8172,6 +8200,7 @@ class PTWModule(QWidget):
         row = QHBoxLayout(row_widget)
         row.setContentsMargins(0, 2, 0, 2)
         typ = QComboBox(row_widget)
+        typ.setMinimumWidth(220)
         typ.addItems(["Select document", "ECC / Excavation Clearance", "Confined Space Entry",
                       "Electrical / Isolation Certificate", "Mechanical Isolation / LOTO",
                       "Gas Test Record", "Lifting Plan", "Work at Height / Rescue",
@@ -8187,12 +8216,14 @@ class PTWModule(QWidget):
         ref.setText(reference)
         typ.currentTextChanged.connect(lambda value, w=other: w.setVisible(value == "Other"))
         remove = QPushButton("Remove", row_widget)
-        remove.clicked.connect(lambda checked=False, rw=row_widget: self._remove_dynamic_row(rw, self.support_doc_rows, self.support_doc_layout, self._add_support_doc_row))
+        remove.setAutoDefault(False)
+        remove.clicked.connect(lambda _checked=False, rw=row_widget: self._remove_dynamic_row(rw, self.support_doc_rows, self.support_doc_layout, self._add_support_doc_row))
         row.addWidget(typ, 2)
         row.addWidget(other, 2)
         row.addWidget(ref, 2)
         row.addWidget(remove)
         self.support_doc_layout.addWidget(row_widget)
+        row_widget.setVisible(True)
         self.support_doc_rows.append((typ, other, ref, row_widget))
 
     def _add_loto_row(self, equipment="", number=""):
@@ -8206,11 +8237,13 @@ class PTWModule(QWidget):
         no.setPlaceholderText("LOTO / isolation number")
         no.setText(number)
         remove = QPushButton("Remove", row_widget)
-        remove.clicked.connect(lambda checked=False, rw=row_widget: self._remove_dynamic_row(rw, self.loto_rows, self.loto_layout, self._add_loto_row))
+        remove.setAutoDefault(False)
+        remove.clicked.connect(lambda _checked=False, rw=row_widget: self._remove_dynamic_row(rw, self.loto_rows, self.loto_layout, self._add_loto_row))
         row.addWidget(eq, 2)
         row.addWidget(no, 1)
         row.addWidget(remove)
         self.loto_layout.addWidget(row_widget)
+        row_widget.setVisible(True)
         self.loto_rows.append((eq, no, row_widget))
 
     def _remove_dynamic_row(self, row_widget, collection, layout, add_empty_callback):
@@ -8253,6 +8286,58 @@ class PTWModule(QWidget):
             for i,eq in enumerate(eqs): self._add_loto_row(eq,nums[i] if i<len(nums) else "")
             if not self.loto_rows:self._add_loto_row()
 
+    def _update_application_permit_summary(self):
+        if not hasattr(self, "application_permit_summary"):
+            return
+        pid = self.selected_permit_id
+        permit = self._permit_row(pid)
+        if not permit:
+            self.application_permit_summary.setText("Save and approve the application to display the permit summary here.")
+            self.issue_application_button.setEnabled(False)
+            return
+        summary = (f"Permit: {permit['permit_number']}\n"
+                   f"Type: {permit['permit_type']} | Status: {permit['status']}\n"
+                   f"Company: {permit['performing_company']} | Location: {permit['location']}\n"
+                   f"Permit Holder: {permit['permit_holder']} | Approved By: {permit['approved_by']}\n"
+                   f"Planned: {permit['planned_start']} to {permit['planned_end']}\n"
+                   f"Supporting Documents: {permit['supporting_document_types'] or 'None'}\n"
+                   f"LOTO Points: {permit['loto_equipment'] or 'None'}")
+        self.application_permit_summary.setText(summary)
+        self.issue_application_button.setEnabled(permit["status"] == "Approved")
+        if permit["status"] == "Issued / Active":
+            self.issue_application_button.setText("Permit Issued — Active")
+            self.issue_application_button.setEnabled(False)
+        else:
+            self.issue_application_button.setText("Issue Approved Permit")
+
+    def _issue_application_permit(self):
+        if not self.selected_permit_id:
+            return QMessageBox.information(self, "Select Permit", "Save or load the permit application first.")
+        self._issue_permit_id(self.selected_permit_id)
+        self._update_application_permit_summary()
+
+    def _issue_permit_id(self, pid):
+        permit = self._permit_row(pid)
+        if not permit:
+            return QMessageBox.information(self, "Select Permit", "The selected permit could not be found.")
+        if permit["status"] != "Approved":
+            return QMessageBox.warning(self, "Approval Required", "Only an approved permit can be issued.")
+        required = [x.strip() for x in self._setting("required_certificate_types", "").split(";") if x.strip()]
+        certs = {_s(c["certificate_type"]) for c in self.db.fetchall(
+            "SELECT certificate_type FROM ptw_certificates WHERE permit_id=? AND status IN ('Approved','Valid') AND verification_status='Verified'", (pid,))}
+        missing = [x for x in required if x not in certs]
+        if missing:
+            return QMessageBox.warning(self, "Certificates Required", "Complete these configured certificates before issue:\n- " + "\n- ".join(missing))
+        if not permit["planned_start"] or not permit["planned_end"]:
+            return QMessageBox.warning(self, "Validity Required", "Planned start and end dates are required.")
+        try:
+            if datetime.fromisoformat(permit["planned_end"]) <= datetime.now():
+                return QMessageBox.warning(self, "Expired", "The planned end date/time has passed. Update the permit validity before issue.")
+        except Exception:
+            return QMessageBox.warning(self, "Invalid Date", "The permit validity dates are invalid.")
+        self._change_status(pid, "Issued / Active", "Permit issued after approval. Permit is now active.")
+        QMessageBox.information(self, "Permit Issued", f"Permit {permit['permit_number']} is now Issued / Active and available in Suspension / Restart.")
+
     def _approve_application(self):
         if not self.selected_permit_id:
             self._save_permit("Draft")
@@ -8269,8 +8354,9 @@ class PTWModule(QWidget):
             return QMessageBox.warning(self,"Approval Not Allowed","Only a saved draft/submitted permit can be approved here.")
         self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(approver,_now(),_now(),pid))
         self._event(pid,"Permit approved",r["status"],"Approved",f"Approved by {approver}")
-        self.refresh_all(); self.tabs.setCurrentWidget(self.register_tab)
-        QMessageBox.information(self,"Permit Approved",f"Permit {r['permit_number']} approved by {approver}. It is now available for Daily Revalidation.")
+        self.refresh_all(); self.tabs.setCurrentWidget(self.application_tab)
+        self._update_application_permit_summary()
+        QMessageBox.information(self,"Permit Approved",f"Permit {r['permit_number']} approved by {approver}. Review the summary and use Issue Approved Permit when ready.")
 
     def _approve_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
@@ -8279,6 +8365,8 @@ class PTWModule(QWidget):
         if not ok:return
         if not name.strip():return QMessageBox.warning(self,"Approver Required","Enter the approver name.")
         self.db.execute("UPDATE ptw_permits SET status='Approved',approved_by=?,approval_date=?,updated_at=? WHERE id=?",(name.strip(),_now(),_now(),pid)); self._event(pid,"Permit approved",r["status"],"Approved",f"Approved by {name.strip()}"); self.refresh_all()
+        if self.selected_permit_id == pid:
+            self._update_application_permit_summary()
 
     def _delete_selected_permit(self):
         pid=self._selected_id(); r=self._permit_row(pid)
@@ -8366,6 +8454,7 @@ class PTWModule(QWidget):
         if hasattr(self,"renewal_check"):
             self.renewal_check.setChecked(False); self.renewal_previous.setCurrentIndex(0)
         self.save_draft_btn.setText("Save Permit")
+        self._update_application_permit_summary()
 
     def _sync_application_supporting_certificates(self, permit_id, types_text, refs_text):
         names=[x.strip() for x in _s(types_text).split(";") if x.strip()]
@@ -8411,8 +8500,9 @@ class PTWModule(QWidget):
             self.selected_permit_id=pid; self._event(pid,"Permit created","",status,"New permit application saved.")
         self._sync_application_supporting_certificates(pid, values.get("supporting_document_types", ""), values.get("supporting_document_reference", ""))
         self.db.conn.commit()
-        self.refresh_all(); self.tabs.setCurrentWidget(self.register_tab)
-        QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. This does not authorize work.")
+        self.refresh_all(); self.tabs.setCurrentWidget(self.application_tab)
+        self._update_application_permit_summary()
+        QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. Work is not authorized until the permit is approved and issued.")
 
     def _submit_permit(self):
         if self.selected_permit_id:
@@ -8451,6 +8541,12 @@ class PTWModule(QWidget):
     def _refresh_suspension_permits(self, *_args):
         if hasattr(self, "susp_permit"):
             self._set_combo_permits(self.susp_permit)
+            if self.susp_permit.count() <= 1:
+                action = self.susp_action.currentText()
+                expected = "Issued / Active" if action == "Suspend Permit" else "Suspended"
+                self.susp_permit.setToolTip(f"No permits currently have status: {expected}")
+            else:
+                self.susp_permit.setToolTip("Select a permit matching the selected action.")
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -8743,18 +8839,13 @@ class PTWModule(QWidget):
         self._change_status(pid,status,f"Approval stage: {role}. Decision: {decision}. {comments}")
 
     def _issue_selected(self):
-        pid=self._selected_id(); r=self._permit_row(pid)
-        if not r:return QMessageBox.information(self,"Select Permit","Select a permit row first.")
-        if r["status"]!="Approved":return QMessageBox.warning(self,"Approval Required","Only an approved permit can be issued. Complete all configured approval stages first.")
-        required=[x.strip() for x in self._setting("required_certificate_types","").split(";") if x.strip()]
-        certs={_s(c["certificate_type"]) for c in self.db.fetchall("SELECT certificate_type FROM ptw_certificates WHERE permit_id=? AND status IN ('Approved','Valid') AND verification_status='Verified'",(pid,))}
-        missing=[x for x in required if x not in certs]
-        if missing:return QMessageBox.warning(self,"Certificates Required","Cannot issue permit. Missing/invalid configured certificates:\n- "+"\n- ".join(missing))
-        if not r["planned_start"] or not r["planned_end"]: return QMessageBox.warning(self,"Validity Required","Start and end time are required.")
-        try:
-            if datetime.fromisoformat(r["planned_end"])<=datetime.now(): return QMessageBox.warning(self,"Expired","Permit expiry is in the past. Correct/revalidate through the configured process.")
-        except Exception: return QMessageBox.warning(self,"Invalid Date","Permit validity date is invalid.")
-        self._change_status(pid,"Issued / Active","Permit issued after recorded approval and configured certificate checks.")
+        pid=self._selected_id()
+        if not pid:
+            return QMessageBox.information(self,"Select Permit","Select a permit row first.")
+        self._issue_permit_id(pid)
+        self.refresh_all()
+        if self.selected_permit_id == pid:
+            self._update_application_permit_summary()
 
     def _change_status(self,pid,status,details=""):
         r=self._permit_row(pid)
@@ -8860,30 +8951,40 @@ class PTWModule(QWidget):
             self._change_status(pid,"Issued / Active","Permit restarted after recorded rechecks and authorized confirmation: "+reason); self._event(pid,"Permit restarted","Suspended","Issued / Active",reason+" Rechecks: "+self.susp_rechecks.text().strip(),evidence)
         self.refresh_all()
 
-    def _submit_closure(self):
-        pid=self.close_permit.currentData(); r=self._permit_row(pid)
-        if not r:return QMessageBox.warning(self,"Permit Required","Select a permit.")
-        if r["status"] not in ("Issued / Active","Suspended","Work Completed","Pending Closure"):return QMessageBox.warning(self,"Invalid State","Only active, suspended, work-completed or pending-closure permits can enter closeout.")
-        if self.close_work.currentText()!="Completed" or not self.close_performing.text().strip() or not self.close_issuer.text().strip():return QMessageBox.warning(self,"Closure Incomplete","Confirm work completion and enter performing authority acknowledgement and issuer/area authority approval reference.")
-        checks=[self.close_inspection,self.close_tools,self.close_people,self.close_plant,self.close_isolation,self.close_reinstatement]
-        if any(w.currentIndex()==0 for w in checks):return QMessageBox.warning(self,"Closure Checklist Incomplete","Complete each closeout check or explicitly select Not applicable per procedure.")
-        required=[x.strip() for x in self._setting("required_certificate_types","").split(";") if x.strip()]
-        certs={_s(c["certificate_type"]) for c in self.db.fetchall("SELECT certificate_type FROM ptw_certificates WHERE permit_id=? AND status IN ('Closed','Valid','Approved') AND verification_status='Verified'",(pid,))}
-        if any(x not in certs for x in required):return QMessageBox.warning(self,"Certificates Pending","Configured required certificates must be verified/closed before permit closure.")
-        evidence=self.close_evidence.text().strip()
-        if evidence and not Path(evidence).exists():return QMessageBox.warning(self,"Evidence Missing","Selected closeout evidence file does not exist.")
-        now=_now()
-        closure_values=(self.close_work.currentText(),self.close_inspection.currentText(),self.close_tools.currentText(),self.close_people.currentText(),self.close_plant.currentText(),self.close_isolation.currentText(),self.close_reinstatement.currentText(),self.close_performing.text().strip(),self.close_issuer.text().strip(),self.close_comments.toPlainText(),evidence)
-        existing_closure=self.db.fetchone("SELECT id,status FROM ptw_closures WHERE permit_id=? ORDER BY id DESC LIMIT 1",(pid,))
-        if existing_closure and existing_closure["status"] == "Pending":
-            self.db.execute("UPDATE ptw_closures SET work_complete=?,site_inspection=?,tools_removed=?,personnel_accounted=?,plant_handover=?,isolation_disposition=?,reinstatement=?,performing_ack=?,issuer_approval=?,closure_comments=?,evidence_path=?,created_at=? WHERE id=?",closure_values+(now,existing_closure["id"]))
+    def _close_permit_simple(self):
+        pid = self.close_permit.currentData()
+        permit = self._permit_row(pid)
+        if not permit:
+            return QMessageBox.warning(self, "Permit Required", "Select a permit from the dropdown.")
+        if not self.close_confirm_check.isChecked():
+            return QMessageBox.warning(self, "Confirmation Required", "Tick the confirmation checkbox before closing the permit.")
+        answer = QMessageBox.question(
+            self, "Confirm Permit Closure",
+            f"Close permit {permit['permit_number']}?\nIts status will become Closed, regardless of its current status.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        now = _now()
+        existing = self.db.fetchone("SELECT id FROM ptw_closures WHERE permit_id=? ORDER BY id DESC LIMIT 1", (pid,))
+        if existing:
+            self.db.execute("UPDATE ptw_closures SET work_complete='Completed',status='Closed',closure_comments=?,created_at=? WHERE id=?",
+                            ("Permit closed using the simplified closeout action.", now, existing["id"]))
         else:
-            self.db.execute("INSERT INTO ptw_closures(permit_id,work_complete,site_inspection,tools_removed,personnel_accounted,plant_handover,isolation_disposition,reinstatement,performing_ack,issuer_approval,closure_comments,evidence_path,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(pid,)+closure_values+("Pending",now))
-        self._change_status(pid,"Pending Closure","Permit closure submitted for verification."); self._event(pid,"Closure submitted",r["status"],"Pending Closure","Closure checklist submitted.",evidence)
-        answer=QMessageBox.question(self,"Approve Final Closure?","Closeout checks are complete. Confirm you are authorized to record final closure and that required site approvals have actually been obtained.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-        if answer==QMessageBox.StandardButton.Yes:
-            self.db.execute("UPDATE ptw_closures SET status='Approved' WHERE id=(SELECT MAX(id) FROM ptw_closures WHERE permit_id=?)",(pid,)); self.db.execute("UPDATE ptw_permits SET status='Closed',closure_date=?,updated_at=? WHERE id=?",(datetime.now().strftime("%Y-%m-%d %H:%M"),_now(),pid)); self._event(pid,"Permit closed","Pending Closure","Closed","Final closure recorded by current application user.")
+            self.db.execute("INSERT INTO ptw_closures(permit_id,work_complete,closure_comments,status,created_at) VALUES(?,?,?,?,?)",
+                            (pid, "Completed", "Permit closed using the simplified closeout action.", "Closed", now))
+        old_status = permit["status"]
+        self.db.execute("UPDATE ptw_permits SET status='Closed',closure_date=?,updated_at=? WHERE id=?",
+                        (datetime.now().strftime("%Y-%m-%d %H:%M"), now, pid))
+        self._event(pid, "Permit closed", old_status, "Closed", "Permit closed using the simplified checkbox confirmation.")
+        self.db.conn.commit()
+        self.close_confirm_check.setChecked(False)
         self.refresh_all()
+        QMessageBox.information(self, "Permit Closed", f"Permit {permit['permit_number']} has been closed successfully.")
+
+    def _submit_closure(self):
+        # Backward-compatible entry point for older PTW UI actions.
+        return self._close_permit_simple()
 
     def _choose_into(self,line):
         path,_=QFileDialog.getOpenFileName(self,"Choose Evidence / Document")
