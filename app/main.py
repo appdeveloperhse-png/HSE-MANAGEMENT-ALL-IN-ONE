@@ -7983,15 +7983,15 @@ class PTWModule(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
         self.application_tab = QWidget(); self.tabs.addTab(self.application_tab, "New Permit Application"); self._build_application()
+        self.documents_tab = QWidget(); self.tabs.addTab(self.documents_tab, "Attachments / Safety Documents"); self._build_documents()
+        self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "Supporting Certificates"); self._build_certificates()
         self.review_tab = QWidget(); self.tabs.addTab(self.review_tab, "Permit Review & Approval"); self._build_review_approval()
         self.issue_tab = QWidget(); self.tabs.addTab(self.issue_tab, "Permit Issue Authority"); self._build_issue_authority()
         self.register_tab = QWidget(); self.tabs.addTab(self.register_tab, "Permit Register"); self._build_register()
         self.revalidation_tab = QWidget(); self.tabs.addTab(self.revalidation_tab, "Daily Revalidation"); self._build_revalidation()
-        self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "Supporting Certificates"); self._build_certificates()
         self.renewal_tab = QWidget(); self.tabs.addTab(self.renewal_tab, "Renewal / Extension"); self._build_renewals()
         self.suspension_tab = QWidget(); self.tabs.addTab(self.suspension_tab, "Suspension / Restart"); self._build_suspension()
         self.closure_tab = QWidget(); self.tabs.addTab(self.closure_tab, "Permit Closure"); self._build_closure()
-        self.documents_tab = QWidget(); self.tabs.addTab(self.documents_tab, "Attachments / Safety Documents"); self._build_documents()
 
     def _table(self, headers, parent_layout):
         t = QTableWidget(); t.setColumnCount(len(headers)); t.setHorizontalHeaderLabels(headers)
@@ -8100,12 +8100,13 @@ class PTWModule(QWidget):
         self.reval_permit=QComboBox(); self.reval_permit.currentIndexChanged.connect(self._load_revalidation_days)
         self.reval_holder=QLineEdit(); self.reval_authority=QLineEdit()
         top.addRow("Select Permit from Register",self.reval_permit)
-        top.addRow("Permit Holder Name",self.reval_holder)
-        top.addRow("Permit Authority",self.reval_authority)
         self.reval_info=QLabel("Select a permit to view its planned dates and daily revalidation record."); self.reval_info.setWordWrap(True); lay.addWidget(self.reval_info)
-        self.reval_table=QTableWidget(); self.reval_table.setColumnCount(4); self.reval_table.setHorizontalHeaderLabels(["Date","Day","Daily Status","Comments"])
+        self.reval_table=QTableWidget(); self.reval_table.setColumnCount(6); self.reval_table.setHorizontalHeaderLabels(["Date","Day","Daily Status","Daily PTW Holder Name","Permit Issuing Authority Name","Comments"])
         self.reval_table.setAlternatingRowColors(True); self.reval_table.setWordWrap(True); self.reval_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.reval_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.ResizeToContents); self.reval_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.Stretch)
+        for col in (0,1,2): self.reval_table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.ResizeToContents)
+        self.reval_table.horizontalHeader().setSectionResizeMode(3,QHeaderView.ResizeMode.Interactive)
+        self.reval_table.horizontalHeader().setSectionResizeMode(4,QHeaderView.ResizeMode.Interactive)
+        self.reval_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch)
         lay.addWidget(self.reval_table,1)
         row=QHBoxLayout(); save=QPushButton("Save Daily Revalidation"); delete=QPushButton("Delete Selected Day Record"); save.clicked.connect(self._save_revalidation); delete.clicked.connect(self._delete_revalidation_day); row.addWidget(save); row.addWidget(delete); row.addStretch(); lay.addLayout(row)
         self.reval_summary=QLabel("Days issued: 0 | Days worked: 0"); lay.addWidget(self.reval_summary)
@@ -8125,6 +8126,10 @@ class PTWModule(QWidget):
         approve.clicked.connect(lambda _checked=False:self._review_decision(True)); return_btn.clicked.connect(lambda _checked=False:self._review_decision(False))
         row.addWidget(approve); row.addWidget(return_btn); row.addStretch(); lay.addLayout(row)
         self.review_table=self._table(["Permit","Company","Permit Type","Location","Applicant","Submitted","Status"],lay)
+        lay.addWidget(QLabel("Submitted Safety Documents / Attachments"))
+        self.review_documents_table=self._table(["Document Type","Filename","Description","Uploaded By","Uploaded At"],lay)
+        lay.addWidget(QLabel("Supporting Certificates"))
+        self.review_certificates_table=self._table(["Certificate Ref","Certificate Type","Responsible Person","Valid Until","Status","Verification","Attachment"],lay)
 
     def _build_issue_authority(self):
         lay=QVBoxLayout(self.issue_tab)
@@ -8138,6 +8143,10 @@ class PTWModule(QWidget):
         form.addRow("Approved Permit",self.issue_permit); lay.addWidget(self.issue_summary); form.addRow("Issued By / Permit Authority",self.issued_by)
         issue=QPushButton("Issue Permit / Authorize Work"); issue.setMinimumHeight(40); issue.clicked.connect(lambda _checked=False:self._issue_from_authority_tab()); lay.addWidget(issue)
         self.issue_table=self._table(["Permit","Company","Permit Type","Location","Permit Holder","Approved By","Approval Date","Status"],lay)
+        lay.addWidget(QLabel("Safety Documents / Attachments for Selected Permit"))
+        self.issue_documents_table=self._table(["Document Type","Filename","Description","Uploaded By","Uploaded At"],lay)
+        lay.addWidget(QLabel("Supporting Certificates for Selected Permit"))
+        self.issue_certificates_table=self._table(["Certificate Ref","Certificate Type","Responsible Person","Valid Until","Status","Verification","Attachment"],lay)
 
     def _build_register(self):
         lay=QVBoxLayout(self.register_tab); filters=QHBoxLayout()
@@ -8151,7 +8160,7 @@ class PTWModule(QWidget):
         self.permit_table.horizontalHeader().setSectionResizeMode(14,QHeaderView.ResizeMode.Stretch)
         self.permit_table.setWordWrap(True); self.permit_table.setMinimumHeight(260)
         row=QHBoxLayout()
-        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Issue Selected",self._issue_selected_from_register),("Export Register",self._export_csv),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
+        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Issue Selected",self._issue_selected_from_register),("Export Excel Register",self._export_excel_register),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
             b=QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         row.addStretch(); lay.addLayout(row)
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
@@ -8335,21 +8344,35 @@ class PTWModule(QWidget):
             f"Permit Holder: {permit['permit_holder']} | Planned: {permit['planned_start']} to {permit['planned_end']}\n"
             f"Supporting Documents: {permit['supporting_document_types'] or 'None'}")
 
+    def _refresh_authority_evidence(self, permit_id, stage):
+        document_table=getattr(self,f"{stage}_documents_table",None)
+        certificate_table=getattr(self,f"{stage}_certificates_table",None)
+        if not permit_id:
+            if document_table is not None: document_table.setRowCount(0)
+            if certificate_table is not None: certificate_table.setRowCount(0)
+            return
+        docs=self.db.fetchall("SELECT document_type,file_path,description,uploaded_by,uploaded_at,id FROM ptw_documents WHERE permit_id=? ORDER BY id DESC",(permit_id,))
+        certs=self.db.fetchall("SELECT certificate_ref,certificate_type,responsible_person,valid_until,status,verification_status,attachment_path,id FROM ptw_certificates WHERE permit_id=? ORDER BY id DESC",(permit_id,))
+        if document_table is not None:self._fill_table(document_table,docs,["document_type","file_path","description","uploaded_by","uploaded_at"])
+        if certificate_table is not None:self._fill_table(certificate_table,certs,["certificate_ref","certificate_type","responsible_person","valid_until","status","verification_status","attachment_path"])
+
     def _refresh_review_summary(self, *_args):
         if not hasattr(self, "review_permit"):
             return
         pid=self.review_permit.currentData(); r=self._permit_row(pid)
         if not r:
-            self.review_summary.setText("Select a submitted permit to review its details."); return
+            self.review_summary.setText("Select a submitted permit to review its details."); self._refresh_authority_evidence(None, "review"); return
         self.review_summary.setText(f"Permit: {r['permit_number']} | {r['status']}\nType: {r['permit_type']} | Company: {r['performing_company']}\nLocation: {r['location']} | Work: {r['work_scope']}\nApplicant: {r['applicant_name']} | Holder: {r['permit_holder']}\nPlanned: {r['planned_start']} to {r['planned_end']}\nSupporting Documents: {r['supporting_document_types'] or 'None'} | LOTO: {r['loto_equipment'] or 'None'}")
+        self._refresh_authority_evidence(pid, "review")
 
     def _refresh_issue_summary(self, *_args):
         if not hasattr(self, "issue_permit"):
             return
         pid=self.issue_permit.currentData(); r=self._permit_row(pid)
         if not r:
-            self.issue_summary.setText("Select an approved permit to review its details."); return
+            self.issue_summary.setText("Select an approved permit to review its details."); self._refresh_authority_evidence(None, "issue"); return
         self.issue_summary.setText(f"Permit: {r['permit_number']} | Status: {r['status']}\nType: {r['permit_type']} | Company: {r['performing_company']}\nLocation: {r['location']} | Work: {r['work_scope']}\nPermit Holder: {r['permit_holder']} | Approved By: {r['approved_by']}\nApproval Date: {r['approval_date']} | Validity: {r['planned_start']} to {r['planned_end']}\nSupporting Documents: {r['supporting_document_types'] or 'None'} | LOTO: {r['loto_equipment'] or 'None'}")
+        self._refresh_authority_evidence(pid, "issue")
 
     def _review_decision(self, approve):
         pid=self.review_permit.currentData(); r=self._permit_row(pid)
@@ -8766,28 +8789,38 @@ class PTWModule(QWidget):
             combo=QComboBox(); combo.addItems(statuses)
             if saved:
                 ix=combo.findText(saved["day_status"]); combo.setCurrentIndex(ix if ix>=0 else 0)
+                holder_text=_s(saved["permit_holder"]) or _s(r["permit_holder"])
+                authority_text=_s(saved["permit_authority"]) or _s(r["permit_issuer"] or r["performing_authority"])
                 comments=QTableWidgetItem(_s(saved["comments"]))
-            else: comments=QTableWidgetItem("")
+            else:
+                holder_text=_s(r["permit_holder"])
+                authority_text=_s(r["permit_issuer"] or r["performing_authority"])
+                comments=QTableWidgetItem("")
             if combo.currentText()=="Revalidated": worked+=1
-            self.reval_table.setCellWidget(i,2,combo); self.reval_table.setItem(i,3,comments)
+            self.reval_table.setCellWidget(i,2,combo)
+            self.reval_table.setItem(i,3,QTableWidgetItem(holder_text))
+            self.reval_table.setItem(i,4,QTableWidgetItem(authority_text))
+            self.reval_table.setItem(i,5,comments)
         self.reval_info.setText(f"Permit: {r['permit_number']} | Planned period: {start.isoformat()} to {end.isoformat()} | Select one status for every day.")
         self.reval_summary.setText(f"Days issued: {issued} | Days worked (revalidated): {worked}")
 
     def _save_revalidation(self):
         pid=self.reval_permit.currentData(); r=self._permit_row(pid)
         if not r:return QMessageBox.warning(self,"Permit Required","Select a permit from the Permit Register.")
-        if not self.reval_holder.text().strip():
-            return QMessageBox.warning(self,"Permit Holder Required","Enter the permit holder name before saving daily revalidation.")
-        if not self.reval_authority.text().strip():
-            return QMessageBox.warning(self,"Permit Authority Required","Enter the permit authority before saving daily revalidation.")
         now=_now(); worked=0
         for i in range(self.reval_table.rowCount()):
-            date_item=self.reval_table.item(i,0); status_widget=self.reval_table.cellWidget(i,2); comment_item=self.reval_table.item(i,3)
+            date_item=self.reval_table.item(i,0); status_widget=self.reval_table.cellWidget(i,2)
+            holder_item=self.reval_table.item(i,3); authority_item=self.reval_table.item(i,4); comment_item=self.reval_table.item(i,5)
             if not date_item or not status_widget: continue
-            day=date_item.text(); status=status_widget.currentText(); comments=comment_item.text().strip() if comment_item else ""
-            self.db.execute("INSERT INTO ptw_daily_revalidation(permit_id,work_date,day_status,comments,recorded_by,recorded_at,permit_holder,permit_authority) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(permit_id,work_date) DO UPDATE SET day_status=excluded.day_status,comments=excluded.comments,recorded_by=excluded.recorded_by,recorded_at=excluded.recorded_at,permit_holder=excluded.permit_holder,permit_authority=excluded.permit_authority",(pid,day,status,comments,self._actor(),now,self.reval_holder.text().strip(),self.reval_authority.text().strip()))
+            day=date_item.text(); status=status_widget.currentText()
+            holder=holder_item.text().strip() if holder_item else ""
+            authority=authority_item.text().strip() if authority_item else ""
+            comments=comment_item.text().strip() if comment_item else ""
+            if status=="Revalidated" and (not holder or not authority):
+                return QMessageBox.warning(self,"Daily Names Required",f"Enter the PTW holder and permit issuing authority for {day} before marking it Revalidated.")
+            self.db.execute("INSERT INTO ptw_daily_revalidation(permit_id,work_date,day_status,comments,recorded_by,recorded_at,permit_holder,permit_authority) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(permit_id,work_date) DO UPDATE SET day_status=excluded.day_status,comments=excluded.comments,recorded_by=excluded.recorded_by,recorded_at=excluded.recorded_at,permit_holder=excluded.permit_holder,permit_authority=excluded.permit_authority",(pid,day,status,comments,self._actor(),now,holder,authority))
             if status=="Revalidated":worked+=1
-            self._event(pid,"Daily permit revalidation",r["status"],r["status"],f"{day}: {status}. {comments}")
+            self._event(pid,"Daily permit revalidation",r["status"],r["status"],f"{day}: {status}. PTW Holder: {holder}. Permit Issuing Authority: {authority}. {comments}")
         self.db.conn.commit(); self.refresh_register(); self.reval_summary.setText(f"Days issued: {self.reval_table.rowCount()} | Days worked (revalidated): {worked}")
         QMessageBox.information(self,"Daily Revalidation Saved",f"Daily revalidation entries saved for {r['permit_number']}.")
 
@@ -9161,16 +9194,52 @@ class PTWModule(QWidget):
             for d in self.db.fetchall("SELECT * FROM ptw_documents WHERE permit_id=?",(pid,)): f.write(f"{d['document_type']}: {d['file_path']}\n")
         QMessageBox.information(self,"Exported","Permit record and supporting-document index exported.")
 
-    def _export_csv(self):
-        path,_=QFileDialog.getSaveFileName(self,"Export PTW Register","ptw_register.csv","CSV Files (*.csv)")
+    def _export_excel_register(self):
+        path,_=QFileDialog.getSaveFileName(self,"Export PTW Register and Daily Revalidation","ptw_register_and_revalidation.xlsx","Excel Workbook (*.xlsx)")
         if not path:return
+        if not path.lower().endswith(".xlsx"):path += ".xlsx"
         self.refresh_register()
-        with open(path,"w",newline="",encoding="utf-8-sig") as f:
-            writer=csv.writer(f)
-            writer.writerow([self.permit_table.horizontalHeaderItem(c).text() for c in range(self.permit_table.columnCount())])
-            for r in range(self.permit_table.rowCount()):
-                writer.writerow([self.permit_table.item(r,c).text() if self.permit_table.item(r,c) else "" for c in range(self.permit_table.columnCount())])
-        QMessageBox.information(self,"Exported",f"PTW register exported with the same columns and calculated day totals shown on screen:\n{path}")
+        wb=Workbook(); ws=wb.active; ws.title="PTW Register"
+        headers=[self.permit_table.horizontalHeaderItem(c).text() for c in range(self.permit_table.columnCount())]
+        ws.append(["PERMIT TO WORK REGISTER"]); ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(headers))
+        ws["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=28
+        ws.append(headers)
+        for r in range(self.permit_table.rowCount()):
+            ws.append([self.permit_table.item(r,c).text() if self.permit_table.item(r,c) else "" for c in range(self.permit_table.columnCount())])
+        headfill=PatternFill("solid",fgColor="D9EAF7"); thin=Side(style="thin",color="B7C9D6")
+        for sheet in [ws]:
+            for cell in sheet[2]:
+                cell.font=Font(bold=True,color="17365D"); cell.fill=headfill; cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); cell.border=Border(bottom=thin)
+            for row in sheet.iter_rows(min_row=3):
+                for cell in row:cell.alignment=Alignment(vertical="top",wrap_text=True)
+            sheet.freeze_panes="A3"; sheet.auto_filter.ref=f"A2:{sheet.cell(sheet.max_row,sheet.max_column).coordinate}"
+            for col in sheet.columns:
+                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); sheet.column_dimensions[letter].width=min(max(longest+2,12),32)
+        daily=wb.create_sheet("Daily Revalidation")
+        dh=["Permit No.","Work Date","Day","Revalidation Mark","Daily Status","Daily PTW Holder Name","Permit Issuing Authority Name","Comments","Recorded By","Recorded At"]
+        daily.append(["DAILY PTW REVALIDATION REGISTER"]); daily.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(dh))
+        daily["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); daily["A1"].fill=PatternFill("solid",fgColor="17365D"); daily["A1"].alignment=Alignment(horizontal="center",vertical="center"); daily.row_dimensions[1].height=28
+        daily.append(dh)
+        records=self.db.fetchall("SELECT p.permit_number,d.work_date,d.day_status,d.permit_holder,d.permit_authority,d.comments,d.recorded_by,d.recorded_at FROM ptw_daily_revalidation d JOIN ptw_permits p ON p.id=d.permit_id ORDER BY p.permit_number,d.work_date")
+        for d in records:
+            try:day_name=datetime.fromisoformat(d["work_date"]).strftime("%A")
+            except Exception:day_name=""
+            status=_s(d["day_status"]); mark="✓" if status=="Revalidated" else "✗" if status in ("Suspended","On Hold","Rejected","No Work") else "—"
+            daily.append([d["permit_number"],d["work_date"],day_name,mark,status,d["permit_holder"],d["permit_authority"],d["comments"],d["recorded_by"],d["recorded_at"]])
+            fill="E2F0D9" if mark=="✓" else "FCE4D6" if mark=="✗" else "FFF2CC"
+            for cell in daily[daily.max_row]:cell.fill=PatternFill("solid",fgColor=fill)
+        for cell in daily[2]:
+            cell.font=Font(bold=True,color="17365D"); cell.fill=headfill; cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); cell.border=Border(bottom=thin)
+        for row in daily.iter_rows(min_row=3):
+            for cell in row:cell.alignment=Alignment(vertical="top",wrap_text=True)
+        daily.freeze_panes="A3"; daily.auto_filter.ref=f"A2:{daily.cell(daily.max_row,daily.max_column).coordinate}"
+        for col in daily.columns:
+            letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); daily.column_dimensions[letter].width=min(max(longest+2,12),36)
+        wb.save(path)
+        QMessageBox.information(self,"Excel Exported",f"PTW Register and Daily Revalidation are saved in separate worksheets. Revalidated = ✓, non-revalidated outcomes = ✗, pending = —.\\n{path}")
+
+    def _export_csv(self):
+        return self._export_excel_register()
 
     def _show_history(self):
         pid=self._selected_id()
