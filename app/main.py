@@ -349,6 +349,7 @@ class Database:
         # Incident/RCA extensions are additive only; existing data remains intact.
         incident_extra = {
             "incident_title": "TEXT DEFAULT ''",
+            "permit_number": "TEXT DEFAULT ''",
             "people_details": "TEXT DEFAULT ''",
             "equipment_details": "TEXT DEFAULT ''",
             "environmental_category": "TEXT DEFAULT ''",
@@ -1217,7 +1218,7 @@ def generate_incident_docx(incident_id, path):
     add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"])
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
     add_docx_kv_table(doc,[
-        ("Incident Title",title),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),
+        ("Incident Title",title),("Permit Number",safe(row["permit_number"]) if "permit_number" in row.keys() else ""),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),
         ("Company",row["company"] or company_name()),("Project",row["project"]),("Location",row["location"]),
         ("Department",row["department"]),("Activity",row["activity"]),("Incident Type",row["incident_type"]),
         ("Investigation Method",row["investigation_method"]),("Status",row["status"]),
@@ -2870,6 +2871,7 @@ class MainWindow(QMainWindow):
         def add_edit(name,label=None,value=""):
             e=QLineEdit(safe(value)); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
         add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else "")
+        add_edit("permit_number","Permit Number",existing["permit_number"] if existing and "permit_number" in existing.keys() else "")
         for name in ["incident_time","location","project","company","department","activity"]:
             default_value = existing[name] if existing else (db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
             add_edit(name,value=default_value)
@@ -3410,7 +3412,8 @@ class MainWindow(QMainWindow):
                 else:
                     db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
                 rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
-                db.execute("UPDATE incidents SET incident_title=? WHERE id=?", (edits["incident_title"].text().strip(), rid))
+                db.execute("UPDATE incidents SET incident_title=?, permit_number=? WHERE id=?",
+                           (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), rid))
                 # Save Fishbone cause attachments and replace temporary source paths with
                 # the saved filenames so reports can display the actual evidence.
                 if method.currentText()=="Fishbone / Ishikawa":
@@ -7992,7 +7995,6 @@ class PTWModule(QWidget):
         self.renewal_tab = QWidget(); self.tabs.addTab(self.renewal_tab, "Renewal / Extension"); self._build_renewals()
         self.suspension_tab = QWidget(); self.tabs.addTab(self.suspension_tab, "Suspension / Restart"); self._build_suspension()
         self.closure_tab = QWidget(); self.tabs.addTab(self.closure_tab, "Permit Closure"); self._build_closure()
-        self.analytics_tab = QWidget(); self.tabs.addTab(self.analytics_tab, "PTW Analytics"); self._build_analytics()
 
     def _table(self, headers, parent_layout):
         t = QTableWidget(); t.setColumnCount(len(headers)); t.setHorizontalHeaderLabels(headers)
@@ -8070,9 +8072,17 @@ class PTWModule(QWidget):
         work=QFormLayout(work_box); work.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.form_fields["work_scope"]=QTextEdit(); self.form_fields["work_scope"].setMaximumHeight(90); self.form_fields["work_scope"].setPlaceholderText("Describe the work activity and scope clearly")
         work.addRow("Work Details / Scope *",self.form_fields["work_scope"])
-        self.form_fields["permit_holder"]=QLineEdit(); work.addRow("Permit Holder Name *",self.form_fields["permit_holder"])
+        self.form_fields["permit_holder"]=QLineEdit(); self.form_fields["permit_holder"].setReadOnly(True); work.addRow("Permit Holder Name *",self.form_fields["permit_holder"])
+        self.form_fields["permit_holder_designation"]=QLineEdit(); self.form_fields["permit_holder_designation"].setReadOnly(True); work.addRow("Permit Holder Position",self.form_fields["permit_holder_designation"])
         self.form_fields["permit_holder_company"]=QLineEdit(); work.addRow("Permit Holder Company",self.form_fields["permit_holder_company"])
-        self.form_fields["permit_holder_employee_id"]=QLineEdit(); work.addRow("Permit Holder ID",self.form_fields["permit_holder_employee_id"])
+        self.form_fields["permit_holder_employee_id"]=QLineEdit(); self.form_fields["permit_holder_employee_id"].setPlaceholderText("Enter employee ID number")
+        holder_id_row=QHBoxLayout(); holder_id_row.addWidget(self.form_fields["permit_holder_employee_id"],1)
+        self.search_ptw_holder_btn=QPushButton("Search")
+        self.search_ptw_holder_btn.setAutoDefault(False)
+        self.search_ptw_holder_btn.clicked.connect(self._search_ptw_holder_training)
+        holder_id_row.addWidget(self.search_ptw_holder_btn)
+        holder_id_wrap=QWidget(); holder_id_wrap.setLayout(holder_id_row); work.addRow("Permit Holder ID *",holder_id_wrap)
+        self.form_fields["permit_holder_employee_id"].textChanged.connect(self._clear_ptw_holder_details_on_id_change)
         self.form_fields["work_description"]=QTextEdit(); self.form_fields["work_description"].setMaximumHeight(70); self.form_fields["work_description"].setPlaceholderText("Additional work description / precautions")
         work.addRow("Additional Work Description",self.form_fields["work_description"])
         root.addWidget(work_box)
@@ -8569,6 +8579,47 @@ class PTWModule(QWidget):
             cert_ref=f"{permit['permit_number']}-CERT-{n:02d}"
             self.db.execute("INSERT OR IGNORE INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,'Draft','','','Pending',?,?,?)",(cert_ref,permit_id,name,ref_text,now,now))
 
+    def _clear_ptw_holder_details_on_id_change(self, _text=""):
+        # Permit holder identity is always sourced from the Training module search.
+        for key in ("permit_holder", "permit_holder_designation"):
+            widget=self.form_fields.get(key)
+            if isinstance(widget,QLineEdit): widget.clear()
+
+    def _search_ptw_holder_training(self):
+        employee_id=self.form_fields["permit_holder_employee_id"].text().strip()
+        if not employee_id:
+            return QMessageBox.warning(self,"Employee ID Required","Enter the permit holder's ID number, then click Search.")
+        record=self.db.fetchone(
+            """SELECT e.id,e.employee_id,e.name,e.designation,e.company,
+                      tr.training_date,tr.expiry_date,c.course_name
+               FROM employees e
+               JOIN training_records tr ON tr.employee_db_id=e.id
+               JOIN training_courses c ON c.id=tr.course_id
+               WHERE lower(trim(COALESCE(e.employee_id,'')))=lower(trim(?))
+                 AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%'
+                      OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
+                 AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
+               ORDER BY tr.training_date DESC, tr.id DESC LIMIT 1""",
+            (employee_id,today())
+        )
+        if not record:
+            self.form_fields["permit_holder"].clear()
+            self.form_fields["permit_holder_designation"].clear()
+            return QMessageBox.warning(
+                self,"PTW Training Record Not Found",
+                f"PTW record for the user with ID {employee_id} not found.\n\n"
+                "A valid PTW / Permit to Work training record is required to submit this permit application."
+            )
+        self.form_fields["permit_holder"].setText(safe(record["name"]))
+        self.form_fields["permit_holder_designation"].setText(safe(record["designation"]))
+        if safe(record["company"]).strip() and not self.form_fields["permit_holder_company"].text().strip():
+            self.form_fields["permit_holder_company"].setText(safe(record["company"]))
+        QMessageBox.information(
+            self,"PTW Training Verified",
+            f"Permit holder verified from Training Register.\nName: {safe(record['name'])}\n"
+            f"Position: {safe(record['designation'])}\nTraining: {safe(record['course_name'])}"
+        )
+
     def _save_permit(self, status="Draft"):
         values={k:self._form_value(k) for k in self.form_fields}
         if any(t.currentText()=="Other" and not other.text().strip() for t,other,ref,_row_widget in self.support_doc_rows):
@@ -8577,8 +8628,30 @@ class PTWModule(QWidget):
             QMessageBox.warning(self,"Required Information","Enter the company / contractor, facility location and work details / scope."); return
         if values["planned_end"] <= values["planned_start"]:
             QMessageBox.warning(self,"Invalid Validity","Planned end must be later than planned start."); return
-        if status != "Draft" and not values.get("permit_holder"):
-            QMessageBox.warning(self,"Permit Holder Required","Enter the permit holder before submitting for review."); return
+        if status != "Draft":
+            if not values.get("permit_holder_employee_id"):
+                QMessageBox.warning(self,"Permit Holder ID Required","Enter the permit holder's ID number and search the Training Register before submitting."); return
+            training_record=self.db.fetchone(
+                """SELECT e.name,e.designation
+                   FROM employees e
+                   JOIN training_records tr ON tr.employee_db_id=e.id
+                   JOIN training_courses c ON c.id=tr.course_id
+                   WHERE lower(trim(COALESCE(e.employee_id,'')))=lower(trim(?))
+                     AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%'
+                          OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
+                     AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
+                   ORDER BY tr.training_date DESC, tr.id DESC LIMIT 1""",
+                (values["permit_holder_employee_id"],today())
+            )
+            if not training_record:
+                QMessageBox.warning(self,"PTW Training Record Not Found",
+                    f"PTW record for the user with ID {values['permit_holder_employee_id']} not found.\n\n"
+                    "The permit application cannot be submitted without a valid PTW / Permit to Work training record.")
+                return
+            values["permit_holder"]=safe(training_record["name"])
+            values["permit_holder_designation"]=safe(training_record["designation"])
+            self.form_fields["permit_holder"].setText(values["permit_holder"])
+            self.form_fields["permit_holder_designation"].setText(values["permit_holder_designation"])
         values["renewal_of_permit_id"] = self.renewal_previous.currentData() if self.renewal_check.isChecked() else None
         if self.renewal_check.isChecked() and not values["renewal_of_permit_id"]:
             QMessageBox.warning(self,"Previous Permit Required","Select the previous permit number for this renewal."); return
@@ -8710,153 +8783,6 @@ class PTWModule(QWidget):
         fields=["permit_number","previous_permit","performing_company","client_authority","subcontractor","permit_type","location","project_number","jsa_number","method_statement_number","supporting_document_types","supporting_document_reference","loto_equipment","loto_number","work_scope","permit_holder","permit_holder_company","permit_holder_employee_id","planned_start","planned_end","days_issued","days_worked","approved_by","approval_date","status"]
         self._fill_table(self.permit_table,data,fields)
 
-    def _build_analytics(self):
-        layout = QVBoxLayout(self.analytics_tab)
-        filters = QHBoxLayout()
-        self.analytics_from = QDateEdit(QDate.currentDate().addYears(-1)); self.analytics_from.setCalendarPopup(True)
-        self.analytics_to = QDateEdit(QDate.currentDate()); self.analytics_to.setCalendarPopup(True)
-        self.analytics_year = QComboBox()
-        current_year = QDate.currentDate().year()
-        self.analytics_year.addItems([str(y) for y in range(current_year, current_year-11, -1)])
-        self.analytics_type = QComboBox(); self.analytics_company = QComboBox()
-        self.analytics_location = QComboBox(); self.analytics_department = QComboBox()
-        self.analytics_status = QComboBox()
-        for label, widget in (("From",self.analytics_from),("To",self.analytics_to),("Year",self.analytics_year),
-                              ("Permit Type",self.analytics_type),("Contractor",self.analytics_company),
-                              ("Location",self.analytics_location),("Department",self.analytics_department),
-                              ("Status",self.analytics_status)):
-            filters.addWidget(QLabel(label)); filters.addWidget(widget)
-        refresh = QPushButton("Refresh"); reset = QPushButton("Reset Filters")
-        refresh.clicked.connect(self._refresh_analytics); reset.clicked.connect(self._reset_analytics_filters)
-        filters.addWidget(refresh); filters.addWidget(reset)
-        layout.addLayout(filters)
-        self.analytics_cards = QLabel("Loading PTW analytics…")
-        self.analytics_cards.setWordWrap(True)
-        self.analytics_cards.setStyleSheet("font-size:14px;font-weight:bold;padding:10px;background:#E8F0FA;color:#17365D;border-radius:4px;")
-        layout.addWidget(self.analytics_cards)
-        layout.addWidget(QLabel("Analytics by permit type, contractor, location, department, and current status"))
-        self.analytics_table = self._table(["Analysis","Category","Permit Count","Share"],layout)
-        layout.addWidget(QLabel("Monthly Permit Trend"))
-        self.analytics_month_table = self._table(["Month","Registered"],layout)
-        layout.addWidget(QLabel("PTW Management Insights"))
-        self.analytics_insights = QLabel("Refresh to calculate factual insights from existing PTW records.")
-        self.analytics_insights.setWordWrap(True); layout.addWidget(self.analytics_insights)
-        export = QPushButton("Export Analytics to Excel")
-        export.clicked.connect(self._export_analytics_excel); layout.addWidget(export)
-        for widget in (self.analytics_from,self.analytics_to,self.analytics_year,self.analytics_type,self.analytics_company,
-                       self.analytics_location,self.analytics_department,self.analytics_status):
-            if isinstance(widget,QComboBox): widget.currentIndexChanged.connect(self._refresh_analytics)
-            else: widget.dateChanged.connect(self._refresh_analytics)
-        self._refresh_analytics_filters()
-
-    def _refresh_analytics_filters(self):
-        rows=self.db.fetchall("SELECT permit_type,performing_company,location,department,status FROM ptw_permits")
-        for widget, field in ((self.analytics_type,"permit_type"),(self.analytics_company,"performing_company"),
-                              (self.analytics_location,"location"),(self.analytics_department,"department"),
-                              (self.analytics_status,"status")):
-            old=widget.currentText()
-            widget.blockSignals(True); widget.clear(); widget.addItem("All")
-            vals=sorted({_s(r[field]).strip() for r in rows if _s(r[field]).strip()})
-            widget.addItems(vals)
-            ix=widget.findText(old); widget.setCurrentIndex(ix if ix>=0 else 0); widget.blockSignals(False)
-
-    def _reset_analytics_filters(self):
-        self.analytics_from.setDate(QDate.currentDate().addYears(-1))
-        self.analytics_to.setDate(QDate.currentDate())
-        for widget in (self.analytics_type,self.analytics_company,self.analytics_location,self.analytics_department,self.analytics_status):
-            widget.setCurrentIndex(0)
-        self.analytics_year.setCurrentIndex(0)
-        self._refresh_analytics()
-
-    def _analytics_rows(self):
-        rows=self.db.fetchall("SELECT * FROM ptw_permits")
-        start=self.analytics_from.date().toString("yyyy-MM-dd")
-        end=self.analytics_to.date().toString("yyyy-MM-dd")
-        selected_year=self.analytics_year.currentText()
-        conditions=(("permit_type",self.analytics_type.currentText()),("performing_company",self.analytics_company.currentText()),
-                    ("location",self.analytics_location.currentText()),("department",self.analytics_department.currentText()),
-                    ("status",self.analytics_status.currentText()))
-        result=[]
-        for r in rows:
-            created=_s(r["created_at"])[:10]
-            if created and not (start<=created<=end): continue
-            if selected_year and created and created[:4]!=selected_year: continue
-            if any(value!="All" and _s(r[field])!=value for field,value in conditions): continue
-            result.append(r)
-        return result
-
-    def _refresh_analytics(self, *_args):
-        if not hasattr(self,"analytics_table"): return
-        self._refresh_analytics_filters()
-        rows=self._analytics_rows()
-        total=len(rows); now=datetime.now()
-        status_counts={}
-        for r in rows: status_counts[_s(r["status"]) or "Unknown"]=status_counts.get(_s(r["status"]) or "Unknown",0)+1
-        expired=sum(1 for r in rows if _s(r["planned_end"]) and _s(r["planned_end"])[:10]<date.today().isoformat() and _s(r["status"]) not in ("Closed","Cancelled"))
-        completed=sum(1 for r in rows if _s(r["status"]).lower() in ("completed","closed"))
-        active=sum(1 for r in rows if _s(r["status"]).lower() in ("issued / active","active","issued"))
-        suspended=sum(1 for r in rows if "suspend" in _s(r["status"]).lower())
-        closed=sum(1 for r in rows if _s(r["status"]).lower()=="closed")
-        cancelled=sum(1 for r in rows if _s(r["status"]).lower()=="cancelled")
-        self.analytics_cards.setText(f"Permits created in selected period: {total}   |   Currently Active: {active}   |   Completed/Closed: {completed}   |   Closed: {closed}   |   Suspended: {suspended}   |   Expired by planned end: {expired}   |   Cancelled: {cancelled}")
-        self.analytics_table.setSortingEnabled(False); self.analytics_table.setRowCount(0)
-        analyses=[("Permit Type","permit_type"),("Contractor","performing_company"),("Location","location"),("Department","department"),("Current Status","status")]
-        for label,field in analyses:
-            counts={}
-            for r in rows:
-                val=_s(r[field]).strip() or "Not specified"; counts[val]=counts.get(val,0)+1
-            for name,count in sorted(counts.items(),key=lambda item:(-item[1],item[0])):
-                row=self.analytics_table.rowCount(); self.analytics_table.insertRow(row)
-                for col,val in enumerate((label,name,count,f"{(count/total*100):.1f}%" if total else "0%")):
-                    self.analytics_table.setItem(row,col,QTableWidgetItem(str(val)))
-        self.analytics_table.setSortingEnabled(True)
-        months={}
-        for r in rows:
-            created=_s(r["created_at"])[:7]
-            if created: months[created]=months.get(created,0)+1
-        self.analytics_month_table.setRowCount(0)
-        for month,count in sorted(months.items()):
-            row=self.analytics_month_table.rowCount(); self.analytics_month_table.insertRow(row)
-            self.analytics_month_table.setItem(row,0,QTableWidgetItem(month)); self.analytics_month_table.setItem(row,1,QTableWidgetItem(str(count)))
-        durations=[]
-        for r in rows:
-            try:
-                start_dt=datetime.fromisoformat(_s(r["planned_start"])); end_dt=datetime.fromisoformat(_s(r["planned_end"]))
-                hours=(end_dt-start_dt).total_seconds()/3600
-                if hours>=0: durations.append(hours)
-            except Exception: pass
-        insights=[]
-        if total:
-            for field,title in (("permit_type","Most common permit type"),("performing_company","Highest permit activity contractor"),("location","Highest activity location")):
-                c={}
-                for r in rows:
-                    val=_s(r[field]).strip()
-                    if val:c[val]=c.get(val,0)+1
-                if c: insights.append(f"{title}: {max(c,key=c.get)} ({max(c.values())} permits)")
-        if durations: insights.append(f"Average planned duration: {sum(durations)/len(durations):.1f} hours ({len(durations)} valid records)")
-        self.analytics_insights.setText("\n".join(insights) if insights else "No records or valid data are available for the selected filters.")
-
-    def _export_analytics_excel(self):
-        path,_=QFileDialog.getSaveFileName(self,"Export PTW Analytics","ptw_analytics.xlsx","Excel Workbook (*.xlsx)")
-        if not path:return
-        if not path.lower().endswith(".xlsx"): path += ".xlsx"
-        wb=Workbook(); ws=wb.active; ws.title="PTW Analytics"
-        ws.append(["PTW Analytics"]); ws.append(["Reporting period",self.analytics_from.date().toString("yyyy-MM-dd"),self.analytics_to.date().toString("yyyy-MM-dd")])
-        ws.append(["Summary",self.analytics_cards.text()])
-        ws.append([])
-        ws.append(["Analysis","Category","Permit Count","Share"])
-        for r in range(self.analytics_table.rowCount()):
-            ws.append([self.analytics_table.item(r,c).text() if self.analytics_table.item(r,c) else "" for c in range(4)])
-        ws2=wb.create_sheet("Monthly Trend"); ws2.append(["Month","Registered"])
-        for r in range(self.analytics_month_table.rowCount()):
-            ws2.append([self.analytics_month_table.item(r,c).text() if self.analytics_month_table.item(r,c) else "" for c in range(2)])
-        for sheet in wb.worksheets:
-            sheet.freeze_panes="A2"; sheet.auto_filter.ref=sheet.dimensions
-            for col in sheet.columns:
-                letter=col[0].column_letter
-                sheet.column_dimensions[letter].width=min(max(max(len(str(c.value or "")) for c in col)+2,12),45)
-        wb.save(path); QMessageBox.information(self,"Export Complete",f"PTW analytics exported to {path}")
-
     def refresh_all(self):
         self.refresh_register()
         rows=self.db.fetchall("SELECT * FROM ptw_permits ORDER BY id DESC")
@@ -8892,7 +8818,6 @@ class PTWModule(QWidget):
             self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
         self._refresh_combo_lists(); self._refresh_other_tables(); self._refresh_authority_workflows()
         if hasattr(self,"reval_permit"): self._load_revalidation_days()
-        if hasattr(self,"analytics_table"): self._refresh_analytics()
 
     def _open_revalidation_selected(self):
         pid=self._selected_id()
@@ -9070,6 +8995,8 @@ class PTWModule(QWidget):
         pid=self._selected_id(); r=self._permit_row(pid)
         if not r: return QMessageBox.information(self,"Select Permit","Select a permit row first.")
         self.selected_permit_id=pid
+        holder_id_widget=self.form_fields.get("permit_holder_employee_id")
+        if holder_id_widget is not None: holder_id_widget.blockSignals(True)
         for k,w in self.form_fields.items():
             val=r[k] if k in r.keys() else ""
             if isinstance(w,QLineEdit): w.setText(_s(val))
@@ -9080,6 +9007,7 @@ class PTWModule(QWidget):
             elif isinstance(w,QDateTimeEdit):
                 dt=QDateTime.fromString(_s(val),"yyyy-MM-dd HH:mm")
                 if dt.isValid(): w.setDateTime(dt)
+        if holder_id_widget is not None: holder_id_widget.blockSignals(False)
         self._set_dynamic_values("supporting_document_types", r["supporting_document_types"], r["supporting_document_reference"])
         self._set_dynamic_values("loto_equipment", r["loto_equipment"], r["loto_number"])
         linked_id = r["renewal_of_permit_id"] if "renewal_of_permit_id" in r.keys() else None
@@ -9099,8 +9027,27 @@ class PTWModule(QWidget):
         pid=self._selected_id(); r=self._permit_row(pid)
         if not r: return QMessageBox.information(self,"Select Permit","Select a permit row first.")
         if r["status"] not in ("Draft","Returned for Correction"): return QMessageBox.warning(self,"Invalid State","Only draft or returned permits can be submitted.")
-        if not r["permit_holder"] or not r["location"] or not r["work_scope"] or not r["work_description"]: return QMessageBox.warning(self,"Incomplete Application","Permit holder, exact location, scope and description are required.")
-        self._change_status(pid,"Submitted","Permit submitted for review. Work is not authorized.")
+        if not r["permit_holder_employee_id"]:
+            return QMessageBox.warning(self,"Permit Holder ID Required","A permit holder ID number linked to a valid PTW / Permit to Work training record is required before submission.")
+        training_record=self.db.fetchone(
+            """SELECT e.name,e.designation FROM employees e
+               JOIN training_records tr ON tr.employee_db_id=e.id
+               JOIN training_courses c ON c.id=tr.course_id
+               WHERE lower(trim(COALESCE(e.employee_id,'')))=lower(trim(?))
+                 AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%'
+                      OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
+                 AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
+               ORDER BY tr.training_date DESC, tr.id DESC LIMIT 1""",
+            (r["permit_holder_employee_id"],today())
+        )
+        if not training_record:
+            return QMessageBox.warning(self,"PTW Training Record Not Found",
+                f"PTW record for the user with ID {r['permit_holder_employee_id']} not found.\n\n"
+                "The permit application cannot be submitted without a valid PTW / Permit to Work training record.")
+        if not r["location"] or not r["work_scope"] or not r["work_description"]: return QMessageBox.warning(self,"Incomplete Application","Permit holder, exact location, scope and description are required.")
+        self.db.execute("UPDATE ptw_permits SET permit_holder=?,permit_holder_designation=? WHERE id=?",
+                        (safe(training_record["name"]),safe(training_record["designation"]),pid))
+        self._change_status(pid,"Submitted","Permit submitted for review. Permit holder verified against the Training Register PTW record. Work is not authorized.")
 
     def _approval_dialog(self):
         pid=self._selected_id(); r=self._permit_row(pid)
