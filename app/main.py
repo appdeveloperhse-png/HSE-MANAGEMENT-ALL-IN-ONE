@@ -5669,8 +5669,69 @@ class MainWindow(QMainWindow):
         form_layout.setHorizontalSpacing(8)
         form_layout.setVerticalSpacing(7)
 
-        course_name = QLineEdit()
-        course_name.setPlaceholderText("e.g. HSE Induction, First Aid, LOTO")
+        # Standard course catalogue covering common oil & gas, construction, marine,
+        # offshore, logistics and support activities. Applicability is set per trade,
+        # department, project and risk assessment in the matrix below.
+        standard_training_courses = [
+            "HSE / Company Induction", "Site / Project HSE Induction", "Client / QatarEnergy Induction",
+            "Safety Orientation for Visitors", "New Employee Safety Induction", "Toolbox Talk / Safety Briefing",
+            "Stop Work Authority (SWA)", "Hazard Identification and Risk Assessment", "Job Safety Analysis (JSA / JHA)",
+            "Permit to Work (PTW)", "Electronic Permit to Work (ePTW)", "Permit Applicant / Originator Training",
+            "Permit Holder Training", "Area Authority Training", "Issuing Authority Training",
+            "Gas Tester / Authorised Gas Tester", "Gas Monitor Training", "Confined Space Entry",
+            "Confined Space Attendant / Standby Man", "Confined Space Entry Supervisor", "Confined Space Rescue",
+            "Hot Work Safety", "Cold Work Safety", "Work at Height", "Working at Height Rescue",
+            "Scaffolding Safety", "Scaffold Inspector", "Scaffold Erector / Dismantler", "Ladder Safety",
+            "Lifting Operations Safety", "Lifting Supervisor", "Appointed Person for Lifting", "Crane Operator",
+            "Mobile Crane Operator", "Tower Crane Operator", "Banksman / Slinger", "Rigger", "Lifting Gear Inspector",
+            "Forklift Operator", "Manlift / MEWP Operator", "Telehandler Operator", "Hoist Operator",
+            "Rigging and Slinging", "Manual Handling", "Ergonomics", "Fire Safety Awareness", "Basic Fire Fighting",
+            "Fire Warden / Fire Watcher", "Fire Watch for Hot Work", "Emergency Response and Evacuation",
+            "Emergency Response Team (ERT)", "Incident Command / Emergency Controller", "First Aid",
+            "Basic Life Support (BLS)", "CPR and AED", "Advanced First Aid", "Occupational Health Awareness",
+            "Heat Stress Prevention", "H2S Awareness", "Basic H2S Training", "H2S and Breathing Apparatus",
+            "Escape Set / EEBD Training", "Self-Contained Breathing Apparatus (SCBA)", "Respiratory Protection",
+            "Personal Protective Equipment (PPE)", "Chemical Handling and Safety", "SDS / COSHH Awareness",
+            "Hazardous Substances and Spill Response", "Oil Spill Response", "Environmental Awareness",
+            "Waste Management and Segregation", "Environmental Incident Reporting", "Noise Awareness and Hearing Protection",
+            "Hand Safety / Hand Injury Prevention", "Eye Protection", "Electrical Safety", "Electrical Awareness",
+            "Lockout / Tagout (LOTO)", "Electrical Isolation / Authorised Person", "High Voltage Safety",
+            "Low Voltage Switching", "Arc Flash Awareness", "Portable Electrical Tools Safety", "Power Tools Safety",
+            "Machine Guarding", "Mechanical Isolation", "Pressure Systems Safety", "Stored Energy Awareness",
+            "Excavation / Trenching Safety", "Underground Services Detection", "Demolition Safety", "Road and Traffic Safety",
+            "Defensive Driving", "4x4 Off-Road Driving", "Heavy Vehicle / Bus Driver Safety", "Journey Management",
+            "Loading and Unloading Safety", "Warehouse Safety", "Material Storage and Handling", "Working Near Water",
+            "Marine Safety Awareness", "Boat Transfer Safety", "Travel Safely by Boat (TSbB)", "Sea Survival",
+            "Personal Survival Techniques (STCW)", "STCW Basic Safety Training", "Fire Prevention and Fire Fighting (STCW)",
+            "Elementary First Aid (STCW)", "Personal Safety and Social Responsibilities (STCW)",
+            "Helicopter Underwater Escape Training (HUET)", "BOSIET", "T-BOSIET", "FOET", "T-FOET",
+            "CA-EBS Training", "IMIST", "Offshore Safety Induction", "Offshore Emergency Response",
+            "Offshore Lifeboat Coxswain", "Helideck Operations", "Helideck Emergency Response",
+            "Dropped Objects Prevention", "Working in Adverse Weather", "Diving Safety Awareness",
+            "Radiation Safety Awareness", "NORM Awareness", "Laser Safety", "Welding Safety",
+            "Welding and Cutting Operations", "Grinding Safety", "Fabrication Shop Safety", "Rigger / Banksman Safety",
+            "Construction Safety", "Civil Works Safety", "Rebar / Steel Fixing Safety", "Concrete Works Safety",
+            "Formwork and Falsework Safety", "Painting and Coating Safety", "Abrasive Blasting Safety",
+            "Hydrotesting Safety", "Pressure Testing Safety", "Pipeline Safety", "Flange Management",
+            "Process Safety Awareness", "Major Accident Hazard Awareness", "SIMOPS Awareness", "MOC Awareness",
+            "Asset Integrity Awareness", "Quality Awareness", "Food Hygiene", "Security Awareness",
+            "Cybersecurity Awareness", "Fatigue Management", "Supervisor HSE Leadership", "HSE for Managers",
+            "IOSH Working Safely", "IOSH Managing Safely", "NEBOSH General Certificate", "NEBOSH HSE Certificate in Process Safety",
+            "Incident Reporting and Investigation", "Root Cause Analysis", "Accident Investigation",
+            "Internal HSE Auditor", "Risk Assessment Workshop", "Behaviour-Based Safety", "HSE Statistics and Reporting",
+            "Other"
+        ]
+        course_name = QComboBox()
+        course_name.setMinimumWidth(260)
+        course_name.setEditable(False)
+        course_name.addItems(standard_training_courses)
+        course_name.setCurrentIndex(-1)
+        course_name.setPlaceholderText("Select a training course…")
+        course_other_label = QLabel("Other training name")
+        course_other_input = QLineEdit()
+        course_other_input.setPlaceholderText("Enter the specific training course name")
+        course_other_label.setVisible(False)
+        course_other_input.setVisible(False)
         trade_combo = QComboBox()
         trade_combo.setEditable(True)
         trade_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -5708,8 +5769,10 @@ class MainWindow(QMainWindow):
         active = QCheckBox("Active requirement")
         active.setChecked(True)
 
-        form_layout.addWidget(QLabel("Course name"), 0, 0)
+        form_layout.addWidget(QLabel("Training name"), 0, 0)
         form_layout.addWidget(course_name, 0, 1, 1, 2)
+        form_layout.addWidget(course_other_label, 4, 0)
+        form_layout.addWidget(course_other_input, 4, 1, 1, 2)
         form_layout.addWidget(QLabel("Applicable trade(s)"), 0, 3)
         form_layout.addWidget(trade_combo, 0, 4, 1, 2)
         form_layout.addWidget(QLabel("Department"), 1, 0)
@@ -5936,6 +5999,15 @@ class MainWindow(QMainWindow):
         trade_combo.view().pressed.connect(toggle_trade_item)
         trade_other_input.textChanged.connect(update_trade_summary)
 
+        def update_course_other_visibility(*args):
+            show_other = course_name.currentText().strip() == "Other"
+            course_other_label.setVisible(show_other)
+            course_other_input.setVisible(show_other)
+        course_name.currentTextChanged.connect(update_course_other_visibility)
+
+        def selected_course_name():
+            return course_other_input.text().strip() if course_name.currentText().strip() == "Other" else course_name.currentText().strip()
+
         def set_trade_selection(saved_trade):
             saved = [x.strip().lower() for x in safe(saved_trade).split(",") if x.strip()]
             if not saved:
@@ -5965,7 +6037,9 @@ class MainWindow(QMainWindow):
         def reset_course_form():
             selected_course_id["value"] = None
             course_table.clearSelection()
-            course_name.clear()
+            course_name.setCurrentIndex(-1)
+            course_other_input.clear()
+            update_course_other_visibility()
             set_trade_selection("")
             trade_other_input.clear()
             department.setCurrentIndex(0)
@@ -6007,7 +6081,19 @@ class MainWindow(QMainWindow):
             if not rec:
                 return
             selected_course_id["value"] = int(course_id)
-            course_name.setText(safe(rec["course_name"]))
+            saved_course_name = safe(rec["course_name"]).strip()
+            idx = course_name.findText(saved_course_name, Qt.MatchFlag.MatchFixedString)
+            if idx >= 0:
+                course_name.setCurrentIndex(idx)
+                course_other_input.clear()
+            else:
+                other_idx = course_name.findText("Other", Qt.MatchFlag.MatchFixedString)
+                if other_idx < 0:
+                    course_name.addItem("Other")
+                    other_idx = course_name.findText("Other", Qt.MatchFlag.MatchFixedString)
+                course_name.setCurrentIndex(other_idx)
+                course_other_input.setText(saved_course_name)
+            update_course_other_visibility()
             saved_trade = safe(rec["designation"]).strip()
             set_trade_selection(saved_trade)
             saved_dept = safe(rec["department"]).strip()
@@ -6026,9 +6112,9 @@ class MainWindow(QMainWindow):
             save_course_btn.setText("Update Course")
 
         def save_course():
-            name = course_name.text().strip()
-            if not name:
-                QMessageBox.warning(self, "Training Matrix", "Enter a training course name.")
+            name = selected_course_name()
+            if not name or (course_name.currentText().strip() == "Other" and not course_other_input.text().strip()):
+                QMessageBox.warning(self, "Training Matrix", "Select a training course. If Other is selected, enter the specific training name.")
                 course_name.setFocus()
                 return
             trades_selected = checked_trades()
@@ -8075,14 +8161,12 @@ class PTWModule(QWidget):
         self.form_fields["permit_holder"]=QLineEdit(); self.form_fields["permit_holder"].setReadOnly(True); work.addRow("Permit Holder Name *",self.form_fields["permit_holder"])
         self.form_fields["permit_holder_designation"]=QLineEdit(); self.form_fields["permit_holder_designation"].setReadOnly(True); work.addRow("Permit Holder Position",self.form_fields["permit_holder_designation"])
         self.form_fields["permit_holder_company"]=QLineEdit(); work.addRow("Permit Holder Company",self.form_fields["permit_holder_company"])
-        self.form_fields["permit_holder_employee_id"]=QLineEdit(); self.form_fields["permit_holder_employee_id"].setPlaceholderText("Enter employee ID number")
-        holder_id_row=QHBoxLayout(); holder_id_row.addWidget(self.form_fields["permit_holder_employee_id"],1)
-        self.search_ptw_holder_btn=QPushButton("Search")
-        self.search_ptw_holder_btn.setAutoDefault(False)
-        self.search_ptw_holder_btn.clicked.connect(self._search_ptw_holder_training)
-        holder_id_row.addWidget(self.search_ptw_holder_btn)
-        holder_id_wrap=QWidget(); holder_id_wrap.setLayout(holder_id_row); work.addRow("Permit Holder ID *",holder_id_wrap)
-        self.form_fields["permit_holder_employee_id"].textChanged.connect(self._clear_ptw_holder_details_on_id_change)
+        self.form_fields["permit_holder_employee_id"]=QComboBox()
+        self.form_fields["permit_holder_employee_id"].setMinimumWidth(240)
+        self.form_fields["permit_holder_employee_id"].addItem("Select PTW-trained employee ID", "")
+        self._populate_ptw_holder_ids()
+        self.form_fields["permit_holder_employee_id"].currentIndexChanged.connect(self._on_ptw_holder_id_selected)
+        work.addRow("Permit Holder ID *",self.form_fields["permit_holder_employee_id"])
         self.form_fields["work_description"]=QTextEdit(); self.form_fields["work_description"].setMaximumHeight(70); self.form_fields["work_description"].setPlaceholderText("Additional work description / precautions")
         work.addRow("Additional Work Description",self.form_fields["work_description"])
         root.addWidget(work_box)
@@ -8535,7 +8619,9 @@ class PTWModule(QWidget):
         w=self.form_fields[key]
         if isinstance(w,QLineEdit): return w.text().strip()
         if isinstance(w,QTextEdit): return w.toPlainText().strip()
-        if isinstance(w,QComboBox): return w.currentText().strip()
+        if isinstance(w,QComboBox):
+            if key == "permit_holder_employee_id": return safe(w.currentData()).strip()
+            return w.currentText().strip()
         if key in ("supporting_document_types", "supporting_document_reference"):
             docs=[]
             for typ,other,ref,_row_widget in self.support_doc_rows:
@@ -8553,6 +8639,7 @@ class PTWModule(QWidget):
         self.selected_permit_id=None
         for k,w in self.form_fields.items():
             if isinstance(w,QLineEdit): w.clear()
+            elif isinstance(w,QComboBox) and k == "permit_holder_employee_id": w.setCurrentIndex(0)
             elif isinstance(w,QTextEdit): w.clear()
             elif isinstance(w,QComboBox): w.setCurrentIndex(0)
             elif isinstance(w,QSpinBox): w.setValue(0)
@@ -8579,14 +8666,55 @@ class PTWModule(QWidget):
             cert_ref=f"{permit['permit_number']}-CERT-{n:02d}"
             self.db.execute("INSERT OR IGNORE INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,'Draft','','','Pending',?,?,?)",(cert_ref,permit_id,name,ref_text,now,now))
 
+    def _populate_ptw_holder_ids(self):
+        combo = self.form_fields.get("permit_holder_employee_id")
+        if not isinstance(combo, QComboBox):
+            return
+        current_id = safe(combo.currentData()).strip()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem("Select PTW-trained employee ID", "")
+        rows = self.db.fetchall(
+            """SELECT DISTINCT e.employee_id
+               FROM employees e
+               JOIN training_records tr ON tr.employee_db_id=e.id
+               JOIN training_courses c ON c.id=tr.course_id
+               WHERE COALESCE(trim(e.employee_id),'')<>''
+                 AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%'
+                      OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
+                 AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
+               ORDER BY e.employee_id COLLATE NOCASE""",
+            (today(),)
+        )
+        for row in rows:
+            employee_id = safe(row["employee_id"]).strip()
+            if employee_id:
+                combo.addItem(employee_id, employee_id)
+        idx = combo.findData(current_id) if current_id else 0
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        combo.blockSignals(False)
+        if combo.currentData():
+            self._on_ptw_holder_id_selected(combo.currentIndex())
+
+    def _on_ptw_holder_id_selected(self, _index=0):
+        combo = self.form_fields.get("permit_holder_employee_id")
+        employee_id = safe(combo.currentData()).strip() if isinstance(combo, QComboBox) else ""
+        if not employee_id:
+            for key in ("permit_holder", "permit_holder_designation"):
+                widget = self.form_fields.get(key)
+                if isinstance(widget, QLineEdit): widget.clear()
+            return
+        self._search_ptw_holder_training(employee_id)
+
     def _clear_ptw_holder_details_on_id_change(self, _text=""):
         # Permit holder identity is always sourced from the Training module search.
         for key in ("permit_holder", "permit_holder_designation"):
             widget=self.form_fields.get(key)
             if isinstance(widget,QLineEdit): widget.clear()
 
-    def _search_ptw_holder_training(self):
-        employee_id=self.form_fields["permit_holder_employee_id"].text().strip()
+    def _search_ptw_holder_training(self, selected_employee_id=None):
+        holder_widget = self.form_fields["permit_holder_employee_id"]
+        employee_id = safe(selected_employee_id).strip() if selected_employee_id is not None else (safe(holder_widget.currentData()).strip() if isinstance(holder_widget,QComboBox) else "")
         if not employee_id:
             return QMessageBox.warning(self,"Employee ID Required","Enter the permit holder's ID number, then click Search.")
         record=self.db.fetchone(
@@ -8614,11 +8742,6 @@ class PTWModule(QWidget):
         self.form_fields["permit_holder_designation"].setText(safe(record["designation"]))
         if safe(record["company"]).strip() and not self.form_fields["permit_holder_company"].text().strip():
             self.form_fields["permit_holder_company"].setText(safe(record["company"]))
-        QMessageBox.information(
-            self,"PTW Training Verified",
-            f"Permit holder verified from Training Register.\nName: {safe(record['name'])}\n"
-            f"Position: {safe(record['designation'])}\nTraining: {safe(record['course_name'])}"
-        )
 
     def _save_permit(self, status="Draft"):
         values={k:self._form_value(k) for k in self.form_fields}
@@ -9002,7 +9125,10 @@ class PTWModule(QWidget):
             if isinstance(w,QLineEdit): w.setText(_s(val))
             elif isinstance(w,QTextEdit): w.setPlainText(_s(val))
             elif isinstance(w,QComboBox):
-                i=w.findText(_s(val)); w.setCurrentIndex(i if i>=0 else 0)
+                if k == "permit_holder_employee_id":
+                    i=w.findData(_s(val)); w.setCurrentIndex(i if i>=0 else 0)
+                else:
+                    i=w.findText(_s(val)); w.setCurrentIndex(i if i>=0 else 0)
             elif isinstance(w,QSpinBox): w.setValue(int(val or 0))
             elif isinstance(w,QDateTimeEdit):
                 dt=QDateTime.fromString(_s(val),"yyyy-MM-dd HH:mm")
