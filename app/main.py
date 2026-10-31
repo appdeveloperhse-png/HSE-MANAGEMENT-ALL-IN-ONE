@@ -7992,6 +7992,7 @@ class PTWModule(QWidget):
         self.renewal_tab = QWidget(); self.tabs.addTab(self.renewal_tab, "Renewal / Extension"); self._build_renewals()
         self.suspension_tab = QWidget(); self.tabs.addTab(self.suspension_tab, "Suspension / Restart"); self._build_suspension()
         self.closure_tab = QWidget(); self.tabs.addTab(self.closure_tab, "Permit Closure"); self._build_closure()
+        self.analytics_tab = QWidget(); self.tabs.addTab(self.analytics_tab, "PTW Analytics"); self._build_analytics()
 
     def _table(self, headers, parent_layout):
         t = QTableWidget(); t.setColumnCount(len(headers)); t.setHorizontalHeaderLabels(headers)
@@ -8709,6 +8710,153 @@ class PTWModule(QWidget):
         fields=["permit_number","previous_permit","performing_company","client_authority","subcontractor","permit_type","location","project_number","jsa_number","method_statement_number","supporting_document_types","supporting_document_reference","loto_equipment","loto_number","work_scope","permit_holder","permit_holder_company","permit_holder_employee_id","planned_start","planned_end","days_issued","days_worked","approved_by","approval_date","status"]
         self._fill_table(self.permit_table,data,fields)
 
+    def _build_analytics(self):
+        layout = QVBoxLayout(self.analytics_tab)
+        filters = QHBoxLayout()
+        self.analytics_from = QDateEdit(QDate.currentDate().addYears(-1)); self.analytics_from.setCalendarPopup(True)
+        self.analytics_to = QDateEdit(QDate.currentDate()); self.analytics_to.setCalendarPopup(True)
+        self.analytics_year = QComboBox()
+        current_year = QDate.currentDate().year()
+        self.analytics_year.addItems([str(y) for y in range(current_year, current_year-11, -1)])
+        self.analytics_type = QComboBox(); self.analytics_company = QComboBox()
+        self.analytics_location = QComboBox(); self.analytics_department = QComboBox()
+        self.analytics_status = QComboBox()
+        for label, widget in (("From",self.analytics_from),("To",self.analytics_to),("Year",self.analytics_year),
+                              ("Permit Type",self.analytics_type),("Contractor",self.analytics_company),
+                              ("Location",self.analytics_location),("Department",self.analytics_department),
+                              ("Status",self.analytics_status)):
+            filters.addWidget(QLabel(label)); filters.addWidget(widget)
+        refresh = QPushButton("Refresh"); reset = QPushButton("Reset Filters")
+        refresh.clicked.connect(self._refresh_analytics); reset.clicked.connect(self._reset_analytics_filters)
+        filters.addWidget(refresh); filters.addWidget(reset)
+        layout.addLayout(filters)
+        self.analytics_cards = QLabel("Loading PTW analytics…")
+        self.analytics_cards.setWordWrap(True)
+        self.analytics_cards.setStyleSheet("font-size:14px;font-weight:bold;padding:10px;background:#E8F0FA;color:#17365D;border-radius:4px;")
+        layout.addWidget(self.analytics_cards)
+        layout.addWidget(QLabel("Analytics by permit type, contractor, location, department, and current status"))
+        self.analytics_table = self._table(["Analysis","Category","Permit Count","Share"],layout)
+        layout.addWidget(QLabel("Monthly Permit Trend"))
+        self.analytics_month_table = self._table(["Month","Registered"],layout)
+        layout.addWidget(QLabel("PTW Management Insights"))
+        self.analytics_insights = QLabel("Refresh to calculate factual insights from existing PTW records.")
+        self.analytics_insights.setWordWrap(True); layout.addWidget(self.analytics_insights)
+        export = QPushButton("Export Analytics to Excel")
+        export.clicked.connect(self._export_analytics_excel); layout.addWidget(export)
+        for widget in (self.analytics_from,self.analytics_to,self.analytics_year,self.analytics_type,self.analytics_company,
+                       self.analytics_location,self.analytics_department,self.analytics_status):
+            if isinstance(widget,QComboBox): widget.currentIndexChanged.connect(self._refresh_analytics)
+            else: widget.dateChanged.connect(self._refresh_analytics)
+        self._refresh_analytics_filters()
+
+    def _refresh_analytics_filters(self):
+        rows=self.db.fetchall("SELECT permit_type,performing_company,location,department,status FROM ptw_permits")
+        for widget, field in ((self.analytics_type,"permit_type"),(self.analytics_company,"performing_company"),
+                              (self.analytics_location,"location"),(self.analytics_department,"department"),
+                              (self.analytics_status,"status")):
+            old=widget.currentText()
+            widget.blockSignals(True); widget.clear(); widget.addItem("All")
+            vals=sorted({_s(r[field]).strip() for r in rows if _s(r[field]).strip()})
+            widget.addItems(vals)
+            ix=widget.findText(old); widget.setCurrentIndex(ix if ix>=0 else 0); widget.blockSignals(False)
+
+    def _reset_analytics_filters(self):
+        self.analytics_from.setDate(QDate.currentDate().addYears(-1))
+        self.analytics_to.setDate(QDate.currentDate())
+        for widget in (self.analytics_type,self.analytics_company,self.analytics_location,self.analytics_department,self.analytics_status):
+            widget.setCurrentIndex(0)
+        self.analytics_year.setCurrentIndex(0)
+        self._refresh_analytics()
+
+    def _analytics_rows(self):
+        rows=self.db.fetchall("SELECT * FROM ptw_permits")
+        start=self.analytics_from.date().toString("yyyy-MM-dd")
+        end=self.analytics_to.date().toString("yyyy-MM-dd")
+        selected_year=self.analytics_year.currentText()
+        conditions=(("permit_type",self.analytics_type.currentText()),("performing_company",self.analytics_company.currentText()),
+                    ("location",self.analytics_location.currentText()),("department",self.analytics_department.currentText()),
+                    ("status",self.analytics_status.currentText()))
+        result=[]
+        for r in rows:
+            created=_s(r["created_at"])[:10]
+            if created and not (start<=created<=end): continue
+            if selected_year and created and created[:4]!=selected_year: continue
+            if any(value!="All" and _s(r[field])!=value for field,value in conditions): continue
+            result.append(r)
+        return result
+
+    def _refresh_analytics(self, *_args):
+        if not hasattr(self,"analytics_table"): return
+        self._refresh_analytics_filters()
+        rows=self._analytics_rows()
+        total=len(rows); now=datetime.now()
+        status_counts={}
+        for r in rows: status_counts[_s(r["status"]) or "Unknown"]=status_counts.get(_s(r["status"]) or "Unknown",0)+1
+        expired=sum(1 for r in rows if _s(r["planned_end"]) and _s(r["planned_end"])[:10]<date.today().isoformat() and _s(r["status"]) not in ("Closed","Cancelled"))
+        completed=sum(1 for r in rows if _s(r["status"]).lower() in ("completed","closed"))
+        active=sum(1 for r in rows if _s(r["status"]).lower() in ("issued / active","active","issued"))
+        suspended=sum(1 for r in rows if "suspend" in _s(r["status"]).lower())
+        closed=sum(1 for r in rows if _s(r["status"]).lower()=="closed")
+        cancelled=sum(1 for r in rows if _s(r["status"]).lower()=="cancelled")
+        self.analytics_cards.setText(f"Permits created in selected period: {total}   |   Currently Active: {active}   |   Completed/Closed: {completed}   |   Closed: {closed}   |   Suspended: {suspended}   |   Expired by planned end: {expired}   |   Cancelled: {cancelled}")
+        self.analytics_table.setSortingEnabled(False); self.analytics_table.setRowCount(0)
+        analyses=[("Permit Type","permit_type"),("Contractor","performing_company"),("Location","location"),("Department","department"),("Current Status","status")]
+        for label,field in analyses:
+            counts={}
+            for r in rows:
+                val=_s(r[field]).strip() or "Not specified"; counts[val]=counts.get(val,0)+1
+            for name,count in sorted(counts.items(),key=lambda item:(-item[1],item[0])):
+                row=self.analytics_table.rowCount(); self.analytics_table.insertRow(row)
+                for col,val in enumerate((label,name,count,f"{(count/total*100):.1f}%" if total else "0%")):
+                    self.analytics_table.setItem(row,col,QTableWidgetItem(str(val)))
+        self.analytics_table.setSortingEnabled(True)
+        months={}
+        for r in rows:
+            created=_s(r["created_at"])[:7]
+            if created: months[created]=months.get(created,0)+1
+        self.analytics_month_table.setRowCount(0)
+        for month,count in sorted(months.items()):
+            row=self.analytics_month_table.rowCount(); self.analytics_month_table.insertRow(row)
+            self.analytics_month_table.setItem(row,0,QTableWidgetItem(month)); self.analytics_month_table.setItem(row,1,QTableWidgetItem(str(count)))
+        durations=[]
+        for r in rows:
+            try:
+                start_dt=datetime.fromisoformat(_s(r["planned_start"])); end_dt=datetime.fromisoformat(_s(r["planned_end"]))
+                hours=(end_dt-start_dt).total_seconds()/3600
+                if hours>=0: durations.append(hours)
+            except Exception: pass
+        insights=[]
+        if total:
+            for field,title in (("permit_type","Most common permit type"),("performing_company","Highest permit activity contractor"),("location","Highest activity location")):
+                c={}
+                for r in rows:
+                    val=_s(r[field]).strip()
+                    if val:c[val]=c.get(val,0)+1
+                if c: insights.append(f"{title}: {max(c,key=c.get)} ({max(c.values())} permits)")
+        if durations: insights.append(f"Average planned duration: {sum(durations)/len(durations):.1f} hours ({len(durations)} valid records)")
+        self.analytics_insights.setText("\n".join(insights) if insights else "No records or valid data are available for the selected filters.")
+
+    def _export_analytics_excel(self):
+        path,_=QFileDialog.getSaveFileName(self,"Export PTW Analytics","ptw_analytics.xlsx","Excel Workbook (*.xlsx)")
+        if not path:return
+        if not path.lower().endswith(".xlsx"): path += ".xlsx"
+        wb=Workbook(); ws=wb.active; ws.title="PTW Analytics"
+        ws.append(["PTW Analytics"]); ws.append(["Reporting period",self.analytics_from.date().toString("yyyy-MM-dd"),self.analytics_to.date().toString("yyyy-MM-dd")])
+        ws.append(["Summary",self.analytics_cards.text()])
+        ws.append([])
+        ws.append(["Analysis","Category","Permit Count","Share"])
+        for r in range(self.analytics_table.rowCount()):
+            ws.append([self.analytics_table.item(r,c).text() if self.analytics_table.item(r,c) else "" for c in range(4)])
+        ws2=wb.create_sheet("Monthly Trend"); ws2.append(["Month","Registered"])
+        for r in range(self.analytics_month_table.rowCount()):
+            ws2.append([self.analytics_month_table.item(r,c).text() if self.analytics_month_table.item(r,c) else "" for c in range(2)])
+        for sheet in wb.worksheets:
+            sheet.freeze_panes="A2"; sheet.auto_filter.ref=sheet.dimensions
+            for col in sheet.columns:
+                letter=col[0].column_letter
+                sheet.column_dimensions[letter].width=min(max(max(len(str(c.value or "")) for c in col)+2,12),45)
+        wb.save(path); QMessageBox.information(self,"Export Complete",f"PTW analytics exported to {path}")
+
     def refresh_all(self):
         self.refresh_register()
         rows=self.db.fetchall("SELECT * FROM ptw_permits ORDER BY id DESC")
@@ -8744,6 +8892,7 @@ class PTWModule(QWidget):
             self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
         self._refresh_combo_lists(); self._refresh_other_tables(); self._refresh_authority_workflows()
         if hasattr(self,"reval_permit"): self._load_revalidation_days()
+        if hasattr(self,"analytics_table"): self._refresh_analytics()
 
     def _open_revalidation_selected(self):
         pid=self._selected_id()
