@@ -8255,7 +8255,7 @@ class PTWModule(QWidget):
         self.permit_table.horizontalHeader().setSectionResizeMode(14,QHeaderView.ResizeMode.Stretch)
         self.permit_table.setWordWrap(True); self.permit_table.setMinimumHeight(260)
         row=QHBoxLayout()
-        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Issue Selected",self._issue_selected_from_register),("Export Excel Register",self._export_excel_register),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
+        for label,fn in [("View / Load",self._load_selected),("Edit Draft",self._edit_selected),("Delete Permit",self._delete_selected_permit),("Issue Selected",self._issue_selected_from_register),("Export Excel",self._export_excel_register),("Export Selected Permit",self._export_selected),("Daily Revalidation",self._open_revalidation_selected),("History",self._show_history)]:
             b=QPushButton(label); b.clicked.connect(fn); row.addWidget(b)
         row.addStretch(); lay.addLayout(row)
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
