@@ -3659,6 +3659,13 @@ class MainWindow(QMainWindow):
         title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:8px;"); dl.addWidget(title)
         summary = QLabel(); summary.setWordWrap(True)
         summary.setStyleSheet("font-size:15px;font-weight:bold;color:#17365D;padding:12px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dl.addWidget(summary)
+        audit_home_filter=QComboBox(); audit_home_filter.addItem("All Audit Types"); audit_home_filter.addItems(self._audit_types())
+        dl.addWidget(QLabel("Audit type overview:")); dl.addWidget(audit_home_filter)
+        audit_summary_table=QTableWidget(0,10); audit_summary_table.setHorizontalHeaderLabels(["Audit Ref","Audit Type","Audit Name / Title","Audit Date","Observations","Nonconformities","Positive Findings","Total Findings","Open Findings","Closed Findings"]); audit_summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); audit_summary_table.setAlternatingRowColors(True); audit_summary_table.setWordWrap(True); audit_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); audit_summary_table.horizontalHeader().setStretchLastSection(True); audit_summary_table.setMinimumHeight(180); dl.addWidget(audit_summary_table,1)
+        def open_audit_from_summary(row, col=0):
+            item=audit_summary_table.item(row,0)
+            if item and item.data(Qt.ItemDataRole.UserRole): self._audit_register_detail(int(item.data(Qt.ItemDataRole.UserRole)))
+        audit_summary_table.cellDoubleClicked.connect(open_audit_from_summary)
         class AuditHomeCharts(QWidget):
             def __init__(self, parent=None):
                 super().__init__(parent); self.status_counts=[]; self.finding_counts=[0,0]; self.setMinimumHeight(300)
@@ -3682,6 +3689,22 @@ class MainWindow(QMainWindow):
             summary.setText(f"Total audits: {total}     |     Scheduled audits: {scheduled}     |     Open findings: {opened}     |     Closed findings: {closed}")
             rows=db.fetchall("SELECT COALESCE(NULLIF(status,''),'Unspecified') AS status,COUNT(*) AS n FROM audits GROUP BY COALESCE(NULLIF(status,''),'Unspecified') ORDER BY status")
             charts.set_data([(safe(r["status"]),int(r["n"])) for r in rows],opened,closed)
+            audit_rows=db.fetchall("SELECT * FROM audits ORDER BY audit_date DESC,id DESC")
+            if audit_home_filter.currentText()!="All Audit Types": audit_rows=[a for a in audit_rows if safe(a["audit_type"])==audit_home_filter.currentText()]
+            audit_summary_table.setRowCount(len(audit_rows))
+            for ri,a in enumerate(audit_rows):
+                fs=db.fetchall("SELECT finding_type,status FROM audit_findings WHERE audit_id=?",(a["id"],))
+                obs=sum(1 for f in fs if "observation" in safe(f["finding_type"]).lower())
+                nc=sum(1 for f in fs if "nonconform" in safe(f["finding_type"]).lower())
+                positive=sum(1 for f in fs if any(term in safe(f["finding_type"]).lower() for term in ("positive","good practice","conformity")))
+                op=sum(1 for f in fs if safe(f["status"]).lower() not in ("closed","verified"))
+                cl=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified"))
+                vals=[a["number"],a["audit_type"],a["title"],a["audit_date"],obs,nc,positive,len(fs),op,cl]
+                for ci,val in enumerate(vals):
+                    it=QTableWidgetItem(safe(val)); it.setData(Qt.ItemDataRole.UserRole,a["id"]); audit_summary_table.setItem(ri,ci,it)
+                    if ci in (8,9): it.setBackground(QColor("#FCE4D6") if ci==8 and op else QColor("#E2F0D9") if ci==9 and cl else QColor("#FFFFFF"))
+            audit_summary_table.resizeRowsToContents()
+        audit_home_filter.currentTextChanged.connect(load_home_dashboard)
         planning_btn.clicked.connect(self.audit_planning_center); refresh_dash.clicked.connect(load_home_dashboard); load_home_dashboard(); tabs.addTab(dash,"Audit Dashboard")
 
         # Full register and CRUD controls are available here, not on the dashboard home page.
@@ -4161,14 +4184,14 @@ class MainWindow(QMainWindow):
 
         # ----- Findings register tab -----
         findings=QWidget(); fvl=QVBoxLayout(findings)
-        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Internal Audit Findings Register — each saved nonconformity is traced to its procedure and checklist criterion")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); edit_finding_btn=QPushButton("Edit Selected Finding"); delete_finding_btn=QPushButton("Delete Selected Finding"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(edit_finding_btn); fbar.addWidget(delete_finding_btn); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
+        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Master Audit Findings Register — findings from internal, client, certification and other audit types")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); edit_finding_btn=QPushButton("Edit Selected Finding"); delete_finding_btn=QPushButton("Delete Selected Finding"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(edit_finding_btn); fbar.addWidget(delete_finding_btn); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
         findings_table=QTableWidget(0,13); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","CAPA Reference","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.setWordWrap(True); findings_table.setTextElideMode(Qt.TextElideMode.ElideNone); findings_table.verticalHeader().setDefaultSectionSize(70); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); findings_table.horizontalHeader().setStretchLastSection(True)
         for col,width in {0:125,1:155,2:65,3:135,4:75,5:245,6:220,7:125,8:100,9:120,10:115}.items(): findings_table.setColumnWidth(col,width)
         findings_table.setColumnHidden(11,True); findings_table.setColumnHidden(12,True); fvl.addWidget(findings_table,1)
         def load_findings():
             rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
                 FROM audit_findings f JOIN audits a ON a.id=f.audit_id
-                WHERE f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%'
+                WHERE 1=1
                 ORDER BY CASE WHEN lower(COALESCE(f.status,''))='closed' THEN 1 ELSE 0 END,f.target_date,a.id,f.finding_number""")
             if finding_status_filter.currentText()=="Open Findings": rows=[r for r in rows if safe(r["status"]).lower() not in ("closed","verified")]
             elif finding_status_filter.currentText()=="Closed Findings": rows=[r for r in rows if safe(r["status"]).lower() in ("closed","verified")]
@@ -9417,48 +9440,54 @@ class PTWModule(QWidget):
         QMessageBox.information(self,"Exported","Permit record and supporting-document index exported.")
 
     def _export_excel_register(self):
+        """Export the complete currently filtered PTW register and daily revalidation."""
         path,_=QFileDialog.getSaveFileName(self,"Export PTW Register and Daily Revalidation","ptw_register_and_revalidation.xlsx","Excel Workbook (*.xlsx)")
-        if not path:return
-        if not path.lower().endswith(".xlsx"):path += ".xlsx"
-        self.refresh_register()
-        wb=Workbook(); ws=wb.active; ws.title="PTW Register"
-        headers=[self.permit_table.horizontalHeaderItem(c).text() for c in range(self.permit_table.columnCount())]
-        ws.append(["PERMIT TO WORK REGISTER"]); ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(headers))
-        ws["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=28
-        ws.append(headers)
-        for r in range(self.permit_table.rowCount()):
-            ws.append([self.permit_table.item(r,c).text() if self.permit_table.item(r,c) else "" for c in range(self.permit_table.columnCount())])
-        headfill=PatternFill("solid",fgColor="D9EAF7"); thin=Side(style="thin",color="B7C9D6")
-        for sheet in [ws]:
-            for cell in sheet[2]:
+        if not path: return
+        if not path.lower().endswith(".xlsx"): path += ".xlsx"
+        try:
+            self.refresh_register()
+            wb=Workbook(); ws=wb.active; ws.title="PTW Register"
+            headers=[self.permit_table.horizontalHeaderItem(c).text() for c in range(self.permit_table.columnCount())]
+            ws.append(["PERMIT TO WORK REGISTER"]); ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=max(1,len(headers)))
+            ws["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.row_dimensions[1].height=28
+            ws.append(headers)
+            for r in range(self.permit_table.rowCount()):
+                ws.append([self.permit_table.item(r,c).text() if self.permit_table.item(r,c) else "" for c in range(self.permit_table.columnCount())])
+            headfill=PatternFill("solid",fgColor="D9EAF7"); thin=Side(style="thin",color="B7C9D6")
+            for cell in ws[2]:
                 cell.font=Font(bold=True,color="17365D"); cell.fill=headfill; cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); cell.border=Border(bottom=thin)
-            for row in sheet.iter_rows(min_row=3):
-                for cell in row:cell.alignment=Alignment(vertical="top",wrap_text=True)
-            sheet.freeze_panes="A3"; sheet.auto_filter.ref=f"A2:{sheet.cell(sheet.max_row,sheet.max_column).coordinate}"
-            for col in sheet.columns:
-                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); sheet.column_dimensions[letter].width=min(max(longest+2,12),32)
-        daily=wb.create_sheet("Daily Revalidation")
-        dh=["Permit No.","Work Date","Day","Revalidation Mark","Daily Status","Daily PTW Holder Name","Permit Issuing Authority Name","Comments","Recorded By","Recorded At"]
-        daily.append(["DAILY PTW REVALIDATION REGISTER"]); daily.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(dh))
-        daily["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); daily["A1"].fill=PatternFill("solid",fgColor="17365D"); daily["A1"].alignment=Alignment(horizontal="center",vertical="center"); daily.row_dimensions[1].height=28
-        daily.append(dh)
-        records=self.db.fetchall("SELECT p.permit_number,d.work_date,d.day_status,d.permit_holder,d.permit_authority,d.comments,d.recorded_by,d.recorded_at FROM ptw_daily_revalidation d JOIN ptw_permits p ON p.id=d.permit_id ORDER BY p.permit_number,d.work_date")
-        for d in records:
-            try:day_name=datetime.fromisoformat(d["work_date"]).strftime("%A")
-            except Exception:day_name=""
-            status=_s(d["day_status"]); mark="✓" if status=="Revalidated" else "✗" if status in ("Suspended","On Hold","Rejected","No Work") else "—"
-            daily.append([d["permit_number"],d["work_date"],day_name,mark,status,d["permit_holder"],d["permit_authority"],d["comments"],d["recorded_by"],d["recorded_at"]])
-            fill="E2F0D9" if mark=="✓" else "FCE4D6" if mark=="✗" else "FFF2CC"
-            for cell in daily[daily.max_row]:cell.fill=PatternFill("solid",fgColor=fill)
-        for cell in daily[2]:
-            cell.font=Font(bold=True,color="17365D"); cell.fill=headfill; cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); cell.border=Border(bottom=thin)
-        for row in daily.iter_rows(min_row=3):
-            for cell in row:cell.alignment=Alignment(vertical="top",wrap_text=True)
-        daily.freeze_panes="A3"; daily.auto_filter.ref=f"A2:{daily.cell(daily.max_row,daily.max_column).coordinate}"
-        for col in daily.columns:
-            letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); daily.column_dimensions[letter].width=min(max(longest+2,12),36)
-        wb.save(path)
-        QMessageBox.information(self,"Excel Exported",f"PTW Register and Daily Revalidation are saved in separate worksheets. Revalidated = ✓, non-revalidated outcomes = ✗, pending = —.\\n{path}")
+            for row in ws.iter_rows(min_row=3):
+                for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
+            ws.freeze_panes="A3"
+            if ws.max_row>=2: ws.auto_filter.ref=f"A2:{ws.cell(ws.max_row,ws.max_column).coordinate}"
+            for col in ws.columns:
+                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); ws.column_dimensions[letter].width=min(max(longest+2,12),32)
+            daily=wb.create_sheet("Daily Revalidation")
+            dh=["Permit No.","Work Date","Day","Revalidation Mark","Daily Status","Daily PTW Holder Name","Permit Issuing Authority Name","Comments","Recorded By","Recorded At"]
+            daily.append(["DAILY PTW REVALIDATION REGISTER"]); daily.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(dh))
+            daily["A1"].font=Font(name="Arial",size=16,bold=True,color="FFFFFF"); daily["A1"].fill=PatternFill("solid",fgColor="17365D"); daily["A1"].alignment=Alignment(horizontal="center",vertical="center"); daily.row_dimensions[1].height=28; daily.append(dh)
+            records=self.db.fetchall("SELECT p.permit_number,d.work_date,d.day_status,d.permit_holder,d.permit_authority,d.comments,d.recorded_by,d.recorded_at FROM ptw_daily_revalidation d JOIN ptw_permits p ON p.id=d.permit_id ORDER BY p.permit_number,d.work_date")
+            for d in records:
+                try: day_name=datetime.fromisoformat(d["work_date"]).strftime("%A")
+                except Exception: day_name=""
+                st=_s(d["day_status"]); mark="✓" if st=="Revalidated" else "✗" if st in ("Suspended","On Hold","Rejected","No Work") else "—"
+                daily.append([d["permit_number"],d["work_date"],day_name,mark,st,d["permit_holder"],d["permit_authority"],d["comments"],d["recorded_by"],d["recorded_at"]])
+                fill="E2F0D9" if mark=="✓" else "FCE4D6" if mark=="✗" else "FFF2CC"
+                for cell in daily[daily.max_row]: cell.fill=PatternFill("solid",fgColor=fill)
+            for cell in daily[2]:
+                cell.font=Font(bold=True,color="17365D"); cell.fill=headfill; cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); cell.border=Border(bottom=thin)
+            for row in daily.iter_rows(min_row=3):
+                for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
+            daily.freeze_panes="A3"
+            if daily.max_row>=2: daily.auto_filter.ref=f"A2:{daily.cell(daily.max_row,daily.max_column).coordinate}"
+            for col in daily.columns:
+                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); daily.column_dimensions[letter].width=min(max(longest+2,12),36)
+            wb.save(path)
+            if not Path(path).is_file() or Path(path).stat().st_size==0: raise OSError("The workbook was not created successfully.")
+            QMessageBox.information(self,"Excel Exported",f"PTW Register and Daily Revalidation were saved in separate worksheets.\n{path}")
+        except Exception as exc:
+            logging.exception("PTW register Excel export failed")
+            QMessageBox.critical(self,"Excel Export Failed",f"Could not create the Excel file.\n\n{exc}")
 
     def _export_csv(self):
         return self._export_excel_register()
