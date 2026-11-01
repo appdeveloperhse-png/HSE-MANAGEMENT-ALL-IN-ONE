@@ -3661,7 +3661,7 @@ class MainWindow(QMainWindow):
         summary.setStyleSheet("font-size:15px;font-weight:bold;color:#17365D;padding:12px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dl.addWidget(summary)
         audit_home_filter=QComboBox(); audit_home_filter.addItem("All Audit Types"); audit_home_filter.addItems(self._audit_types())
         dl.addWidget(QLabel("Audit type overview:")); dl.addWidget(audit_home_filter)
-        audit_summary_table=QTableWidget(0,10); audit_summary_table.setHorizontalHeaderLabels(["Audit Ref","Audit Type","Audit Name / Title","Audit Date","Observations","Nonconformities","Positive Findings","Total Findings","Open Findings","Closed Findings"]); audit_summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); audit_summary_table.setAlternatingRowColors(True); audit_summary_table.setWordWrap(True); audit_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); audit_summary_table.horizontalHeader().setStretchLastSection(True); audit_summary_table.setMinimumHeight(180); dl.addWidget(audit_summary_table,1)
+        audit_summary_table=QTableWidget(0,8); audit_summary_table.setHorizontalHeaderLabels(["Main Audit Number","Audit Type","Audit Name / Title","Audit Date","Total Findings","Open Findings","Closed Findings","Closed %"]); audit_summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); audit_summary_table.setAlternatingRowColors(True); audit_summary_table.setWordWrap(True); audit_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); audit_summary_table.horizontalHeader().setStretchLastSection(True); audit_summary_table.setMinimumHeight(180); dl.addWidget(audit_summary_table,1)
         def open_audit_from_summary(row, col=0):
             item=audit_summary_table.item(row,0)
             if item and item.data(Qt.ItemDataRole.UserRole): self._audit_register_detail(int(item.data(Qt.ItemDataRole.UserRole)))
@@ -3699,7 +3699,8 @@ class MainWindow(QMainWindow):
                 positive=sum(1 for f in fs if any(term in safe(f["finding_type"]).lower() for term in ("positive","good practice","conformity")))
                 op=sum(1 for f in fs if safe(f["status"]).lower() not in ("closed","verified"))
                 cl=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified"))
-                vals=[a["number"],a["audit_type"],a["title"],a["audit_date"],obs,nc,positive,len(fs),op,cl]
+                closed_pct=(100.0*cl/len(fs)) if fs else 0.0
+                vals=[a["number"],a["audit_type"],a["title"],a["audit_date"],len(fs),op,cl,f"{closed_pct:.1f}%"]
                 for ci,val in enumerate(vals):
                     it=QTableWidgetItem(safe(val)); it.setData(Qt.ItemDataRole.UserRole,a["id"]); audit_summary_table.setItem(ri,ci,it)
                     if ci in (8,9): it.setBackground(QColor("#FCE4D6") if ci==8 and op else QColor("#E2F0D9") if ci==9 and cl else QColor("#FFFFFF"))
@@ -4816,7 +4817,7 @@ class MainWindow(QMainWindow):
                     # overwrite or recreate them from the general Audit Workspace.
                     if prior_row and prior_row["source_schedule_id"] is not None:
                         continue
-                    values=(n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now)
+                    values=(n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now,now)
                     if fid:
                         db.execute("UPDATE audit_findings SET finding_number=?,finding_standard=?,clause=?,sub_clause=?,finding_type=?,finding_detail=?,observation=?,corrective_action=?,responsible=?,responsible_person_id=?,location=?,target_date=?,status=?,close_out_evidence=?,updated_at=? WHERE id=? AND audit_id=?",values+(fid,existing["id"]))
                         db.execute("DELETE FROM audit_attachments WHERE audit_id=? AND finding_id=?",(existing["id"],fid))
@@ -9461,7 +9462,8 @@ class PTWModule(QWidget):
             ws.freeze_panes="A3"
             if ws.max_row>=2: ws.auto_filter.ref=f"A2:{ws.cell(ws.max_row,ws.max_column).coordinate}"
             for col in ws.columns:
-                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); ws.column_dimensions[letter].width=min(max(longest+2,12),32)
+                from openpyxl.utils import get_column_letter
+                letter=get_column_letter(col[0].column); longest=max((len(str(c.value or "")) for c in col),default=10); ws.column_dimensions[letter].width=min(max(longest+2,12),32)
             daily=wb.create_sheet("Daily Revalidation")
             dh=["Permit No.","Work Date","Day","Revalidation Mark","Daily Status","Daily PTW Holder Name","Permit Issuing Authority Name","Comments","Recorded By","Recorded At"]
             daily.append(["DAILY PTW REVALIDATION REGISTER"]); daily.merge_cells(start_row=1,start_column=1,end_row=1,end_column=len(dh))
@@ -9481,7 +9483,8 @@ class PTWModule(QWidget):
             daily.freeze_panes="A3"
             if daily.max_row>=2: daily.auto_filter.ref=f"A2:{daily.cell(daily.max_row,daily.max_column).coordinate}"
             for col in daily.columns:
-                letter=col[0].column_letter; longest=max((len(str(c.value or "")) for c in col),default=10); daily.column_dimensions[letter].width=min(max(longest+2,12),36)
+                from openpyxl.utils import get_column_letter
+                letter=get_column_letter(col[0].column); longest=max((len(str(c.value or "")) for c in col),default=10); daily.column_dimensions[letter].width=min(max(longest+2,12),36)
             wb.save(path)
             if not Path(path).is_file() or Path(path).stat().st_size==0: raise OSError("The workbook was not created successfully.")
             QMessageBox.information(self,"Excel Exported",f"PTW Register and Daily Revalidation were saved in separate worksheets.\n{path}")
