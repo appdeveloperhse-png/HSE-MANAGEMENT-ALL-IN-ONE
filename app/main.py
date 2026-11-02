@@ -2284,6 +2284,49 @@ def aud_procedure_library():
         _AUD_LIBRARY_CACHE.update(audit_procedure_library())
     return _AUD_LIBRARY_CACHE
 
+def aud_iso_standard_checklist(standard):
+    """Return an ordered working checklist for the selected ISO management-system standard."""
+    standard = safe(standard).strip()
+    if standard == "ISO 9001":
+        clauses = {
+            "4": ["4.1 Understanding the organization and its context",
+                  "4.2 Understanding the needs and expectations of interested parties",
+                  "4.3 Determining the scope of the quality management system",
+                  "4.4 Quality management system and its processes"],
+            "5": ["5.1 Leadership and commitment", "5.2 Quality policy",
+                  "5.3 Organizational roles, responsibilities and authorities"],
+            "6": ["6.1 Actions to address risks and opportunities",
+                  "6.2 Quality objectives and planning to achieve them",
+                  "6.3 Planning of changes"],
+            "7": ["7.1 Resources", "7.2 Competence", "7.3 Awareness",
+                  "7.4 Communication", "7.5 Documented information"],
+            "8": ["8.1 Operational planning and control",
+                  "8.2 Requirements for products and services",
+                  "8.3 Design and development of products and services",
+                  "8.4 Control of externally provided processes, products and services",
+                  "8.5 Production and service provision", "8.6 Release of products and services",
+                  "8.7 Control of nonconforming outputs"],
+            "9": ["9.1 Monitoring, measurement, analysis and evaluation",
+                  "9.2 Internal audit", "9.3 Management review"],
+            "10": ["10.1 General", "10.2 Nonconformity and corrective action",
+                   "10.3 Continual improvement"],
+        }
+    else:
+        clauses = ISO_CLAUSES.get(standard, {})
+    rows = []
+    for clause_no, titles in clauses.items():
+        for title in titles:
+            # Keep the checklist in clause order and require an auditable observation/evidence entry.
+            rows.append({
+                "clause_sno": clause_no,
+                "sub_clause": title,
+                "checklist_pts": f"Verify implementation and retain objective evidence for: {title}",
+                "procedure": standard,
+            })
+    return rows
+
+
+
 
 def aud_ts():
     return datetime.now().isoformat(timespec="seconds")
@@ -2302,10 +2345,24 @@ def aud_get(audit_id):
 
 
 def aud_list(statuses=None):
-    rows = db.fetchall("SELECT * FROM audits WHERE COALESCE(aud_ver,0)=2 ORDER BY id DESC")
-    if statuses:
-        rows = [r for r in rows if safe(r["status"]) in statuses]
-    return rows
+    """Return audits belonging to this workflow, including legacy rows submitted through it."""
+    rows = db.fetchall("SELECT * FROM audits ORDER BY id DESC")
+    allowed = set(statuses) if statuses else None
+    result = []
+    for row in rows:
+        status = safe(row["status"]).strip()
+        audit_type = safe(row["audit_type"]).strip()
+        is_audit_v2 = int(row["aud_ver"] or 0) == 2
+        # Older rows may have been submitted through the Audit Management screen
+        # before the v2 marker was added. Include those in the relevant pickers.
+        legacy_workflow_row = audit_type in AUD_TYPES and status in (
+            "Draft", "Scheduled", "Submitted", "In Progress", "Completed"
+        )
+        if not (is_audit_v2 or legacy_workflow_row):
+            continue
+        if allowed is None or status in allowed:
+            result.append(row)
+    return result
 
 
 # ------------------------------------------------------------
@@ -2341,7 +2398,7 @@ def aud_save_audit(audit_id, data, status):
     if existing:
         db.execute(
             "UPDATE audits SET audit_type=?,audit_date=?,location=?,auditor=?,lead_auditor=?,title=?,scope=?,"
-            "procedures=?,status=?,updated_at=?,submitted_at=? WHERE id=?",
+            "procedures=?,status=?,updated_at=?,submitted_at=?,aud_ver=2 WHERE id=?",
             (audit_type, audit_date, location, auditor, auditor, title, scope, json.dumps(procedures),
              status, now, now if status == "Submitted" else "", existing["id"])
         )
@@ -2356,14 +2413,15 @@ def aud_save_audit(audit_id, data, status):
     return int(db.fetchone("SELECT id FROM audits WHERE number=?", (number,))["id"])
 
 
-def aud_set_auditee(audit_id, auditee, audit_type=None, procedures=None):
+def aud_set_auditee(audit_id, auditee, audit_type=None, procedures=None, standard=None):
     audit = aud_get(audit_id)
     if not audit:
         raise ValueError("Audit not found.")
     new_type = safe(audit_type).strip() if audit_type in AUD_TYPES else safe(audit["audit_type"])
     procs = json.dumps([safe(p) for p in procedures]) if procedures is not None else safe(audit["procedures"]) or "[]"
-    db.execute("UPDATE audits SET auditee=?,audit_type=?,procedures=?,updated_at=? WHERE id=?",
-               (safe(auditee).strip(), new_type, procs, aud_ts(), audit_id))
+    selected_standard = safe(standard).strip() if standard is not None else safe(audit["standard"])
+    db.execute("UPDATE audits SET auditee=?,audit_type=?,procedures=?,standard=?,updated_at=?,aud_ver=2 WHERE id=?",
+               (safe(auditee).strip(), new_type, procs, selected_standard, aud_ts(), audit_id))
 
 
 def aud_delete_audit(audit_id):
@@ -2614,7 +2672,8 @@ def aud_export_excel(audit_id, path):
             logging.exception("Audit Excel logo embedding failed")
     info = [("Audit No.", audit["number"]), ("Audit Type", audit["audit_type"]), ("Audit Date", audit["audit_date"]),
             ("Location", audit["location"]), ("Auditor", audit["auditor"]), ("Auditee", audit["auditee"]),
-            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"])))]
+            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"]))),
+            ("ISO Standard", safe(audit["standard"]) or "—")]
     r = 3
     for i in range(0, len(info), 2):
         for j in range(2):
@@ -2674,7 +2733,8 @@ def aud_export_word(audit_id, path):
     r.font.color.rgb = RGBColor(0x17, 0x36, 0x5D)
     info = [("Audit No.", audit["number"]), ("Audit Type", audit["audit_type"]), ("Audit Date", audit["audit_date"]),
             ("Location", audit["location"]), ("Auditor", audit["auditor"]), ("Auditee", audit["auditee"]),
-            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"])) or "—")]
+            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"])) or "—"),
+            ("ISO Standard", safe(audit["standard"]) or "—")]
     t = document.add_table(rows=0, cols=4)
     t.style = "Table Grid"
     t.autofit = False
@@ -2719,6 +2779,82 @@ def aud_export_word(audit_id, path):
     add_docx_signatures(document)
     add_docx_footer(document)
     save_docx_validated(document, path)
+
+
+
+def aud_export_pdf(audit_id, path):
+    """Generate a detailed, landscape PDF Audit Register with audit metadata and every saved finding."""
+    audit = aud_get(audit_id)
+    if not audit:
+        raise ValueError("Audit record not found.")
+    headers, rows = aud_register_table(audit_id)
+    styles = getSampleStyleSheet()
+    story = [
+        Paragraph(f"<b>{xml_safe(company_name())}</b>", styles["Title"]),
+        Paragraph(f"<b>DETAILED AUDIT REGISTER — {xml_safe(audit['number'])}</b>", styles["Heading2"]),
+        Spacer(1, 8),
+    ]
+    metadata = [
+        ["Audit Number", safe(audit["number"]), "Audit Type", safe(audit["audit_type"])],
+        ["Audit Date", safe(audit["audit_date"]), "Status", safe(audit["status"])],
+        ["Location", safe(audit["location"]), "Auditor", safe(audit["auditor"])],
+        ["Auditee", safe(audit["auditee"]), "ISO Standard", safe(audit["standard"]) or "—"],
+        ["Procedures", ", ".join(aud_parse_procedures(audit["procedures"])) or "—", "Scope", safe(audit["scope"]) or "—"],
+    ]
+    meta_table = Table(metadata, colWidths=[78, 175, 78, 175])
+    meta_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#DCE6F1")),
+        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#DCE6F1")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.extend([meta_table, Spacer(1, 10)])
+    closed = sum(1 for row in rows if row[11] == "Closed")
+    story.append(Paragraph(
+        f"Total checklist findings: {len(rows)} &nbsp;&nbsp; Open / other: {len(rows)-closed} "
+        f"&nbsp;&nbsp; Closed: {closed} &nbsp;&nbsp; CAPA linked: {sum(1 for row in rows if row[10]=='Yes')}",
+        styles["Normal"]))
+    story.append(Spacer(1, 6))
+    wrapped_headers = [Paragraph(f"<b>{xml_safe(h)}</b>", styles["BodyText"]) for h in headers]
+    data = [wrapped_headers]
+    for row in rows:
+        data.append([Paragraph(xml_safe(value).replace("\\n", "<br/>"), styles["BodyText"]) for value in row])
+    if len(data) == 1:
+        data.append([Paragraph("No checklist findings have been saved.", styles["BodyText"])] + [""] * (len(headers)-1))
+    widths = [72, 82, 55, 40, 58, 125, 95, 105, 58, 48, 42, 48, 70, 72]
+    table = Table(data, colWidths=widths, repeatRows=1, hAlign="LEFT")
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    story.extend([table, Spacer(1, 16)])
+    signature = Table([
+        ["Prepared / Lead Auditor", "Reviewed By", "Approved By"],
+        ["Name: ______________________\\nSignature: ___________________\\nDate: ________________________"] * 3
+    ], colWidths=[190, 190, 190])
+    signature.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DCE6F1")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
+    ]))
+    story.append(signature)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    doc = SimpleDocTemplate(str(path), pagesize=landscape(A4), rightMargin=22, leftMargin=22, topMargin=24, bottomMargin=24)
+    doc.build(story)
 
 
 def aud_export_notification_word(audit_id, path):
@@ -4394,12 +4530,14 @@ class MainWindow(QMainWindow):
         btns = QHBoxLayout()
         excel_btn = QPushButton("Export Excel")
         word_btn = QPushButton("Export Word")
+        pdf_btn = QPushButton("Export PDF")
         complete_btn = QPushButton("Mark Audit Completed")
         close_btn = QPushButton("Close")
-        for b in (excel_btn, word_btn, complete_btn, close_btn):
+        for b in (excel_btn, word_btn, pdf_btn, complete_btn, close_btn):
             b.setMinimumHeight(36)
         btns.addWidget(excel_btn)
         btns.addWidget(word_btn)
+        btns.addWidget(pdf_btn)
         btns.addStretch(1)
         btns.addWidget(complete_btn)
         btns.addWidget(close_btn)
@@ -4415,7 +4553,7 @@ class MainWindow(QMainWindow):
                 f"<td><b>Audit Type:</b> {safe(a['audit_type'])}</td><td><b>Date:</b> {safe(a['audit_date'])}</td>"
                 f"<td><b>Location:</b> {safe(a['location'])}</td><td><b>Auditor:</b> {safe(a['auditor'])}</td>"
                 f"<td><b>Auditee:</b> {safe(a['auditee']) or '—'}</td><td><b>Status:</b> {safe(a['status'])}</td></tr>"
-                f"<tr><td colspan='6'><b>Procedures:</b> {procs}</td></tr></table>")
+                f"<tr><td colspan='6'><b>Procedures:</b> {procs} &nbsp; <b>ISO Standard:</b> {safe(a['standard']) or '—'}</td></tr></table>")
             headers, rows = aud_register_table(audit_id)
             closed = sum(1 for r in rows if r[11] == "Closed")
             summary.setText(f"Total findings: {len(rows)}   |   Open: {len(rows) - closed}   |   Closed: {closed}   |   "
@@ -4455,6 +4593,19 @@ class MainWindow(QMainWindow):
                 logging.exception("Audit Word export failed")
                 QMessageBox.critical(d, "Export Failed", f"Unable to create the Word report.\n\n{exc}")
 
+        def export_pdf():
+            path, _ = QFileDialog.getSaveFileName(d, "Export Audit Register (PDF)",
+                                                  str(REPORT_DIR / f"{safe(audit['number'])}_Audit_Register.pdf"),
+                                                  "PDF Document (*.pdf)")
+            if not path:
+                return
+            try:
+                aud_export_pdf(audit_id, path)
+                self.show_export_success(path)
+            except Exception as exc:
+                logging.exception("Audit PDF export failed")
+                QMessageBox.critical(d, "Export Failed", f"Unable to create the PDF report.\\n\\n{exc}")
+
         def mark_completed():
             open_items = db.fetchone("SELECT COUNT(*) AS n FROM aud_findings WHERE audit_id=? AND status<>'Closed'", (audit_id,))["n"]
             text = "Mark this audit as Completed?"
@@ -4468,6 +4619,7 @@ class MainWindow(QMainWindow):
 
         excel_btn.clicked.connect(export_excel)
         word_btn.clicked.connect(export_word)
+        pdf_btn.clicked.connect(export_pdf)
         complete_btn.clicked.connect(mark_completed)
         close_btn.clicked.connect(d.accept)
         load()
@@ -4492,16 +4644,25 @@ class MainWindow(QMainWindow):
         type_combo.addItems(AUD_TYPES)
         form_lay.addWidget(QLabel("Audit Type:"), 1, 0)
         form_lay.addWidget(type_combo, 1, 1)
-        proc_label = QLabel("Procedures (tick one or more):")
+        proc_label = QLabel("Internal Audit Procedures:")
+        proc_combo = QComboBox()
+        proc_combo.addItem("Select procedure...")
+        proc_combo.addItems(list(aud_procedure_library().keys()))
         proc_list = QListWidget()
-        proc_list.setMaximumHeight(150)
-        for name in aud_procedure_library().keys():
-            item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
-            proc_list.addItem(item)
+        proc_list.setMaximumHeight(92)
+        proc_add_btn = QPushButton("Add Procedure")
+        proc_remove_btn = QPushButton("Remove Selected")
+        proc_picker = QWidget()
+        proc_picker_lay = QVBoxLayout(proc_picker)
+        proc_picker_lay.setContentsMargins(0, 0, 0, 0)
+        proc_picker_row = QHBoxLayout()
+        proc_picker_row.addWidget(proc_combo, 1)
+        proc_picker_row.addWidget(proc_add_btn)
+        proc_picker_row.addWidget(proc_remove_btn)
+        proc_picker_lay.addLayout(proc_picker_row)
+        proc_picker_lay.addWidget(proc_list)
         form_lay.addWidget(proc_label, 2, 0, Qt.AlignmentFlag.AlignTop)
-        form_lay.addWidget(proc_list, 2, 1, 1, 3)
+        form_lay.addWidget(proc_picker, 2, 1, 1, 3)
         date_edit = self._aud_date_edit()
         location_edit = QLineEdit()
         auditor_edit = QLineEdit()
@@ -4553,13 +4714,25 @@ class MainWindow(QMainWindow):
         lay.addLayout(row_btns)
 
         def checked_procedures():
-            return [proc_list.item(i).text() for i in range(proc_list.count())
-                    if proc_list.item(i).checkState() == Qt.CheckState.Checked]
+            return [proc_list.item(i).text() for i in range(proc_list.count())]
+
+        def add_selected_procedure():
+            name = proc_combo.currentText()
+            if proc_combo.currentIndex() <= 0:
+                return
+            if not any(proc_list.item(i).text() == name for i in range(proc_list.count())):
+                proc_list.addItem(name)
+            proc_combo.setCurrentIndex(0)
+
+        def remove_selected_procedure():
+            row = proc_list.currentRow()
+            if row >= 0:
+                proc_list.takeItem(row)
 
         def update_visibility():
             is_internal = type_combo.currentText() == "Internal"
             proc_label.setVisible(is_internal)
-            proc_list.setVisible(is_internal)
+            proc_picker.setVisible(is_internal)
             has_type = type_combo.currentIndex() > 0
             # Date / Location / Auditor are requested after the type (and, for Internal, the procedures) are chosen.
             details.setEnabled(has_type and (not is_internal or bool(checked_procedures())))
@@ -4568,8 +4741,8 @@ class MainWindow(QMainWindow):
             state["id"] = None
             number_label.setText("Audit Number: assigned automatically on first save")
             type_combo.setCurrentIndex(0)
-            for i in range(proc_list.count()):
-                proc_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+            proc_list.clear()
+            proc_combo.setCurrentIndex(0)
             date_edit.setDate(QDate.currentDate())
             location_edit.clear()
             auditor_edit.clear()
@@ -4638,9 +4811,10 @@ class MainWindow(QMainWindow):
             state["id"] = int(audit["id"])
             number_label.setText(f"Audit Number: {safe(audit['number'])}   (editing {safe(audit['status'])})")
             type_combo.setCurrentText(safe(audit["audit_type"]))
-            selected = set(aud_parse_procedures(audit["procedures"]))
-            for i in range(proc_list.count()):
-                proc_list.item(i).setCheckState(Qt.CheckState.Checked if proc_list.item(i).text() in selected else Qt.CheckState.Unchecked)
+            selected = aud_parse_procedures(audit["procedures"])
+            proc_list.clear()
+            for name in selected:
+                proc_list.addItem(name)
             parsed = QDate.fromString(safe(audit["audit_date"]), "yyyy-MM-dd")
             date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
             location_edit.setText(safe(audit["location"]))
@@ -4673,7 +4847,8 @@ class MainWindow(QMainWindow):
             load_table()
 
         type_combo.currentIndexChanged.connect(lambda *_: update_visibility())
-        proc_list.itemChanged.connect(lambda *_: update_visibility())
+        proc_add_btn.clicked.connect(add_selected_procedure)
+        proc_remove_btn.clicked.connect(remove_selected_procedure)
         draft_btn.clicked.connect(lambda: do_save("Draft"))
         save_btn.clicked.connect(lambda: do_save("Scheduled"))
         submit_btn.clicked.connect(lambda: do_save("Submitted"))
@@ -4710,7 +4885,13 @@ class MainWindow(QMainWindow):
         top.setColumnStretch(3, 1)
         lay.addLayout(top)
 
-        proc_box = QGroupBox("Procedures — tick a procedure to display its checklist")
+        standard_label = QLabel("ISO Checklist Standard:")
+        standard_combo = QComboBox()
+        standard_combo.addItem("Select ISO standard...")
+        standard_combo.addItems(["ISO 45001", "ISO 9001", "ISO 14001"])
+        top.addWidget(standard_label, 1, 0)
+        top.addWidget(standard_combo, 1, 1)
+        proc_box = QGroupBox("Internal Audit Procedures — select procedures to display their checklist")
         pl = QVBoxLayout(proc_box)
         proc_list = QListWidget()
         proc_list.setMaximumHeight(120)
@@ -4838,6 +5019,18 @@ class MainWindow(QMainWindow):
                 add_row({"template": True, "procedure": proc, "auditor_name": safe(audit["auditor"]),
                          "clause_sno": str(n), "sub_clause": clauses, "checklist_pts": text})
 
+        def add_iso_template_rows(standard):
+            if not standard or standard_combo.currentIndex() <= 0 or state["audit_id"] is None:
+                return
+            audit = aud_get(state["audit_id"])
+            present = {(row_meta(r).get("procedure"), cell_text(r, 5)) for r in range(table.rowCount())}
+            for rec in aud_iso_standard_checklist(standard):
+                if (standard, rec["checklist_pts"]) in present:
+                    continue
+                add_row({"template": True, "procedure": standard, "auditor_name": safe(audit["auditor"]),
+                         "clause_sno": rec["clause_sno"], "sub_clause": rec["sub_clause"],
+                         "checklist_pts": rec["checklist_pts"]})
+
         def remove_template_rows(proc):
             for r in range(table.rowCount() - 1, -1, -1):
                 meta = row_meta(r)
@@ -4850,9 +5043,11 @@ class MainWindow(QMainWindow):
 
         def update_type_ui():
             has_type = type_combo.currentIndex() > 0 and state["audit_id"] is not None
-            uses_procs = type_combo.currentText() in AUD_PROCEDURE_TYPES
+            uses_procs = type_combo.currentText() == "Internal"
+            standard_label.setVisible(has_type and not uses_procs)
+            standard_combo.setVisible(has_type and not uses_procs)
             proc_box.setVisible(uses_procs and state["audit_id"] is not None)
-            table.setEnabled(has_type)
+            table.setEnabled(has_type and (uses_procs or standard_combo.currentIndex() > 0))
             for b in (add_btn, del_btn, meta_btn, save_btn):
                 b.setEnabled(state["audit_id"] is not None)
             if state["audit_id"] is None:
@@ -4863,7 +5058,7 @@ class MainWindow(QMainWindow):
                 hint.setText("Tick procedures to load their checklists; use '+ Add Blank Row' for any additional manual entries. "
                              "Pre-loaded checklist points are saved as findings once Evidence or a Corrective Action is entered (or CAPA = Yes).")
             else:
-                hint.setText("Blank checklist: use '+ Add Blank Row' to enter findings manually from scratch.")
+                hint.setText("Select ISO 45001, ISO 9001 or ISO 14001. The ordered clause checklist will load; enter an observation/evidence for each assessed item.")
 
         def on_proc_changed(item):
             if state["loading"] or state["audit_id"] is None:
@@ -4877,9 +5072,9 @@ class MainWindow(QMainWindow):
             if state["loading"]:
                 return
             update_type_ui()
-            if state["audit_id"] is not None and type_combo.currentIndex() > 0 \
-                    and type_combo.currentText() not in AUD_PROCEDURE_TYPES and table.rowCount() == 0:
-                add_row({"template": False, "auditor_name": safe(aud_get(state["audit_id"])["auditor"])})
+            if state["audit_id"] is not None and type_combo.currentText() != "Internal":
+                standard_combo.setCurrentIndex(0)
+                update_type_ui()
 
         def load_audit(audit_id):
             state["loading"] = True
@@ -4889,6 +5084,7 @@ class MainWindow(QMainWindow):
             if not audit_id:
                 auditee_edit.clear()
                 type_combo.setCurrentIndex(0)
+                standard_combo.setCurrentIndex(0)
                 for i in range(proc_list.count()):
                     proc_list.item(i).setCheckState(Qt.CheckState.Unchecked)
                 state["loading"] = False
@@ -4900,6 +5096,8 @@ class MainWindow(QMainWindow):
             # Ask for / confirm the Type of Audit: pre-selected from the schedule, empty if never captured.
             idx = type_combo.findText(safe(audit["audit_type"]))
             type_combo.setCurrentIndex(idx if idx > 0 else 0)
+            standard_idx = standard_combo.findText(safe(audit["standard"]))
+            standard_combo.setCurrentIndex(standard_idx if standard_idx > 0 else 0)
             selected = set(aud_parse_procedures(audit["procedures"]))
             for f in aud_findings(audit_id):
                 if safe(f["procedure"]):
@@ -4909,11 +5107,11 @@ class MainWindow(QMainWindow):
             update_type_ui()
             for f in aud_findings(audit_id):
                 add_row(rec_from_db(f))
-            if type_combo.currentText() in AUD_PROCEDURE_TYPES:
+            if type_combo.currentText() == "Internal":
                 for proc in checked_procs():
                     add_template_rows(proc)
-            elif type_combo.currentIndex() > 0 and table.rowCount() == 0:
-                add_row({"template": False, "auditor_name": safe(audit["auditor"])})
+            elif standard_combo.currentIndex() > 0:
+                add_iso_template_rows(standard_combo.currentText())
             state["loading"] = False
             if type_combo.currentIndex() == 0:
                 QMessageBox.information(tab, "Type of Audit", "Please select the Type of Audit to open the checklist.")
@@ -4949,8 +5147,13 @@ class MainWindow(QMainWindow):
             if type_combo.currentIndex() == 0:
                 QMessageBox.warning(tab, "Type of Audit", "Please select the Type of Audit.")
                 return False
-            procs = checked_procs() if type_combo.currentText() in AUD_PROCEDURE_TYPES else []
-            aud_set_auditee(state["audit_id"], auditee_edit.text(), type_combo.currentText(), procs)
+            is_internal = type_combo.currentText() == "Internal"
+            procs = checked_procs() if is_internal else []
+            standard = "" if is_internal else standard_combo.currentText()
+            if not is_internal and standard_combo.currentIndex() == 0:
+                QMessageBox.warning(tab, "ISO Standard Required", "Select ISO 45001, ISO 9001 or ISO 14001 to load the checklist.")
+                return False
+            aud_set_auditee(state["audit_id"], auditee_edit.text(), type_combo.currentText(), procs, standard)
             return True
 
         def save_meta():
@@ -5016,6 +5219,10 @@ class MainWindow(QMainWindow):
 
         audit_combo.currentIndexChanged.connect(audit_selected)
         type_combo.currentIndexChanged.connect(on_type_changed)
+        standard_combo.currentIndexChanged.connect(
+            lambda *_: (add_iso_template_rows(standard_combo.currentText()), update_type_ui())
+            if not state["loading"] and type_combo.currentText() != "Internal" else None
+        )
         proc_list.itemChanged.connect(on_proc_changed)
         add_btn.clicked.connect(add_blank)
         del_btn.clicked.connect(delete_row)
