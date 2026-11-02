@@ -2467,10 +2467,9 @@ def aud_row_has_content(r):
         return True
     evidence = safe(r.get("evidence")).strip()
     action = safe(r.get("corrective_action")).strip()
-    if r.get("template"):
-        return bool(evidence or action or safe(r.get("capa_required")) == "Yes")
-    return any(safe(r.get(k)).strip() for k in
-               ("clause_sno", "sub_clause", "checklist_pts", "evidence", "corrective_action", "responsible"))
+    # Checklist template text is not itself a finding. Count/persist only an
+    # actual observation entered by the auditor (evidence/finding) or action.
+    return bool(evidence or action or safe(r.get("capa_required")) == "Yes")
 
 
 def aud_save_findings(audit_id, rows, removed_ids=()):
@@ -2592,9 +2591,10 @@ def aud_metrics():
     conducted = db.fetchone(f"SELECT COUNT(*) AS n FROM audits WHERE COALESCE(aud_ver,0)=2 AND status IN ({marks})",
                             AUD_CONDUCTED_STATUSES)["n"]
     base = "FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE COALESCE(a.aud_ver,0)=2"
-    findings = db.fetchone(f"SELECT COUNT(*) AS n {base}")["n"]
-    open_f = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.status<>'Closed'")["n"]
-    capa_pending = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.route_stage=?", (AUD_STAGE_CAPA,))["n"]
+    substantive = " AND (TRIM(COALESCE(f.evidence,''))<>'' OR TRIM(COALESCE(f.corrective_action,''))<>'')"
+    findings = db.fetchone(f"SELECT COUNT(*) AS n {base}{substantive}")["n"]
+    open_f = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.status<>'Closed'{substantive}")["n"]
+    capa_pending = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.route_stage=?{substantive}", (AUD_STAGE_CAPA,))["n"]
     return {"conducted": conducted, "findings": findings, "open": open_f, "capa": capa_pending}
 
 
@@ -2604,6 +2604,8 @@ def aud_register_table(audit_id):
     audit = aud_get(audit_id)
     rows = []
     for f in aud_findings(audit_id):
+        if not (safe(f["evidence"]).strip() or safe(f["corrective_action"]).strip()):
+            continue
         rows.append([safe(audit["number"]), safe(f["finding_no"]), safe(f["auditor_name"]), safe(f["clause_sno"]),
                      safe(f["sub_clause"]), safe(f["checklist_pts"]), safe(f["evidence"]), safe(f["corrective_action"]),
                      safe(f["responsible"]), safe(f["target_date"]), safe(f["capa_required"]), safe(f["status"]),
@@ -4392,14 +4394,43 @@ class MainWindow(QMainWindow):
         sched_tab = self._aud_build_schedule(ctx)
         check_tab = self._aud_build_checklist(ctx)
         note_tab = self._aud_build_notifications(ctx)
+        register_tab = self._aud_build_master_register(ctx)
         tabs.addTab(dash_tab, "Audit Dashboard")
         tabs.addTab(sched_tab, "Schedule Audit")
         tabs.addTab(check_tab, "Auditee && Checklist")
+        tabs.addTab(register_tab, "Master Audit Register")
         tabs.addTab(note_tab, "Notifications")
         refreshers = {0: ctx["refresh_dashboard"], 1: ctx["refresh_schedule"],
-                      2: ctx["refresh_checklist_options"], 3: ctx["refresh_notification_options"]}
+                      2: ctx["refresh_checklist_options"], 3: ctx["refresh_master_register"],
+                      4: ctx["refresh_notification_options"]}
         tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
         ctx["refresh_dashboard"]()
+
+    def _aud_build_master_register(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        search = QLineEdit(); search.setPlaceholderText("Search audit number, type, date, location, auditor, or status")
+        lay.addWidget(search)
+        table = self._aud_table(["Audit Number", "Audit Type", "Date", "Location", "Auditor", "Scope", "Status"])
+        self._aud_readonly(table)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+        def load():
+            needle = search.text().strip().casefold()
+            records = [a for a in aud_list() if not needle or needle in " ".join(safe(a[k]) for k in ("number", "audit_type", "audit_date", "location", "auditor", "scope", "status")).casefold()]
+            table.setRowCount(len(records))
+            for r, a in enumerate(records):
+                for c, key in enumerate(("number", "audit_type", "audit_date", "location", "auditor", "scope", "status")):
+                    table.setItem(r, c, self._aud_item(a[key], a["id"], link=(c == 0)))
+        def open_record(row, col=0):
+            item = table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole):
+                self._aud_register_dialog(int(item.data(Qt.ItemDataRole.UserRole)), load)
+        table.cellClicked.connect(open_record)
+        search.textChanged.connect(load)
+        ctx["refresh_master_register"] = load
+        load()
+        return tab
 
     # ---------------- shared small helpers ----------------
     def _aud_table(self, headers, stretch_last=False):
@@ -4568,8 +4599,12 @@ class MainWindow(QMainWindow):
                 f"<tr><td colspan='6'><b>Procedures:</b> {procs} &nbsp; <b>ISO Standard:</b> {safe(a['standard']) or '—'}</td></tr></table>")
             headers, rows = aud_register_table(audit_id)
             closed = sum(1 for r in rows if r[11] == "Closed")
-            summary.setText(f"Total findings: {len(rows)}   |   Open: {len(rows) - closed}   |   Closed: {closed}   |   "
-                            f"CAPA routed: {sum(1 for r in rows if r[10] == 'Yes')}")
+            total = len(rows)
+            open_count = total - closed
+            open_pct = (open_count * 100.0 / total) if total else 0.0
+            closed_pct = (closed * 100.0 / total) if total else 0.0
+            summary.setText(f"Total findings: {total}   |   Open: {open_count} ({open_pct:.1f}%)   |   "
+                            f"Closed: {closed} ({closed_pct:.1f}%)   |   CAPA routed: {sum(1 for r in rows if r[10] == 'Yes')}")
             table.setRowCount(len(rows))
             for ri, row in enumerate(rows):
                 for ci, val in enumerate(row):
@@ -4747,7 +4782,7 @@ class MainWindow(QMainWindow):
             proc_picker.setVisible(is_internal)
             has_type = type_combo.currentIndex() > 0
             # Date / Location / Auditor are requested after the type (and, for Internal, the procedures) are chosen.
-            details.setEnabled(has_type and (not is_internal or bool(checked_procedures())))
+            details.setEnabled(has_type)
 
         def clear_form():
             state["id"] = None
@@ -5183,6 +5218,23 @@ class MainWindow(QMainWindow):
             if status is not None:
                 status.setCurrentText(safe(f["status"]) if safe(f["status"]) in AUD_FINDING_STATUSES else "Open")
             lock_capa(row, rec)
+
+        def attach_evidence_to_row(row, col):
+            # Evidence cell supports choosing one or more files; paths are stored
+            # with the finding evidence so they remain available to exports/register.
+            if col != 6 or row < 0:
+                return
+            paths, _ = QFileDialog.getOpenFileNames(
+                tab, "Attach Audit Evidence", "",
+                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            if not paths:
+                return
+            current = cell_text(row, 6).strip()
+            joined = "; ".join(paths)
+            table.item(row, 6).setText((current + "\n" if current else "") + joined)
+            table.item(row, 6).setToolTip("Attached evidence: " + joined)
+
+        table.cellDoubleClicked.connect(attach_evidence_to_row)
 
         def save_checklist():
             if state["audit_id"] is None:
