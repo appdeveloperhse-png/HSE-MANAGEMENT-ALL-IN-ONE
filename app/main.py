@@ -507,6 +507,57 @@ class Database:
             if col not in response_cols:
                 self.conn.execute(f"ALTER TABLE audit_checklist_responses ADD COLUMN {col} {definition}")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_findings_schedule_item ON audit_findings(source_schedule_id, source_item_no)")
+
+        # ---- Audit Management module v2: additive tables/columns (no other module is touched) ----
+        _aud_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audits)").fetchall()}
+        for _col, _definition in {"aud_ver": "INTEGER DEFAULT 0", "procedures": "TEXT DEFAULT ''"}.items():
+            if _col not in _aud_cols:
+                self.conn.execute(f"ALTER TABLE audits ADD COLUMN {_col} {_definition}")
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aud_findings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id INTEGER NOT NULL,
+            seq INTEGER NOT NULL,
+            finding_no TEXT UNIQUE,
+            auditor_name TEXT DEFAULT '',
+            clause_sno TEXT DEFAULT '',
+            sub_clause TEXT DEFAULT '',
+            checklist_pts TEXT DEFAULT '',
+            evidence TEXT DEFAULT '',
+            corrective_action TEXT DEFAULT '',
+            responsible TEXT DEFAULT '',
+            target_date TEXT DEFAULT '',
+            capa_required TEXT DEFAULT 'No',
+            capa_number TEXT DEFAULT '',
+            status TEXT DEFAULT 'Open',
+            route_stage TEXT DEFAULT 'Audit Register',
+            procedure TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS aud_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audit_id INTEGER NOT NULL,
+            doc_number TEXT UNIQUE,
+            to_party TEXT DEFAULT '',
+            from_party TEXT DEFAULT '',
+            subject TEXT DEFAULT '',
+            scope TEXT DEFAULT '',
+            audit_date TEXT DEFAULT '',
+            audit_time TEXT DEFAULT '',
+            venue TEXT DEFAULT '',
+            auditee TEXT DEFAULT '',
+            audit_team TEXT DEFAULT '',
+            reference_docs TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            created_at TEXT,
+            updated_at TEXT,
+            FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_aud_findings_audit ON aud_findings(audit_id);
+        CREATE INDEX IF NOT EXISTS idx_aud_notifications_audit ON aud_notifications(audit_id);
+        """)
         self.conn.commit()
 
         # Observation multi-action + CAPA tracking link (additive only).
@@ -2093,6 +2144,662 @@ class BarChartWidget(QWidget):
 
 
 # ============================================================
+# AUDIT MANAGEMENT MODULE (v2) - DATA, ROUTING AND REPORT LOGIC
+# Self-contained. Reads/writes only: audits (parent), aud_findings (child),
+# aud_notifications, and inserts routed rows into the existing capa table.
+# ============================================================
+
+AUD_TYPES = ["Internal", "External", "Certificate", "Compliance", "Regulatory"]
+AUD_PROCEDURE_TYPES = ("Internal", "External")
+AUD_FINDING_STATUSES = ["Open", "In Progress", "Closed"]
+AUD_CONDUCTED_STATUSES = ("Submitted", "In Progress", "Completed")
+AUD_SCHEDULED_STATUSES = ("Scheduled", "Submitted", "In Progress", "Completed")
+AUD_STAGE_CAPA = "CAPA Module"
+AUD_STAGE_CLOSURE = "Audit Report / Closure"
+AUD_STAGE_REGISTER = "Audit Register"
+AUD_CHECKLIST_HEADERS = [
+    "Audit No.", "Audit Finding No.", "Auditor Name", "Clause S.No", "Sub Clause",
+    "Checklist Pts", "Evidence", "Corrective Action", "Responsible", "Target Date",
+    "CAPA (Yes/No)", "Status"
+]
+AUD_REGISTER_HEADERS = AUD_CHECKLIST_HEADERS + ["CAPA No.", "Routed To"]
+
+_AUD_LIBRARY_CACHE = {}
+
+
+def audit_procedure_library():
+    # Built from the supplied Master Audit Prompt. Short summary checklists are
+    # expanded with standard evidence/control checks so each procedure is usable
+    # as a practical field checklist.
+    procedures = {
+        "Generic HSE Audit": ("Applicable legal, client, company and ISO requirements", [
+            "Current HSE policy is approved, communicated and displayed where appropriate",
+            "Roles, responsibilities, competence and management accountability are defined",
+            "Hazards are identified and risks assessed for routine and non-routine activities",
+            "Risk controls follow the hierarchy of controls and are implemented at the workplace",
+            "Workers and contractors receive induction, task briefings and required training",
+            "Permits, risk assessments and method statements are current where required",
+            "Work areas, access routes, housekeeping and welfare facilities are satisfactory",
+            "Plant, tools, lifting equipment and vehicles are inspected and maintained",
+            "PPE is suitable, available, maintained and used correctly",
+            "Emergency plans, contacts, alarms, routes and equipment are suitable and tested",
+            "Incidents, near misses and unsafe conditions are reported and investigated",
+            "Inspection, monitoring, exposure and statutory records are current and traceable",
+            "Environmental aspects, waste, spills and emissions are controlled where applicable",
+            "Previous audit findings and corrective actions are tracked and effectiveness verified",
+            "Management reviews performance trends and communicates improvement actions"]),
+        "General Workplace Inspection": ("Workplace condition and activity inspection", [
+            "Walkways, stairs, exits and emergency access routes are clear and safe",
+            "Floors are free from uncontrolled spills, trip hazards and damaged surfaces",
+            "Materials, cylinders, tools and equipment are stored securely and appropriately",
+            "Electrical cables, plugs, temporary supplies and distribution boards are undamaged",
+            "Fire extinguishers, alarms, hose reels and emergency equipment are accessible",
+            "Emergency exits, signs, lighting and assembly-point information are visible",
+            "Machines and tools have suitable guards and are in safe operating condition",
+            "Lifting gear, slings, shackles and accessories show valid identification and inspection",
+            "Work at height areas have suitable edge protection, access and dropped-object controls",
+            "Chemical containers are labelled and stored with suitable spill containment",
+            "Waste is segregated, bins are suitable and hazardous waste is controlled",
+            "PPE is appropriate to the task and worn correctly by workers and visitors",
+            "Permits, isolations and risk controls match the activities being observed",
+            "Workers can explain task hazards, stop-work expectations and emergency actions",
+            "Unsafe conditions are recorded with an owner, target date and follow-up verification"]),
+        "Permit to Work (PTW) System": ("8.1, 8.1.2, 6.1, 7.2", [
+            "Correct type of permit selected","Scope of work clearly described and matches actual activity","JSA / Risk Assessment attached and relevant","All required isolations identified and completed","Gas testing completed within validity period","All authorized signatures present","SIMOPS conflict check completed","Permit displayed at work location","Workers understand permit conditions","Permit properly closed after completion","No expired permits still active","Supporting documents attached"]),
+        "Hot Work Procedure": ("8.1, 8.1.2, 8.2", ["Hot Work Permit issued and valid","Gas test completed before start and periodically","Combustible materials removed or protected","Fire watch assigned, trained and present","Suitable fire extinguisher available","Fire watch continues after completion","Welding equipment in good condition with flashback arrestors","Area properly ventilated","Work stopped if conditions change","Permit closed and area inspected"]),
+        "Confined Space Entry": ("8.1, 8.1.2, 8.2, 7.2", ["Space correctly classified","Entry Permit fully completed","Atmospheric testing done in correct sequence (O₂ → LEL → H₂S → CO)","Results within acceptable limits","Continuous monitoring during entry","All energy sources isolated and LOTO applied","Attendant present at all times","Rescue plan and equipment staged","Entrants wearing full body harness with retrieval line","Communication system tested","Entry log maintained","Forced ventilation operating if required"]),
+        "Lockout / Tagout (LOTO)": ("8.1, 8.1.2", ["All energy sources identified","Written isolation procedure available","Locks and tags applied by authorized persons","Each person has individual lock","Try-start verification performed","Isolation Certificate completed","Tags legible with name, date and reason","Group lockout box used when required","De-isolation done only after all locks removed","Equipment tested safe before return to service"]),
+        "Working at Height": ("8.1, 8.1.2, 7.2", ["Fall Protection Plan available","Hierarchy of controls applied","Full body harness inspected and valid","Anchor points rated and inspected","Correct lanyards / SRLs used","Scaffold / platform / MEWP inspected and tagged","Edge protection or hole covers in place","Tools tethered","Exclusion zone below work area","Rescue plan available"]),
+        "Lifting & Rigging / Crane Operations": ("8.1, 8.1.2, 7.2", ["Lift categorized correctly","Lift Plan approved for complex/critical lifts","Crane and lifting gear certified","Load chart available and followed","Riggers and banksman competent","Tag lines used","Exclusion zone enforced","No personnel under suspended load","Weather conditions suitable","Pre-lift checks completed"]),
+        "Excavation & Trenching": ("8.1, 8.1.2", ["Excavation Permit issued","Underground services located and marked","Soil type assessed","Protective system (shoring/sloping/benching) in place","Safe access and egress provided","Spoil placed at safe distance","Barricades and warning signs installed","Atmosphere tested if required","Daily inspection by competent person","Emergency rescue plan available"]),
+        "Scaffolding": ("8.1, 8.1.2, 7.2", ["Erected by competent scaffolders","Design available for complex scaffolds","Correctly tagged","Base plates, standards, ledgers, braces correct","Guardrails, mid-rails and toe boards complete","Platforms fully boarded","Safe access provided","Inspected before use and after alteration","No overloading","Adequate ties and bracing"]),
+        "Electrical Safety": ("8.1, 8.1.2, 7.2", ["Only competent electricians working","Live work controlled by permit","Temporary installations inspected","RCDs/ELCBs tested","Cables protected","LOTO applied for maintenance","Correct PPE used","Distribution boards locked and labeled","Earth leakage protection functional","No unauthorized modifications"]),
+        "Hazard Communication / Chemical Safety": ("8.1, 7.3, 6.1", ["Chemical register up to date","SDS available and accessible","All containers labeled","Secondary containment provided","Incompatible chemicals separated","Spill kits available","Workers trained on hazards","Correct PPE used","Emergency eye wash/shower available","Chemical waste disposal controlled"]),
+        "Personal Protective Equipment (PPE)": ("8.1, 7.1, 7.2", ["PPE selection matches identified hazards","PPE condition checked before use","Workers trained in correct use and limitations","PPE stored hygienically and protected from damage","Defective PPE quarantined and replaced","Fit testing completed where required","Issue and replacement records maintained","Supervision verifies consistent use"]),
+        "Job Safety Analysis (JSA) / Risk Assessment": ("6.1.2, 8.1", ["Assessment is task-specific and current","Workers involved in hazard identification","Routine and non-routine hazards identified","Controls follow the hierarchy of controls","Residual risk assessed and acceptable","Controls implemented at worksite","Changes trigger reassessment","Approvals and review records retained"]),
+        "Incident Reporting & Investigation": ("10.2, 9.1", ["Incidents and near misses reported promptly","Investigation team and responsibilities defined","Evidence and witness statements collected","Root cause analysis completed","Corrective actions assigned to responsible persons","Actions have target dates and priority","Corrective actions verified and closed","Lessons learned shared with relevant workers"]),
+        "Emergency Preparedness & Response": ("8.2", ["Emergency plan current and approved","Roles and responsibilities defined","Drills conducted and recorded","Emergency equipment inspected and available","Assembly points marked and communicated","Emergency contacts displayed and current","Drill findings tracked to closure","Workers and contractors know response actions"]),
+        "Fire Prevention & Protection": ("8.1, 8.2", ["Extinguishers inspected and accessible","Hot work controlled by permit","Flammable materials stored correctly","Detection and alarm systems functional","Escape routes and exits clear","Fire doors and emergency lighting serviceable","Workers know alarm and evacuation actions","Fire inspection findings tracked to closure"]),
+        "H₂S Safety": ("8.1, 7.2, 8.2", ["H₂S detectors calibrated and bump-tested","Escape masks available and inspected","Training and competency current","Alarm response and evacuation practiced","Wind direction indicators available where required","Muster points and escape routes identified","Rescue arrangements do not expose rescuers","Inspection and drill records maintained"]),
+        "Welding & Cutting": ("8.1", ["Cylinders secured upright and segregated","Flashback arrestors fitted correctly","Ventilation adequate for fumes","Hot work permit and gas testing completed","Correct welding PPE used","Welding leads and equipment inspected","Fire watch and extinguishers provided","Work area checked after completion"]),
+        "Pressure Testing": ("8.1", ["Approved pressure-test procedure available","Exclusion zone established and controlled","Pressure gauges calibrated and suitable","Relief devices installed and verified","Competent persons assigned","Test medium and pressure limits confirmed","Connections and restraints inspected","Depressurization and emergency arrangements defined"]),
+        "Dropped Objects Prevention": ("8.1", ["Tools tethered at height","Barricades established below work area","Tools and equipment checked before use","DROPS controls implemented and understood","Loose materials secured","Lifting baskets and storage arrangements inspected","Dropped-object hazards included in risk assessment","Inspections and corrective actions recorded"]),
+        "SIMOPS": ("8.1, 8.1.3", ["SIMOPS matrix available and current","Coordination meetings held and recorded","Single PTW authority or clear interface defined","Interface risks assessed","Conflicting activities identified and controlled","Work groups briefed on restrictions","Changes communicated to affected teams","SIMOPS actions tracked to closure"]),
+        "Contractor HSE Management": ("8.1.4, 7.2", ["Contractor prequalification completed","Induction completed before work","Competence and certificates verified","Risk assessments and method statements reviewed","Contractor performance monitored","Supervision and interfaces defined","Incidents and nonconformities reported","Corrective actions followed up"]),
+        "Management of Change (MOC)": ("8.1.3", ["Change described and classified","Change risk assessment completed","Required technical and HSE approvals obtained","Affected workers informed and trained","Documents and drawings updated","Temporary changes have expiry/review date","Pre-Startup Safety Review completed where required","Post-change effectiveness verified"]),
+        "Housekeeping": ("8.1", ["Walkways and access routes clear","Waste segregated correctly","Materials stored safely and secured","Spills cleaned promptly","Fire equipment and exits unobstructed","Cables and hoses routed safely","Scrap and sharp objects controlled","Housekeeping inspections and actions recorded"]),
+        "Waste Management & Environmental Controls": ("8.1 + ISO 14001", ["Waste segregated and labeled","Waste storage areas suitable and controlled","Licensed disposal and transfer records kept","Spill kits available and inspected","Emissions and discharges monitored where required","Hazardous waste handled by trained personnel","Environmental incidents reported","Waste records and corrective actions reviewed"]),
+        "Vehicle / Journey Management": ("8.1", ["Drivers licensed and competent","Pre-trip checks completed","Journey plans prepared for remote travel","Fatigue and driving hours controlled","Vehicle maintenance and inspection current","Seat belts and restraints used","Route and emergency communications confirmed","Journey completion and deviations monitored"]),
+        "Manual Handling": ("8.1, 6.1", ["Manual handling risk assessment completed","Mechanical aids used where practicable","Team lifting arrangements defined","Workers trained in safe handling","Load weight and route assessed","Storage heights and access suitable","High-risk or repetitive tasks reviewed","Injuries and improvement actions monitored"]),
+        "Noise & Hearing Conservation": ("8.1, 6.1", ["Noise exposure areas identified","Noise assessments current","Hearing protection suitable and used","Audiometry programme implemented where required","Equipment noise controls maintained","Workers informed of exposure risks","Hearing protection fit and condition checked","Records and corrective actions reviewed"]),
+        "Respiratory Protection": ("8.1, 7.2", ["Respirator selected for identified hazard","Fit testing completed where required","Medical clearance obtained where applicable","Inspection, cleaning and storage controlled","Filters replaced at defined intervals","Users trained in limitations and use","Emergency respiratory equipment checked","Records are current and accessible"]),
+        "First Aid & Medical Response": ("8.2, 7.1", ["Trained first aiders available for shift and location","First-aid kits stocked and inspected","Emergency numbers posted and current","Medical response and transport arrangements defined","Access routes for emergency response clear","Incident treatment records protected and maintained","First-aiders' training current","Deficiencies corrected promptly"]),
+        "Stop Work Authority": ("5.1, 5.4, 8.1", ["Workers know their right and duty to stop unsafe work","No-retaliation expectations communicated","Stop-work events recorded","Supervisors respond promptly to stop-work concerns","Work restarts only after hazards controlled","Lessons learned communicated","Contractors understand stop-work process","Trends and recurring issues reviewed"]),
+        "Training, Competency & Induction": ("7.2, 7.3", ["Training matrix available and current","Training and competency records current","High-risk tasks assigned only to competent persons","Induction covers site-specific hazards","Refresher training planned before expiry","Competence verified in practice","Training gaps assigned actions","Records retained and accessible"]),
+        "Ladders & Platforms": ("8.1", ["Ladders and platforms inspected before use","Correct ladder type and rating selected","Ladders secured against movement","Three points of contact maintained where applicable","Defective equipment tagged and removed","Ground and access conditions suitable","Work duration and alternatives considered","Inspection records and user training maintained"]),
+        "Radiography / NDT Safety": ("8.1", ["Controlled area established and secured","Barriers and warning signs displayed","Radiation monitoring and dosimetry provided","Competent and authorized operators assigned","Work permit and notification requirements met","Emergency arrangements available","Exposure equipment inspected and maintained","Survey and exposure records retained"]),
+        "Abrasive Blasting / Painting": ("8.1", ["Containment used to control dust and overspray","Respiratory protection suitable and fit-tested where required","Abrasive and coating hazards assessed","Ventilation and exposure controls adequate","Waste and spent abrasive controlled","Hoses, pots and pressure equipment inspected","PPE and decontamination arrangements suitable","Environmental and inspection records maintained"]),
+        "Pre-Startup Safety Review (PSSR)": ("8.1.3", ["PSSR checklist completed","Punch items categorized and closed or formally controlled","Equipment and safeguards verified against design","Operating procedures approved and available","Personnel trained before start-up","Permits and isolations status checked","Handover and authorization documented","Outstanding actions tracked to closure"]),
+        "Fatigue Management": ("8.1, 6.1", ["Working hours and rest periods controlled","Fitness-for-work checks conducted","Fatigue hazards assessed for critical tasks","Rest facilities and transport arrangements adequate","Workers know fatigue reporting process","Supervisors monitor signs of fatigue","Overtime and shift patterns reviewed","Fatigue-related events and actions analysed"]),
+        "Heat / Cold Stress": ("8.1", ["Work-rest regimes followed","Drinking water and hydration provided","Environmental conditions monitored","Shade, cooling or warming facilities available","Workers trained to recognize symptoms","Acclimatization and vulnerable workers considered","Emergency response for heat/cold illness defined","Records and corrective actions reviewed"]),
+        "Spill Response & Environmental Incident": ("8.2 + ISO 14001", ["Response plan available and current","Spill kits suitable and ready","Drills conducted and recorded","Reporting and escalation process followed","Drain and sensitive-area protection available","Waste from cleanup safely contained and disposed","Response roles and contacts understood","Incident causes and actions tracked"]),
+        "Visitor & Short Service Employee Control": ("8.1.4", ["Induction completed before access","Escort provided where required","PPE issued and suitable","Access restrictions explained","Short-service employees identified","Close supervision provided for high-risk tasks","Emergency arrangements communicated","Visitor and training records maintained"]),
+        "HSE Performance Monitoring & KPI": ("9.1", ["Leading and lagging indicators tracked","Data definitions and sources consistent","Trends analysed at planned intervals","Targets and performance reviewed by management","Underperformance triggers action","Actions have owners and due dates","Data accuracy and reporting timeliness checked","Effectiveness of actions reviewed"])
+            }
+    governance = [
+        "Document governance: approved owner, document number, revision history, effective date, review date and control of obsolete copies are defined and evidenced.",
+        "Purpose and applicability: scope, exclusions, interfaces, triggering conditions and boundaries of the procedure are explicit and consistent with actual work.",
+        "Roles and accountability: authority, responsibilities, competence requirements, handovers and escalation routes are assigned to roles and communicated.",
+        "Requirements register: applicable legal, client, contractual, ISO and internal requirements are identified, updated and traceable to procedure controls.",
+        "Risk methodology: task-specific hazards, risk assessment, hierarchy of controls and acceptance of residual risk are required before authorization.",
+        "Prerequisites and approvals: required permits, method statements, drawings, isolations, resources and approvals are defined as hold points before work begins.",
+        "Control design: steps, acceptance criteria, prohibited conditions, verification methods and stop-work triggers are clear, measurable and unambiguous.",
+        "Interfaces: contractor responsibilities, simultaneous operations, affected departments and emergency interfaces are addressed and coordinated.",
+        "Competence and communication: required training, authorization, briefing, acknowledgement and refresher requirements are defined and recorded.",
+        "Records and retention: mandatory forms, registers, certificates, logs, test records, retention periods and record owners are identified and retrievable.",
+        "Deviation and change control: deviations, abnormal conditions, temporary changes and revisions require authorization, risk review, communication and records.",
+        "Monitoring and assurance: inspections, audits, sampling, performance indicators, review frequency and accountable reviewers are defined.",
+        "Nonconformity and CAPA: containment, root-cause analysis, action ownership, due dates, effectiveness verification and closure authority are defined.",
+        "Management review: incidents, audit trends, lessons learned, KPI results and operational changes trigger documented review and procedure improvement."
+    ]
+    expanded = {}
+    for procedure, (clauses, specifics) in procedures.items():
+        # Prioritize procedure-specific checks; add governance checks only to reach 15.
+        criteria = [f"Procedure-specific control: verify {specific.lower()} against the current approved {procedure.lower()} procedure and retain objective evidence." for specific in specifics]
+        seed = list(specifics) or ["required controls", "assigned responsibilities", "records and monitoring"]
+        pad_index = 0
+        while len(criteria) < 15:
+            if pad_index < len(governance):
+                criteria.append(f"{procedure} — {governance[pad_index]}")
+            else:
+                specific = seed[pad_index % len(seed)]
+                criteria.append(f"{procedure} — sample a recent work activity and verify that {specific.lower()} was implemented, recorded and reviewed.")
+            pad_index += 1
+        expanded[procedure] = (clauses, criteria[:15])
+    return expanded
+
+
+def aud_procedure_library():
+    if not _AUD_LIBRARY_CACHE:
+        _AUD_LIBRARY_CACHE.update(audit_procedure_library())
+    return _AUD_LIBRARY_CACHE
+
+
+def aud_ts():
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def aud_parse_procedures(value):
+    try:
+        data = json.loads(safe(value) or "[]")
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def aud_get(audit_id):
+    return db.fetchone("SELECT * FROM audits WHERE id=?", (audit_id,))
+
+
+def aud_list(statuses=None):
+    rows = db.fetchall("SELECT * FROM audits WHERE COALESCE(aud_ver,0)=2 ORDER BY id DESC")
+    if statuses:
+        rows = [r for r in rows if safe(r["status"]) in statuses]
+    return rows
+
+
+# ------------------------------------------------------------
+# Scheduling: Draft -> Scheduled (Save) -> Submitted -> In Progress -> Completed
+# ------------------------------------------------------------
+def aud_save_audit(audit_id, data, status):
+    """Create or update the PARENT audit. status = Draft | Scheduled | Submitted."""
+    audit_type = safe(data.get("audit_type")).strip()
+    if audit_type not in AUD_TYPES:
+        raise ValueError("Select an Audit Type first.")
+    procedures = [safe(p) for p in (data.get("procedures") or [])] if audit_type == "Internal" else []
+    audit_date = safe(data.get("audit_date")).strip()
+    location = safe(data.get("location")).strip()
+    auditor = safe(data.get("auditor")).strip()
+    if status in ("Scheduled", "Submitted"):
+        missing = []
+        if audit_type == "Internal" and not procedures:
+            missing.append("at least one Procedure")
+        if not audit_date:
+            missing.append("Date")
+        if not location:
+            missing.append("Location")
+        if not auditor:
+            missing.append("Auditor")
+        if missing:
+            raise ValueError("Please provide: " + ", ".join(missing) + ".")
+    existing = aud_get(audit_id) if audit_id else None
+    if existing and safe(existing["status"]) not in ("Draft", "Scheduled"):
+        raise ValueError("This audit has already been submitted and can no longer be re-scheduled.")
+    now = aud_ts()
+    title = safe(data.get("title")).strip()
+    scope = safe(data.get("scope")).strip()
+    if existing:
+        db.execute(
+            "UPDATE audits SET audit_type=?,audit_date=?,location=?,auditor=?,lead_auditor=?,title=?,scope=?,"
+            "procedures=?,status=?,updated_at=?,submitted_at=? WHERE id=?",
+            (audit_type, audit_date, location, auditor, auditor, title, scope, json.dumps(procedures),
+             status, now, now if status == "Submitted" else "", existing["id"])
+        )
+        return int(existing["id"])
+    number = document_number("AUD")
+    db.execute(
+        "INSERT INTO audits(number,audit_date,audit_type,project,location,auditor,lead_auditor,scope,status,"
+        "created_at,title,created_by,updated_at,submitted_at,aud_ver,procedures) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (number, audit_date, audit_type, db.setting("project_name", ""), location, auditor, auditor, scope, status,
+         now, title, "", now, now if status == "Submitted" else "", 2, json.dumps(procedures))
+    )
+    return int(db.fetchone("SELECT id FROM audits WHERE number=?", (number,))["id"])
+
+
+def aud_set_auditee(audit_id, auditee, audit_type=None, procedures=None):
+    audit = aud_get(audit_id)
+    if not audit:
+        raise ValueError("Audit not found.")
+    new_type = safe(audit_type).strip() if audit_type in AUD_TYPES else safe(audit["audit_type"])
+    procs = json.dumps([safe(p) for p in procedures]) if procedures is not None else safe(audit["procedures"]) or "[]"
+    db.execute("UPDATE audits SET auditee=?,audit_type=?,procedures=?,updated_at=? WHERE id=?",
+               (safe(auditee).strip(), new_type, procs, aud_ts(), audit_id))
+
+
+def aud_delete_audit(audit_id):
+    """Deletes the audit with its findings and notifications. CAPA records already raised stay in the CAPA module."""
+    db.execute("DELETE FROM aud_findings WHERE audit_id=?", (audit_id,))
+    db.execute("DELETE FROM aud_notifications WHERE audit_id=?", (audit_id,))
+    db.execute("DELETE FROM audits WHERE id=? AND COALESCE(aud_ver,0)=2", (audit_id,))
+
+
+def aud_set_status(audit_id, status):
+    db.execute("UPDATE audits SET status=?,updated_at=? WHERE id=?", (status, aud_ts(), audit_id))
+
+
+# ------------------------------------------------------------
+# Findings: Parent (Audit No.) / Child (Audit Finding No.)
+# ------------------------------------------------------------
+def aud_findings(audit_id):
+    return db.fetchall("SELECT * FROM aud_findings WHERE audit_id=? ORDER BY seq,id", (audit_id,))
+
+
+def aud_next_finding_no(audit_id):
+    audit = aud_get(audit_id)
+    row = db.fetchone("SELECT COALESCE(MAX(seq),0) AS n FROM aud_findings WHERE audit_id=?", (audit_id,))
+    seq = int(row["n"]) + 1
+    return seq, f"{safe(audit['number'])}-F{seq:02d}"
+
+
+def aud_row_has_content(r):
+    """Template (pre-loaded) rows are only persisted once assessed; manual rows once anything is typed."""
+    if r.get("id"):
+        return True
+    evidence = safe(r.get("evidence")).strip()
+    action = safe(r.get("corrective_action")).strip()
+    if r.get("template"):
+        return bool(evidence or action or safe(r.get("capa_required")) == "Yes")
+    return any(safe(r.get(k)).strip() for k in
+               ("clause_sno", "sub_clause", "checklist_pts", "evidence", "corrective_action", "responsible"))
+
+
+def aud_save_findings(audit_id, rows, removed_ids=()):
+    """Persist checklist rows and apply the CAPA Yes/No routing. Returns a summary dict."""
+    audit = aud_get(audit_id)
+    if not audit:
+        raise ValueError("Audit not found.")
+    todo = [(i, r) for i, r in enumerate(rows) if aud_row_has_content(r)]
+    errors = []
+    for i, r in todo:
+        if safe(r.get("capa_required")) == "Yes":
+            missing = [label for key, label in (("corrective_action", "Corrective Action"), ("responsible", "Responsible"))
+                       if not safe(r.get(key)).strip()]
+            if missing:
+                errors.append(f"Row {i + 1}: CAPA = Yes requires " + " and ".join(missing) + ".")
+    if errors:
+        raise ValueError("\n".join(errors))
+    summary = {"saved": [], "capa_created": [], "register_only": 0, "notes": []}
+    for fid in removed_ids:
+        f = db.fetchone("SELECT capa_number FROM aud_findings WHERE id=? AND audit_id=?", (fid, audit_id))
+        if f and not safe(f["capa_number"]):
+            db.execute("DELETE FROM aud_findings WHERE id=?", (fid,))
+    now = aud_ts()
+    for i, r in todo:
+        capa_flag = "Yes" if safe(r.get("capa_required")) == "Yes" else "No"
+        status = safe(r.get("status")) if safe(r.get("status")) in AUD_FINDING_STATUSES else "Open"
+        existing = db.fetchone("SELECT * FROM aud_findings WHERE id=? AND audit_id=?", (r["id"], audit_id)) if r.get("id") else None
+        if existing and safe(existing["capa_number"]) and capa_flag == "No":
+            capa_flag = "Yes"
+            summary["notes"].append(f"{safe(existing['finding_no'])}: a CAPA ({safe(existing['capa_number'])}) already exists, so CAPA stays 'Yes'.")
+        values = (safe(r.get("auditor_name")).strip(), safe(r.get("clause_sno")).strip(), safe(r.get("sub_clause")).strip(),
+                  safe(r.get("checklist_pts")).strip(), safe(r.get("evidence")).strip(), safe(r.get("corrective_action")).strip(),
+                  safe(r.get("responsible")).strip(), safe(r.get("target_date")).strip(), capa_flag, status,
+                  safe(r.get("procedure")).strip())
+        if existing:
+            db.execute(
+                "UPDATE aud_findings SET auditor_name=?,clause_sno=?,sub_clause=?,checklist_pts=?,evidence=?,corrective_action=?,"
+                "responsible=?,target_date=?,capa_required=?,status=?,procedure=?,updated_at=? WHERE id=?",
+                values + (now, existing["id"]))
+            fid = int(existing["id"])
+        else:
+            seq, finding_no = aud_next_finding_no(audit_id)
+            cur = db.execute(
+                "INSERT INTO aud_findings(audit_id,seq,finding_no,auditor_name,clause_sno,sub_clause,checklist_pts,evidence,"
+                "corrective_action,responsible,target_date,capa_required,status,procedure,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (audit_id, seq, finding_no) + values + (now, now))
+            fid = int(cur.lastrowid)
+        routed = aud_route_finding(fid)
+        if routed.get("capa_created"):
+            summary["capa_created"].append(routed["capa_created"])
+        if capa_flag == "No":
+            summary["register_only"] += 1
+        summary["saved"].append((i, fid))
+    if summary["saved"] and safe(audit["status"]) in ("Submitted", "Scheduled"):
+        aud_set_status(audit_id, "In Progress")
+    return summary
+
+
+def aud_route_finding(fid):
+    """
+    CAPA ROUTING (strictly on the CAPA Yes/No field)
+      CAPA = Yes -> raise/keep a record in the CAPA module FIRST; stage 'CAPA Module'.
+                    When that CAPA is Closed, aud_sync_capa_stages() moves it to 'Audit Report / Closure'.
+      CAPA = No  -> bypass the CAPA module entirely; stage 'Audit Register' only.
+    """
+    f = db.fetchone("SELECT * FROM aud_findings WHERE id=?", (fid,))
+    audit = aud_get(f["audit_id"])
+    result = {}
+    if safe(f["capa_required"]) == "Yes":
+        if not safe(f["capa_number"]):
+            capa_no = next_number("HSE-CAPA", "capa")
+            finding_text = f"{safe(audit['number'])} / {safe(f['finding_no'])}: {safe(f['checklist_pts'])}"
+            if safe(f["evidence"]):
+                finding_text += f" | Evidence: {safe(f['evidence'])}"
+            db.execute(
+                "INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,"
+                "responsible,priority,target_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (capa_no, "Audit", safe(f["finding_no"]), finding_text, "", safe(f["corrective_action"]), "",
+                 safe(f["responsible"]), "Medium", safe(f["target_date"]), "Open", aud_ts()))
+            db.execute("UPDATE aud_findings SET capa_number=?,route_stage=?,status=CASE WHEN status='Closed' THEN 'In Progress' ELSE status END WHERE id=?",
+                       (capa_no, AUD_STAGE_CAPA, fid))
+            result["capa_created"] = capa_no
+        else:
+            aud_sync_capa_stages(None, fid)
+    else:
+        db.execute("UPDATE aud_findings SET route_stage=? WHERE id=?", (AUD_STAGE_REGISTER, fid))
+    return result
+
+
+def aud_sync_capa_stages(audit_id=None, finding_id=None):
+    """Move CAPA=Yes findings on to 'Audit Report / Closure' once their CAPA is Closed in the CAPA module."""
+    sql = "SELECT * FROM aud_findings WHERE capa_required='Yes' AND COALESCE(capa_number,'')<>''"
+    params = []
+    if audit_id:
+        sql += " AND audit_id=?"
+        params.append(audit_id)
+    if finding_id:
+        sql += " AND id=?"
+        params.append(finding_id)
+    for f in db.fetchall(sql, tuple(params)):
+        capa = db.fetchone("SELECT status FROM capa WHERE number=?", (f["capa_number"],))
+        if capa is None:
+            # CAPA record no longer exists: clear the link so the next checklist save re-raises it.
+            db.execute("UPDATE aud_findings SET capa_number='',route_stage=? WHERE id=?", (AUD_STAGE_CAPA, f["id"]))
+        elif safe(capa["status"]) == "Closed":
+            if safe(f["route_stage"]) != AUD_STAGE_CLOSURE or safe(f["status"]) != "Closed":
+                db.execute("UPDATE aud_findings SET route_stage=?,status='Closed',updated_at=? WHERE id=?",
+                           (AUD_STAGE_CLOSURE, aud_ts(), f["id"]))
+        else:
+            new_status = "In Progress" if safe(f["status"]) == "Closed" else safe(f["status"])
+            if safe(f["route_stage"]) != AUD_STAGE_CAPA or new_status != safe(f["status"]):
+                db.execute("UPDATE aud_findings SET route_stage=?,status=?,updated_at=? WHERE id=?",
+                           (AUD_STAGE_CAPA, new_status, aud_ts(), f["id"]))
+
+
+def aud_metrics():
+    marks = ",".join("?" for _ in AUD_CONDUCTED_STATUSES)
+    conducted = db.fetchone(f"SELECT COUNT(*) AS n FROM audits WHERE COALESCE(aud_ver,0)=2 AND status IN ({marks})",
+                            AUD_CONDUCTED_STATUSES)["n"]
+    base = "FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE COALESCE(a.aud_ver,0)=2"
+    findings = db.fetchone(f"SELECT COUNT(*) AS n {base}")["n"]
+    open_f = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.status<>'Closed'")["n"]
+    capa_pending = db.fetchone(f"SELECT COUNT(*) AS n {base} AND f.route_stage=?", (AUD_STAGE_CAPA,))["n"]
+    return {"conducted": conducted, "findings": findings, "open": open_f, "capa": capa_pending}
+
+
+def aud_register_table(audit_id):
+    """Complete Audit Register rows (parent number repeated on every child row)."""
+    aud_sync_capa_stages(audit_id)
+    audit = aud_get(audit_id)
+    rows = []
+    for f in aud_findings(audit_id):
+        rows.append([safe(audit["number"]), safe(f["finding_no"]), safe(f["auditor_name"]), safe(f["clause_sno"]),
+                     safe(f["sub_clause"]), safe(f["checklist_pts"]), safe(f["evidence"]), safe(f["corrective_action"]),
+                     safe(f["responsible"]), safe(f["target_date"]), safe(f["capa_required"]), safe(f["status"]),
+                     safe(f["capa_number"]), safe(f["route_stage"])])
+    return AUD_REGISTER_HEADERS, rows
+
+
+# ------------------------------------------------------------
+# Notifications
+# ------------------------------------------------------------
+def aud_next_notification_no():
+    prefix = f"{document_prefix()}-ANOT-{datetime.now().year}-"
+    highest = 0
+    for r in db.fetchall("SELECT doc_number FROM aud_notifications WHERE doc_number LIKE ?", (prefix + "%",)):
+        try:
+            highest = max(highest, int(safe(r["doc_number"]).split("-")[-1]))
+        except Exception:
+            pass
+    return f"{prefix}{highest + 1:04d}"
+
+
+def aud_get_notification(audit_id):
+    return db.fetchone("SELECT * FROM aud_notifications WHERE audit_id=? ORDER BY id DESC LIMIT 1", (audit_id,))
+
+
+def aud_save_notification(audit_id, data):
+    audit = aud_get(audit_id)
+    if not audit or safe(audit["status"]) not in AUD_SCHEDULED_STATUSES:
+        raise ValueError("Notifications can only be created for scheduled audits.")
+    missing = [label for key, label in (("to_party", "To"), ("from_party", "From"), ("subject", "Subject"), ("scope", "Scope"))
+               if not safe(data.get(key)).strip()]
+    if missing:
+        raise ValueError("Please complete: " + ", ".join(missing) + ".")
+    now = aud_ts()
+    cols = ("to_party", "from_party", "subject", "scope", "audit_date", "audit_time", "venue", "auditee",
+            "audit_team", "reference_docs", "remarks")
+    values = tuple(safe(data.get(c)).strip() for c in cols)
+    existing = aud_get_notification(audit_id)
+    if existing:
+        db.execute("UPDATE aud_notifications SET " + ",".join(f"{c}=?" for c in cols) + ",updated_at=? WHERE id=?",
+                   values + (now, existing["id"]))
+        return int(existing["id"])
+    cur = db.execute(
+        "INSERT INTO aud_notifications(audit_id,doc_number," + ",".join(cols) + ",created_at,updated_at) VALUES(?,?," +
+        ",".join("?" for _ in cols) + ",?,?)",
+        (audit_id, aud_next_notification_no()) + values + (now, now))
+    return int(cur.lastrowid)
+
+
+# ------------------------------------------------------------
+# Reports: Excel / Word (Audit Register) and Word (Audit Notification invite)
+# ------------------------------------------------------------
+def aud_export_excel(audit_id, path):
+    audit = aud_get(audit_id)
+    headers, rows = aud_register_table(audit_id)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Audit Register"
+    thin = Side(style="thin", color="808080")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    navy = PatternFill("solid", fgColor="17365D")
+    light = PatternFill("solid", fgColor="DCE6F1")
+    ncols = len(headers)
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=ncols)
+    ws["B1"] = f"{company_name()} — AUDIT REGISTER"
+    ws["B1"].font = Font(bold=True, size=16, color="17365D")
+    ws["B1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 48
+    logo = report_logo_path()
+    if logo:
+        try:
+            img = XLImage(str(logo))
+            w0, h0 = img.width, img.height
+            img.height = 46
+            img.width = int(w0 * 46 / max(h0, 1))
+            ws.add_image(img, "A1")
+        except Exception:
+            logging.exception("Audit Excel logo embedding failed")
+    info = [("Audit No.", audit["number"]), ("Audit Type", audit["audit_type"]), ("Audit Date", audit["audit_date"]),
+            ("Location", audit["location"]), ("Auditor", audit["auditor"]), ("Auditee", audit["auditee"]),
+            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"])))]
+    r = 3
+    for i in range(0, len(info), 2):
+        for j in range(2):
+            if i + j < len(info):
+                label, value = info[i + j]
+                lc = ws.cell(row=r, column=1 + j * 4, value=label)
+                lc.font = Font(bold=True)
+                lc.fill = light
+                lc.border = border
+                ws.merge_cells(start_row=r, start_column=2 + j * 4, end_row=r, end_column=4 + j * 4)
+                vc = ws.cell(row=r, column=2 + j * 4, value=xml_safe(value))
+                vc.alignment = Alignment(wrap_text=True, vertical="top")
+        r += 1
+    header_row = r + 1
+    for c, h in enumerate(headers, 1):
+        cell = ws.cell(row=header_row, column=c, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = navy
+        cell.border = border
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[header_row].height = 30
+    for ri, row in enumerate(rows, header_row + 1):
+        for c, val in enumerate(row, 1):
+            cell = ws.cell(row=ri, column=c, value=xml_safe(val))
+            cell.border = border
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+    widths = [20, 24, 16, 10, 16, 40, 28, 32, 16, 12, 9, 12, 18, 22]
+    from openpyxl.utils import get_column_letter
+    for c, wd in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(c)].width = wd
+    total = len(rows)
+    closed = sum(1 for x in rows if x[11] == "Closed")
+    ws.cell(row=header_row + total + 2, column=1, value=f"Total findings: {total}   |   Open: {total - closed}   |   Closed: {closed}").font = Font(bold=True)
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=3)
+    if total:
+        ws.auto_filter.ref = f"A{header_row}:{ws.cell(row=header_row + total, column=ncols).coordinate}"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToHeight = 0
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+
+
+def aud_export_word(audit_id, path):
+    from docx.shared import RGBColor
+    audit = aud_get(audit_id)
+    headers, rows = aud_register_table(audit_id)
+    document = Document()
+    set_docx_landscape(document)
+    add_docx_report_header(document, "AUDIT REGISTER", "AUD", safe(audit["number"]))
+    p = document.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run(f"AUDIT REGISTER — {xml_safe(audit['number'])}")
+    r.bold = True
+    r.font.size = Pt(15)
+    r.font.color.rgb = RGBColor(0x17, 0x36, 0x5D)
+    info = [("Audit No.", audit["number"]), ("Audit Type", audit["audit_type"]), ("Audit Date", audit["audit_date"]),
+            ("Location", audit["location"]), ("Auditor", audit["auditor"]), ("Auditee", audit["auditee"]),
+            ("Status", audit["status"]), ("Procedures", ", ".join(aud_parse_procedures(audit["procedures"])) or "—")]
+    t = document.add_table(rows=0, cols=4)
+    t.style = "Table Grid"
+    t.autofit = False
+    for i in range(0, len(info), 2):
+        cells = t.add_row().cells
+        for j in range(2):
+            label, value = info[i + j]
+            lc, vc = cells[j * 2], cells[j * 2 + 1]
+            lc.text = xml_safe(label)
+            vc.text = xml_safe(value) or "—"
+            add_docx_cell_shading(lc, "DCE6F1")
+            for run in lc.paragraphs[0].runs:
+                run.bold = True
+            for cell, wd in ((lc, 1.3), (vc, 3.8)):
+                cell.width = Inches(wd)
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        run.font.size = Pt(8)
+    document.add_paragraph()
+    table = document.add_table(rows=1, cols=len(headers))
+    for i, h in enumerate(headers):
+        table.rows[0].cells[i].text = h
+    if not rows:
+        cells = table.add_row().cells
+        cells[0].text = "No audit findings have been recorded for this audit."
+    for row in rows:
+        cells = table.add_row().cells
+        for i, val in enumerate(row):
+            cells[i].text = xml_safe(val)
+    style_docx_table(table, header=True, font_size=7)
+    widths = [0.95, 1.1, 0.7, 0.45, 0.65, 1.55, 1.0, 1.15, 0.7, 0.65, 0.4, 0.5, 0.75, 0.9]
+    for row in table.rows:
+        for i, cell in enumerate(row.cells):
+            cell.width = Inches(widths[i])
+    total = len(rows)
+    closed = sum(1 for x in rows if x[11] == "Closed")
+    sp = document.add_paragraph()
+    sr = sp.add_run(f"Total findings: {total}   |   Open: {total - closed}   |   Closed: {closed}   |   "
+                    f"CAPA routed: {sum(1 for x in rows if x[10] == 'Yes')}")
+    sr.bold = True
+    sr.font.size = Pt(9)
+    add_docx_signatures(document)
+    add_docx_footer(document)
+    save_docx_validated(document, path)
+
+
+def aud_export_notification_word(audit_id, path):
+    """Professional 'Invites Document': logo, 'Audit Notification' heading, document number, details table."""
+    from docx.shared import RGBColor
+    audit = aud_get(audit_id)
+    note = aud_get_notification(audit_id)
+    if not audit or not note:
+        raise ValueError("Save the notification before exporting.")
+    document = Document()
+    section = document.sections[0]
+    section.left_margin = section.right_margin = Inches(0.9)
+    section.top_margin = Inches(0.7)
+    section.bottom_margin = Inches(0.7)
+    lp = document.add_paragraph()
+    lp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    logo = report_logo_path()
+    if logo:
+        try:
+            lp.add_run().add_picture(str(logo), width=Inches(1.7))
+        except Exception:
+            logging.exception("Notification logo failed")
+            lp.add_run(xml_safe(company_name())).bold = True
+    else:
+        cr = lp.add_run(xml_safe(company_name()))
+        cr.bold = True
+        cr.font.size = Pt(16)
+    if logo:
+        cp = document.add_paragraph()
+        cp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        c = cp.add_run(xml_safe(company_name()))
+        c.bold = True
+        c.font.size = Pt(11)
+    tp = document.add_paragraph()
+    tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    tr = tp.add_run("Audit Notification")
+    tr.bold = True
+    tr.font.size = Pt(22)
+    tr.font.color.rgb = RGBColor(0x17, 0x36, 0x5D)
+    dp = document.add_paragraph()
+    dp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    dr = dp.add_run(f"Document Number: {xml_safe(note['doc_number'])}")
+    dr.bold = True
+    dr.font.size = Pt(11)
+    document.add_paragraph()
+    audit_date = safe(note["audit_date"]) or safe(audit["audit_date"])
+    pairs = [
+        ("Document Number", note["doc_number"]), ("Audit Number", audit["number"]), ("Audit Type", audit["audit_type"]),
+        ("To", note["to_party"]), ("From", note["from_party"]), ("Subject", note["subject"]), ("Scope", note["scope"]),
+        ("Audit Date", audit_date), ("Time", note["audit_time"]), ("Venue / Location", note["venue"] or audit["location"]),
+        ("Auditee", note["auditee"] or audit["auditee"]), ("Audit Team / Auditor", note["audit_team"] or audit["auditor"]),
+        ("Procedures / Documents for Review", note["reference_docs"]), ("Remarks", note["remarks"]),
+        ("Date of Issue", safe(note["updated_at"])[:10]),
+    ]
+    table = document.add_table(rows=0, cols=2)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    for label, value in pairs:
+        if label in ("Remarks", "Procedures / Documents for Review", "Time") and not safe(value).strip():
+            continue
+        cells = table.add_row().cells
+        cells[0].text = xml_safe(label)
+        cells[1].text = xml_safe(value) or "—"
+        add_docx_cell_shading(cells[0], "17365D")
+        for run in cells[0].paragraphs[0].runs:
+            run.bold = True
+            run.font.color.rgb = RGBColor(255, 255, 255)
+        for cell, wd in ((cells[0], 2.1), (cells[1], 4.6)):
+            cell.width = Inches(wd)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            for para in cell.paragraphs:
+                para.paragraph_format.space_before = Pt(3)
+                para.paragraph_format.space_after = Pt(3)
+                for run in para.runs:
+                    run.font.size = Pt(10)
+    add_docx_footer(document)
+    save_docx_validated(document, path)
+
+
+# ============================================================
 # MAIN WINDOW
 # ============================================================
 
@@ -3525,1908 +4232,975 @@ class MainWindow(QMainWindow):
         save_draft.clicked.connect(lambda:save("Draft")); save_final.clicked.connect(lambda:save("Closed")); save_exit.clicked.connect(lambda:save("Draft")); dialog.exec()
 
     # ========================================================
-    # AUDIT MODULE - self-contained implementation
+    # AUDIT MANAGEMENT MODULE (v2) - desktop layout
+    # Tabs: Audit Dashboard | Schedule Audit | Auditee & Checklist | Notifications
     # ========================================================
-    def _audit_setting_list(self, key, default):
-        raw = db.setting(key, "")
-        if raw:
-            try:
-                value = json.loads(raw)
-                if isinstance(value, list) and value:
-                    return [str(x) for x in value]
-            except Exception:
-                pass
-        return list(default)
-
-    def _audit_employees(self):
-        try:
-            return db.fetchall("SELECT id,name,designation,department FROM employees WHERE active=1 ORDER BY name")
-        except Exception:
-            return []
-
-    def _audit_person_combo(self, include_blank=True):
-        combo=QComboBox()
-        if include_blank: combo.addItem("-- Select Person --", None)
-        people=self._audit_employees()
-        if people:
-            for r in people:
-                label=safe(r["name"])
-                if safe(r["designation"]): label += f" — {safe(r['designation'])}"
-                combo.addItem(label, r["id"])
-        else:
-            combo.addItem("No active employees configured", None)
-        return combo
-
-    def _audit_standards(self):
-        configured = self._audit_setting_list("audit_standards", ["ISO 9001", "ISO 14001", "ISO 45001", "Other"])
-        return list(dict.fromkeys(["ISO 45001", "ISO 14001", "ISO 9001"] + configured))
-
-    def _audit_types(self):
-        configured = self._audit_setting_list("audit_types", AUDIT_TYPES)
-        return list(dict.fromkeys(AUDIT_TYPES + configured))
-
-    def _next_audit_reference(self, audit_type, audit_date, exclude_id=None):
-        """Create the Audit module's company/type/year serial, e.g. AB-IA01-2026."""
-        company = re.sub(r"[^A-Za-z0-9]", "", safe(company_name()).upper())
-        prefix = company[:2] or "CO"
-        code = "IA" if "internal" in safe(audit_type).lower() else "EA"
-        try:
-            year = date.fromisoformat(safe(audit_date)).year
-        except Exception:
-            year = date.today().year
-        pattern = re.compile(rf"^{re.escape(prefix)}-{code}(\d+)-{year}$", re.I)
-        nums = []
-        for row in db.fetchall("SELECT id,number FROM audits"):
-            if exclude_id is not None and int(row["id"]) == int(exclude_id):
-                continue
-            match = pattern.fullmatch(safe(row["number"]))
-            if match:
-                nums.append(int(match.group(1)))
-        return f"{prefix}-{code}{max(nums + [0]) + 1:02d}-{year}"
-
-    def _next_audit_finding_reference(self, audit_id, audit_number, audit_date, exclude_finding_id=None):
-        """Independent, parent-scoped finding reference; legacy integer finding_number is retained."""
-        parent_reference = safe(audit_number).strip()
-        if not parent_reference:
-            try:
-                year = date.fromisoformat(safe(audit_date)).year
-            except Exception:
-                year = date.today().year
-            parent_reference = f"AUD-{year}-{int(audit_id):03d}"
-        prefix = parent_reference
-        rows = db.fetchall("SELECT id,finding_reference FROM audit_findings WHERE audit_id=?", (audit_id,))
-        used = []
-        pattern = re.compile(rf"^{re.escape(prefix)}-F(\d+)$", re.I)
-        for row in rows:
-            if exclude_finding_id is not None and int(row["id"]) == int(exclude_finding_id):
-                continue
-            match = pattern.fullmatch(safe(row["finding_reference"]))
-            if match:
-                used.append(int(match.group(1)))
-        return f"{prefix}-F{max(used + [0]) + 1:02d}"
-
-    def _renumber_audits_after_delete(self, deleted_number):
-        """Close serial gaps for the deleted audit's type/year; leave legacy refs untouched."""
-        match = re.fullmatch(r"([A-Z0-9]{2})-(IA|EA)(\d+)-(\d{4})", safe(deleted_number).upper())
-        if not match:
-            return
-        prefix, code, _old_seq, year = match.groups()
-        rows = db.fetchall("SELECT id,number,audit_date FROM audits ORDER BY audit_date,id")
-        target = []
-        for row in rows:
-            if re.fullmatch(rf"{re.escape(prefix)}-{code}\d+-{year}", safe(row["number"]).upper()):
-                target.append(row)
-        for seq, row in enumerate(target, 1):
-            wanted = f"{prefix}-{code}{seq:02d}-{year}"
-            if safe(row["number"]) != wanted:
-                db.execute("UPDATE audits SET number=?,updated_at=? WHERE id=?", (wanted, datetime.now().isoformat(timespec="seconds"), row["id"]))
-
-    def _audit_finding_types(self):
-        return self._audit_setting_list("audit_finding_types", [
-            "Positive", "Negative", "Non-Conformance", "Observation",
-            "Major Nonconformity", "Minor Nonconformity",
-            "Opportunity for Improvement", "Positive Finding"])
-
-    def _audit_finding_statuses(self):
-        return self._audit_setting_list("audit_finding_statuses", [
-            "Open", "In Progress", "Submitted for Verification", "Verified", "Closed", "Overdue"])
-
-    def _audit_clause_map(self, standard):
-        raw=db.setting("audit_clause_map", "")
-        if raw:
-            try:
-                data=json.loads(raw)
-                if isinstance(data,dict) and standard in data and isinstance(data[standard],dict):
-                    return data[standard]
-            except Exception:
-                pass
-        return ISO_CLAUSES.get(standard,{})
-
-    def _audit_log(self, audit_id, action, details="", user=None):
-        user = user or db.setting("current_user", "") or db.setting("default_observer", "") or "System User"
-        db.execute("INSERT INTO audit_history(audit_id,action,user_name,details,timestamp) VALUES(?,?,?,?,?)",
-                   (audit_id,action,user,details,datetime.now().isoformat(timespec="seconds")))
-
-    def _audit_attachment_copy(self, paths, audit_number, audit_id, finding_id=None, uploaded_by=""):
-        saved=[]
-        for path in paths or []:
-            try:
-                source=Path(path)
-                if not source.exists(): continue
-                prefix=f"{audit_number}_{'F'+str(finding_id)+'_' if finding_id else ''}"
-                destination=ATTACH_DIR / f"{prefix}{source.name}"
-                n=1
-                while destination.exists():
-                    destination=ATTACH_DIR / f"{prefix}{n}_{source.name}"; n+=1
-                shutil.copy2(source,destination)
-                db.execute("INSERT INTO audit_attachments(audit_id,finding_id,file_path,attachment_type,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
-                           (audit_id,finding_id,str(destination),"Evidence",uploaded_by,datetime.now().isoformat(timespec="seconds")))
-                saved.append(str(destination))
-            except Exception:
-                logging.exception("Audit attachment copy failed")
-        return saved
-
-    def _audit_attachment_rows(self, audit_id, finding_id=None):
-        if finding_id is None:
-            return db.fetchall("SELECT * FROM audit_attachments WHERE audit_id=? AND (finding_id IS NULL OR finding_id=0) ORDER BY id",(audit_id,))
-        return db.fetchall("SELECT * FROM audit_attachments WHERE audit_id=? AND finding_id=? ORDER BY id",(audit_id,finding_id))
-
     def audits(self):
-        """Audit home page: dashboard first; keep register actions in a separate tab."""
         w, layout = self.page("Audit Management")
-        tabs = QTabWidget(); layout.addWidget(tabs, 1)
-        dash = QWidget(); dl = QVBoxLayout(dash)
-        title = QLabel("HSE AUDIT DASHBOARD")
-        title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:8px;"); dl.addWidget(title)
-        summary = QLabel(); summary.setWordWrap(True)
-        summary.setStyleSheet("font-size:15px;font-weight:bold;color:#17365D;padding:12px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dl.addWidget(summary)
-        audit_home_filter=QComboBox(); audit_home_filter.addItem("All Audit Types"); audit_home_filter.addItems(self._audit_types())
-        dl.addWidget(QLabel("Audit type overview:")); dl.addWidget(audit_home_filter)
-        audit_summary_table=QTableWidget(0,8); audit_summary_table.setHorizontalHeaderLabels(["Main Audit Number","Audit Type","Audit Name / Title","Audit Date","Total Findings","Open Findings","Closed Findings","Closed %"]); audit_summary_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); audit_summary_table.setAlternatingRowColors(True); audit_summary_table.setWordWrap(True); audit_summary_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); audit_summary_table.horizontalHeader().setStretchLastSection(True); audit_summary_table.setMinimumHeight(180); dl.addWidget(audit_summary_table,1)
-        def open_audit_from_summary(row, col=0):
-            item=audit_summary_table.item(row,0)
-            if item and item.data(Qt.ItemDataRole.UserRole): self._audit_register_detail(int(item.data(Qt.ItemDataRole.UserRole)))
-        audit_summary_table.cellDoubleClicked.connect(open_audit_from_summary)
-        class AuditHomeCharts(QWidget):
-            def __init__(self, parent=None):
-                super().__init__(parent); self.status_counts=[]; self.finding_counts=[0,0]; self.setMinimumHeight(300)
-            def set_data(self, statuses, opened, closed):
-                self.status_counts=list(statuses); self.finding_counts=[int(opened),int(closed)]; self.update()
-            def paintEvent(self, event):
-                painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.fillRect(self.rect(),QColor("#FFFFFF")); painter.setPen(QColor("#17365D")); painter.setFont(QFont("Arial",11,QFont.Weight.Bold)); painter.drawText(18,24,"AUDITS BY STATUS — BAR GRAPH"); painter.drawText(max(360,self.width()//2),24,"FINDINGS — PIE CHART")
-                left=QRectF(18,42,max(280,self.width()//2-35),225); painter.setPen(QPen(QColor("#D5DEE8"),1)); painter.drawRoundedRect(left,6,6)
-                rows=self.status_counts or [("No audits yet",0)]; maxv=max([int(v) for _,v in rows]+[1]); bh=max(18,min(30,int((left.height()-25)/max(1,min(len(rows),6)))-5))
-                for i,(label,value) in enumerate(rows[:6]):
-                    y=left.top()+14+i*(bh+7); painter.setFont(QFont("Arial",9)); painter.setPen(QColor("#34495E")); painter.drawText(int(left.left()+8),int(y+bh-4),str(label)[:18]); bw=max(0,(left.width()-145)*int(value)/maxv); painter.fillRect(QRectF(left.left()+112,y,bw,bh),QColor("#4472C4")); painter.setPen(QColor("#17365D")); painter.drawText(int(left.left()+118+bw),int(y+bh-4),str(value))
-                cx=max(360,self.width()//2)+(self.width()-max(360,self.width()//2))//2; cy=145; radius=78; total=sum(self.finding_counts); start_angle=0
-                for i,value in enumerate(self.finding_counts):
-                    span=int(360*value/total) if total else 180; painter.setBrush([QColor("#4472C4"),QColor("#70AD47")][i]); painter.setPen(QPen(QColor("#FFFFFF"),2)); painter.drawPie(QRectF(cx-radius,cy-radius,radius*2,radius*2),start_angle*16,span*16); start_angle+=span
-                painter.setPen(QColor("#34495E")); painter.setFont(QFont("Arial",9)); painter.drawText(cx-90,cy+radius+24,f"Open: {self.finding_counts[0]}    Closed: {self.finding_counts[1]}")
-        charts=AuditHomeCharts(); dl.addWidget(charts,1)
-        actions=QHBoxLayout(); planning_btn=QPushButton("Open Audit Planning & Checklists"); planning_btn.setMinimumHeight(40); planning_btn.setStyleSheet("font-weight:bold;padding:8px 14px;background:#E8F0FA;color:#17365D;"); refresh_dash=QPushButton("Refresh Dashboard"); actions.addWidget(planning_btn); actions.addStretch(); actions.addWidget(refresh_dash); dl.addLayout(actions)
-        def load_home_dashboard():
-            total=db.fetchone("SELECT COUNT(*) AS n FROM audits")["n"]; scheduled=db.fetchone("SELECT COUNT(*) AS n FROM audit_schedule")["n"]
-            completed=db.fetchone("SELECT COUNT(*) AS n FROM audits WHERE lower(COALESCE(status,'')) IN ('completed','closed','work completed')")["n"]
-            pending=max(0,int(total)-int(completed))
-            opened=db.fetchone("SELECT COUNT(*) AS n FROM audit_findings WHERE lower(COALESCE(status,'open')) NOT IN ('closed','verified')")["n"]
-            closed=db.fetchone("SELECT COUNT(*) AS n FROM audit_findings WHERE lower(COALESCE(status,'')) IN ('closed','verified')")["n"]
-            finding_total=int(opened)+int(closed)
-            positive=db.fetchone("SELECT COUNT(*) AS n FROM audit_findings WHERE lower(COALESCE(finding_type,'')) LIKE '%positive%' OR lower(COALESCE(finding_type,'')) LIKE '%good practice%' OR lower(COALESCE(finding_type,''))='conformity'")["n"]
-            capa_count=db.fetchone("SELECT COUNT(*) AS n FROM audit_findings WHERE COALESCE(capa_required,0)=1 OR COALESCE(capa_number,'')<>''")["n"]
-            closure_pct=(100.0*int(closed)/finding_total) if finding_total else 0.0
-            summary.setText(f"Total audits: {total}  |  Completed: {completed}  |  Pending: {pending}  |  Total findings: {finding_total}  |  Positive findings: {positive}  |  Open observations/findings: {opened}  |  Closed observations/findings: {closed}  |  CAPA: {capa_count}  |  Closure: {closure_pct:.1f}%  |  Scheduled: {scheduled}")
-            rows=db.fetchall("SELECT COALESCE(NULLIF(status,''),'Unspecified') AS status,COUNT(*) AS n FROM audits GROUP BY COALESCE(NULLIF(status,''),'Unspecified') ORDER BY status")
-            charts.set_data([(safe(r["status"]),int(r["n"])) for r in rows],opened,closed)
-            audit_rows=db.fetchall("SELECT * FROM audits ORDER BY audit_date DESC,id DESC")
-            if audit_home_filter.currentText()!="All Audit Types": audit_rows=[a for a in audit_rows if safe(a["audit_type"])==audit_home_filter.currentText()]
-            audit_summary_table.setRowCount(len(audit_rows))
-            for ri,a in enumerate(audit_rows):
-                fs=db.fetchall("SELECT finding_type,status FROM audit_findings WHERE audit_id=?",(a["id"],))
-                obs=sum(1 for f in fs if "observation" in safe(f["finding_type"]).lower())
-                nc=sum(1 for f in fs if "nonconform" in safe(f["finding_type"]).lower())
-                positive=sum(1 for f in fs if any(term in safe(f["finding_type"]).lower() for term in ("positive","good practice","conformity")))
-                op=sum(1 for f in fs if safe(f["status"]).lower() not in ("closed","verified"))
-                cl=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified"))
-                closed_pct=(100.0*cl/len(fs)) if fs else 0.0
-                vals=[a["number"],a["audit_type"],a["title"],a["audit_date"],len(fs),op,cl,f"{closed_pct:.1f}%"]
-                for ci,val in enumerate(vals):
-                    it=QTableWidgetItem(safe(val)); it.setData(Qt.ItemDataRole.UserRole,a["id"]); audit_summary_table.setItem(ri,ci,it)
-                    if ci in (8,9): it.setBackground(QColor("#FCE4D6") if ci==8 and op else QColor("#E2F0D9") if ci==9 and cl else QColor("#FFFFFF"))
-            audit_summary_table.resizeRowsToContents()
-        audit_home_filter.currentTextChanged.connect(load_home_dashboard)
-        planning_btn.clicked.connect(self.audit_planning_center); refresh_dash.clicked.connect(load_home_dashboard); load_home_dashboard(); tabs.addTab(dash,"Audit Dashboard")
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+        ctx = {"tabs": tabs}
+        dash_tab = self._aud_build_dashboard(ctx)
+        sched_tab = self._aud_build_schedule(ctx)
+        check_tab = self._aud_build_checklist(ctx)
+        note_tab = self._aud_build_notifications(ctx)
+        tabs.addTab(dash_tab, "Audit Dashboard")
+        tabs.addTab(sched_tab, "Schedule Audit")
+        tabs.addTab(check_tab, "Auditee && Checklist")
+        tabs.addTab(note_tab, "Notifications")
+        refreshers = {0: ctx["refresh_dashboard"], 1: ctx["refresh_schedule"],
+                      2: ctx["refresh_checklist_options"], 3: ctx["refresh_notification_options"]}
+        tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
+        ctx["refresh_dashboard"]()
 
-        # Full register and CRUD controls are available here, not on the dashboard home page.
-        reg=QWidget(); rl=QVBoxLayout(reg); top=QHBoxLayout(); reg_title=QLabel("MANAGE AUDITS"); reg_title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); top.addWidget(reg_title); top.addStretch()
-        new_btn=QPushButton("+ New Audit"); edit_btn=QPushButton("Edit Selected Audit"); delete_btn=QPushButton("Delete Selected Audit"); settings_btn=QPushButton("Audit Settings"); report_btn=QPushButton("Individual Report"); master_excel_btn=QPushButton("Export Master Excel"); master_pdf_btn=QPushButton("Export Master PDF"); plan_btn=QPushButton("Audit Planning & Checklists")
-        for b in [plan_btn,settings_btn,report_btn,master_excel_btn,master_pdf_btn,edit_btn,delete_btn,new_btn]: b.setMinimumHeight(36); top.addWidget(b)
-        rl.addLayout(top); filters=QHBoxLayout(); search=QLineEdit(); search.setPlaceholderText("Search reference, title, department, location or auditor..."); filters.addWidget(search,2)
-        status=QComboBox(); status.addItems(["All Statuses","Draft","Submitted"]); filters.addWidget(status); typ=QComboBox(); typ.addItem("All Audit Types"); typ.addItems(self._audit_types()); filters.addWidget(typ)
-        dept=QComboBox(); dept.addItem("All Departments")
-        try: dept.addItems(sorted({safe(r["department"]) for r in db.fetchall("SELECT department FROM employees WHERE active=1") if safe(r["department"])}))
-        except Exception: pass
-        filters.addWidget(dept); rl.addLayout(filters)
-        table=QTableWidget(); headers=["Audit Reference","Audit Type","Procedure / Title","Audit Date","Department","Location","Auditor","Findings Summary","Open","Closed","CAPA","Closure %","Status","Created By","Last Updated","Actions"]; table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.setAlternatingRowColors(True); table.setSortingEnabled(True); table.setWordWrap(True); table.setTextElideMode(Qt.TextElideMode.ElideNone); table.verticalHeader().setDefaultSectionSize(54); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); table.horizontalHeader().setStretchLastSection(True)
-        for col,width in {0:145,1:135,2:190,3:95,4:125,5:130,6:130,7:230,8:65,9:65,10:65,11:80,12:105,13:115,14:145,15:80}.items(): table.setColumnWidth(col,width)
-        rl.addWidget(table,1)
-        def load():
-            rows=db.fetchall("SELECT * FROM audits ORDER BY id DESC"); data=[]
-            for r in rows:
-                if status.currentText()!="All Statuses" and safe(r["status"])!=status.currentText(): continue
-                if typ.currentText()!="All Audit Types" and safe(r["audit_type"])!=typ.currentText(): continue
-                if dept.currentText()!="All Departments" and safe(r["department"])!=dept.currentText(): continue
-                needle=search.text().strip().lower(); hay=" ".join(safe(r[k]) for k in ["number","audit_type","title","audit_date","department","location","auditor","lead_auditor","status","created_by"] if k in r.keys()).lower()
-                if needle and needle not in hay: continue
-                data.append(r)
-            table.setSortingEnabled(False); table.setRowCount(len(data))
-            for i,r in enumerate(data):
-                fs=db.fetchall("SELECT finding_type,status,capa_required,capa_number,finding_detail,observation FROM audit_findings WHERE audit_id=?",(r["id"],))
-                count=len(fs); op=sum(1 for f in fs if safe(f["status"]).lower() not in ("closed","verified")); cl=count-op
-                capa_n=sum(1 for f in fs if int(f["capa_required"] or 0)==1 or safe(f["capa_number"]))
-                pct=(100.0*cl/count) if count else 0.0
-                summary_text="; ".join((safe(f["finding_detail"] or f["observation"])[:70]) for f in fs[:2])
-                vals=[r["number"],r["audit_type"],r["title"],r["audit_date"],r["department"],r["location"],r["auditor"] or r["lead_auditor"],summary_text,op,cl,capa_n,f"{pct:.1f}%",r["status"],r["created_by"],r["updated_at"] or r["created_at"],"View" if r["status"]=="Submitted" else "Edit"]
-                for c,v in enumerate(vals): item=QTableWidgetItem(safe(v)); item.setData(Qt.ItemDataRole.UserRole,r["id"]); table.setItem(i,c,item)
-            table.resizeRowsToContents(); table.setSortingEnabled(True); load_home_dashboard()
-        def selected_id():
-            row=table.currentRow(); return table.item(row,0).data(Qt.ItemDataRole.UserRole) if row>=0 and table.item(row,0) else None
-        def open_selected():
-            aid=selected_id()
-            if aid: self.audit_workspace(aid,load)
-        def generate_selected():
-            aid=selected_id()
-            if aid: self._audit_register_detail(aid)
-            else: QMessageBox.information(self,"Select Audit","Select an audit from the register first.")
-        def edit_selected_audit():
-            aid=selected_id()
-            if not aid: return QMessageBox.information(self,"Select Audit","Select an audit to edit first.")
-            self.audit_workspace(aid,load,allow_edit=True)
-        def delete_selected_audit():
-            aid=selected_id()
-            if not aid: return QMessageBox.information(self,"Select Audit","Select an audit to delete first.")
-            ar=db.fetchone("SELECT number,title FROM audits WHERE id=?",(aid,))
-            if not ar: return load()
-            answer=QMessageBox.question(self,"Delete Audit",f"Delete audit {safe(ar['number'])} — {safe(ar['title'])}?\n\nIts audit findings, evidence and audit history will be removed. Any linked CAPA record will be retained in the existing CAPA Tracking Register.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-            if answer!=QMessageBox.StandardButton.Yes: return
-            try:
-                deleted_number=safe(ar["number"])
-                db.execute("UPDATE audit_schedule SET linked_audit_id=NULL,updated_at=? WHERE linked_audit_id=?",(datetime.now().isoformat(timespec="seconds"),aid)); db.execute("DELETE FROM audit_finding_history WHERE finding_id IN (SELECT id FROM audit_findings WHERE audit_id=?)",(aid,)); db.execute("DELETE FROM audit_attachments WHERE audit_id=?",(aid,)); db.execute("DELETE FROM audit_findings WHERE audit_id=?",(aid,)); db.execute("DELETE FROM audit_history WHERE audit_id=?",(aid,)); db.execute("DELETE FROM audits WHERE id=?",(aid,)); self._renumber_audits_after_delete(deleted_number); load(); QMessageBox.information(self,"Audit Deleted","Selected audit deleted. Matching company/type/year serial numbers have been resequenced. Existing CAPA records were retained.")
-            except Exception as exc: logging.exception("Audit deletion failed"); QMessageBox.critical(self,"Delete Failed",f"Could not delete the selected audit.\n\n{exc}")
-        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings); report_btn.clicked.connect(generate_selected); master_excel_btn.clicked.connect(self._audit_export_master_excel); master_pdf_btn.clicked.connect(self._audit_export_master_pdf); edit_btn.clicked.connect(edit_selected_audit); delete_btn.clicked.connect(delete_selected_audit); plan_btn.clicked.connect(self.audit_planning_center)
-        table.cellDoubleClicked.connect(lambda *_:open_selected()); table.cellClicked.connect(lambda row,col:self._audit_register_detail(table.item(row,0).data(Qt.ItemDataRole.UserRole)) if col==0 and table.item(row,0) else None)
-        for ctl in [search,status,typ,dept]: ctl.textChanged.connect(load) if isinstance(ctl,QLineEdit) else ctl.currentTextChanged.connect(load)
-        load(); tabs.addTab(reg,"Manage Audits")
+    # ---------------- shared small helpers ----------------
+    def _aud_table(self, headers, stretch_last=False):
+        table = QTableWidget(0, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.setWordWrap(True)
+        table.horizontalHeader().setStretchLastSection(stretch_last)
+        return table
 
-    def _audit_procedure_library(self):
-        # Built from the supplied Master Audit Prompt. Short summary checklists are
-        # expanded with standard evidence/control checks so each procedure is usable
-        # as a practical field checklist.
-        procedures = {
-            "Generic HSE Audit": ("Applicable legal, client, company and ISO requirements", [
-                "Current HSE policy is approved, communicated and displayed where appropriate",
-                "Roles, responsibilities, competence and management accountability are defined",
-                "Hazards are identified and risks assessed for routine and non-routine activities",
-                "Risk controls follow the hierarchy of controls and are implemented at the workplace",
-                "Workers and contractors receive induction, task briefings and required training",
-                "Permits, risk assessments and method statements are current where required",
-                "Work areas, access routes, housekeeping and welfare facilities are satisfactory",
-                "Plant, tools, lifting equipment and vehicles are inspected and maintained",
-                "PPE is suitable, available, maintained and used correctly",
-                "Emergency plans, contacts, alarms, routes and equipment are suitable and tested",
-                "Incidents, near misses and unsafe conditions are reported and investigated",
-                "Inspection, monitoring, exposure and statutory records are current and traceable",
-                "Environmental aspects, waste, spills and emissions are controlled where applicable",
-                "Previous audit findings and corrective actions are tracked and effectiveness verified",
-                "Management reviews performance trends and communicates improvement actions"]),
-            "General Workplace Inspection": ("Workplace condition and activity inspection", [
-                "Walkways, stairs, exits and emergency access routes are clear and safe",
-                "Floors are free from uncontrolled spills, trip hazards and damaged surfaces",
-                "Materials, cylinders, tools and equipment are stored securely and appropriately",
-                "Electrical cables, plugs, temporary supplies and distribution boards are undamaged",
-                "Fire extinguishers, alarms, hose reels and emergency equipment are accessible",
-                "Emergency exits, signs, lighting and assembly-point information are visible",
-                "Machines and tools have suitable guards and are in safe operating condition",
-                "Lifting gear, slings, shackles and accessories show valid identification and inspection",
-                "Work at height areas have suitable edge protection, access and dropped-object controls",
-                "Chemical containers are labelled and stored with suitable spill containment",
-                "Waste is segregated, bins are suitable and hazardous waste is controlled",
-                "PPE is appropriate to the task and worn correctly by workers and visitors",
-                "Permits, isolations and risk controls match the activities being observed",
-                "Workers can explain task hazards, stop-work expectations and emergency actions",
-                "Unsafe conditions are recorded with an owner, target date and follow-up verification"]),
-            "Permit to Work (PTW) System": ("8.1, 8.1.2, 6.1, 7.2", [
-                "Correct type of permit selected","Scope of work clearly described and matches actual activity","JSA / Risk Assessment attached and relevant","All required isolations identified and completed","Gas testing completed within validity period","All authorized signatures present","SIMOPS conflict check completed","Permit displayed at work location","Workers understand permit conditions","Permit properly closed after completion","No expired permits still active","Supporting documents attached"]),
-            "Hot Work Procedure": ("8.1, 8.1.2, 8.2", ["Hot Work Permit issued and valid","Gas test completed before start and periodically","Combustible materials removed or protected","Fire watch assigned, trained and present","Suitable fire extinguisher available","Fire watch continues after completion","Welding equipment in good condition with flashback arrestors","Area properly ventilated","Work stopped if conditions change","Permit closed and area inspected"]),
-            "Confined Space Entry": ("8.1, 8.1.2, 8.2, 7.2", ["Space correctly classified","Entry Permit fully completed","Atmospheric testing done in correct sequence (O₂ → LEL → H₂S → CO)","Results within acceptable limits","Continuous monitoring during entry","All energy sources isolated and LOTO applied","Attendant present at all times","Rescue plan and equipment staged","Entrants wearing full body harness with retrieval line","Communication system tested","Entry log maintained","Forced ventilation operating if required"]),
-            "Lockout / Tagout (LOTO)": ("8.1, 8.1.2", ["All energy sources identified","Written isolation procedure available","Locks and tags applied by authorized persons","Each person has individual lock","Try-start verification performed","Isolation Certificate completed","Tags legible with name, date and reason","Group lockout box used when required","De-isolation done only after all locks removed","Equipment tested safe before return to service"]),
-            "Working at Height": ("8.1, 8.1.2, 7.2", ["Fall Protection Plan available","Hierarchy of controls applied","Full body harness inspected and valid","Anchor points rated and inspected","Correct lanyards / SRLs used","Scaffold / platform / MEWP inspected and tagged","Edge protection or hole covers in place","Tools tethered","Exclusion zone below work area","Rescue plan available"]),
-            "Lifting & Rigging / Crane Operations": ("8.1, 8.1.2, 7.2", ["Lift categorized correctly","Lift Plan approved for complex/critical lifts","Crane and lifting gear certified","Load chart available and followed","Riggers and banksman competent","Tag lines used","Exclusion zone enforced","No personnel under suspended load","Weather conditions suitable","Pre-lift checks completed"]),
-            "Excavation & Trenching": ("8.1, 8.1.2", ["Excavation Permit issued","Underground services located and marked","Soil type assessed","Protective system (shoring/sloping/benching) in place","Safe access and egress provided","Spoil placed at safe distance","Barricades and warning signs installed","Atmosphere tested if required","Daily inspection by competent person","Emergency rescue plan available"]),
-            "Scaffolding": ("8.1, 8.1.2, 7.2", ["Erected by competent scaffolders","Design available for complex scaffolds","Correctly tagged","Base plates, standards, ledgers, braces correct","Guardrails, mid-rails and toe boards complete","Platforms fully boarded","Safe access provided","Inspected before use and after alteration","No overloading","Adequate ties and bracing"]),
-            "Electrical Safety": ("8.1, 8.1.2, 7.2", ["Only competent electricians working","Live work controlled by permit","Temporary installations inspected","RCDs/ELCBs tested","Cables protected","LOTO applied for maintenance","Correct PPE used","Distribution boards locked and labeled","Earth leakage protection functional","No unauthorized modifications"]),
-            "Hazard Communication / Chemical Safety": ("8.1, 7.3, 6.1", ["Chemical register up to date","SDS available and accessible","All containers labeled","Secondary containment provided","Incompatible chemicals separated","Spill kits available","Workers trained on hazards","Correct PPE used","Emergency eye wash/shower available","Chemical waste disposal controlled"]),
-            "Personal Protective Equipment (PPE)": ("8.1, 7.1, 7.2", ["PPE selection matches identified hazards","PPE condition checked before use","Workers trained in correct use and limitations","PPE stored hygienically and protected from damage","Defective PPE quarantined and replaced","Fit testing completed where required","Issue and replacement records maintained","Supervision verifies consistent use"]),
-            "Job Safety Analysis (JSA) / Risk Assessment": ("6.1.2, 8.1", ["Assessment is task-specific and current","Workers involved in hazard identification","Routine and non-routine hazards identified","Controls follow the hierarchy of controls","Residual risk assessed and acceptable","Controls implemented at worksite","Changes trigger reassessment","Approvals and review records retained"]),
-            "Incident Reporting & Investigation": ("10.2, 9.1", ["Incidents and near misses reported promptly","Investigation team and responsibilities defined","Evidence and witness statements collected","Root cause analysis completed","Corrective actions assigned to responsible persons","Actions have target dates and priority","Corrective actions verified and closed","Lessons learned shared with relevant workers"]),
-            "Emergency Preparedness & Response": ("8.2", ["Emergency plan current and approved","Roles and responsibilities defined","Drills conducted and recorded","Emergency equipment inspected and available","Assembly points marked and communicated","Emergency contacts displayed and current","Drill findings tracked to closure","Workers and contractors know response actions"]),
-            "Fire Prevention & Protection": ("8.1, 8.2", ["Extinguishers inspected and accessible","Hot work controlled by permit","Flammable materials stored correctly","Detection and alarm systems functional","Escape routes and exits clear","Fire doors and emergency lighting serviceable","Workers know alarm and evacuation actions","Fire inspection findings tracked to closure"]),
-            "H₂S Safety": ("8.1, 7.2, 8.2", ["H₂S detectors calibrated and bump-tested","Escape masks available and inspected","Training and competency current","Alarm response and evacuation practiced","Wind direction indicators available where required","Muster points and escape routes identified","Rescue arrangements do not expose rescuers","Inspection and drill records maintained"]),
-            "Welding & Cutting": ("8.1", ["Cylinders secured upright and segregated","Flashback arrestors fitted correctly","Ventilation adequate for fumes","Hot work permit and gas testing completed","Correct welding PPE used","Welding leads and equipment inspected","Fire watch and extinguishers provided","Work area checked after completion"]),
-            "Pressure Testing": ("8.1", ["Approved pressure-test procedure available","Exclusion zone established and controlled","Pressure gauges calibrated and suitable","Relief devices installed and verified","Competent persons assigned","Test medium and pressure limits confirmed","Connections and restraints inspected","Depressurization and emergency arrangements defined"]),
-            "Dropped Objects Prevention": ("8.1", ["Tools tethered at height","Barricades established below work area","Tools and equipment checked before use","DROPS controls implemented and understood","Loose materials secured","Lifting baskets and storage arrangements inspected","Dropped-object hazards included in risk assessment","Inspections and corrective actions recorded"]),
-            "SIMOPS": ("8.1, 8.1.3", ["SIMOPS matrix available and current","Coordination meetings held and recorded","Single PTW authority or clear interface defined","Interface risks assessed","Conflicting activities identified and controlled","Work groups briefed on restrictions","Changes communicated to affected teams","SIMOPS actions tracked to closure"]),
-            "Contractor HSE Management": ("8.1.4, 7.2", ["Contractor prequalification completed","Induction completed before work","Competence and certificates verified","Risk assessments and method statements reviewed","Contractor performance monitored","Supervision and interfaces defined","Incidents and nonconformities reported","Corrective actions followed up"]),
-            "Management of Change (MOC)": ("8.1.3", ["Change described and classified","Change risk assessment completed","Required technical and HSE approvals obtained","Affected workers informed and trained","Documents and drawings updated","Temporary changes have expiry/review date","Pre-Startup Safety Review completed where required","Post-change effectiveness verified"]),
-            "Housekeeping": ("8.1", ["Walkways and access routes clear","Waste segregated correctly","Materials stored safely and secured","Spills cleaned promptly","Fire equipment and exits unobstructed","Cables and hoses routed safely","Scrap and sharp objects controlled","Housekeeping inspections and actions recorded"]),
-            "Waste Management & Environmental Controls": ("8.1 + ISO 14001", ["Waste segregated and labeled","Waste storage areas suitable and controlled","Licensed disposal and transfer records kept","Spill kits available and inspected","Emissions and discharges monitored where required","Hazardous waste handled by trained personnel","Environmental incidents reported","Waste records and corrective actions reviewed"]),
-            "Vehicle / Journey Management": ("8.1", ["Drivers licensed and competent","Pre-trip checks completed","Journey plans prepared for remote travel","Fatigue and driving hours controlled","Vehicle maintenance and inspection current","Seat belts and restraints used","Route and emergency communications confirmed","Journey completion and deviations monitored"]),
-            "Manual Handling": ("8.1, 6.1", ["Manual handling risk assessment completed","Mechanical aids used where practicable","Team lifting arrangements defined","Workers trained in safe handling","Load weight and route assessed","Storage heights and access suitable","High-risk or repetitive tasks reviewed","Injuries and improvement actions monitored"]),
-            "Noise & Hearing Conservation": ("8.1, 6.1", ["Noise exposure areas identified","Noise assessments current","Hearing protection suitable and used","Audiometry programme implemented where required","Equipment noise controls maintained","Workers informed of exposure risks","Hearing protection fit and condition checked","Records and corrective actions reviewed"]),
-            "Respiratory Protection": ("8.1, 7.2", ["Respirator selected for identified hazard","Fit testing completed where required","Medical clearance obtained where applicable","Inspection, cleaning and storage controlled","Filters replaced at defined intervals","Users trained in limitations and use","Emergency respiratory equipment checked","Records are current and accessible"]),
-            "First Aid & Medical Response": ("8.2, 7.1", ["Trained first aiders available for shift and location","First-aid kits stocked and inspected","Emergency numbers posted and current","Medical response and transport arrangements defined","Access routes for emergency response clear","Incident treatment records protected and maintained","First-aiders' training current","Deficiencies corrected promptly"]),
-            "Stop Work Authority": ("5.1, 5.4, 8.1", ["Workers know their right and duty to stop unsafe work","No-retaliation expectations communicated","Stop-work events recorded","Supervisors respond promptly to stop-work concerns","Work restarts only after hazards controlled","Lessons learned communicated","Contractors understand stop-work process","Trends and recurring issues reviewed"]),
-            "Training, Competency & Induction": ("7.2, 7.3", ["Training matrix available and current","Training and competency records current","High-risk tasks assigned only to competent persons","Induction covers site-specific hazards","Refresher training planned before expiry","Competence verified in practice","Training gaps assigned actions","Records retained and accessible"]),
-            "Ladders & Platforms": ("8.1", ["Ladders and platforms inspected before use","Correct ladder type and rating selected","Ladders secured against movement","Three points of contact maintained where applicable","Defective equipment tagged and removed","Ground and access conditions suitable","Work duration and alternatives considered","Inspection records and user training maintained"]),
-            "Radiography / NDT Safety": ("8.1", ["Controlled area established and secured","Barriers and warning signs displayed","Radiation monitoring and dosimetry provided","Competent and authorized operators assigned","Work permit and notification requirements met","Emergency arrangements available","Exposure equipment inspected and maintained","Survey and exposure records retained"]),
-            "Abrasive Blasting / Painting": ("8.1", ["Containment used to control dust and overspray","Respiratory protection suitable and fit-tested where required","Abrasive and coating hazards assessed","Ventilation and exposure controls adequate","Waste and spent abrasive controlled","Hoses, pots and pressure equipment inspected","PPE and decontamination arrangements suitable","Environmental and inspection records maintained"]),
-            "Pre-Startup Safety Review (PSSR)": ("8.1.3", ["PSSR checklist completed","Punch items categorized and closed or formally controlled","Equipment and safeguards verified against design","Operating procedures approved and available","Personnel trained before start-up","Permits and isolations status checked","Handover and authorization documented","Outstanding actions tracked to closure"]),
-            "Fatigue Management": ("8.1, 6.1", ["Working hours and rest periods controlled","Fitness-for-work checks conducted","Fatigue hazards assessed for critical tasks","Rest facilities and transport arrangements adequate","Workers know fatigue reporting process","Supervisors monitor signs of fatigue","Overtime and shift patterns reviewed","Fatigue-related events and actions analysed"]),
-            "Heat / Cold Stress": ("8.1", ["Work-rest regimes followed","Drinking water and hydration provided","Environmental conditions monitored","Shade, cooling or warming facilities available","Workers trained to recognize symptoms","Acclimatization and vulnerable workers considered","Emergency response for heat/cold illness defined","Records and corrective actions reviewed"]),
-            "Spill Response & Environmental Incident": ("8.2 + ISO 14001", ["Response plan available and current","Spill kits suitable and ready","Drills conducted and recorded","Reporting and escalation process followed","Drain and sensitive-area protection available","Waste from cleanup safely contained and disposed","Response roles and contacts understood","Incident causes and actions tracked"]),
-            "Visitor & Short Service Employee Control": ("8.1.4", ["Induction completed before access","Escort provided where required","PPE issued and suitable","Access restrictions explained","Short-service employees identified","Close supervision provided for high-risk tasks","Emergency arrangements communicated","Visitor and training records maintained"]),
-            "HSE Performance Monitoring & KPI": ("9.1", ["Leading and lagging indicators tracked","Data definitions and sources consistent","Trends analysed at planned intervals","Targets and performance reviewed by management","Underperformance triggers action","Actions have owners and due dates","Data accuracy and reporting timeliness checked","Effectiveness of actions reviewed"])
-                }
-        governance = [
-            "Document governance: approved owner, document number, revision history, effective date, review date and control of obsolete copies are defined and evidenced.",
-            "Purpose and applicability: scope, exclusions, interfaces, triggering conditions and boundaries of the procedure are explicit and consistent with actual work.",
-            "Roles and accountability: authority, responsibilities, competence requirements, handovers and escalation routes are assigned to roles and communicated.",
-            "Requirements register: applicable legal, client, contractual, ISO and internal requirements are identified, updated and traceable to procedure controls.",
-            "Risk methodology: task-specific hazards, risk assessment, hierarchy of controls and acceptance of residual risk are required before authorization.",
-            "Prerequisites and approvals: required permits, method statements, drawings, isolations, resources and approvals are defined as hold points before work begins.",
-            "Control design: steps, acceptance criteria, prohibited conditions, verification methods and stop-work triggers are clear, measurable and unambiguous.",
-            "Interfaces: contractor responsibilities, simultaneous operations, affected departments and emergency interfaces are addressed and coordinated.",
-            "Competence and communication: required training, authorization, briefing, acknowledgement and refresher requirements are defined and recorded.",
-            "Records and retention: mandatory forms, registers, certificates, logs, test records, retention periods and record owners are identified and retrievable.",
-            "Deviation and change control: deviations, abnormal conditions, temporary changes and revisions require authorization, risk review, communication and records.",
-            "Monitoring and assurance: inspections, audits, sampling, performance indicators, review frequency and accountable reviewers are defined.",
-            "Nonconformity and CAPA: containment, root-cause analysis, action ownership, due dates, effectiveness verification and closure authority are defined.",
-            "Management review: incidents, audit trends, lessons learned, KPI results and operational changes trigger documented review and procedure improvement."
-        ]
-        expanded = {}
-        for procedure, (clauses, specifics) in procedures.items():
-            # Prioritize procedure-specific checks; add governance checks only to reach 15.
-            criteria = [f"Procedure-specific control: verify {specific.lower()} against the current approved {procedure.lower()} procedure and retain objective evidence." for specific in specifics]
-            seed = list(specifics) or ["required controls", "assigned responsibilities", "records and monitoring"]
-            pad_index = 0
-            while len(criteria) < 15:
-                if pad_index < len(governance):
-                    criteria.append(f"{procedure} — {governance[pad_index]}")
-                else:
-                    specific = seed[pad_index % len(seed)]
-                    criteria.append(f"{procedure} — sample a recent work activity and verify that {specific.lower()} was implemented, recorded and reviewed.")
-                pad_index += 1
-            expanded[procedure] = (clauses, criteria[:15])
-        # Audit-specific custom procedure records extend the starter library without changing
-        # any other module. Custom checklists are not represented as officially verified unless reviewed.
-        try:
-            for record in db.fetchall("SELECT * FROM audit_procedure_records WHERE active=1 ORDER BY title"):
-                try:
-                    custom_items = json.loads(safe(record["checklist_json"]) or "[]")
-                    if not isinstance(custom_items, list): custom_items = []
-                except Exception:
-                    custom_items = []
-                if custom_items:
-                    expanded[safe(record["title"])] = (safe(record["clause_references"]) or "Company procedure review", [str(x) for x in custom_items if str(x).strip()])
-        except Exception:
-            logging.exception("Unable to load custom Audit Procedure Library records")
-        return expanded
+    def _aud_readonly(self, table):
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
 
-    def audit_planning_center(self):
-        d=QDialog(self); d.setWindowTitle("Audit Planning, Inspection Checklists & Findings Register")
-        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint); d.setSizeGripEnabled(True)
-        screen=d.screen() or QApplication.primaryScreen()
-        if screen:
-            g=screen.availableGeometry(); d.setGeometry(g); d.setMinimumSize(min(700,g.width()),min(500,g.height()))
-        else: d.resize(1200,800)
-        root=QVBoxLayout(d)
-        heading=QLabel("HSE AUDIT PLANNING & ASSURANCE"); heading.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:8px;")
-        root.addWidget(heading)
-        intro=QLabel("Risk-based internal audit schedule, procedure compliance audits, controlled-document and record sampling, clause-based findings, evidence traceability and corrective-action follow-up.")
-        intro.setWordWrap(True); root.addWidget(intro)
-        tabs=QTabWidget(); root.addWidget(tabs,1)
-
-        # ----- Schedule tab -----
-        sched=QWidget(); sl=QVBoxLayout(sched)
-        target_note=QLabel("Planning target: 4 procedure audits per month  |  High risk: every 6 months  |  Medium risk: annually  |  Low risk: every 18 months")
-        target_note.setWordWrap(True); target_note.setStyleSheet("padding:8px;background:#E8F0FA;color:#17365D;font-weight:bold;border:1px solid #C7D7EA;border-radius:4px;")
-        sl.addWidget(target_note)
-        sbar=QHBoxLayout(); add=QPushButton("+ New Scheduled Audit"); edit=QPushButton("Edit Selected"); reschedule=QPushButton("Reschedule Selected Dates"); delete=QPushButton("Delete Selected"); sbar.addWidget(add); sbar.addWidget(edit); sbar.addWidget(reschedule); sbar.addWidget(delete); sbar.addStretch(); sl.addLayout(sbar)
-        schedule_table=QTableWidget(0,10); schedule_table.setHorizontalHeaderLabels(["ID","Procedure / Audit Topic","Audit Area","Risk","Frequency","Planned Date","Owner","Status","Linked Audit","Notes"]); schedule_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); schedule_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); schedule_table.setAlternatingRowColors(True); schedule_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); schedule_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); schedule_table.horizontalHeader().setStretchLastSection(True); sl.addWidget(schedule_table,1)
-        schedule_table.setColumnHidden(0,True)
-        schedule_table.setColumnHidden(8,True)  # linkage is maintained internally; avoid a confusing manual-link column.
-        proc_names=list(self._audit_procedure_library().keys())
-        def schedule_selected_ids():
-            ids=[]
-            for idx in schedule_table.selectionModel().selectedRows():
-                item=schedule_table.item(idx.row(),0)
-                if item:
-                    try: ids.append(int(item.text()))
-                    except Exception: pass
-            if not ids and schedule_table.currentRow()>=0 and schedule_table.item(schedule_table.currentRow(),0):
-                try: ids=[int(schedule_table.item(schedule_table.currentRow(),0).text())]
-                except Exception: pass
-            return list(dict.fromkeys(ids))
-        def schedule_selected_id():
-            ids=schedule_selected_ids()
-            return ids[0] if ids else None
-        def load_schedule():
-            rows=db.fetchall("SELECT s.*,a.number AS audit_number FROM audit_schedule s LEFT JOIN audits a ON a.id=s.linked_audit_id ORDER BY s.planned_date,s.id")
-            schedule_table.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                vals=[r["id"],r["procedure_name"],r["area"] if "area" in r.keys() else "",r["risk_level"],r["frequency"],r["planned_date"],r["owner"],r["status"],r["audit_number"] or "",r["notes"]]
-                for c,v in enumerate(vals): schedule_table.setItem(i,c,QTableWidgetItem(safe(v)))
-                if safe(r["status"]).lower() in ("overdue","overdue - action required"):
-                    for c in range(schedule_table.columnCount()):
-                        schedule_table.item(i,c).setBackground(QColor("#FCE4D6"))
-        def edit_schedule(schedule_id=None):
-            row=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(schedule_id,)) if schedule_id else None
-            form=QDialog(d); form.setWindowTitle("Scheduled Audit Plan"); form.resize(700,580); fl=QFormLayout(form)
-            procedure=QComboBox(); procedure.addItems(proc_names)
-            risk=QComboBox(); risk.addItems(["High","Medium","Low"])
-            freq=QComboBox(); freq.addItems(["Every 6 months","Once per year","Every 18 months"])
-            planned=QDateEdit(); planned.setCalendarPopup(True); planned.setDisplayFormat("dd-MMM-yyyy"); planned.setDate(QDate.currentDate().addMonths(1))
-            area=QLineEdit(); area.setPlaceholderText("Worksite, department or audited area")
-            owner=QLineEdit(); owner.setPlaceholderText("Audit owner / lead auditor")
-            stat=QComboBox(); stat.addItems(["Planned","In Progress","Completed","Deferred","Cancelled"])
-            notes=QTextEdit(); notes.setMaximumHeight(100)
-            fl.addRow("Procedure / Audit Topic",procedure); fl.addRow("Audit Area / Department",area); fl.addRow("Risk Level",risk); fl.addRow("Frequency",freq); fl.addRow("Planned Date",planned); fl.addRow("Owner / Lead Auditor",owner); fl.addRow("Plan Status",stat); fl.addRow("Notes / Scope",notes)
-            def update_frequency():
-                freq.setCurrentText({"High":"Every 6 months","Medium":"Once per year","Low":"Every 18 months"}.get(risk.currentText(),"Once per year"))
-            risk.currentTextChanged.connect(update_frequency)
-            if row:
-                procedure.setCurrentText(safe(row["procedure_name"])); area.setText(safe(row["area"] if "area" in row.keys() else "")); risk.setCurrentText(safe(row["risk_level"])); freq.setCurrentText(safe(row["frequency"])); owner.setText(safe(row["owner"])); stat.setCurrentText(safe(row["status"])); notes.setPlainText(safe(row["notes"]))
-                try: planned.setDate(QDate.fromString(safe(row["planned_date"]),"yyyy-MM-dd"))
-                except Exception: pass
-            buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(buttons)
-            def save_plan():
-                now=datetime.now().isoformat(timespec="seconds")
-                preserved_link = row["linked_audit_id"] if row and "linked_audit_id" in row.keys() else None
-                values=(procedure.currentText(),area.text().strip(),risk.currentText(),freq.currentText(),planned.date().toString("yyyy-MM-dd"),owner.text().strip(),stat.currentText(),preserved_link,notes.toPlainText().strip(),now)
-                if row:
-                    db.execute("UPDATE audit_schedule SET procedure_name=?,area=?,risk_level=?,frequency=?,planned_date=?,owner=?,status=?,linked_audit_id=?,notes=?,updated_at=? WHERE id=?",values+(schedule_id,))
-                else:
-                    db.execute("INSERT INTO audit_schedule(procedure_name,area,risk_level,frequency,planned_date,owner,status,linked_audit_id,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",values)
-                form.accept()
-            buttons.accepted.connect(save_plan); buttons.rejected.connect(form.reject)
-            if form.exec()==QDialog.DialogCode.Accepted:
-                load_schedule(); load_checklist_schedule()
-        add.clicked.connect(lambda:edit_schedule())
-        edit.clicked.connect(lambda:edit_schedule(schedule_selected_id()) if schedule_selected_id() else QMessageBox.information(d,"Select Plan","Select a scheduled audit first."))
-        def reschedule_plans():
-            ids=schedule_selected_ids()
-            if not ids:return QMessageBox.information(d,"Select Plans","Select one or more scheduled audits first.")
-            form=QDialog(d); form.setWindowTitle("Reschedule Selected Audits"); fl=QFormLayout(form)
-            dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); dt.setDate(QDate.currentDate().addMonths(1)); fl.addRow(f"New planned date for {len(ids)} selected audit(s)",dt)
-            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(bb)
-            bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
-            if form.exec()==QDialog.DialogCode.Accepted:
-                for sid in ids: db.execute("UPDATE audit_schedule SET planned_date=?,updated_at=? WHERE id=?",(dt.date().toString("yyyy-MM-dd"),datetime.now().isoformat(timespec="seconds"),sid))
-                load_schedule(); load_checklist_schedule()
-        def delete_plan():
-            ids=schedule_selected_ids()
-            if not ids:return QMessageBox.information(d,"Select Plans","Select one or more scheduled audits first.")
-            if QMessageBox.question(d,"Delete Scheduled Audits",f"Delete {len(ids)} selected schedule(s) and their saved checklist responses? Existing Audit Register records and findings will not be deleted.")==QMessageBox.StandardButton.Yes:
-                for sid in ids: db.execute("DELETE FROM audit_schedule WHERE id=?",(sid,))
-                load_schedule(); load_checklist_schedule()
-        reschedule.clicked.connect(reschedule_plans)
-        delete.clicked.connect(delete_plan)
-        load_schedule(); tabs.addTab(sched,"Audit Schedule")
-
-        # ----- Internal audit checklist tab -----
-        check=QWidget(); cl=QVBoxLayout(check)
-        cbar=QHBoxLayout(); cbar.addWidget(QLabel("Planned audits — select multiple using the tick-box dropdown:"))
-        schedule_combo=QComboBox(); schedule_combo.setEditable(True); schedule_combo.lineEdit().setReadOnly(True); schedule_combo.lineEdit().setPlaceholderText("Select planned audits…"); schedule_combo.setMinimumWidth(420); schedule_combo.setMinimumHeight(34); schedule_model=QStandardItemModel(schedule_combo); schedule_combo.setModel(schedule_model); cl.addWidget(schedule_combo)
-        def schedule_combo_summary():
-            count=sum(1 for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked)
-            schedule_combo.setCurrentText(f"{count} planned audit(s) selected" if count else "Select planned audits…")
-        def schedule_combo_changed(index):
-            item=schedule_model.item(index)
-            if item:
-                item.setCheckState(Qt.CheckState.Unchecked if item.checkState()==Qt.CheckState.Checked else Qt.CheckState.Checked)
-                schedule_combo_summary()
-        schedule_combo.activated.connect(schedule_combo_changed)
-        load_btn=QPushButton("Load Selected Checklists"); save_btn=QPushButton("Save Checklist & Update Findings"); export_checklist_btn=QPushButton("Export Excel"); export_word_btn=QPushButton("Export Word"); print_checklist_btn=QPushButton("Print Checklist")
-        for b in [load_btn,save_btn,export_checklist_btn,export_word_btn,print_checklist_btn]: cbar.addWidget(b)
-        cl.addLayout(cbar)
-        score=QLabel("Procedure compliance: Not calculated"); score.setStyleSheet("font-weight:bold;color:#17365D;padding:8px;background:#E8F0FA;border:1px solid #C7D7EA;"); cl.addWidget(score)
-        checklist_table=QTableWidget(0,14); checklist_table.setHorizontalHeaderLabels(["Audit Number","Procedure No.","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","Severity","CAPA Required","CAPA Not Required Justification"])
-        checklist_table.setAlternatingRowColors(True); checklist_table.setWordWrap(True); checklist_table.setTextElideMode(Qt.TextElideMode.ElideNone); checklist_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); checklist_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); checklist_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); checklist_table.setMinimumHeight(440); checklist_table.verticalHeader().setDefaultSectionSize(118); checklist_table.verticalHeader().setMinimumSectionSize(90)
-        checklist_table.setStyleSheet("QTableWidget{gridline-color:#C9D3DF;font-size:10pt;} QTableWidget::item{padding:7px;} QHeaderView::section{background:#17365D;color:white;font-weight:bold;padding:8px;border:1px solid #D7E0EA;}")
-        for col,width in {0:150,1:105,2:220,3:420,4:115,5:155,6:150,7:280,8:230,9:210,10:135,11:105,12:120,13:230}.items(): checklist_table.setColumnWidth(col,width)
-        cl.addWidget(checklist_table,1)
-        def load_checklist_schedule():
-            selected={schedule_model.item(i).data(Qt.ItemDataRole.UserRole) for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked}
-            schedule_model.clear()
-            for r in db.fetchall("SELECT id,procedure_name,planned_date,status FROM audit_schedule ORDER BY planned_date,id"):
-                item=QStandardItem(f"{r['planned_date']} | {r['procedure_name']} | {r['status']}"); item.setData(r["id"],Qt.ItemDataRole.UserRole); item.setFlags(Qt.ItemFlag.ItemIsEnabled|Qt.ItemFlag.ItemIsUserCheckable); item.setCheckable(True); item.setCheckState(Qt.CheckState.Checked if r["id"] in selected else Qt.CheckState.Unchecked); schedule_model.appendRow(item)
-            schedule_combo.setCurrentIndex(-1); schedule_combo_summary()
-        def selected_schedule_ids():
-            return [int(schedule_model.item(i).data(Qt.ItemDataRole.UserRole)) for i in range(schedule_model.rowCount()) if schedule_model.item(i).checkState()==Qt.CheckState.Checked]
-        def add_checklist_row(sid, sr, n, item_text, clause, saved=None):
-            row=checklist_table.rowCount(); checklist_table.insertRow(row)
-            proc=safe(sr["procedure_name"]); audit_id=ensure_internal_audit(sid,sr)
-            ar=db.fetchone("SELECT number FROM audits WHERE id=?",(audit_id,)); audit_no=safe(ar["number"]) if ar else f"IA-PLAN-{sid:04d}"
-            proc_no=f"PROC-{list(self._audit_procedure_library().keys()).index(proc)+1:02d}"
-            for col,val in enumerate([audit_no,proc_no,f"{proc}\nPlanned: {safe(sr['planned_date'])}",item_text]):
-                cell=QTableWidgetItem(safe(val)); cell.setTextAlignment(Qt.AlignmentFlag.AlignLeft|Qt.AlignmentFlag.AlignVCenter); checklist_table.setItem(row,col,cell)
-            checklist_table.item(row,0).setData(Qt.ItemDataRole.UserRole,sid); checklist_table.item(row,1).setData(Qt.ItemDataRole.UserRole,n)
-            clauses=[x.strip() for x in safe(clause).replace("+",",").split(",") if x.strip()]
-            checklist_table.setItem(row,4,QTableWidgetItem(clauses[0] if clauses else "—")); checklist_table.setItem(row,5,QTableWidgetItem("\n".join(clauses[1:]) if len(clauses)>1 else "—"))
-            result=QComboBox(); result.addItems(["Not Audited","Conforming","Nonconformity","N/A","Positive Observation","Opportunity for Improvement"])
-            comments=QTextEdit(); comments.setPlaceholderText("Record objective evidence: procedure/document ID and revision, sample/record reviewed, interview reference, gap and clause-based rationale."); comments.setMinimumHeight(72); comments.setMaximumHeight(112)
-            evidence=QLineEdit(); evidence.setPlaceholderText("Attachment path / evidence reference"); browse=QPushButton("Browse…"); browse.setMaximumWidth(82)
-            evidence_host=QWidget(); evidence_layout=QHBoxLayout(evidence_host); evidence_layout.setContentsMargins(3,3,3,3); evidence_layout.addWidget(evidence,1); evidence_layout.addWidget(browse)
-            browse.clicked.connect(lambda checked=False, field=evidence: field.setText(QFileDialog.getOpenFileName(d,"Select Audit Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")[0] or field.text()))
-            owner=QLineEdit(); owner.setPlaceholderText("Finding owner / responsible person")
-            due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy"); due.setDate(QDate.currentDate().addDays(30))
-            severity=QComboBox(); severity.addItems(["Low","Medium","High","Critical"])
-            capa_reason=QLineEdit(); capa_reason.setPlaceholderText("If CAPA = No, enter authorized justification")
-            capa=QComboBox(); capa.addItems(["No","Yes"])
-            if saved:
-                old_result=safe(saved["result"]); result.setCurrentText({"Yes":"Conforming","No":"Nonconformity","N/A":"N/A"}.get(old_result,old_result if old_result in ["Not Audited","Conforming","Nonconformity","N/A"] else "Not Audited"))
-                comments.setPlainText(safe(saved["comments"])); evidence.setText(safe(saved["evidence_path"])); owner.setText(safe(saved["responsible"])); capa.setCurrentText("Yes" if ("capa_required" in saved.keys() and saved["capa_required"]) else "No")
-                if "severity" in saved.keys(): severity.setCurrentText(safe(saved["severity"]) or "Medium")
-                if "capa_reason" in saved.keys(): capa_reason.setText(safe(saved["capa_reason"]))
-                try: due.setDate(QDate.fromString(safe(saved["target_date"]),"yyyy-MM-dd"))
-                except Exception: pass
-            checklist_table.setCellWidget(row,6,result); checklist_table.setCellWidget(row,7,comments); checklist_table.setCellWidget(row,8,evidence_host); checklist_table.setCellWidget(row,9,owner); checklist_table.setCellWidget(row,10,due); checklist_table.setCellWidget(row,11,severity); checklist_table.setCellWidget(row,12,capa); checklist_table.setCellWidget(row,13,capa_reason)
-            for col in range(checklist_table.columnCount()):
-                it=checklist_table.item(row,col)
-                if it: it.setToolTip(it.text())
-            result.currentTextChanged.connect(lambda *_:update_score())
-        def load_checklist():
-            ids=selected_schedule_ids(); checklist_table.setRowCount(0)
-            if not ids: score.setText("Select one or more planned audits first."); return
-            lib=self._audit_procedure_library()
-            for sid in ids:
-                sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
-                if not sr: continue
-                proc=safe(sr["procedure_name"]); clause,items=lib.get(proc,("",[]))
-                saved={r["item_no"]:r for r in db.fetchall("SELECT * FROM audit_checklist_responses WHERE schedule_id=? ORDER BY item_no",(sid,))}
-                for n,item_text in enumerate(items,1): add_checklist_row(sid,sr,n,item_text,clause,saved.get(n))
-            update_score()
-        def update_score():
-            yes=no=0
-            for row in range(checklist_table.rowCount()):
-                w=checklist_table.cellWidget(row,6)
-                if not w: continue
-                if w.currentText()=="Conforming": yes+=1
-                elif w.currentText()=="Nonconformity": no+=1
-            total=yes+no; pct=round(yes*100/total) if total else 0
-            score.setText(f"Procedure compliance: {pct}%  |  Conforming: {yes}  |  Nonconformities: {no}  |  Not Audited / N/A excluded")
-        def ensure_internal_audit(sid, sr):
-            linked=sr["linked_audit_id"]; audit=db.fetchone("SELECT id,audit_type FROM audits WHERE id=?",(linked,)) if linked else None
-            if audit and "internal audit" in safe(audit["audit_type"]).lower(): return linked
-            audit_date=safe(sr["planned_date"]) or date.today().isoformat()
-            number=self._next_audit_reference("Internal Audit", audit_date)
-            db.execute("INSERT INTO audits(number,audit_date,audit_type,standard,project,location,department,auditor,lead_auditor,auditee,scope,objective,criteria,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(number,audit_date,"Internal Audit","ISO 45001","",safe(sr["area"] if "area" in sr.keys() else ""),"HSE",safe(sr["owner"]),safe(sr["owner"]),"",f"Procedure compliance audit: {safe(sr['procedure_name'])}","Determine conformity, adequacy and effectiveness of the controlled procedure and associated records","Approved procedure, ISO 45001 and applicable legal/client/company requirements","Draft",datetime.now().isoformat(timespec="seconds")))
-            aid=db.fetchone("SELECT id FROM audits WHERE number=?",(number,))["id"]; db.execute("UPDATE audit_schedule SET linked_audit_id=?,updated_at=? WHERE id=?",(aid,datetime.now().isoformat(timespec="seconds"),sid)); return aid
-        def save_checklist():
-            ids=selected_schedule_ids()
-            if not ids:return QMessageBox.information(d,"Select Audits","Select one or more planned audits from the tick-box dropdown first.")
-            updated=[]
-            for row in range(checklist_table.rowCount()):
-                no_item=checklist_table.item(row,0); procno_item=checklist_table.item(row,1); criterion=checklist_table.item(row,3)
-                if not no_item or not procno_item or not criterion: continue
-                sid=no_item.data(Qt.ItemDataRole.UserRole); n=procno_item.data(Qt.ItemDataRole.UserRole)
-                if sid is None or n is None: continue
-                sid=int(sid); n=int(n); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
-                if not sr: continue
-                proc=safe(sr["procedure_name"]); clause,items=self._audit_procedure_library().get(proc,("",[])); item_text=criterion.text()
-                result_widget=checklist_table.cellWidget(row,6); comments_widget=checklist_table.cellWidget(row,7); evidence_host=checklist_table.cellWidget(row,8); owner_edit=checklist_table.cellWidget(row,9); due_widget=checklist_table.cellWidget(row,10); severity_widget=checklist_table.cellWidget(row,11); capa_widget=checklist_table.cellWidget(row,12); capa_reason_widget=checklist_table.cellWidget(row,13)
-                ui_result=result_widget.currentText() if result_widget else "Not Audited"; result={"Conforming":"Yes","Nonconformity":"No","N/A":"N/A"}.get(ui_result,"Not Audited")
-                comments=comments_widget.toPlainText().strip() if comments_widget else ""; evidence=evidence_host.findChild(QLineEdit).text().strip() if evidence_host else ""
-                responsible=owner_edit.text().strip() if isinstance(owner_edit,QLineEdit) else ""; target_date=due_widget.date().toString("yyyy-MM-dd") if isinstance(due_widget,QDateEdit) else ""
-                capa_required=1 if capa_widget and capa_widget.currentText()=="Yes" else 0
-                severity_value=severity_widget.currentText() if isinstance(severity_widget,QComboBox) else "Medium"
-                capa_reason_value=capa_reason_widget.text().strip() if isinstance(capa_reason_widget,QLineEdit) else ""
-                if ui_result=="Nonconformity" and (not comments or not evidence):
-                    QMessageBox.warning(d,"Finding Evidence Required",f"For nonconformity in {proc}, enter objective evidence/gap and an evidence reference or attachment path before saving."); return
-                if ui_result=="Nonconformity" and not responsible:
-                    QMessageBox.warning(d,"Finding Owner Required",f"Assign a responsible person for the finding in {proc}."); return
-                if ui_result=="Nonconformity" and not capa_required and not capa_reason_value:
-                    QMessageBox.warning(d,"CAPA Justification Required",f"Explain why CAPA is not required for the nonconformity in {proc}."); return
-                existing_response=db.fetchone("SELECT capa_number FROM audit_checklist_responses WHERE schedule_id=? AND item_no=?",(sid,n)); capa_number=safe(existing_response["capa_number"]) if existing_response else ""
-                db.execute("INSERT INTO audit_checklist_responses(schedule_id,item_no,procedure_name,iso_clause,checklist_item,result,comments,evidence_path,updated_at,responsible,target_date,capa_required,capa_number,severity,capa_reason,finding_classification) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(schedule_id,item_no) DO UPDATE SET procedure_name=excluded.procedure_name,iso_clause=excluded.iso_clause,checklist_item=excluded.checklist_item,result=excluded.result,comments=excluded.comments,evidence_path=excluded.evidence_path,updated_at=excluded.updated_at,responsible=excluded.responsible,target_date=excluded.target_date,capa_required=excluded.capa_required,capa_number=CASE WHEN excluded.capa_number='' THEN audit_checklist_responses.capa_number ELSE excluded.capa_number END,severity=excluded.severity,capa_reason=excluded.capa_reason,finding_classification=excluded.finding_classification",(sid,n,proc,clause,item_text,result,comments,evidence,datetime.now().isoformat(timespec="seconds"),responsible,target_date,capa_required,capa_number,severity_value,capa_reason_value,"Minor Nonconformity"))
-                aid=ensure_internal_audit(sid,sr); existing_f=db.fetchone("SELECT id,status,capa_number FROM audit_findings WHERE source_schedule_id=? AND source_item_no=?",(sid,n))
-                if result=="No":
-                    detail=f"Procedure compliance nonconformity: {item_text}. Objective evidence / gap: {comments}".strip(); corrective=f"Analyse root cause; define and implement corrective action against the approved procedure; assign an owner and due date; verify effectiveness. Evidence: {evidence}".strip()
-                    if existing_f:
-                        fid=existing_f["id"]; db.execute("UPDATE audit_findings SET audit_id=?,procedure_name=?,clause=?,finding_type='Minor Nonconformity',finding_detail=?,observation=?,evidence=?,corrective_action=?,responsible=?,target_date=?,capa_required=?,severity=?,capa_reason=?,status=CASE WHEN status='Closed' THEN 'Open' ELSE status END,updated_at=? WHERE id=?",(aid,proc,clause,detail,detail,evidence,corrective,responsible,target_date,capa_required,severity_value,capa_reason_value,datetime.now().isoformat(timespec="seconds"),fid))
-                    else:
-                        next_no=db.fetchone("SELECT COALESCE(MAX(finding_number),0)+1 AS n FROM audit_findings WHERE audit_id=?",(aid,))["n"]
-                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,finding_type,finding_detail,observation,evidence,corrective_action,responsible,target_date,status,created_at,updated_at,source_schedule_id,source_item_no,procedure_name,capa_required,capa_number,severity,capa_reason,finding_reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(aid,next_no,"ISO 45001",clause,"Minor Nonconformity",detail,detail,evidence,corrective,responsible,target_date,"Open",datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),sid,n,proc,capa_required,"",severity_value,capa_reason_value,f"AF-{datetime.now().year}-{aid:04d}-{next_no:03d}"))
-                        fid=db.fetchone("SELECT id FROM audit_findings WHERE source_schedule_id=? AND source_item_no=? ORDER BY id DESC LIMIT 1",(sid,n))["id"]
-                    db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Checklist finding saved",safe(existing_f["status"]) if existing_f else "","Open",capa_reason_value,evidence,safe(db.setting("current_user", "") or "System User"),datetime.now().isoformat(timespec="seconds")))
-                    if capa_required:
-                        fr=db.fetchone("SELECT capa_number FROM audit_findings WHERE id=?",(fid,)); capano=safe(fr["capa_number"]) if fr else ""
-                        if not capano:
-                            capano=next_number("HSE-CAPA","capa"); db.execute("INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(capano,"Audit",f"{no_item.text()} / {proc} / Finding {n}",detail,"",corrective,"",responsible,severity_value,target_date,"Open",datetime.now().isoformat(timespec="seconds")))
-                            db.execute("UPDATE audit_findings SET capa_number=? WHERE id=?",(capano,fid)); db.execute("UPDATE audit_checklist_responses SET capa_number=? WHERE schedule_id=? AND item_no=?",(capano,sid,n))
-                updated.append(sid)
-            for sid in set(updated):db.execute("UPDATE audit_schedule SET status='Completed',updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),sid))
-            update_score(); load_findings(); load_internal_register(); load_dashboard()
-            QMessageBox.information(d,"Checklist Saved","Procedure compliance checklist saved. Nonconformities are listed in the Audit Findings Register; CAPA-required findings are linked to CAPA Tracking Register.")
-        def checklist_html():
-            rows=[]
-            for row in range(checklist_table.rowCount()):
-                cells=[safe(checklist_table.item(row,c).text() if checklist_table.item(row,c) else "") for c in range(6)]
-                result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""
-                comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""
-                owner_w=checklist_table.cellWidget(row,9); due_w=checklist_table.cellWidget(row,10); sev_w=checklist_table.cellWidget(row,11); capa_w=checklist_table.cellWidget(row,12); reason_w=checklist_table.cellWidget(row,13); owner=owner_w.text() if isinstance(owner_w,QLineEdit) else ""; due=due_w.date().toString("dd-MMM-yyyy") if isinstance(due_w,QDateEdit) else ""; severity=sev_w.currentText() if isinstance(sev_w,QComboBox) else ""; capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No"; reason=reason_w.text() if isinstance(reason_w,QLineEdit) else ""
-                rows.append("<tr>"+"".join(f"<td>{safe(v)}</td>" for v in cells)+f"<td>{safe(result)}</td><td>{safe(comments)}</td><td>{safe(evidence)}</td><td>{safe(owner)}</td><td>{safe(due)}</td><td>{safe(severity)}</td><td>{safe(capa)}</td><td>{safe(reason)}</td></tr>")
-            logo=report_logo_path(); logo_html=f'<p><img src="{logo}" width="120"></p>' if logo and Path(logo).exists() else ""
-            headers="<th>Audit No.</th><th>Procedure No.</th><th>Procedure / Date</th><th>Procedure Compliance Criteria</th><th>ISO Main Clause</th><th>Sub-clause(s)</th><th>Result</th><th>Objective Evidence / Gap</th><th>Evidence Attachment</th><th>Responsible Person</th><th>Target Date</th><th>Severity</th><th>CAPA Required</th><th>CAPA Not Required Justification</th>"
-            return f'<html><head><style>body{{font-family:Arial;font-size:9pt}}h1{{color:#17365D}}table{{border-collapse:collapse;width:100%}}th{{background:#17365D;color:white}}td,th{{border:1px solid #aab7c4;padding:6px;vertical-align:top;white-space:pre-wrap}}</style></head><body>{logo_html}<h1>{safe(company_name())} — INTERNAL AUDIT CHECKLIST</h1><p>Procedure conformity, adequacy, implementation and objective evidence.</p><table><tr>{headers}</tr>{"".join(rows)}</table></body></html>'
-        def print_checklist():
-            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
-            printer=QPrinter(QPrinter.PrinterMode.HighResolution); printer.setPageOrientation(QPrinter.Orientation.Landscape); dialog=QPrintDialog(printer,d)
-            if dialog.exec()==QDialog.DialogCode.Accepted:
-                doc=QTextDocument(); doc.setHtml(checklist_html()); doc.print_(printer)
-        def export_checklist():
-            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
-            path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.xlsx","Excel Workbook (*.xlsx)")
-            if not path:return
-            try:
-                wb=Workbook(); ws=wb.active; ws.title="Procedure Audit"; ws.merge_cells("A1:N1"); ws["A1"]=f"{company_name()} — INTERNAL AUDIT / PROCEDURE COMPLIANCE CHECKLIST"; ws["A1"].font=Font(bold=True,size=15,color="FFFFFF"); ws["A1"].fill=PatternFill("solid",fgColor="17365D"); ws["A1"].alignment=Alignment(horizontal="center",vertical="center"); ws.append(["Audit Number","Procedure Number","Procedure / Planned Date","Procedure Compliance Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Compliance Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person / Action Owner","Target Date","Severity","CAPA Required","CAPA Not Required Justification"])
-                for row in range(checklist_table.rowCount()):
-                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)]; result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else ""; comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else ""; evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else ""; owner_w=checklist_table.cellWidget(row,9); due_w=checklist_table.cellWidget(row,10); sev_w=checklist_table.cellWidget(row,11); capa_w=checklist_table.cellWidget(row,12); reason_w=checklist_table.cellWidget(row,13); owner=owner_w.text() if isinstance(owner_w,QLineEdit) else ""; due=due_w.date().toString("yyyy-MM-dd") if isinstance(due_w,QDateEdit) else ""; sev=sev_w.currentText() if isinstance(sev_w,QComboBox) else ""; capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No"; reason=reason_w.text() if isinstance(reason_w,QLineEdit) else ""; ws.append(vals+[result,comments,evidence,owner,due,sev,capa,reason])
-                for cell in ws[2]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="4472C4");cell.alignment=Alignment(wrap_text=True,vertical="center")
-                for row in ws.iter_rows(min_row=3):
-                    for cell in row:cell.alignment=Alignment(wrap_text=True,vertical="top")
-                for col,width in {"A":19,"B":17,"C":30,"D":68,"E":18,"F":22,"G":20,"H":48,"I":35,"J":28,"K":17,"L":14,"M":16,"N":35}.items():ws.column_dimensions[col].width=width
-                ws.row_dimensions[1].height=32;ws.row_dimensions[2].height=42
-                for rn in range(3,ws.max_row+1):ws.row_dimensions[rn].height=86
-                try:
-                    logo=report_logo_path()
-                    if logo and Path(logo).exists():img=XLImage(str(logo));img.width=95;img.height=38;ws.add_image(img,"A1")
-                except Exception:logging.exception("Audit checklist logo embedding failed")
-                ws.freeze_panes="A3";ws.auto_filter.ref=f"A2:N{ws.max_row}";wb.save(path);QMessageBox.information(d,"Export Complete","Procedure compliance audit checklist exported successfully.")
-            except Exception as exc:logging.exception("Audit checklist Excel export failed");QMessageBox.critical(d,"Export Failed",f"Unable to export checklist.\n\n{exc}")
-        def export_checklist_word():
-            if checklist_table.rowCount()==0:return QMessageBox.information(d,"No Checklist","Load one or more audit checklists first.")
-            path,_=QFileDialog.getSaveFileName(d,"Export Internal Audit Checklist","Internal_Audit_Checklist.docx","Word Document (*.docx)")
-            if not path:return
-            try:
-                doc=Document();sec=doc.sections[0];sec.orientation=WD_ORIENT.LANDSCAPE;sec.page_width,sec.page_height=sec.page_height,sec.page_width;sec.top_margin=Inches(.35);sec.bottom_margin=Inches(.35);sec.left_margin=Inches(.35);sec.right_margin=Inches(.35);hp=sec.header.paragraphs[0];hp.alignment=WD_ALIGN_PARAGRAPH.CENTER;logo=report_logo_path()
-                if logo and Path(logo).exists():
-                    try:hp.add_run().add_picture(str(logo),width=Inches(.9),height=Inches(.45))
-                    except Exception:logging.exception("Audit checklist Word logo failed")
-                p=doc.add_paragraph();p.alignment=WD_ALIGN_PARAGRAPH.CENTER;r=p.add_run(f"{company_name()}\nINTERNAL AUDIT — PROCEDURE COMPLIANCE CHECKLIST");r.bold=True;r.font.size=Pt(15)
-                table=doc.add_table(rows=1,cols=14);table.alignment=WD_TABLE_ALIGNMENT.CENTER;table.autofit=False;headers=["Audit No.","Procedure No.","Procedure / Date","Audit Criteria","Primary ISO Clause","Other Applicable Clauses / Sub-clauses","Result","Objective Evidence / Gap","Evidence Attachment","Responsible Person","Target Date","Severity","CAPA Required","CAPA Not Required Justification"]
-                for i,h in enumerate(headers):table.cell(0,i).text=h
-                for row in range(checklist_table.rowCount()):
-                    vals=[checklist_table.item(row,c).text() if checklist_table.item(row,c) else "" for c in range(6)];result=checklist_table.cellWidget(row,6).currentText() if checklist_table.cellWidget(row,6) else "";comments=checklist_table.cellWidget(row,7).toPlainText() if checklist_table.cellWidget(row,7) else "";evidence=checklist_table.cellWidget(row,8).findChild(QLineEdit).text() if checklist_table.cellWidget(row,8) else "";owner_w=checklist_table.cellWidget(row,9);due_w=checklist_table.cellWidget(row,10);sev_w=checklist_table.cellWidget(row,11);capa_w=checklist_table.cellWidget(row,12);reason_w=checklist_table.cellWidget(row,13);owner=owner_w.text() if isinstance(owner_w,QLineEdit) else "";due=due_w.date().toString("dd-MMM-yyyy") if isinstance(due_w,QDateEdit) else "";sev=sev_w.currentText() if isinstance(sev_w,QComboBox) else "";capa=capa_w.currentText() if isinstance(capa_w,QComboBox) else "No";reason=reason_w.text() if isinstance(reason_w,QLineEdit) else "";cells=table.add_row().cells
-                    for i,v in enumerate(vals+[result,comments,evidence,owner,due,sev,capa,reason]):cells[i].text=safe(v);cells[i].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
-                style_docx_table(table,header=True,font_size=6);widths=[.65,.65,1.1,1.65,.55,.6,.65,1.25,1.0,.9,.65,.55,.65,1.0]
-                for row in table.rows:
-                    for i,c in enumerate(row.cells):c.width=Inches(widths[i])
-                doc.save(path);QMessageBox.information(d,"Export Complete","Word checklist exported successfully.")
-            except Exception as exc:logging.exception("Audit checklist Word export failed");QMessageBox.critical(d,"Export Failed",f"Unable to export Word checklist.\n\n{exc}")
-        load_btn.clicked.connect(load_checklist); save_btn.clicked.connect(save_checklist); export_checklist_btn.clicked.connect(export_checklist); export_word_btn.clicked.connect(export_checklist_word); print_checklist_btn.clicked.connect(print_checklist)
-        load_checklist_schedule(); tabs.addTab(check,"Internal Audit Checklist")
-
-        # ----- Findings register tab -----
-        findings=QWidget(); fvl=QVBoxLayout(findings)
-        fbar=QHBoxLayout(); fbar.addWidget(QLabel("Master Audit Findings Register — findings from internal, client, certification and other audit types")); finding_status_filter=QComboBox(); finding_status_filter.addItems(["All Findings","Open Findings","Closed Findings"]); fbar.addWidget(finding_status_filter); close_selected_findings=QPushButton("Close Selected Findings"); edit_finding_btn=QPushButton("Edit Selected Finding"); delete_finding_btn=QPushButton("Delete Selected Finding"); refresh_findings=QPushButton("Refresh"); fbar.addWidget(close_selected_findings); fbar.addWidget(edit_finding_btn); fbar.addWidget(delete_finding_btn); fbar.addWidget(refresh_findings); fvl.addLayout(fbar)
-        findings_table=QTableWidget(0,13); findings_table.setHorizontalHeaderLabels(["Audit Ref","Procedure","Finding #","Finding Type","Clause","Finding Detail / Reference","Corrective Action","Responsible","Target Date","Status","CAPA Reference","Audit ID","Finding ID"]); findings_table.setAlternatingRowColors(True); findings_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); findings_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); findings_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); findings_table.setWordWrap(True); findings_table.setTextElideMode(Qt.TextElideMode.ElideNone); findings_table.verticalHeader().setDefaultSectionSize(70); findings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive); findings_table.horizontalHeader().setStretchLastSection(True)
-        for col,width in {0:125,1:155,2:65,3:135,4:75,5:245,6:220,7:125,8:100,9:120,10:115}.items(): findings_table.setColumnWidth(col,width)
-        findings_table.setColumnHidden(11,True); findings_table.setColumnHidden(12,True); fvl.addWidget(findings_table,1)
-        def load_findings():
-            rows=db.fetchall("""SELECT f.*,a.number AS audit_ref,a.title AS audit_title,a.id AS parent_audit_id
-                FROM audit_findings f JOIN audits a ON a.id=f.audit_id
-                WHERE 1=1
-                ORDER BY CASE WHEN lower(COALESCE(f.status,''))='closed' THEN 1 ELSE 0 END,f.target_date,a.id,f.finding_number""")
-            if finding_status_filter.currentText()=="Open Findings": rows=[r for r in rows if safe(r["status"]).lower() not in ("closed","verified")]
-            elif finding_status_filter.currentText()=="Closed Findings": rows=[r for r in rows if safe(r["status"]).lower() in ("closed","verified")]
-            findings_table.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                vals=[r["audit_ref"],r["procedure_name"] if "procedure_name" in r.keys() and r["procedure_name"] else (r["audit_title"] or ""),r["finding_number"],r["finding_type"],r["clause"],r["finding_detail"] or r["observation"],r["corrective_action"],r["responsible"],r["target_date"],"OVERDUE" if overdue(safe(r["target_date"]),safe(r["status"])) else r["status"],safe(r["capa_number"] if "capa_number" in r.keys() else ""),r["parent_audit_id"],r["id"]]
-                for c,v in enumerate(vals):
-                    item=QTableWidgetItem(safe(v)); findings_table.setItem(i,c,item)
-                    if vals[9]=="OVERDUE": item.setBackground(QColor("#FCE4D6"))
-            findings_table.resizeRowsToContents()
-        def open_finding_audit():
-            rr=findings_table.currentRow()
-            if rr<0:return
-            aid=findings_table.item(rr,11).text()
-            if aid:
-                d.accept(); self.audit_workspace(int(aid),self.audits)
-        def close_selected_internal_findings():
-            ids=[]
-            for idx in findings_table.selectionModel().selectedRows():
-                item=findings_table.item(idx.row(),12)
-                if item and item.text().isdigit(): ids.append(int(item.text()))
-            if not ids:return QMessageBox.information(d,"Select Findings","Select one or more findings to close.")
-            if QMessageBox.question(d,"Close Findings",f"Review and close {len(ids)} selected finding(s)? CAPA-required findings can only close after the linked CAPA is completed.")==QMessageBox.StandardButton.Yes:
-                now=datetime.now().isoformat(timespec="seconds")
-                for fid in ids:
-                    fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-                    if not fr: continue
-                    if fr["capa_required"]:
-                        cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
-                        if not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed"):
-                            QMessageBox.warning(d,"CAPA Not Closed",f"Finding {safe(fr['finding_reference']) or fid} requires CAPA. Close it only after the linked CAPA is completed in the existing CAPA Tracking Register.")
-                            return
-                    elif not safe(fr["capa_reason"]):
-                        QMessageBox.warning(d,"Disposition Required",f"Finding {safe(fr['finding_reference']) or fid} has CAPA Required = No but no authorized justification. Edit the checklist disposition before closure.")
-                        return
-                    db.execute("UPDATE audit_findings SET status='Closed',verification_status='Verified',closure_date=?,verification='Verified from Internal Audit Findings Register',updated_at=? WHERE id=?",(date.today().isoformat(),now,fid))
-                    db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,user_name,timestamp) VALUES(?,?,?,?,?,?,?)",(fid,"Finding closed",safe(fr["status"]),"Closed","Closed after CAPA/disposition validation",safe(db.setting("current_user", "") or "System User"),now))
-                load_findings(); load_internal_register(); load_dashboard()
-        def edit_selected_finding():
-            rr=findings_table.currentRow()
-            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding to edit first.")
-            fid=int(findings_table.item(rr,12).text()); fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-            if not fr:return
-            form=QDialog(d); form.setWindowTitle("Edit Audit Finding"); form.resize(650,520); ff=QFormLayout(form)
-            detail=QTextEdit(); detail.setPlainText(safe(fr["finding_detail"] or fr["observation"]))
-            corrective=QTextEdit(); corrective.setPlainText(safe(fr["corrective_action"]))
-            responsible=QLineEdit(safe(fr["responsible"])); due=QDateEdit(); due.setCalendarPopup(True); due.setDisplayFormat("dd-MMM-yyyy")
-            try: due.setDate(QDate.fromString(safe(fr["target_date"]),"yyyy-MM-dd"))
-            except Exception: due.setDate(QDate.currentDate().addDays(30))
-            severity=QComboBox(); severity.addItems(["Low","Medium","High","Critical"]); severity.setCurrentText(safe(fr["severity"]) or "Medium")
-            status_edit=QComboBox(); status_edit.addItems(["Open","In Progress","Pending Verification","Closed"]); status_edit.setCurrentText(safe(fr["status"]) if safe(fr["status"]) in ["Open","In Progress","Pending Verification","Closed"] else "Open")
-            ff.addRow("Finding detail / evidence gap:",detail); ff.addRow("Corrective action:",corrective); ff.addRow("Responsible person:",responsible); ff.addRow("Target date:",due); ff.addRow("Severity:",severity); ff.addRow("Status:",status_edit)
-            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
-            if form.exec()!=QDialog.DialogCode.Accepted:return
-            if status_edit.currentText()=="Closed":
-                linked_capa=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
-                if fr["capa_required"] and (not linked_capa or safe(linked_capa["status"]).lower() not in ("closed","verified","complete","completed")):
-                    return QMessageBox.warning(form,"CAPA Not Closed","Complete the linked CAPA in the existing CAPA Tracking Register before closing this finding.")
-                if not fr["capa_required"] and not safe(fr["capa_reason"]):
-                    return QMessageBox.warning(form,"Disposition Required","Record an authorized reason for not requiring CAPA before closing this finding.")
-            now=datetime.now().isoformat(timespec="seconds")
-            db.execute("UPDATE audit_findings SET finding_detail=?,observation=?,corrective_action=?,responsible=?,target_date=?,severity=?,status=?,updated_at=? WHERE id=?",(detail.toPlainText().strip(),detail.toPlainText().strip(),corrective.toPlainText().strip(),responsible.text().strip(),due.date().toString("yyyy-MM-dd"),severity.currentText(),status_edit.currentText(),now,fid))
-            # Keep the existing linked CAPA record synchronized without creating another CAPA.
-            if safe(fr["capa_number"]):
-                db.execute("UPDATE capa SET finding=?,corrective_action=?,responsible=?,priority=?,target_date=? WHERE number=?",(detail.toPlainText().strip(),corrective.toPlainText().strip(),responsible.text().strip(),severity.currentText(),due.date().toString("yyyy-MM-dd"),safe(fr["capa_number"])))
-            load_findings(); load_verification(); load_dashboard()
-        def delete_selected_finding():
-            ids=[]
-            for idx in findings_table.selectionModel().selectedRows():
-                it=findings_table.item(idx.row(),12)
-                if it and it.text().isdigit():ids.append(int(it.text()))
-            if not ids and findings_table.currentRow()>=0 and findings_table.item(findings_table.currentRow(),12):ids=[int(findings_table.item(findings_table.currentRow(),12).text())]
-            if not ids:return QMessageBox.information(d,"Select Finding","Select one or more findings to delete first.")
-            if QMessageBox.question(d,"Delete Audit Finding",f"Delete {len(ids)} selected audit finding(s)? Any linked CAPA records will remain in the existing CAPA Tracking Register.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
-            for fid in ids:
-                db.execute("DELETE FROM audit_finding_history WHERE finding_id=?",(fid,)); db.execute("DELETE FROM audit_attachments WHERE finding_id=?",(fid,)); db.execute("DELETE FROM audit_findings WHERE id=?",(fid,))
-            load_findings(); load_verification(); load_dashboard()
-        close_selected_findings.clicked.connect(close_selected_internal_findings); edit_finding_btn.clicked.connect(edit_selected_finding); delete_finding_btn.clicked.connect(delete_selected_finding)
-        refresh_findings.clicked.connect(load_findings); finding_status_filter.currentTextChanged.connect(load_findings); findings_table.cellDoubleClicked.connect(lambda *_:open_finding_audit())
-        load_findings(); tabs.addTab(findings,"Internal Audit Findings")
-
-        # ----- Internal audit register / master data / dashboard -----
-        dash=QWidget(); dl=QVBoxLayout(dash); dl.addWidget(QLabel("INTERNAL AUDIT PERFORMANCE DASHBOARD"))
-        dashboard_summary=QLabel(); dashboard_summary.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;padding:10px;background:#E8F0FA;border:1px solid #C7D7EA;border-radius:5px;"); dashboard_summary.setWordWrap(True); dl.addWidget(dashboard_summary)
-        class AuditDashboardCharts(QWidget):
-            def __init__(self,parent=None):
-                super().__init__(parent); self.audit_counts=[]; self.finding_counts=[0,0]; self.setMinimumHeight(250); self.setMaximumHeight(300)
-            def set_data(self,audit_counts,open_findings,closed_findings):
-                self.audit_counts=list(audit_counts); self.finding_counts=[int(open_findings),int(closed_findings)]; self.update()
-            def paintEvent(self,event):
-                painter=QPainter(self); painter.setRenderHint(QPainter.RenderHint.Antialiasing); painter.fillRect(self.rect(),QColor("#FFFFFF")); painter.setPen(QColor("#17365D")); painter.setFont(QFont("Arial",11,QFont.Weight.Bold)); painter.drawText(18,25,"AUDIT STATUS — BAR GRAPH"); painter.drawText(max(360,self.width()//2),25,"FINDINGS — STATUS DISTRIBUTION")
-                chart_left=QRectF(18,42,max(280,self.width()//2-35),190); painter.setPen(QPen(QColor("#D5DEE8"),1)); painter.drawRect(chart_left)
-                data=self.audit_counts or [("No data",0)]; maxv=max([x[1] for x in data]+[1]); usable=max(1,len(data)); bar_h=min(24,max(12,int((chart_left.height()-18)/usable)-5));
-                for idx,(label,value) in enumerate(data[:6]):
-                    y=chart_left.top()+12+idx*(bar_h+5); width=max(0,(chart_left.width()-130)*float(value)/maxv); painter.setPen(QColor("#34495E")); painter.setFont(QFont("Arial",8)); painter.drawText(int(chart_left.left()+6),int(y+bar_h-3),str(label)[:18]); painter.fillRect(QRectF(chart_left.left()+112,y,width,bar_h),QColor("#4472C4")); painter.setPen(QColor("#17365D")); painter.drawText(int(chart_left.left()+116+width),int(y+bar_h-3),str(value))
-                pie_center_x=max(360,self.width()//2)+self.width()//4; pie_center_y=132; radius=76; total=sum(self.finding_counts); colors=[QColor("#4472C4"),QColor("#70AD47")]; start=0
-                for idx,value in enumerate(self.finding_counts):
-                    span=int(360*value/total) if total else (180 if idx==0 else 180); painter.setBrush(colors[idx]); painter.setPen(QPen(QColor("#FFFFFF"),2)); painter.drawPie(QRectF(pie_center_x-radius,pie_center_y-radius,radius*2,radius*2),start*16,span*16); start+=span
-                painter.setPen(QColor("#34495E")); painter.setFont(QFont("Arial",9)); painter.drawText(pie_center_x-90,230,f"Open: {self.finding_counts[0]}     Closed: {self.finding_counts[1]}")
-        dashboard_charts=AuditDashboardCharts(); dl.addWidget(dashboard_charts)
-        dashboard_table=QTableWidget(0,5); dashboard_table.setHorizontalHeaderLabels(["Procedure","Audit Area","Risk Level","Planned Audits","Open Findings"]); dashboard_table.setAlternatingRowColors(True); dashboard_table.horizontalHeader().setStretchLastSection(True); dl.addWidget(dashboard_table,1)
-        def load_dashboard():
-            total=db.fetchone("SELECT COUNT(*) c FROM audit_schedule") ["c"]
-            open_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'open')) NOT IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
-            closed_count=db.fetchone("SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE lower(COALESCE(f.status,'')) IN ('closed','verified') AND (f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%')")["c"]
-            dashboard_summary.setText(f"Scheduled procedure audits: {total}    |    Open findings: {open_count}    |    Closed findings: {closed_count}")
-            audit_status_rows=db.fetchall("SELECT status,COUNT(*) AS n FROM audit_schedule GROUP BY status ORDER BY status")
-            dashboard_charts.set_data([(safe(x["status"]) or "Unspecified",int(x["n"])) for x in audit_status_rows],open_count,closed_count)
-            rows=db.fetchall("SELECT procedure_name,area,risk_level,COUNT(*) AS planned FROM audit_schedule GROUP BY procedure_name,area,risk_level ORDER BY risk_level,area,procedure_name")
-            dashboard_table.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                op=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE procedure_name=? AND lower(COALESCE(status,'open')) NOT IN ('closed','verified')",(r["procedure_name"],))["c"]
-                for c,v in enumerate([r["procedure_name"],r["area"],r["risk_level"],r["planned"],op]): dashboard_table.setItem(i,c,QTableWidgetItem(safe(v)))
-        load_dashboard(); tabs.insertTab(0,dash,"Audit Dashboard")
-
-        reg=QWidget(); rvl=QVBoxLayout(reg); rbar=QHBoxLayout(); rbar.addWidget(QLabel("Internal Audit Register — select multiple rows to review the master tracking list")); rrefresh=QPushButton("Refresh"); rbar.addStretch(); rbar.addWidget(rrefresh); rvl.addLayout(rbar)
-        reg_table=QTableWidget(0,10); reg_table.setHorizontalHeaderLabels(["Audit Ref","Procedure / Audit Title","Audit Area","Audit Date","Auditor","Open Findings","Closed Findings","Audit Status","Audit ID","Linked Schedule"]); reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); reg_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection); reg_table.setAlternatingRowColors(True); reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); reg_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); reg_table.horizontalHeader().setStretchLastSection(True); reg_table.setColumnHidden(8,True); rvl.addWidget(reg_table,1)
-        def load_internal_register():
-            rows=db.fetchall("SELECT a.*,s.procedure_name AS scheduled_procedure,s.area AS scheduled_area,s.id AS schedule_ref FROM audits a LEFT JOIN audit_schedule s ON s.linked_audit_id=a.id WHERE lower(COALESCE(a.audit_type,'')) LIKE '%internal%' ORDER BY a.audit_date DESC,a.id DESC")
-            reg_table.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                aid=r["id"]; op=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=? AND lower(COALESCE(status,'open')) NOT IN ('closed','verified')",(aid,))["c"]; closed=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=? AND lower(COALESCE(status,'')) IN ('closed','verified')",(aid,))["c"]
-                vals=[r["number"],r["scheduled_procedure"] or r["title"] or r["scope"],r["scheduled_area"] or r["location"],r["audit_date"],r["auditor"] or r["lead_auditor"],op,closed,r["status"],aid,r["schedule_ref"] or ""]
-                for c,v in enumerate(vals): reg_table.setItem(i,c,QTableWidgetItem(safe(v)))
-        rrefresh.clicked.connect(load_internal_register); reg_table.cellDoubleClicked.connect(lambda *_: (d.accept(), self.audit_workspace(int(reg_table.item(reg_table.currentRow(),8).text()),self.audits)) if reg_table.currentRow()>=0 else None)
-        load_internal_register()
-
-        master=QWidget(); mvl=QVBoxLayout(master); mvl.addWidget(QLabel("AUDIT MASTER DATA — PROCEDURE LIBRARY, ISO CLAUSES AND RISK-BASED FREQUENCY"))
-        master_table=QTableWidget(0,4); master_table.setHorizontalHeaderLabels(["Procedure / Audit Topic","Applicable ISO Clauses","Checklist Criteria Count","Default Risk Frequency"]); master_table.setAlternatingRowColors(True); master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); master_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.Stretch); master_table.horizontalHeader().setStretchLastSection(True); mvl.addWidget(master_table,1)
-        for proc,(clause,items) in self._audit_procedure_library().items():
-            rr=master_table.rowCount(); master_table.insertRow(rr)
-            risk="Every 6 months (High) / Annual (Medium) / Every 18 months (Low)"
-            for c,v in enumerate([proc,clause,len(items),risk]): master_table.setItem(rr,c,QTableWidgetItem(safe(v)))
-        # Audit Master Data is intentionally kept out of the user-facing tab set to reduce confusion.
-
-        # Audit notifications are generated from the existing schedule and retain revisions.
-        notifications=QWidget(); nvl=QVBoxLayout(notifications)
-        nvl.addWidget(QLabel("AUDIT NOTIFICATIONS — generated from planned audits; each issued revision is retained."))
-        nt=QTableWidget(0,7); nt.setHorizontalHeaderLabels(["Schedule ID","Procedure / Audit","Area / Site","Planned Date","Lead Auditor","Status","Latest Notification"])
-        nt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); nt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); nt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        nt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); nt.horizontalHeader().setStretchLastSection(True); nvl.addWidget(nt,1)
-        nbar=QHBoxLayout(); nrefresh=QPushButton("Refresh"); ngen=QPushButton("Generate Word Notification"); nbar.addWidget(nrefresh); nbar.addWidget(ngen); nbar.addStretch(); nvl.addLayout(nbar)
-        def load_notifications():
-            rows=db.fetchall("SELECT s.*, (SELECT document_path FROM audit_notifications n WHERE n.schedule_id=s.id ORDER BY n.id DESC LIMIT 1) AS latest FROM audit_schedule s ORDER BY s.planned_date,s.id")
-            nt.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                vals=[r["id"],r["procedure_name"],r["area"],r["planned_date"],r["owner"],r["status"],Path(safe(r["latest"])).name if safe(r["latest"]) else "Not issued"]
-                for c,v in enumerate(vals): nt.setItem(i,c,QTableWidgetItem(safe(v)))
-        def generate_notification():
-            rr=nt.currentRow()
-            if rr<0: return QMessageBox.information(d,"Select Scheduled Audit","Select a scheduled audit first.")
-            sid=int(nt.item(rr,0).text()); sr=db.fetchone("SELECT * FROM audit_schedule WHERE id=?",(sid,))
-            if not sr: return
-            if safe(sr["status"]).lower() in ("cancelled", "deferred"):
-                return QMessageBox.warning(d,"Schedule Not Active","A notification can be generated once the audit schedule is planned. Re-plan this audit before issuing a notification.")
-            form=QDialog(d); form.setWindowTitle("Audit Notification Details"); form.resize(560,340); ff=QFormLayout(form)
-            recipients=QLineEdit(); recipients.setPlaceholderText("To recipients; separate multiple names/emails with semicolons")
-            cc=QLineEdit(); cc.setPlaceholderText("CC recipients (optional)")
-            scope=QTextEdit(); scope.setPlainText(f"Review conformity, adequacy, implementation and effectiveness of the controlled procedure: {safe(sr['procedure_name'])}. Review the current approved procedure, revision history, responsibilities, risk controls, competence, required records, monitoring and corrective-action closure."); scope.setMaximumHeight(100)
-            ff.addRow("To:",recipients); ff.addRow("CC:",cc); ff.addRow("Scope / documents required:",scope)
-            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
-            if form.exec()!=QDialog.DialogCode.Accepted:return
-            path,_=QFileDialog.getSaveFileName(d,"Save Audit Notification",f"Audit_Notification_{sid}.docx","Word Document (*.docx)")
-            if not path:return
-            try:
-                doc=Document(); sec=doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55); sec.left_margin=Inches(.65); sec.right_margin=Inches(.65)
-                hp=sec.header.paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; logo=report_logo_path()
-                # Word embeds raster images reliably; skip unsupported logo formats rather than
-                # creating a notification that Word may display with a broken-image marker.
-                supported_logo_exts={".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"}
-                if logo and Path(logo).exists() and Path(logo).suffix.lower() in supported_logo_exts:
-                    try: hp.add_run().add_picture(str(logo),width=Inches(1.0),height=Inches(.5))
-                    except Exception: logging.exception("Audit notification logo could not be embedded; continuing without logo")
-                p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; run=p.add_run(f"{company_name()}\nINTERNAL HSE AUDIT NOTIFICATION"); run.bold=True; run.font.size=Pt(16)
-                linked=db.fetchone("SELECT number,title,audit_date FROM audits WHERE id=?",(sr["linked_audit_id"],)) if sr["linked_audit_id"] else None
-                data=[("Document Number",f"{document_prefix()}-AUD-NOT-{sid:04d}"),("Audit Reference",safe(linked["number"]) if linked else f"IA-PLAN-{sid:04d}"),("Audit Title",safe(linked["title"]) if linked else safe(sr["procedure_name"])),("Procedure",safe(sr["procedure_name"])),("Area / Site",safe(sr["area"])),("Planned Date",safe(sr["planned_date"])),("Lead Auditor",safe(sr["owner"])),("Audit Status",safe(sr["status"])),("To",recipients.text().strip()),("CC",cc.text().strip())]
-                table=doc.add_table(rows=0,cols=2); table.style="Table Grid"
-                for k,v in data:
-                    cells=table.add_row().cells; cells[0].text=xml_safe(k); cells[1].text=xml_safe(v)
-                doc.add_heading("Audit Scope and Documents Required",level=2); doc.add_paragraph(xml_safe(scope.toPlainText()))
-                doc.add_paragraph(xml_safe("Please make the current approved procedure and revision history, applicable legal/client/ISO requirements, relevant risk assessments, competence records, implementation records, monitoring results, previous findings and corrective-action evidence available. The audit will use controlled-document sampling, interviews and objective evidence to evaluate procedure compliance."))
-                doc.add_paragraph("Prepared by: ____________________     Reviewed / Approved by: ____________________     Date: ______________")
-                # Save atomically and validate the DOCX package before recording it as issued.
-                if not str(path).lower().endswith(".docx"):
-                    path = str(path) + ".docx"
-                save_docx_validated(doc, path)
-                with zipfile.ZipFile(path, "r") as generated_doc:
-                    bad_member = generated_doc.testzip()
-                    if bad_member:
-                        raise ValueError(f"Word notification validation failed at {bad_member}")
-                # Re-open with python-docx as a second validation that the saved document is readable.
-                Document(str(path))
-                revision=db.fetchone("SELECT COALESCE(MAX(revision),0)+1 AS n FROM audit_notifications WHERE schedule_id=?",(sid,))["n"]
-                db.execute("INSERT INTO audit_notifications(schedule_id,document_path,recipients,revision,issued_at,issued_by) VALUES(?,?,?,?,?,?)",(sid,path,recipients.text().strip()+("; CC: "+cc.text().strip() if cc.text().strip() else ""),revision,datetime.now().isoformat(timespec="seconds"),safe(db.setting("current_user", "") or "System User")))
-                if sr["linked_audit_id"]: self._audit_log(sr["linked_audit_id"],"Audit notification generated",f"Revision {revision}: {path}")
-                load_notifications()
-                open_now = QMessageBox.question(d,"Notification Generated",f"Word audit notification saved and validated. Revision: {revision}\n\n{path}\n\nOpen the notification now?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.Yes)
-                if open_now == QMessageBox.StandardButton.Yes:
-                    if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(path).resolve()))):
-                        QMessageBox.warning(d,"Open Word Document","The file was saved and validated, but Windows could not launch the default Word application. Open the file from the saved path shown above.")
-            except Exception as exc: logging.exception("Audit notification generation failed"); QMessageBox.critical(d,"Notification Failed",str(exc))
-        nrefresh.clicked.connect(load_notifications); ngen.clicked.connect(generate_notification); load_notifications(); tabs.addTab(notifications,"Audit Notifications")
-
-        # Verification is driven by the existing Audit Findings Register and reads CAPA status
-        # from the existing capa table; no parallel CAPA register is created.
-        verify=QWidget(); vvl=QVBoxLayout(verify); vvl.addWidget(QLabel("VERIFICATION & CLOSEOUT — CAPA status is read from the existing CAPA Tracking Register data."))
-        vt=QTableWidget(0,11); vt.setHorizontalHeaderLabels(["Finding Ref","Audit Ref","Procedure","Finding / Evidence","Responsible","Target Date","CAPA Ref","CAPA Status","Finding Status","Closeout Evidence","Approved By"] )
-        vt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); vt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); vt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        vt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); vt.horizontalHeader().setStretchLastSection(True); vvl.addWidget(vt,1)
-        vbar=QHBoxLayout(); vrefresh=QPushButton("Refresh Findings"); vreview=QPushButton("Review / Verify Selected Finding"); vadd_evidence=QPushButton("Add Closeout Evidence"); vsubmit=QPushButton("Submit Closeout for Approval"); vbar.addWidget(vrefresh); vbar.addWidget(vreview); vbar.addWidget(vadd_evidence); vbar.addWidget(vsubmit); vbar.addStretch(); vvl.addLayout(vbar)
-        def save_closeout_status(fid,value):
-            fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-            if not fr:return
-            if value=="Closed":
-                cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
-                if fr["capa_required"] and (not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed")):
-                    QMessageBox.warning(d,"CAPA Not Closed","This finding requires its linked CAPA to be completed in the existing CAPA Tracking Register before closure."); load_verification(); return
-                if not fr["capa_required"] and not safe(fr["capa_reason"]):
-                    QMessageBox.warning(d,"Disposition Required","Record an authorized reason for not requiring CAPA before closure."); load_verification(); return
-            now=datetime.now().isoformat(timespec="seconds")
-            mapped={"Approved":"Pending Verification","Rejected":"Action in Progress","Closed":"Closed"}.get(value,value)
-            db.execute("UPDATE audit_findings SET closeout_approval_status=?,status=?,verification_status=?,closure_date=?,updated_at=? WHERE id=?",(value,mapped,"Verified" if value=="Closed" else "Pending Verification",date.today().isoformat() if value=="Closed" else "",now,fid))
-            load_findings(); load_internal_register(); load_dashboard()
-        def save_closeout_approver(fid,value):
-            if value=="Select Role": return
-            db.execute("UPDATE audit_findings SET closeout_approver=?,updated_at=? WHERE id=?",(value,datetime.now().isoformat(timespec="seconds"),fid))
-        def load_verification():
-            rows=db.fetchall("SELECT f.*,a.number AS audit_ref FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE f.source_schedule_id IS NOT NULL OR lower(COALESCE(a.audit_type,'')) LIKE '%internal%' ORDER BY CASE WHEN lower(COALESCE(f.status,'')) IN ('closed','verified') THEN 1 ELSE 0 END,f.target_date")
-            vt.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(r["capa_number"]),)) if safe(r["capa_number"]) else None
-                ref=safe(r["finding_reference"]) or f"AF-{int(r['id']):05d}"
-                vals=[ref,r["audit_ref"],r["procedure_name"],r["finding_detail"] or r["observation"],r["responsible"],r["target_date"],r["capa_number"],safe(cr["status"]) if cr else ("Not Required" if not r["capa_required"] else "CAPA link missing")]
-                for c,v in enumerate(vals): vt.setItem(i,c,QTableWidgetItem(safe(v)))
-                status_cell=QComboBox(); status_cell.addItems(["Pending Verification","Action in Progress","Pending Approval","Approved","Rejected","Closed"]); current_status=safe(r["closeout_approval_status"]) if "closeout_approval_status" in r.keys() else "Pending Approval"
-                if current_status not in [status_cell.itemText(j) for j in range(status_cell.count())]: current_status="Pending Approval"
-                status_cell.setCurrentText(current_status); status_cell.currentTextChanged.connect(lambda value,fid=int(r["id"]): save_closeout_status(fid,value)); vt.setCellWidget(i,8,status_cell)
-                evidence_btn=QPushButton("Add / View Evidence"); evidence_btn.setToolTip(safe(r["closeout_evidence"] if "closeout_evidence" in r.keys() else "")); evidence_btn.clicked.connect(lambda checked=False,fid=int(r["id"]): add_closeout_evidence_for_id(fid)); vt.setCellWidget(i,9,evidence_btn)
-                approver=QComboBox(); approver.addItems(["Select Role","Lead Auditor","Supervisor","Manager"]); approver.setCurrentText(safe(r["closeout_approver"]) if "closeout_approver" in r.keys() and safe(r["closeout_approver"]) else "Select Role"); approver.currentTextChanged.connect(lambda value,fid=int(r["id"]): save_closeout_approver(fid,value)); vt.setCellWidget(i,10,approver)
-                vt.item(i,0).setData(Qt.ItemDataRole.UserRole,int(r["id"]))
-        def verify_selected_finding():
-            rr=vt.currentRow()
-            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding first.")
-            fid=vt.item(rr,0).data(Qt.ItemDataRole.UserRole); fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-            if not fr:return
-            form=QDialog(d); form.setWindowTitle("Finding Verification / Closeout"); form.resize(600,360); ff=QFormLayout(form)
-            action=QComboBox(); action.addItems(["Pending Verification","Action in Progress","Pending Response","Closed","Return for Action"])
-            action.setCurrentText(safe(fr["status"]) if safe(fr["status"]) in ["Pending Verification","Action in Progress","Pending Response","Closed","Return for Action"] else "Pending Verification")
-            comments=QTextEdit(); comments.setPlaceholderText("Record verification comments, evidence reviewed, and reasons for rejection or return.")
-            evidence=QLineEdit(); evidence.setPlaceholderText("Evidence file path / reference (optional)"); browse=QPushButton("Browse…")
-            browse.clicked.connect(lambda: evidence.setText(QFileDialog.getOpenFileName(form,"Select Verification Evidence","","Evidence Files (*.*)")[0] or evidence.text()))
-            evhost=QWidget(); eh=QHBoxLayout(evhost); eh.setContentsMargins(0,0,0,0); eh.addWidget(evidence); eh.addWidget(browse)
-            ff.addRow("New finding status:",action); ff.addRow("Verification comments:",comments); ff.addRow("Evidence:",evhost)
-            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
-            if form.exec()!=QDialog.DialogCode.Accepted:return
-            new_status=action.currentText(); cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
-            if new_status=="Closed" and fr["capa_required"] and (not cr or safe(cr["status"]).lower() not in ("closed","verified","complete","completed")):
-                return QMessageBox.warning(d,"CAPA Not Closed","This finding requires CAPA. The linked record in the existing CAPA Tracking Register must reach its approved completed/closed status before the audit finding can be closed.")
-            if new_status=="Closed" and not fr["capa_required"] and not safe(fr["capa_reason"]):
-                return QMessageBox.warning(d,"Disposition Required","An authorized reason for not requiring CAPA must be recorded before this finding can be closed.")
-            now=datetime.now().isoformat(timespec="seconds"); close_date=date.today().isoformat() if new_status=="Closed" else ""
-            db.execute("UPDATE audit_findings SET status=?,verification=?,verification_status=?,closure_date=?,updated_at=? WHERE id=?",(new_status,comments.toPlainText().strip(),"Verified" if new_status=="Closed" else "Pending Verification",close_date,now,fid))
-            db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Finding verification updated",safe(fr["status"]),new_status,comments.toPlainText().strip(),evidence.text().strip(),safe(db.setting("current_user", "") or "System User"),now))
-            load_verification(); load_findings(); load_internal_register(); load_dashboard(); QMessageBox.information(d,"Verification Saved","Finding verification history was recorded.")
-        def add_closeout_evidence_for_id(fid):
-            path,_=QFileDialog.getOpenFileName(d,"Select Closeout Evidence","","Evidence Files (*.*)")
-            if not path:return
-            fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-            if not fr:return
-            saved=self._audit_attachment_copy([path],safe(fr["finding_reference"]) or f"F{fid}",fr["audit_id"],fid,safe(db.setting("current_user","") or "System User"))
-            db.execute("UPDATE audit_findings SET closeout_evidence=?,updated_at=? WHERE id=?",((safe(fr["closeout_evidence"]) + "\n" if "closeout_evidence" in fr.keys() and safe(fr["closeout_evidence"]) else "") + (saved[0] if saved else path),datetime.now().isoformat(timespec="seconds"),fid))
-            load_verification()
-        def add_closeout_evidence():
-            rr=vt.currentRow()
-            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding row first.")
-            fid=vt.item(rr,0).data(Qt.ItemDataRole.UserRole); add_closeout_evidence_for_id(fid)
-        def submit_closeout_for_approval():
-            rr=vt.currentRow()
-            if rr<0:return QMessageBox.information(d,"Select Finding","Select a finding row first.")
-            fid=vt.item(rr,0).data(Qt.ItemDataRole.UserRole); fr=db.fetchone("SELECT * FROM audit_findings WHERE id=?",(fid,))
-            if not fr:return
-            if not safe(fr["closeout_approver"] if "closeout_approver" in fr.keys() else ""):
-                return QMessageBox.warning(d,"Approver Required","Select Lead Auditor, Supervisor, or Manager in the Approved By column before submitting.")
-            if not safe(fr["closeout_evidence"] if "closeout_evidence" in fr.keys() else ""):
-                return QMessageBox.warning(d,"Evidence Required","Add closeout evidence before submitting this finding for approval.")
-            if fr["capa_required"]:
-                cr=db.fetchone("SELECT status FROM capa WHERE number=?",(safe(fr["capa_number"]),)) if safe(fr["capa_number"]) else None
-                if not cr:return QMessageBox.warning(d,"CAPA Link Missing","This finding requires CAPA but has no linked record in the existing CAPA Tracking Register.")
-                if safe(cr["status"]).lower() not in ("closed","verified","complete","completed"):
-                    return QMessageBox.warning(d,"CAPA Not Closed","Complete the linked CAPA in the existing CAPA Tracking Register before submitting closeout.")
-            elif not safe(fr["capa_reason"]):
-                return QMessageBox.warning(d,"CAPA Justification Required","Enter an authorized reason for not requiring CAPA before submitting closeout.")
-            now=datetime.now().isoformat(timespec="seconds")
-            db.execute("UPDATE audit_findings SET closeout_approval_status='Pending Approval',status='Pending Approval',updated_at=? WHERE id=?",(now,fid))
-            db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,evidence_path,user_name,timestamp) VALUES(?,?,?,?,?,?,?,?)",(fid,"Closeout submitted for approval",safe(fr["status"]),"Pending Approval","Closeout submitted from Verification & Closeout.",safe(fr["closeout_evidence"] if "closeout_evidence" in fr.keys() else ""),safe(db.setting("current_user","") or "System User"),now))
-            load_verification(); load_findings(); load_dashboard(); QMessageBox.information(d,"Closeout Submitted","The finding closeout has been submitted for approval.")
-        vrefresh.clicked.connect(load_verification); vreview.clicked.connect(verify_selected_finding); vadd_evidence.clicked.connect(add_closeout_evidence); vsubmit.clicked.connect(submit_closeout_for_approval); load_verification(); tabs.addTab(verify,"Verification & Closeout")
-
-        # Editable custom procedure records are Audit-only. New checklists are labelled by their
-        # declared source/approval status and do not claim to be verified external requirements.
-        proc_admin=QWidget(); pvl=QVBoxLayout(proc_admin); pvl.addWidget(QLabel("PROCEDURE LIBRARY — verify company/client source documents before approving checklist criteria."))
-        pt=QTableWidget(0,8); pt.setHorizontalHeaderLabels(["Procedure ID","Title","Document No.","Revision","Clauses","Owner","Source / Approval Status","Active"])
-        pt.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); pt.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); pt.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        pt.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); pt.horizontalHeader().setStretchLastSection(True); pvl.addWidget(pt,1)
-        pbar=QHBoxLayout(); padd=QPushButton("Add / Edit Procedure"); pdel=QPushButton("Deactivate Selected"); pref=QPushButton("Refresh"); pbar.addWidget(padd); pbar.addWidget(pdel); pbar.addWidget(pref); pbar.addStretch(); pvl.addLayout(pbar)
-        def load_proc_admin():
-            rows=db.fetchall("SELECT * FROM audit_procedure_records ORDER BY title"); pt.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                vals=[r["procedure_id"],r["title"],r["document_number"],r["revision"],r["clause_references"],r["owner"],r["approval_status"],"Yes" if r["active"] else "No"]
-                for c,v in enumerate(vals):pt.setItem(i,c,QTableWidgetItem(safe(v)))
-                pt.item(i,0).setData(Qt.ItemDataRole.UserRole,int(r["id"]))
-        def edit_proc_record():
-            rr=pt.currentRow(); pid=pt.item(rr,0).data(Qt.ItemDataRole.UserRole) if rr>=0 and pt.item(rr,0) else None
-            rec=db.fetchone("SELECT * FROM audit_procedure_records WHERE id=?",(pid,)) if pid else None
-            form=QDialog(d); form.setWindowTitle("Audit Procedure Library Record"); form.resize(700,650); ff=QFormLayout(form)
-            fields={k:QLineEdit() for k in ["procedure_id","title","document_number","issuing_organization","site_contract","revision","effective_date","review_date","clause_references","owner","applicability","source_file"]}
-            for k,w in fields.items(): ff.addRow(k.replace("_"," ").title()+":",w)
-            approval=QComboBox(); approval.addItems(["Draft checklist pending review","Company-controlled procedure","Official verified requirement","Approved"]); ff.addRow("Source / approval status:",approval)
-            checklist=QTextEdit(); checklist.setPlaceholderText("One procedure-compliance audit criterion per line; include document control, responsibilities, controls, records, monitoring and corrective-action requirements."); ff.addRow("Checklist criteria (one per line):",checklist)
-            if rec:
-                for k,w in fields.items():w.setText(safe(rec[k]))
-                approval.setCurrentText(safe(rec["approval_status"]))
-                try:checklist.setPlainText("\n".join(json.loads(safe(rec["checklist_json"]) or "[]")))
-                except Exception:pass
-            bb=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(bb); bb.accepted.connect(form.accept); bb.rejected.connect(form.reject)
-            if form.exec()!=QDialog.DialogCode.Accepted:return
-            title=fields["title"].text().strip(); items=[x.strip() for x in checklist.toPlainText().splitlines() if x.strip()]
-            if not title or not items:return QMessageBox.warning(d,"Required Fields","Enter a procedure title and at least one checklist criterion.")
-            vals=[fields[k].text().strip() for k in fields]+[approval.currentText(),json.dumps(items,ensure_ascii=False),datetime.now().isoformat(timespec="seconds")]
-            if rec:db.execute("UPDATE audit_procedure_records SET procedure_id=?,title=?,document_number=?,issuing_organization=?,site_contract=?,revision=?,effective_date=?,review_date=?,clause_references=?,owner=?,applicability=?,source_file=?,approval_status=?,checklist_json=?,updated_at=? WHERE id=?",tuple(vals)+(pid,))
-            else:db.execute("INSERT INTO audit_procedure_records(procedure_id,title,document_number,issuing_organization,site_contract,revision,effective_date,review_date,clause_references,owner,applicability,source_file,approval_status,checklist_json,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",tuple(vals))
-            load_proc_admin(); load_dashboard(); load_checklist_schedule()
-        def deactivate_proc_record():
-            rr=pt.currentRow()
-            if rr<0:return QMessageBox.information(d,"Select Procedure","Select a custom procedure first.")
-            pid=pt.item(rr,0).data(Qt.ItemDataRole.UserRole)
-            if QMessageBox.question(d,"Deactivate Procedure","Deactivate this custom procedure? Existing audits and saved findings will be retained.")==QMessageBox.StandardButton.Yes:
-                db.execute("UPDATE audit_procedure_records SET active=0,updated_at=? WHERE id=?",(datetime.now().isoformat(timespec="seconds"),pid));load_proc_admin()
-        padd.clicked.connect(edit_proc_record); pdel.clicked.connect(deactivate_proc_record); pref.clicked.connect(load_proc_admin); load_proc_admin(); tabs.addTab(proc_admin,"Procedure Library")
-
-        close=QPushButton("Close"); close.clicked.connect(d.accept); root.addWidget(close)
-        d.exec()
-
-    def _audit_register_detail(self, audit_id):
-        a, fs = self._audit_report_data(audit_id)
-        if not a:
-            return
-        d=QDialog(self); d.setWindowTitle(f"Audit Register — {safe(a['number'])}"); d.resize(1180,820)
-        lay=QVBoxLayout(d)
-        head=QLabel(f"AUDIT REGISTER — {safe(a['number'])}"); head.setStyleSheet("font-size:21px;font-weight:bold;color:#17365D;padding:6px;"); lay.addWidget(head)
-        info=QTableWidget(0,2); info.setHorizontalHeaderLabels(["Audit Field","Value"]); info.horizontalHeader().setStretchLastSection(True); info.setAlternatingRowColors(True)
-        for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Audit Standard",a["standard"]),("Audit Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Status",a["status"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"])]:
-            r=info.rowCount(); info.insertRow(r); info.setItem(r,0,QTableWidgetItem(safe(k))); info.setItem(r,1,QTableWidgetItem(safe(v)))
-        info.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); lay.addWidget(info,1)
-        if fs:
-            lay.addWidget(QLabel("FINDINGS"))
-            ft=QTableWidget(0,11); ft.setHorizontalHeaderLabels(["S.No.","Audit Number","Finding Number","Finding (Checklist)","Corrective Action","Finding Type","Responsible Person","Target Date","CAPA","Status","Location"]); ft.setAlternatingRowColors(True); ft.horizontalHeader().setStretchLastSection(True)
-            for f in fs:
-                r=ft.rowCount(); ft.insertRow(r); vals=[r+1,a["number"],f["finding_reference"] if "finding_reference" in f.keys() and safe(f["finding_reference"]) else f"{a['number']}-F{int(f['finding_number'] or 0):02d}",f["finding_detail"] or f["observation"],f["corrective_action"],f["finding_type"],f["responsible"],f["target_date"],safe(f["capa_number"]) or ("Yes" if int(f["capa_required"] or 0)==1 else "No"),("OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]),f["location"] if "location" in f.keys() else ""]
-                for c,v in enumerate(vals): ft.setItem(r,c,QTableWidgetItem(safe(v)))
-            ft.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); lay.addWidget(ft,2)
-        buttons=QHBoxLayout(); word=QPushButton("Generate Word"); excel=QPushButton("Generate Excel"); close=QPushButton("Close")
-        buttons.addWidget(word); buttons.addWidget(excel); buttons.addStretch(); buttons.addWidget(close); lay.addLayout(buttons)
-        word.clicked.connect(lambda:self._audit_export_word(audit_id)); excel.clicked.connect(lambda:self._audit_export_excel(audit_id)); close.clicked.connect(d.accept)
-        d.exec()
-
-    def audit_type_selector(self, refresh):
-        d=QDialog(self); d.setWindowTitle("Select Audit Type"); d.resize(560,320)
-        lay=QVBoxLayout(d); h=QLabel("SELECT AUDIT TYPE"); h.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:10px;"); lay.addWidget(h)
-        info=QLabel("Select the audit type before opening the Audit Workspace."); info.setWordWrap(True); lay.addWidget(info)
-        combo=QComboBox(); combo.addItems(self._audit_types()); lay.addWidget(combo)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); lay.addWidget(buttons)
-        def continue_with_type():
-            chosen=combo.currentText()
-            d.accept()
-            if "internal audit" in chosen.lower():
-                self.audit_planning_center()
-            else:
-                self.audit_workspace(None,refresh,chosen)
-        buttons.accepted.connect(continue_with_type)
-        buttons.rejected.connect(d.reject); d.exec()
-
-    def audit_workspace(self, audit_id=None, refresh=None, selected_type=None, allow_edit=False):
-        existing=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)) if audit_id else None
-        if existing and existing["status"]=="Submitted" and not allow_edit: readonly=True
-        else: readonly=False
-        d=QDialog(self); d.setWindowTitle("Audit Workspace")
-        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
-        d.setSizeGripEnabled(True)
-        # Keep the dialog within the usable desktop area. A large minimum size
-        # can force Qt to extend the window beyond the screen on smaller displays.
-        screen=d.screen() or QApplication.primaryScreen()
-        if screen:
-            available=screen.availableGeometry()
-            d.setMinimumSize(min(640, available.width()), min(440, available.height()))
-            d.setGeometry(available)
-        else:
-            d.setMinimumSize(640,440)
-            d.resize(1100,760)
-        outer=QVBoxLayout(d)
-        outer.setContentsMargins(12,12,12,10)
-        outer.setSpacing(8)
-        banner=QHBoxLayout(); head=QLabel("AUDIT WORKSPACE"); head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;"); banner.addWidget(head); banner.addStretch(); outer.addLayout(banner)
-        tabs=QTabWidget(); tabs.setDocumentMode(True); tabs.setUsesScrollButtons(True); tabs.tabBar().setExpanding(False); outer.addWidget(tabs,1)
-        tabs.setMinimumHeight(180)
-        overview=QWidget(); of=QFormLayout(overview); of.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        audit_type=QComboBox(); audit_type.addItems(self._audit_types());
-        title=QLineEdit(); audit_date=QDateEdit(); audit_date.setCalendarPopup(True); audit_date.setDisplayFormat("dd-MMM-yyyy"); audit_date.setDate(datetime.now().date())
-        reference=QLineEdit(); reference.setPlaceholderText("Automatically generated from company, audit type and year"); reference.setReadOnly(True); department=QLineEdit(); department.setPlaceholderText("Enter department..."); location=QLineEdit(); location.setPlaceholderText("Enter audit location..."); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit()
-        of.addRow("Audit Type:",audit_type); of.addRow("Audit Reference:",reference); of.addRow("Audit Title:",title); of.addRow("Audit Date:",audit_date); of.addRow("Department:",department); of.addRow("Location:",location); of.addRow("Audit Standard:",standard); of.addRow("Audit Scope:",scope); of.addRow("Audit Criteria:",criteria)
-        overview_scroll=QScrollArea(); overview_scroll.setWidgetResizable(True); overview_scroll.setFrameShape(QScrollArea.Shape.NoFrame); overview_scroll.setWidget(overview)
-        tabs.addTab(overview_scroll,"Overview")
-
-        findings_tab=QWidget(); fl=QVBoxLayout(findings_tab); finding_scroll=QScrollArea(); finding_scroll.setWidgetResizable(True); finding_host=QWidget(); finding_layout=QVBoxLayout(finding_host); finding_layout.setAlignment(Qt.AlignmentFlag.AlignTop); finding_scroll.setWidget(finding_host); fl.addWidget(finding_scroll,1); add_finding=QPushButton("+ ADD FINDING"); add_finding.setMinimumHeight(40); fl.addWidget(add_finding); tabs.addTab(findings_tab,"Findings")
-        review=QWidget(); rf=QFormLayout(review); rf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        def person_row(label):
-            row=QHBoxLayout(); c=QLineEdit(); c.setPlaceholderText("Enter name..."); pos=QLineEdit(); pos.setPlaceholderText("Position..."); dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); row.addWidget(c,2); row.addWidget(pos,1); row.addWidget(dt); box=QWidget(); box.setLayout(row); rf.addRow(label,box); return c,pos,dt
-        auditor, auditor_pos, auditor_date=person_row("Auditor (Name / Position / Date):")
-        reviewer, reviewer_pos, reviewer_date=person_row("Reviewed By:")
-        approver, approver_pos, approver_date=person_row("Approved By:")
-        review_scroll=QScrollArea(); review_scroll.setWidgetResizable(True); review_scroll.setFrameShape(QScrollArea.Shape.NoFrame); review_scroll.setWidget(review)
-        tabs.addTab(review_scroll,"Review & Approval")
-        att_tab=QWidget(); al=QVBoxLayout(att_tab); attach_list=QListWidget(); al.addWidget(QLabel("AUDIT-LEVEL ATTACHMENTS")); al.addWidget(attach_list,1); att_btns=QHBoxLayout(); add_att=QPushButton("+ ADD ATTACHMENT"); open_att=QPushButton("View / Open"); del_att=QPushButton("Delete Selected"); att_btns.addWidget(add_att); att_btns.addWidget(open_att); att_btns.addWidget(del_att); al.addLayout(att_btns); att_scroll=QScrollArea(); att_scroll.setWidgetResizable(True); att_scroll.setFrameShape(QScrollArea.Shape.NoFrame); att_scroll.setWidget(att_tab); tabs.addTab(att_scroll,"Attachments")
-        hist_tab=QWidget(); hl=QVBoxLayout(hist_tab); history=QTableWidget(); history.setColumnCount(4); history.setHorizontalHeaderLabels(["Date","User","Action","Details"]); history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); history.horizontalHeader().setStretchLastSection(True); hl.addWidget(history); hist_scroll=QScrollArea(); hist_scroll.setWidgetResizable(True); hist_scroll.setFrameShape(QScrollArea.Shape.NoFrame); hist_scroll.setWidget(hist_tab); tabs.addTab(hist_scroll,"History")
-
-        finding_widgets=[]
-        def clause_map(): return self._audit_clause_map(standard.currentText())
-        def make_finding(data=None):
-            idx=len(finding_widgets)+1; box=QGroupBox(f"FINDING {idx}"); box.setStyleSheet("QGroupBox{font-size:15px;font-weight:bold;border:1px solid #B8C2CC;margin-top:10px;padding:10px;}QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 5px;}")
-            form=QFormLayout(box); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-            ft=QComboBox(); ft.addItems(self._audit_finding_types())
-            fs=QComboBox(); fs.addItems(self._audit_standards())
-            cl=QComboBox(); sc=QComboBox()
-            detail=QTextEdit(); detail.setMinimumHeight(100); ca=QTextEdit(); ca.setMinimumHeight(90)
-            rp=QLineEdit(); rp.setPlaceholderText("Enter responsible person...")
-            loc=QLineEdit(); loc.setPlaceholderText("Enter finding location...")
-            status=QComboBox(); status.addItems(self._audit_finding_statuses())
-            td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
-            closeout=QLineEdit(); closeout.setPlaceholderText("Enter close-out evidence / verification...")
-            capa_required=QComboBox(); capa_required.addItems(["No","Yes"])
-            capa_link=QComboBox(); capa_link.setEditable(True); capa_link.addItem("-- Create new CAPA / select existing --", "")
-            try:
-                for cr in db.fetchall("SELECT number FROM capa ORDER BY id DESC"):
-                    capa_link.addItem(safe(cr["number"]), safe(cr["number"]))
-            except Exception: pass
-            form.addRow("Finding Type:",ft); form.addRow("Standard:",fs); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Location:",loc); form.addRow("Status:",status); form.addRow("Target Date:",td); form.addRow("CAPA Required:",capa_required); form.addRow("Link Existing CAPA (or create new):",capa_link); form.addRow("Close Out Evidence / Verification:",closeout)
-            evidence=QListWidget(); evidence.setMaximumHeight(110); eb=QHBoxLayout(); add=QPushButton("+ ADD ATTACHMENT"); open_a=QPushButton("View / Open"); rem=QPushButton("Delete Selected"); eb.addWidget(add); eb.addWidget(open_a); eb.addWidget(rem); ew=QWidget(); ee=QVBoxLayout(ew); ee.setContentsMargins(0,0,0,0); ee.addWidget(evidence); ee.addLayout(eb); form.addRow("Attachments:",ew)
-            remove=QPushButton("Remove Finding"); form.addRow("",remove)
-            def load_cl():
-                cl.blockSignals(True); cl.clear(); cl.addItems(list(self._audit_clause_map(fs.currentText()).keys())); cl.blockSignals(False); load_sub()
-            def load_sub():
-                sc.clear(); sc.addItems(self._audit_clause_map(fs.currentText()).get(cl.currentText(),[]))
-            fs.currentTextChanged.connect(load_cl); cl.currentTextChanged.connect(load_sub); load_cl()
-            if data:
-                fs.setCurrentText(safe(data["finding_standard"]) if "finding_standard" in data.keys() and safe(data["finding_standard"]) else safe(existing["standard"]) if existing else self._audit_standards()[0]); load_cl()
-                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"])); loc.setText(safe(data["location"]) if "location" in data.keys() else ""); closeout.setText(safe(data["close_out_evidence"]) if "close_out_evidence" in data.keys() else "")
-                if data["target_date"]:
-                    try: td.setDate(date.fromisoformat(data["target_date"]))
-                    except Exception: pass
-                rp.setText(safe(data.get("responsible", "")))
-                if "capa_required" in data.keys(): capa_required.setCurrentText("Yes" if int(data["capa_required"] or 0)==1 else "No")
-                if "capa_number" in data.keys() and safe(data["capa_number"]): capa_link.setCurrentText(safe(data["capa_number"]))
-                if existing:
-                    for ar in self._audit_attachment_rows(existing["id"], data["id"]):
-                        fp=safe(ar["file_path"])
-                        if fp: evidence.addItem(fp)
-            finding_widgets.append({"box":box,"type":ft,"standard":fs,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"location":loc,"status":status,"target":td,"closeout":closeout,"capa_required":capa_required,"capa_link":capa_link,"attachments":evidence,"add":add,"remove":remove,"data":data})
-            closeout.textChanged.connect(lambda text, st=status: st.setCurrentText("Closed") if text.strip() else None)
-            def choose():
-                paths,_=QFileDialog.getOpenFileNames(d,"Select Finding Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
-                for p in paths: evidence.addItem(p)
-            add.clicked.connect(choose)
-            open_a.clicked.connect(lambda: self._audit_open_attachment(evidence))
-            rem.clicked.connect(lambda: evidence.takeItem(evidence.currentRow()) if evidence.currentRow()>=0 else None)
-            remove.clicked.connect(lambda: remove_finding(box))
-            finding_layout.addWidget(box)
-            box.setEnabled(not readonly)
-        def remove_finding(box):
-            if readonly:return
-            for i,x in enumerate(finding_widgets):
-                if x["box"] is box:
-                    box.setParent(None); box.deleteLater(); finding_widgets.pop(i); break
-            for n,x in enumerate(finding_widgets,1): x["box"].setTitle(f"FINDING {n}")
-        add_finding.clicked.connect(lambda:make_finding())
-        if selected_type:
-            idx = audit_type.findText(selected_type)
-            if idx >= 0:
-                audit_type.setCurrentIndex(idx)
-        def update_reference_preview(*_):
-            if not existing:
-                reference.setText(self._next_audit_reference(audit_type.currentText(), audit_date.date().toString("yyyy-MM-dd")))
-        audit_type.currentTextChanged.connect(update_reference_preview)
-        audit_date.dateChanged.connect(update_reference_preview)
-
-        def load_audit():
-            nonlocal existing
-            if not existing:return
-            audit_type.setCurrentText(safe(existing["audit_type"])); reference.setText(safe(existing["number"])); title.setText(safe(existing["title"])); department.setText(safe(existing["department"])); location.setText(safe(existing["location"])); standard.setCurrentText(safe(existing["standard"])); scope.setPlainText(safe(existing["scope"])); criteria.setPlainText(safe(existing["criteria"]))
-            try:audit_date.setDate(date.fromisoformat(safe(existing["audit_date"])))
-            except Exception:pass
-            auditor.setText(safe(existing["auditor"])); reviewer.setText(safe(existing["reviewer"])); approver.setText(safe(existing["approver"]))
-            auditor_pos.setText(safe(existing["auditor_position"])); reviewer_pos.setText(safe(existing["reviewer_position"])); approver_pos.setText(safe(existing["approver_position"]))
-            for widget,key in [(auditor_date,"auditor_date"),(reviewer_date,"reviewer_date"),(approver_date,"approver_date")]:
-                try: widget.setDate(date.fromisoformat(safe(existing[key])))
-                except Exception: pass
-            for r in db.fetchall("SELECT * FROM audit_findings WHERE audit_id=? ORDER BY finding_number,id",(existing["id"],)): make_finding(r)
-            if not finding_widgets: make_finding()
-            load_attachments(); load_history()
-        def load_attachments():
-            attach_list.clear()
-            if not existing:return
-            for a in self._audit_attachment_rows(existing["id"]):
-                item=QListWidgetItem(Path(safe(a["file_path"])).name); item.setData(Qt.ItemDataRole.UserRole,a["id"]); attach_list.addItem(item)
-        def load_history():
-            if not existing:return
-            rows=db.fetchall("SELECT timestamp,user_name,action,details FROM audit_history WHERE audit_id=? ORDER BY id",(existing["id"],)); history.setRowCount(len(rows))
-            for i,r in enumerate(rows):
-                for c,v in enumerate([r["timestamp"],r["user_name"],r["action"],r["details"]]): history.setItem(i,c,QTableWidgetItem(safe(v)))
-
-        add_att.clicked.connect(lambda:self._audit_add_general_attachment(existing,attach_list) if existing and not readonly else None)
-        open_att.clicked.connect(lambda:self._audit_open_attachment(attach_list, audit_id=existing["id"] if existing else None))
-        del_att.clicked.connect(lambda:self._audit_delete_general_attachment(existing,attach_list) if existing and not readonly else None)
-        if existing: load_audit()
-        else: make_finding()
-        if existing and readonly:
-            overview.setEnabled(False); review.setEnabled(False); add_finding.setEnabled(False); add_att.setEnabled(False); open_att.setEnabled(True); del_att.setEnabled(False)
-            for x in finding_widgets:
-                for key in ["type","standard","clause","sub","detail","ca","person","location","target","capa_required","capa_link","attachments","add","remove"]:
-                    x[key].setEnabled(False)
-                x["status"].setEnabled(True); x["closeout"].setEnabled(True)
-            d.setWindowTitle(f"Audit View — {existing['number']} — SUBMITTED / STATUS & CLOSE-OUT ONLY")
-        else:
-            if not existing:
-                update_reference_preview()
-            if refresh is None: refresh=lambda:None
-
-        buttons=QHBoxLayout(); buttons.setSpacing(8)
-        save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); close=QPushButton("Close")
-        for b in [save,submit,close]:
-            b.setMinimumHeight(42)
-            buttons.addWidget(b)
-        buttons.addStretch()
-        outer.addLayout(buttons)
-        if readonly: save.setEnabled(True); submit.setEnabled(False)
-        def validate_submission():
-            if not title.text().strip(): return "Audit Title is required."
-            if not audit_type.currentText(): return "Audit Type is required."
-            if not standard.currentText(): return "Audit Standard is required."
-            if not finding_widgets: return "At least one finding is required."
-            for i,x in enumerate(finding_widgets,1):
-                required=[(x["type"].currentText(),"Finding Type"),(x["standard"].currentText(),"Standard"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].text().strip(),"Responsible Person"),(x["location"].text().strip(),"Location")]
-                for val,label in required:
-                    if not val or val.startswith("--") or val.startswith("No active"): return f"Finding {i}: {label} is required."
-                if not x["target"].date(): return f"Finding {i}: Target Date is required."
-            if not auditor.text().strip() or not reviewer.text().strip() or not approver.text().strip(): return "Auditor, Reviewer and Approver are required."
-            return ""
-        def save_submitted_status_closeout():
-            nonlocal existing
-            if not existing:
-                return
-            try:
-                now=datetime.now().isoformat(timespec="seconds")
-                for x in finding_widgets:
-                    closeout_value=x["closeout"].text().strip()
-                    status_value=x["status"].currentText().strip()
-                    if closeout_value:
-                        status_value="Closed"
-                        x["status"].setCurrentText("Closed")
-                    if status_value=="Closed" and not closeout_value:
-                        QMessageBox.warning(d,"Close-out Evidence Required","A finding can only be Closed after Close Out Evidence is entered.")
-                        return
-                    fid=x["data"]["id"] if x.get("data") and "id" in x["data"].keys() else None
-                    if fid:
-                        db.execute("UPDATE audit_findings SET status=?, close_out_evidence=?, updated_at=? WHERE id=? AND audit_id=?",(status_value,closeout_value,now,fid,existing["id"]))
-                        self._audit_log(existing["id"],"Submitted audit finding updated",f"Finding {x['data']['finding_number']}: Status={status_value}; Close Out Evidence updated")
-                db.execute("UPDATE audits SET updated_at=? WHERE id=?",(now,existing["id"]))
-                if refresh: refresh()
-                QMessageBox.information(d,"Saved","Status and close-out evidence were saved.")
-            except Exception as e:
-                logging.exception("Audit submitted update failed"); QMessageBox.critical(d,"Save Error",f"Unable to save status/close-out evidence.\n\n{e}")
-
-        def save_audit(final=False):
-            nonlocal existing
-            if readonly:
-                save_submitted_status_closeout()
-                return
-            if final:
-                msg=validate_submission()
-                if msg: QMessageBox.warning(d,"Validation",msg); return
-                if QMessageBox.question(d,"Confirm Submission","Once this audit is submitted, only finding Status and Close Out Evidence can be changed.")!=QMessageBox.StandardButton.Yes: return
-            try:
-                for finding_index, finding_widget in enumerate(finding_widgets, 1):
-                    selected_capa = finding_widget["capa_link"].currentText().strip()
-                    if finding_widget["capa_required"].currentText() == "Yes" and selected_capa and not db.fetchone("SELECT id FROM capa WHERE number=?", (selected_capa,)):
-                        QMessageBox.warning(d, "CAPA Link Not Found", f"CAPA number '{selected_capa}' on finding {finding_index} does not exist in the central CAPA Register. Select an existing CAPA or leave the field blank to create a new linked CAPA.")
-                        return
-                    if finding_widget["capa_required"].currentText() == "Yes" and not selected_capa and not finding_widget["ca"].toPlainText().strip():
-                        QMessageBox.warning(d, "Corrective Action Required", f"Finding {finding_index}: enter a corrective action before creating a linked CAPA.")
-                        return
-                now=datetime.now().isoformat(timespec="seconds")
-                ref_value = safe(existing["number"]) if existing else self._next_audit_reference(audit_type.currentText(), audit_date.date().toString("yyyy-MM-dd"))
-                reference.setText(ref_value)
-                if not ref_value:
-                    QMessageBox.warning(d,"Reference Error","Unable to generate an Audit Reference. Check the company name in Settings."); return
-                duplicate=db.fetchone("SELECT id FROM audits WHERE number=? AND id<>?",(ref_value, existing["id"] if existing else -1))
-                if duplicate:
-                    QMessageBox.warning(d,"Duplicate Audit Reference","This Audit Reference already exists. Please enter a unique reference."); return
-                vals=(audit_date.date().toString("yyyy-MM-dd"),audit_type.currentText(),title.text().strip(),standard.currentText(),department.text().strip(),location.text().strip(),scope.toPlainText(),criteria.toPlainText(),auditor.text().strip(),auditor_pos.text(),auditor_date.date().toString("yyyy-MM-dd"),reviewer.text().strip(),reviewer_pos.text(),reviewer_date.date().toString("yyyy-MM-dd"),approver.text().strip(),approver_pos.text(),approver_date.date().toString("yyyy-MM-dd"),"Submitted" if final else "Draft",now,now if final else "")
-                if not existing:
-                    db.execute("INSERT INTO audits(number,audit_date,audit_type,title,standard,department,location,scope,criteria,auditor,auditor_position,auditor_date,reviewer,reviewer_position,reviewer_date,approver,approver_position,approver_date,status,created_by,created_at,updated_at,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (reference.text(),)+vals[:18]+(db.setting("current_user","") or "System User",now,now,vals[-1]))
-                    existing=db.fetchone("SELECT * FROM audits WHERE number=?",(reference.text(),)); self._audit_log(existing["id"],"Audit created", "Draft" if not final else "Submitted")
-                else:
-                    db.execute("UPDATE audits SET number=?,audit_date=?,audit_type=?,title=?,standard=?,department=?,location=?,scope=?,criteria=?,auditor=?,auditor_position=?,auditor_date=?,reviewer=?,reviewer_position=?,reviewer_date=?,approver=?,approver_position=?,approver_date=?,status=?,updated_at=?,submitted_at=? WHERE id=?", (ref_value,)+vals+(existing["id"],))
-                    self._audit_log(existing["id"],"Audit submitted" if final else "Audit saved", "Status: Submitted" if final else "Status: Draft")
-                    # Preserve existing findings. They are updated individually below so linked CAPA
-                    # records, checklist-originated findings, evidence and audit history are not orphaned.
-                # If newly created, there are no finding rows yet; write current finding state.
-                # Preserve the currently listed finding attachments while rebuilding the
-                # finding rows. Removing an attachment from the UI therefore removes it
-                # from the saved audit on the next draft save.
-                preserved_attachments=[]
-                if existing:
-                    for n,x in enumerate(finding_widgets,1):
-                        kept=[]
-                        for i in range(x["attachments"].count()):
-                            candidate=x["attachments"].item(i).text()
-                            if Path(candidate).exists(): kept.append(candidate)
-                        preserved_attachments.append((n,kept))
-                prior_manual_findings = db.fetchall("SELECT id,status,capa_number FROM audit_findings WHERE audit_id=? AND source_schedule_id IS NULL",(existing["id"],)) if existing else []
-                visible_existing_ids = {int(x["data"]["id"]) for x in finding_widgets if x.get("data") is not None and "id" in x["data"].keys()}
-                for n,x in enumerate(finding_widgets,1):
-                    if x["status"].currentText().lower() in ("closed","verified") and not x["closeout"].text().strip():
-                        QMessageBox.warning(d,"Verification Required",f"Finding {n} cannot be closed until close-out evidence / verification is recorded."); return
-                    pid=None
-                    prior=x.get("data")
-                    fid=int(prior["id"]) if prior is not None and "id" in prior.keys() else None
-                    prior_row=db.fetchone("SELECT source_schedule_id FROM audit_findings WHERE id=? AND audit_id=?",(fid,existing["id"])) if fid else None
-                    # Checklist-originated findings are managed by the checklist workflow. Do not
-                    # overwrite or recreate them from the general Audit Workspace.
-                    if prior_row and prior_row["source_schedule_id"] is not None:
-                        continue
-                    values=(n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now,now)
-                    if fid:
-                        old_ref=db.fetchone("SELECT finding_reference FROM audit_findings WHERE id=? AND audit_id=?",(fid,existing["id"]))
-                        finding_ref=safe(old_ref["finding_reference"]) if old_ref else ""
-                        if not finding_ref: finding_ref=self._next_audit_finding_reference(existing["id"],reference.text(),safe(existing["audit_date"]),fid)
-                        db.execute("UPDATE audit_findings SET finding_number=?,finding_standard=?,clause=?,sub_clause=?,finding_type=?,finding_detail=?,observation=?,corrective_action=?,responsible=?,responsible_person_id=?,location=?,target_date=?,status=?,close_out_evidence=?,finding_reference=?,capa_required=?,capa_number=?,updated_at=? WHERE id=? AND audit_id=?",values[:14]+(finding_ref,1 if x["capa_required"].currentText()=="Yes" else 0,x["capa_link"].currentText().strip(),values[15],fid,existing["id"]))
-                        db.execute("DELETE FROM audit_attachments WHERE audit_id=? AND finding_id=?",(existing["id"],fid))
-                    else:
-                        finding_ref=self._next_audit_finding_reference(existing["id"],reference.text(),safe(existing["audit_date"]))
-                        db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,close_out_evidence,finding_reference,capa_required,capa_number,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(existing["id"],)+values[:14]+(finding_ref,1 if x["capa_required"].currentText()=="Yes" else 0,x["capa_link"].currentText().strip())+values[14:])
-                        fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
-                    # If CAPA is required and no existing CAPA number was selected, create a linked
-                    # record in the existing central CAPA table. CAPA numbering remains independent.
-                    if x["capa_required"].currentText()=="Yes":
-                        linked_no=x["capa_link"].currentText().strip()
-                        if linked_no and db.fetchone("SELECT id FROM capa WHERE number=?",(linked_no,)):
-                            db.execute("UPDATE audit_findings SET capa_number=?,capa_required=1 WHERE id=?",(linked_no,fid))
-                        elif not linked_no:
-                            capa_no=next_number("HSE-CAPA","capa")
-                            db.execute("INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(capa_no,"Audit",finding_ref,x["detail"].toPlainText(),"",x["ca"].toPlainText(),"",x["person"].text().strip(),"Medium",x["target"].date().toString("yyyy-MM-dd"),"Open","","",now,json.dumps([{"action":x["ca"].toPlainText().strip(),"evidence":[],"has_evidence":False}],ensure_ascii=False),"Pending Approval","","",0,"Open",x["detail"].toPlainText()))
-                            db.execute("UPDATE audit_findings SET capa_number=?,capa_required=1 WHERE id=?",(capa_no,fid))
-                    else:
-                        db.execute("UPDATE audit_findings SET capa_required=0 WHERE id=?",(fid,))
-                    paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
-                    for fp in paths:
-                        try:
-                            # Existing files in the application attachment store are retained
-                            # as-is; newly selected external files are copied into the store.
-                            if str(Path(fp).resolve()).startswith(str(ATTACH_DIR.resolve())):
-                                db.execute("INSERT INTO audit_attachments(audit_id,finding_id,file_path,attachment_type,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
-                                           (existing["id"],fid,fp,"Evidence",db.setting("current_user","") or "System User",now))
-                            else:
-                                self._audit_attachment_copy([fp],reference.text(),existing["id"],fid,db.setting("current_user","") or "System User")
-                        except Exception:
-                            logging.exception("Unable to preserve audit finding attachment")
-                # A finding removed from the editor is never physically deleted. Keep its history
-                # and CAPA relationship, and flag it for controlled review/cancellation instead.
-                for prior_finding in prior_manual_findings:
-                    if int(prior_finding["id"]) not in visible_existing_ids:
-                        old_status=safe(prior_finding["status"])
-                        db.execute("UPDATE audit_findings SET status='Cancellation Pending Review',updated_at=? WHERE id=?",(now,prior_finding["id"]))
-                        db.execute("INSERT INTO audit_finding_history(finding_id,action,old_status,new_status,comments,user_name,timestamp) VALUES(?,?,?,?,?,?,?)",(prior_finding["id"],"Cancellation requested from Audit Workspace",old_status,"Cancellation Pending Review","Finding retained to preserve audit history and any CAPA relationship; authorized review is required.",safe(db.setting("current_user", "") or "System User"),now))
-                # General attachments already saved independently.
-                existing=db.fetchone("SELECT * FROM audits WHERE id=?",(existing["id"],))
-                if refresh: refresh()
-                if final: QMessageBox.information(d,"Audit Submitted","Audit submitted successfully and is now read-only."); d.accept()
-                else: QMessageBox.information(d,"Saved","Audit saved as Draft. You can edit it later.")
-            except Exception as e:
-                logging.exception("Audit save failed"); QMessageBox.critical(d,"Save Error",f"Unable to save audit.\n\n{e}")
-        save.clicked.connect(lambda:save_audit(False)); submit.clicked.connect(lambda:save_audit(True)); close.clicked.connect(d.reject)
-        d.exec()
-
-    def _audit_add_general_attachment(self, audit, widget):
-        paths,_=QFileDialog.getOpenFileNames(self,"Select Audit Attachment","","Documents and Evidence (*.pdf *.doc *.docx *.xls *.xlsx *.png *.jpg *.jpeg *.bmp *.txt);;All Files (*)")
-        if paths:
-            self._audit_attachment_copy(paths,audit["number"],audit["id"],None,db.setting("current_user","") or "System User"); self._audit_log(audit["id"],"Attachment added", "; ".join(Path(x).name for x in paths));
-            for p in paths: widget.addItem(Path(p).name)
-
-    def _audit_open_attachment(self, widget, audit_id=None):
-        item=widget.currentItem()
-        if not item:return
-        path=item.text()
+    def _aud_item(self, text, audit_id=None, link=False):
+        item = QTableWidgetItem(safe(text))
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         if audit_id is not None:
-            row=db.fetchone("SELECT file_path FROM audit_attachments WHERE id=? AND audit_id=?",(item.data(Qt.ItemDataRole.UserRole),audit_id))
-            if row:path=safe(row["file_path"])
-        fp=Path(path)
-        if not fp.exists():
-            QMessageBox.warning(self,"Attachment","The attachment file could not be found.")
+            item.setData(Qt.ItemDataRole.UserRole, int(audit_id))
+        if link:
+            font = QFont()
+            font.setBold(True)
+            font.setUnderline(True)
+            item.setFont(font)
+            item.setForeground(QBrush(QColor("#0B5ED7")))
+        return item
+
+    def _aud_date_edit(self, value=""):
+        editor = QDateEdit()
+        editor.setCalendarPopup(True)
+        editor.setDisplayFormat("dd-MMM-yyyy")
+        parsed = QDate.fromString(safe(value), "yyyy-MM-dd")
+        editor.setDate(parsed if parsed.isValid() else QDate.currentDate())
+        return editor
+
+    def _aud_blank_date_edit(self, value=""):
+        """Date editor that can be left blank (shows empty at the minimum date)."""
+        editor = QDateEdit()
+        editor.setCalendarPopup(True)
+        editor.setDisplayFormat("dd-MMM-yyyy")
+        editor.setMinimumDate(QDate(2000, 1, 1))
+        editor.setSpecialValueText(" ")
+        parsed = QDate.fromString(safe(value), "yyyy-MM-dd")
+        editor.setDate(parsed if parsed.isValid() else editor.minimumDate())
+        return editor
+
+    def _aud_date_text(self, editor):
+        if editor.date() == editor.minimumDate() and editor.specialValueText():
+            return ""
+        return editor.date().toString("yyyy-MM-dd")
+
+    # ============================================================
+    # TAB 1 - AUDIT DASHBOARD
+    # ============================================================
+    def _aud_build_dashboard(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        cards = QHBoxLayout()
+        labels = {}
+        for key, title in [("conducted", "Total Audits Conducted"), ("findings", "Total Findings"),
+                           ("open", "Open Findings"), ("capa", "Findings Pending in CAPA")]:
+            box = QGroupBox(title)
+            bl = QVBoxLayout(box)
+            lab = QLabel("0")
+            lab.setStyleSheet("font-size:30px;font-weight:bold;color:#17365D;")
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bl.addWidget(lab)
+            cards.addWidget(box)
+            labels[key] = lab
+        lay.addLayout(cards)
+        top = QHBoxLayout()
+        top.addWidget(QLabel("<b>Audit Summary</b> — click an Audit Number to open its complete Audit Register."), 1)
+        search = QLineEdit()
+        search.setPlaceholderText("Search audit number, type or status...")
+        search.setFixedWidth(320)
+        refresh_btn = QPushButton("Refresh")
+        top.addWidget(search)
+        top.addWidget(refresh_btn)
+        lay.addLayout(top)
+        table = self._aud_table(["Audit Number", "Audit Type", "Audit Date", "Status"])
+        self._aud_readonly(table)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+
+        def load():
+            aud_sync_capa_stages()
+            m = aud_metrics()
+            for key, lab in labels.items():
+                lab.setText(str(m[key]))
+            needle = search.text().strip().lower()
+            rows = [a for a in aud_list(AUD_CONDUCTED_STATUSES)
+                    if not needle or needle in " ".join([safe(a["number"]), safe(a["audit_type"]), safe(a["status"])]).lower()]
+            table.setRowCount(len(rows))
+            for ri, a in enumerate(rows):
+                # Summary level shows ONLY the parent Audit Number - never finding numbers.
+                table.setItem(ri, 0, self._aud_item(a["number"], a["id"], link=True))
+                table.setItem(ri, 1, self._aud_item(a["audit_type"], a["id"]))
+                table.setItem(ri, 2, self._aud_item(a["audit_date"], a["id"]))
+                table.setItem(ri, 3, self._aud_item(a["status"], a["id"]))
+
+        def open_register(row, col=0):
+            item = table.item(row, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole):
+                self._aud_register_dialog(int(item.data(Qt.ItemDataRole.UserRole)), load)
+
+        table.cellClicked.connect(lambda r, c: open_register(r) if c == 0 else None)
+        table.cellDoubleClicked.connect(open_register)
+        search.textChanged.connect(load)
+        refresh_btn.clicked.connect(load)
+        ctx["refresh_dashboard"] = load
+        return tab
+
+    # ---------------- Audit Register (drill-down / UI report view) ----------------
+    def _aud_register_dialog(self, audit_id, on_change=None):
+        aud_sync_capa_stages(audit_id)
+        audit = aud_get(audit_id)
+        if not audit:
+            QMessageBox.warning(self, "Audit Register", "The selected audit could not be found.")
             return
-        try:
-            if hasattr(os,"startfile"): os.startfile(str(fp))
+        d = QDialog(self)
+        d.setWindowTitle(f"Audit Register — {safe(audit['number'])}")
+        d.resize(1380, 780)
+        lay = QVBoxLayout(d)
+        title = QLabel(f"AUDIT REGISTER — {safe(audit['number'])}")
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;")
+        lay.addWidget(title)
+        info = QLabel()
+        info.setTextFormat(Qt.TextFormat.RichText)
+        info.setWordWrap(True)
+        lay.addWidget(info)
+        summary = QLabel()
+        summary.setStyleSheet("font-weight:bold;")
+        lay.addWidget(summary)
+        table = self._aud_table(AUD_REGISTER_HEADERS)
+        self._aud_readonly(table)
+        lay.addWidget(table, 1)
+        btns = QHBoxLayout()
+        excel_btn = QPushButton("Export Excel")
+        word_btn = QPushButton("Export Word")
+        complete_btn = QPushButton("Mark Audit Completed")
+        close_btn = QPushButton("Close")
+        for b in (excel_btn, word_btn, complete_btn, close_btn):
+            b.setMinimumHeight(36)
+        btns.addWidget(excel_btn)
+        btns.addWidget(word_btn)
+        btns.addStretch(1)
+        btns.addWidget(complete_btn)
+        btns.addWidget(close_btn)
+        lay.addLayout(btns)
+        widths = [150, 170, 110, 80, 110, 260, 190, 210, 110, 95, 60, 90, 130, 160]
+
+        def load():
+            aud_sync_capa_stages(audit_id)
+            a = aud_get(audit_id)
+            procs = ", ".join(aud_parse_procedures(a["procedures"])) or "—"
+            info.setText(
+                f"<table cellspacing='6'><tr>"
+                f"<td><b>Audit Type:</b> {safe(a['audit_type'])}</td><td><b>Date:</b> {safe(a['audit_date'])}</td>"
+                f"<td><b>Location:</b> {safe(a['location'])}</td><td><b>Auditor:</b> {safe(a['auditor'])}</td>"
+                f"<td><b>Auditee:</b> {safe(a['auditee']) or '—'}</td><td><b>Status:</b> {safe(a['status'])}</td></tr>"
+                f"<tr><td colspan='6'><b>Procedures:</b> {procs}</td></tr></table>")
+            headers, rows = aud_register_table(audit_id)
+            closed = sum(1 for r in rows if r[11] == "Closed")
+            summary.setText(f"Total findings: {len(rows)}   |   Open: {len(rows) - closed}   |   Closed: {closed}   |   "
+                            f"CAPA routed: {sum(1 for r in rows if r[10] == 'Yes')}")
+            table.setRowCount(len(rows))
+            for ri, row in enumerate(rows):
+                for ci, val in enumerate(row):
+                    table.setItem(ri, ci, self._aud_item(val))
+            for ci, wd in enumerate(widths):
+                table.setColumnWidth(ci, wd)
+            table.resizeRowsToContents()
+            complete_btn.setEnabled(safe(a["status"]) in ("Submitted", "In Progress"))
+
+        def export_excel():
+            path, _ = QFileDialog.getSaveFileName(d, "Export Audit Register (Excel)",
+                                                  str(REPORT_DIR / f"{safe(audit['number'])}_Audit_Register.xlsx"),
+                                                  "Excel Workbook (*.xlsx)")
+            if not path:
+                return
+            try:
+                aud_export_excel(audit_id, path)
+                self.show_export_success(path)
+            except Exception as exc:
+                logging.exception("Audit Excel export failed")
+                QMessageBox.critical(d, "Export Failed", f"Unable to create the Excel report.\n\n{exc}")
+
+        def export_word():
+            path, _ = QFileDialog.getSaveFileName(d, "Export Audit Register (Word)",
+                                                  str(REPORT_DIR / f"{safe(audit['number'])}_Audit_Register.docx"),
+                                                  "Word Document (*.docx)")
+            if not path:
+                return
+            try:
+                aud_export_word(audit_id, path)
+                self.show_export_success(path)
+            except Exception as exc:
+                logging.exception("Audit Word export failed")
+                QMessageBox.critical(d, "Export Failed", f"Unable to create the Word report.\n\n{exc}")
+
+        def mark_completed():
+            open_items = db.fetchone("SELECT COUNT(*) AS n FROM aud_findings WHERE audit_id=? AND status<>'Closed'", (audit_id,))["n"]
+            text = "Mark this audit as Completed?"
+            if open_items:
+                text += f"\n\n{open_items} finding(s) are still open; they will remain tracked in the register."
+            if QMessageBox.question(d, "Complete Audit", text) == QMessageBox.StandardButton.Yes:
+                aud_set_status(audit_id, "Completed")
+                load()
+                if on_change:
+                    on_change()
+
+        excel_btn.clicked.connect(export_excel)
+        word_btn.clicked.connect(export_word)
+        complete_btn.clicked.connect(mark_completed)
+        close_btn.clicked.connect(d.accept)
+        load()
+        d.exec()
+        if on_change:
+            on_change()
+
+    # ============================================================
+    # TAB 2 - AUDIT SCHEDULING
+    # ============================================================
+    def _aud_build_schedule(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        state = {"id": None}
+        box = QGroupBox("Schedule an Audit")
+        form_lay = QGridLayout(box)
+        number_label = QLabel("Audit Number: assigned automatically on first save")
+        number_label.setStyleSheet("font-weight:bold;color:#17365D;")
+        form_lay.addWidget(number_label, 0, 0, 1, 4)
+        type_combo = QComboBox()
+        type_combo.addItem("Select audit type...")
+        type_combo.addItems(AUD_TYPES)
+        form_lay.addWidget(QLabel("Audit Type:"), 1, 0)
+        form_lay.addWidget(type_combo, 1, 1)
+        proc_label = QLabel("Procedures (tick one or more):")
+        proc_list = QListWidget()
+        proc_list.setMaximumHeight(150)
+        for name in aud_procedure_library().keys():
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            proc_list.addItem(item)
+        form_lay.addWidget(proc_label, 2, 0, Qt.AlignmentFlag.AlignTop)
+        form_lay.addWidget(proc_list, 2, 1, 1, 3)
+        date_edit = self._aud_date_edit()
+        location_edit = QLineEdit()
+        auditor_edit = QLineEdit()
+        title_edit = QLineEdit()
+        scope_edit = QTextEdit()
+        scope_edit.setMaximumHeight(60)
+        details = QWidget()
+        dl = QGridLayout(details)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.addWidget(QLabel("Date:"), 0, 0)
+        dl.addWidget(date_edit, 0, 1)
+        dl.addWidget(QLabel("Location:"), 0, 2)
+        dl.addWidget(location_edit, 0, 3)
+        dl.addWidget(QLabel("Auditor:"), 1, 0)
+        dl.addWidget(auditor_edit, 1, 1)
+        dl.addWidget(QLabel("Audit Title:"), 1, 2)
+        dl.addWidget(title_edit, 1, 3)
+        dl.addWidget(QLabel("Scope:"), 2, 0, Qt.AlignmentFlag.AlignTop)
+        dl.addWidget(scope_edit, 2, 1, 1, 3)
+        form_lay.addWidget(details, 3, 0, 1, 4)
+        form_lay.setColumnStretch(1, 1)
+        form_lay.setColumnStretch(3, 1)
+        lay.addWidget(box)
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        submit_btn = QPushButton("Submit")
+        draft_btn = QPushButton("Draft")
+        clear_btn = QPushButton("New / Clear")
+        for b in (save_btn, submit_btn, draft_btn, clear_btn):
+            b.setMinimumHeight(38)
+            b.setMinimumWidth(120)
+        submit_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        btn_row.addStretch(1)
+        for b in (draft_btn, save_btn, submit_btn, clear_btn):
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        lay.addWidget(QLabel("<b>All audits</b> — Draft and Scheduled audits can be edited; Submitted audits continue in the 'Auditee and Checklist' tab."))
+        table = self._aud_table(["Audit Number", "Audit Type", "Date", "Location", "Auditor", "Status"])
+        self._aud_readonly(table)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+        row_btns = QHBoxLayout()
+        edit_btn = QPushButton("Edit Selected (Draft / Scheduled)")
+        delete_btn = QPushButton("Delete Selected Audit")
+        row_btns.addWidget(edit_btn)
+        row_btns.addWidget(delete_btn)
+        row_btns.addStretch(1)
+        lay.addLayout(row_btns)
+
+        def checked_procedures():
+            return [proc_list.item(i).text() for i in range(proc_list.count())
+                    if proc_list.item(i).checkState() == Qt.CheckState.Checked]
+
+        def update_visibility():
+            is_internal = type_combo.currentText() == "Internal"
+            proc_label.setVisible(is_internal)
+            proc_list.setVisible(is_internal)
+            has_type = type_combo.currentIndex() > 0
+            # Date / Location / Auditor are requested after the type (and, for Internal, the procedures) are chosen.
+            details.setEnabled(has_type and (not is_internal or bool(checked_procedures())))
+
+        def clear_form():
+            state["id"] = None
+            number_label.setText("Audit Number: assigned automatically on first save")
+            type_combo.setCurrentIndex(0)
+            for i in range(proc_list.count()):
+                proc_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+            date_edit.setDate(QDate.currentDate())
+            location_edit.clear()
+            auditor_edit.clear()
+            title_edit.clear()
+            scope_edit.clear()
+            update_visibility()
+
+        def load_table():
+            rows = aud_list()
+            table.setRowCount(len(rows))
+            for ri, a in enumerate(rows):
+                for ci, key in enumerate(["number", "audit_type", "audit_date", "location", "auditor", "status"]):
+                    table.setItem(ri, ci, self._aud_item(a[key], a["id"]))
+
+        def collect():
+            return {
+                "audit_type": type_combo.currentText() if type_combo.currentIndex() > 0 else "",
+                "procedures": checked_procedures(),
+                "audit_date": date_edit.date().toString("yyyy-MM-dd"),
+                "location": location_edit.text(),
+                "auditor": auditor_edit.text(),
+                "title": title_edit.text(),
+                "scope": scope_edit.toPlainText(),
+            }
+
+        def do_save(status):
+            try:
+                audit_id = aud_save_audit(state["id"], collect(), status)
+            except ValueError as exc:
+                QMessageBox.warning(tab, "Audit Scheduling", str(exc))
+                return
+            except Exception as exc:
+                logging.exception("Audit save failed")
+                QMessageBox.critical(tab, "Audit Scheduling", f"Could not save the audit.\n\n{exc}")
+                return
+            audit = aud_get(audit_id)
+            number = safe(audit["number"])
+            if status == "Submitted":
+                auditee, ok = QInputDialog.getText(
+                    tab, "Auditee", f"Audit {number} submitted.\n\nEnter the Auditee (person / department / organisation being audited):")
+                if ok and auditee.strip():
+                    aud_set_auditee(audit_id, auditee.strip())
+                clear_form()
+                load_table()
+                ctx["refresh_checklist_options"]()
+                ctx["open_checklist"](audit_id)
+                ctx["tabs"].setCurrentIndex(2)
+                return
+            QMessageBox.information(tab, "Audit Scheduling",
+                                    f"Audit {number} saved as {status}." + (
+                                        "\nIt now appears in the Notifications audit list." if status == "Scheduled" else ""))
+            clear_form()
+            load_table()
+
+        def edit_selected():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            if item is None:
+                QMessageBox.information(tab, "Select Audit", "Select a Draft or Scheduled audit first.")
+                return
+            audit = aud_get(int(item.data(Qt.ItemDataRole.UserRole)))
+            if safe(audit["status"]) not in ("Draft", "Scheduled"):
+                QMessageBox.information(tab, "Audit Submitted",
+                                        "Submitted audits can no longer be re-scheduled. Continue them in the 'Auditee and Checklist' tab.")
+                return
+            state["id"] = int(audit["id"])
+            number_label.setText(f"Audit Number: {safe(audit['number'])}   (editing {safe(audit['status'])})")
+            type_combo.setCurrentText(safe(audit["audit_type"]))
+            selected = set(aud_parse_procedures(audit["procedures"]))
+            for i in range(proc_list.count()):
+                proc_list.item(i).setCheckState(Qt.CheckState.Checked if proc_list.item(i).text() in selected else Qt.CheckState.Unchecked)
+            parsed = QDate.fromString(safe(audit["audit_date"]), "yyyy-MM-dd")
+            date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
+            location_edit.setText(safe(audit["location"]))
+            auditor_edit.setText(safe(audit["auditor"]))
+            title_edit.setText(safe(audit["title"]))
+            scope_edit.setPlainText(safe(audit["scope"]))
+            update_visibility()
+
+        def delete_selected():
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            if item is None:
+                QMessageBox.information(tab, "Select Audit", "Select an audit to delete first.")
+                return
+            audit = aud_get(int(item.data(Qt.ItemDataRole.UserRole)))
+            count = db.fetchone("SELECT COUNT(*) AS n FROM aud_findings WHERE audit_id=?", (audit["id"],))["n"]
+            if QMessageBox.question(
+                    tab, "Delete Audit",
+                    f"Delete audit {safe(audit['number'])}?\n\nIts {count} finding(s) and any notification will be removed. "
+                    f"CAPA records already raised stay in the CAPA module.") != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                aud_delete_audit(int(audit["id"]))
+            except Exception as exc:
+                logging.exception("Audit delete failed")
+                QMessageBox.critical(tab, "Delete Failed", str(exc))
+                return
+            if state["id"] == int(audit["id"]):
+                clear_form()
+            load_table()
+
+        type_combo.currentIndexChanged.connect(lambda *_: update_visibility())
+        proc_list.itemChanged.connect(lambda *_: update_visibility())
+        draft_btn.clicked.connect(lambda: do_save("Draft"))
+        save_btn.clicked.connect(lambda: do_save("Scheduled"))
+        submit_btn.clicked.connect(lambda: do_save("Submitted"))
+        clear_btn.clicked.connect(clear_form)
+        edit_btn.clicked.connect(edit_selected)
+        delete_btn.clicked.connect(delete_selected)
+        table.cellDoubleClicked.connect(lambda *_: edit_selected())
+        update_visibility()
+        load_table()
+        ctx["refresh_schedule"] = load_table
+        return tab
+
+    # ============================================================
+    # TAB 3 - AUDITEE & CHECKLIST (+ CAPA routing on save)
+    # ============================================================
+    def _aud_build_checklist(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        state = {"audit_id": None, "removed": [], "loading": False}
+        top = QGridLayout()
+        audit_combo = QComboBox()
+        audit_combo.setMinimumWidth(320)
+        auditee_edit = QLineEdit()
+        auditee_edit.setPlaceholderText("Enter the Auditee")
+        type_combo = QComboBox()
+        type_combo.addItem("Select type of audit...")
+        type_combo.addItems(AUD_TYPES)
+        top.addWidget(QLabel("Select Audit:"), 0, 0)
+        top.addWidget(audit_combo, 0, 1)
+        top.addWidget(QLabel("Auditee:"), 0, 2)
+        top.addWidget(auditee_edit, 0, 3)
+        top.addWidget(QLabel("Type of Audit:"), 0, 4)
+        top.addWidget(type_combo, 0, 5)
+        top.setColumnStretch(3, 1)
+        lay.addLayout(top)
+
+        proc_box = QGroupBox("Procedures — tick a procedure to display its checklist")
+        pl = QVBoxLayout(proc_box)
+        proc_list = QListWidget()
+        proc_list.setMaximumHeight(120)
+        for name in aud_procedure_library().keys():
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            proc_list.addItem(item)
+        pl.addWidget(proc_list)
+        lay.addWidget(proc_box)
+        hint = QLabel("")
+        hint.setStyleSheet("color:#555;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        table = self._aud_table(AUD_CHECKLIST_HEADERS)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        for ci, wd in enumerate([150, 170, 110, 80, 110, 260, 190, 210, 110, 110, 90, 100]):
+            table.setColumnWidth(ci, wd)
+        lay.addWidget(table, 1)
+
+        btns = QHBoxLayout()
+        add_btn = QPushButton("+ Add Blank Row")
+        del_btn = QPushButton("Delete Selected Row")
+        meta_btn = QPushButton("Save Auditee && Type")
+        save_btn = QPushButton("Save Checklist")
+        for b in (add_btn, del_btn, meta_btn, save_btn):
+            b.setMinimumHeight(38)
+        save_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        btns.addWidget(add_btn)
+        btns.addWidget(del_btn)
+        btns.addStretch(1)
+        btns.addWidget(meta_btn)
+        btns.addWidget(save_btn)
+        lay.addLayout(btns)
+
+        # ---- row helpers ----
+        def row_meta(row):
+            item = table.item(row, 1)
+            try:
+                return json.loads(safe(item.data(Qt.ItemDataRole.UserRole)) or "{}") if item else {}
+            except Exception:
+                return {}
+
+        def set_meta(row, meta):
+            item = table.item(row, 1)
+            if item is not None:
+                item.setData(Qt.ItemDataRole.UserRole, json.dumps(meta))
+
+        def cell_text(row, col):
+            item = table.item(row, col)
+            return item.text() if item else ""
+
+        def readonly_item(text):
+            it = QTableWidgetItem(safe(text))
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            return it
+
+        def add_row(rec):
+            row = table.rowCount()
+            table.insertRow(row)
+            audit = aud_get(state["audit_id"])
+            table.setItem(row, 0, readonly_item(audit["number"]))
+            fno = readonly_item(rec.get("finding_no") or "(assigned on save)")
+            table.setItem(row, 1, fno)
+            set_meta(row, {"id": rec.get("id"), "template": bool(rec.get("template")), "procedure": safe(rec.get("procedure"))})
+            for col, key in ((2, "auditor_name"), (3, "clause_sno"), (4, "sub_clause"), (5, "checklist_pts"),
+                             (6, "evidence"), (7, "corrective_action"), (8, "responsible")):
+                table.setItem(row, col, QTableWidgetItem(safe(rec.get(key))))
+            if safe(rec.get("procedure")):
+                table.item(row, 5).setToolTip(f"Procedure: {safe(rec.get('procedure'))}")
+            table.setCellWidget(row, 9, self._aud_blank_date_edit(rec.get("target_date")))
+            capa = QComboBox()
+            capa.addItems(["No", "Yes"])
+            capa.setCurrentText("Yes" if safe(rec.get("capa_required")) == "Yes" else "No")
+            table.setCellWidget(row, 10, capa)
+            status = QComboBox()
+            status.addItems(AUD_FINDING_STATUSES)
+            status.setCurrentText(safe(rec.get("status")) if safe(rec.get("status")) in AUD_FINDING_STATUSES else "Open")
+            table.setCellWidget(row, 11, status)
+            lock_capa(row, rec)
+            table.setRowHeight(row, 52)
+
+        def lock_capa(row, rec):
+            capa = table.cellWidget(row, 10)
+            if capa is None:
+                return
+            if safe(rec.get("capa_number")):
+                capa.setCurrentText("Yes")
+                capa.setEnabled(False)
+                capa.setToolTip(f"Routed to {safe(rec.get('route_stage')) or AUD_STAGE_CAPA} — CAPA No. {safe(rec.get('capa_number'))}")
             else:
-                import subprocess
-                subprocess.Popen(["xdg-open",str(fp)])
-        except Exception as e:
-            QMessageBox.warning(self,"Attachment","Unable to open the attachment.\n\n"+str(e))
+                capa.setEnabled(True)
+                capa.setToolTip("Yes = route to the CAPA module first, then to Audit Report / Closure.  No = Audit Register only.")
 
-    def _audit_delete_general_attachment(self,audit,widget):
-        item=widget.currentItem()
-        if not item:return
-        aid=item.data(Qt.ItemDataRole.UserRole)
-        row=db.fetchone("SELECT file_path FROM audit_attachments WHERE id=? AND audit_id=? AND (finding_id IS NULL OR finding_id=0)",(aid,audit["id"]))
-        if row:
-            try: Path(safe(row["file_path"])).unlink(missing_ok=True)
-            except Exception: pass
-            db.execute("DELETE FROM audit_attachments WHERE id=?",(aid,)); self._audit_log(audit["id"],"Attachment removed",item.text()); widget.takeItem(widget.row(item))
+        def rec_from_db(f):
+            return {"id": f["id"], "finding_no": f["finding_no"], "auditor_name": f["auditor_name"], "clause_sno": f["clause_sno"],
+                    "sub_clause": f["sub_clause"], "checklist_pts": f["checklist_pts"], "evidence": f["evidence"],
+                    "corrective_action": f["corrective_action"], "responsible": f["responsible"], "target_date": f["target_date"],
+                    "capa_required": f["capa_required"], "status": f["status"], "procedure": f["procedure"],
+                    "capa_number": f["capa_number"], "route_stage": f["route_stage"], "template": False}
 
-    def audit_settings(self):
-        d=QDialog(self); d.setWindowTitle("Audit Settings"); d.resize(900,700); lay=QVBoxLayout(d)
-        tabs=QTabWidget(); lay.addWidget(tabs)
-        def list_editor(key, default, title):
-            w=QWidget(); l=QVBoxLayout(w); l.addWidget(QLabel(title)); lw=QListWidget(); lw.addItems(self._audit_setting_list(key,default)); l.addWidget(lw)
-            row=QHBoxLayout(); add=QLineEdit(); add.setPlaceholderText("Add value..."); ba=QPushButton("Add"); br=QPushButton("Remove Selected"); row.addWidget(add); row.addWidget(ba); row.addWidget(br); l.addLayout(row)
-            ba.clicked.connect(lambda: (lw.addItem(add.text().strip()),add.clear()) if add.text().strip() else None); br.clicked.connect(lambda: lw.takeItem(lw.currentRow()) if lw.currentRow()>=0 else None); tabs.addTab(w,title); return lw
-        types=list_editor("audit_types",AUDIT_TYPES,"Audit Types"); ftypes=list_editor("audit_finding_types",["Major Nonconformity","Minor Nonconformity","Observation","Opportunity for Improvement","Positive Finding"],"Finding Types"); statuses=list_editor("audit_finding_statuses",["Open","In Progress","Submitted for Verification","Verified","Closed","Overdue"],"Finding Statuses"); standards=list_editor("audit_standards",["ISO 9001","ISO 14001","ISO 45001","Other"],"Standards")
-        clause_tab=QWidget(); cl=QVBoxLayout(clause_tab); cl.addWidget(QLabel("Configure Standards → Clauses → Sub-Clauses using JSON. Example: {\"ISO 45001\": {\"7\": [\"7.2 Competence\"]}}")); clause_edit=QTextEdit(); clause_edit.setPlainText(json.dumps(json.loads(db.setting("audit_clause_map","")) if db.setting("audit_clause_map","") else ISO_CLAUSES,ensure_ascii=False,indent=2)); cl.addWidget(clause_edit); tabs.addTab(clause_tab,"Clauses / Sub-Clauses")
-        info=QLabel("Clause and Sub-Clause selections in each finding are dependent on the selected Audit Standard. Changes here affect only the Audit module."); info.setWordWrap(True); lay.addWidget(info)
-        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); lay.addWidget(buttons)
+        def collect_rows():
+            rows = []
+            for r in range(table.rowCount()):
+                meta = row_meta(r)
+                capa = table.cellWidget(r, 10)
+                status = table.cellWidget(r, 11)
+                target = table.cellWidget(r, 9)
+                rows.append({
+                    "id": meta.get("id"), "template": meta.get("template"), "procedure": meta.get("procedure"),
+                    "auditor_name": cell_text(r, 2), "clause_sno": cell_text(r, 3), "sub_clause": cell_text(r, 4),
+                    "checklist_pts": cell_text(r, 5), "evidence": cell_text(r, 6), "corrective_action": cell_text(r, 7),
+                    "responsible": cell_text(r, 8), "target_date": self._aud_date_text(target) if target else "",
+                    "capa_required": capa.currentText() if capa else "No", "status": status.currentText() if status else "Open"})
+            return rows
+
+        def add_template_rows(proc):
+            audit = aud_get(state["audit_id"])
+            clauses, items = aud_procedure_library().get(proc, ("", []))
+            present = {(row_meta(r).get("procedure"), cell_text(r, 5)) for r in range(table.rowCount())}
+            for n, text in enumerate(items, 1):
+                if (proc, text) in present:
+                    continue
+                add_row({"template": True, "procedure": proc, "auditor_name": safe(audit["auditor"]),
+                         "clause_sno": str(n), "sub_clause": clauses, "checklist_pts": text})
+
+        def remove_template_rows(proc):
+            for r in range(table.rowCount() - 1, -1, -1):
+                meta = row_meta(r)
+                if meta.get("template") and not meta.get("id") and meta.get("procedure") == proc:
+                    table.removeRow(r)
+
+        def checked_procs():
+            return [proc_list.item(i).text() for i in range(proc_list.count())
+                    if proc_list.item(i).checkState() == Qt.CheckState.Checked]
+
+        def update_type_ui():
+            has_type = type_combo.currentIndex() > 0 and state["audit_id"] is not None
+            uses_procs = type_combo.currentText() in AUD_PROCEDURE_TYPES
+            proc_box.setVisible(uses_procs and state["audit_id"] is not None)
+            table.setEnabled(has_type)
+            for b in (add_btn, del_btn, meta_btn, save_btn):
+                b.setEnabled(state["audit_id"] is not None)
+            if state["audit_id"] is None:
+                hint.setText("Select a submitted audit to begin.")
+            elif type_combo.currentIndex() == 0:
+                hint.setText("Select the Type of Audit to open the checklist.")
+            elif uses_procs:
+                hint.setText("Tick procedures to load their checklists; use '+ Add Blank Row' for any additional manual entries. "
+                             "Pre-loaded checklist points are saved as findings once Evidence or a Corrective Action is entered (or CAPA = Yes).")
+            else:
+                hint.setText("Blank checklist: use '+ Add Blank Row' to enter findings manually from scratch.")
+
+        def on_proc_changed(item):
+            if state["loading"] or state["audit_id"] is None:
+                return
+            if item.checkState() == Qt.CheckState.Checked:
+                add_template_rows(item.text())
+            else:
+                remove_template_rows(item.text())
+
+        def on_type_changed(*_):
+            if state["loading"]:
+                return
+            update_type_ui()
+            if state["audit_id"] is not None and type_combo.currentIndex() > 0 \
+                    and type_combo.currentText() not in AUD_PROCEDURE_TYPES and table.rowCount() == 0:
+                add_row({"template": False, "auditor_name": safe(aud_get(state["audit_id"])["auditor"])})
+
+        def load_audit(audit_id):
+            state["loading"] = True
+            state["audit_id"] = audit_id
+            state["removed"] = []
+            table.setRowCount(0)
+            if not audit_id:
+                auditee_edit.clear()
+                type_combo.setCurrentIndex(0)
+                for i in range(proc_list.count()):
+                    proc_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+                state["loading"] = False
+                update_type_ui()
+                return
+            aud_sync_capa_stages(audit_id)
+            audit = aud_get(audit_id)
+            auditee_edit.setText(safe(audit["auditee"]))
+            # Ask for / confirm the Type of Audit: pre-selected from the schedule, empty if never captured.
+            idx = type_combo.findText(safe(audit["audit_type"]))
+            type_combo.setCurrentIndex(idx if idx > 0 else 0)
+            selected = set(aud_parse_procedures(audit["procedures"]))
+            for f in aud_findings(audit_id):
+                if safe(f["procedure"]):
+                    selected.add(safe(f["procedure"]))
+            for i in range(proc_list.count()):
+                proc_list.item(i).setCheckState(Qt.CheckState.Checked if proc_list.item(i).text() in selected else Qt.CheckState.Unchecked)
+            update_type_ui()
+            for f in aud_findings(audit_id):
+                add_row(rec_from_db(f))
+            if type_combo.currentText() in AUD_PROCEDURE_TYPES:
+                for proc in checked_procs():
+                    add_template_rows(proc)
+            elif type_combo.currentIndex() > 0 and table.rowCount() == 0:
+                add_row({"template": False, "auditor_name": safe(audit["auditor"])})
+            state["loading"] = False
+            if type_combo.currentIndex() == 0:
+                QMessageBox.information(tab, "Type of Audit", "Please select the Type of Audit to open the checklist.")
+
+        def audit_selected(*_):
+            load_audit(audit_combo.currentData())
+
+        def fill_audit_combo(select_id=None):
+            current = select_id if select_id is not None else audit_combo.currentData()
+            audit_combo.blockSignals(True)
+            audit_combo.clear()
+            audit_combo.addItem("Select audit...", None)
+            for a in aud_list(AUD_CONDUCTED_STATUSES):
+                audit_combo.addItem(f"{safe(a['number'])} — {safe(a['audit_type'])} — {safe(a['audit_date'])}", int(a["id"]))
+            idx = audit_combo.findData(current) if current is not None else 0
+            audit_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            audit_combo.blockSignals(False)
+
+        def refresh_options():
+            fill_audit_combo()
+            if audit_combo.currentData() is None and state["audit_id"] is not None:
+                load_audit(None)
+
+        def open_checklist(audit_id):
+            fill_audit_combo(audit_id)
+            load_audit(audit_combo.currentData())
+
+        def persist_meta():
+            if not auditee_edit.text().strip():
+                QMessageBox.warning(tab, "Auditee Required", "Please enter the Auditee before saving.")
+                auditee_edit.setFocus()
+                return False
+            if type_combo.currentIndex() == 0:
+                QMessageBox.warning(tab, "Type of Audit", "Please select the Type of Audit.")
+                return False
+            procs = checked_procs() if type_combo.currentText() in AUD_PROCEDURE_TYPES else []
+            aud_set_auditee(state["audit_id"], auditee_edit.text(), type_combo.currentText(), procs)
+            return True
+
+        def save_meta():
+            if state["audit_id"] is None:
+                return
+            if persist_meta():
+                QMessageBox.information(tab, "Saved", "Auditee and Type of Audit saved.")
+
+        def refresh_row(row, fid):
+            f = db.fetchone("SELECT * FROM aud_findings WHERE id=?", (fid,))
+            rec = rec_from_db(f)
+            table.item(row, 1).setText(safe(f["finding_no"]))
+            set_meta(row, {"id": int(f["id"]), "template": False, "procedure": safe(f["procedure"])})
+            status = table.cellWidget(row, 11)
+            if status is not None:
+                status.setCurrentText(safe(f["status"]) if safe(f["status"]) in AUD_FINDING_STATUSES else "Open")
+            lock_capa(row, rec)
+
+        def save_checklist():
+            if state["audit_id"] is None:
+                return
+            if not persist_meta():
+                return
+            try:
+                result = aud_save_findings(state["audit_id"], collect_rows(), state["removed"])
+            except ValueError as exc:
+                QMessageBox.warning(tab, "Checklist", str(exc))
+                return
+            except Exception as exc:
+                logging.exception("Audit checklist save failed")
+                QMessageBox.critical(tab, "Checklist", f"Could not save the checklist.\n\n{exc}")
+                return
+            state["removed"] = []
+            for row, fid in result["saved"]:
+                refresh_row(row, fid)
+            msg = [f"{len(result['saved'])} finding(s) saved."]
+            if result["capa_created"]:
+                msg.append("Routed to the CAPA module first (then Audit Report / Closure): " + ", ".join(result["capa_created"]))
+            if result["register_only"]:
+                msg.append(f"{result['register_only']} finding(s) with CAPA = No were routed to the Audit Register only.")
+            msg.extend(result["notes"])
+            QMessageBox.information(tab, "Checklist Saved", "\n".join(msg))
+            ctx["refresh_dashboard"]()
+
+        def delete_row():
+            row = table.currentRow()
+            if row < 0:
+                QMessageBox.information(tab, "Select Row", "Select a row to delete first.")
+                return
+            meta = row_meta(row)
+            if meta.get("id"):
+                f = db.fetchone("SELECT capa_number FROM aud_findings WHERE id=?", (meta["id"],))
+                if f and safe(f["capa_number"]):
+                    QMessageBox.warning(tab, "Cannot Delete", f"This finding has CAPA {safe(f['capa_number'])} in the CAPA module and cannot be deleted here.")
+                    return
+                state["removed"].append(int(meta["id"]))
+            table.removeRow(row)
+
+        def add_blank():
+            if state["audit_id"] is None:
+                return
+            add_row({"template": False, "auditor_name": safe(aud_get(state["audit_id"])["auditor"])})
+
+        audit_combo.currentIndexChanged.connect(audit_selected)
+        type_combo.currentIndexChanged.connect(on_type_changed)
+        proc_list.itemChanged.connect(on_proc_changed)
+        add_btn.clicked.connect(add_blank)
+        del_btn.clicked.connect(delete_row)
+        meta_btn.clicked.connect(save_meta)
+        save_btn.clicked.connect(save_checklist)
+        fill_audit_combo()
+        update_type_ui()
+        ctx["refresh_checklist_options"] = refresh_options
+        ctx["open_checklist"] = open_checklist
+        return tab
+
+    # ============================================================
+    # TAB 4 - AUDIT NOTIFICATIONS (+ Word "Invites Document")
+    # ============================================================
+    def _aud_build_notifications(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        state = {"audit_id": None, "loading": False}
+        top = QHBoxLayout()
+        audit_combo = QComboBox()
+        audit_combo.setMinimumWidth(380)
+        top.addWidget(QLabel("<b>Select Scheduled Audit:</b>"))
+        top.addWidget(audit_combo)
+        top.addStretch(1)
+        lay.addLayout(top)
+
+        box = QGroupBox("Audit Notification Details")
+        form = QFormLayout(box)
+        doc_label = QLabel("—")
+        doc_label.setStyleSheet("font-weight:bold;color:#17365D;")
+        type_label = QLabel("—")
+        to_edit = QLineEdit()
+        from_edit = QLineEdit()
+        subject_edit = QLineEdit()
+        scope_edit = QTextEdit()
+        scope_edit.setMaximumHeight(90)
+        date_edit = self._aud_date_edit()
+        time_edit = QLineEdit()
+        time_edit.setPlaceholderText("e.g. 09:00 - 12:00")
+        venue_edit = QLineEdit()
+        auditee_edit = QLineEdit()
+        team_edit = QLineEdit()
+        refs_edit = QLineEdit()
+        remarks_edit = QTextEdit()
+        remarks_edit.setMaximumHeight(70)
+        form.addRow("Document Number:", doc_label)
+        form.addRow("Audit Type:", type_label)
+        form.addRow("To *:", to_edit)
+        form.addRow("From *:", from_edit)
+        form.addRow("Subject *:", subject_edit)
+        form.addRow("Scope *:", scope_edit)
+        form.addRow("Audit Date:", date_edit)
+        form.addRow("Time:", time_edit)
+        form.addRow("Venue / Location:", venue_edit)
+        form.addRow("Auditee:", auditee_edit)
+        form.addRow("Audit Team / Auditor:", team_edit)
+        form.addRow("Procedures / Documents for Review:", refs_edit)
+        form.addRow("Remarks:", remarks_edit)
+        lay.addWidget(box)
+        btns = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        export_btn = QPushButton("Export to Word")
+        for b in (save_btn, export_btn):
+            b.setMinimumHeight(38)
+            b.setMinimumWidth(150)
+        save_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        btns.addStretch(1)
+        btns.addWidget(save_btn)
+        btns.addWidget(export_btn)
+        lay.addLayout(btns)
+        lay.addStretch(1)
+
+        fields = [to_edit, from_edit, subject_edit, scope_edit, date_edit, time_edit, venue_edit, auditee_edit,
+                  team_edit, refs_edit, remarks_edit]
+
+        def clear_fields():
+            for w in (to_edit, from_edit, subject_edit, scope_edit, time_edit, venue_edit, auditee_edit, team_edit, refs_edit, remarks_edit):
+                w.clear()
+            date_edit.setDate(QDate.currentDate())
+            doc_label.setText("—")
+            type_label.setText("—")
+
+        def load_audit(*_):
+            audit_id = audit_combo.currentData()
+            state["audit_id"] = audit_id
+            clear_fields()
+            for w in fields:
+                w.setEnabled(audit_id is not None)
+            save_btn.setEnabled(audit_id is not None)
+            export_btn.setEnabled(False)
+            if audit_id is None:
+                return
+            audit = aud_get(audit_id)
+            note = aud_get_notification(audit_id)
+            type_label.setText(safe(audit["audit_type"]))
+            if note:
+                doc_label.setText(safe(note["doc_number"]))
+                to_edit.setText(safe(note["to_party"]))
+                from_edit.setText(safe(note["from_party"]))
+                subject_edit.setText(safe(note["subject"]))
+                scope_edit.setPlainText(safe(note["scope"]))
+                parsed = QDate.fromString(safe(note["audit_date"]), "yyyy-MM-dd")
+                date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
+                time_edit.setText(safe(note["audit_time"]))
+                venue_edit.setText(safe(note["venue"]))
+                auditee_edit.setText(safe(note["auditee"]))
+                team_edit.setText(safe(note["audit_team"]))
+                refs_edit.setText(safe(note["reference_docs"]))
+                remarks_edit.setPlainText(safe(note["remarks"]))
+                export_btn.setEnabled(True)
+            else:
+                doc_label.setText("Assigned on save")
+                subject_edit.setText(f"Notification of {safe(audit['audit_type'])} Audit — {safe(audit['number'])}")
+                scope_edit.setPlainText(safe(audit["scope"]))
+                parsed = QDate.fromString(safe(audit["audit_date"]), "yyyy-MM-dd")
+                date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
+                venue_edit.setText(safe(audit["location"]))
+                auditee_edit.setText(safe(audit["auditee"]))
+                team_edit.setText(safe(audit["auditor"]))
+                refs_edit.setText(", ".join(aud_parse_procedures(audit["procedures"])))
+
+        def fill_combo(select_id=None):
+            current = select_id if select_id is not None else audit_combo.currentData()
+            audit_combo.blockSignals(True)
+            audit_combo.clear()
+            audit_combo.addItem("Select a scheduled audit...", None)
+            for a in aud_list(AUD_SCHEDULED_STATUSES):
+                audit_combo.addItem(f"{safe(a['number'])} — {safe(a['audit_type'])} — {safe(a['audit_date'])}", int(a["id"]))
+            idx = audit_combo.findData(current) if current is not None else 0
+            audit_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            audit_combo.blockSignals(False)
+
+        def refresh_options():
+            previous = state["audit_id"]
+            fill_combo()
+            if audit_combo.currentData() != previous:
+                load_audit()
+
         def save():
-            for key,lw in [("audit_types",types),("audit_finding_types",ftypes),("audit_finding_statuses",statuses),("audit_standards",standards)]: db.set_setting(key,json.dumps([lw.item(i).text() for i in range(lw.count())],ensure_ascii=False))
+            if state["audit_id"] is None:
+                return
+            data = {"to_party": to_edit.text(), "from_party": from_edit.text(), "subject": subject_edit.text(),
+                    "scope": scope_edit.toPlainText(), "audit_date": date_edit.date().toString("yyyy-MM-dd"),
+                    "audit_time": time_edit.text(), "venue": venue_edit.text(), "auditee": auditee_edit.text(),
+                    "audit_team": team_edit.text(), "reference_docs": refs_edit.text(), "remarks": remarks_edit.toPlainText()}
             try:
-                clause_data=json.loads(clause_edit.toPlainText())
-                if not isinstance(clause_data,dict): raise ValueError("Clause configuration must be a JSON object.")
-                db.set_setting("audit_clause_map",json.dumps(clause_data,ensure_ascii=False))
-            except Exception as e:
-                QMessageBox.warning(d,"Invalid Clause Configuration",str(e)); return
-            d.accept()
-        buttons.accepted.connect(save); buttons.rejected.connect(d.reject); d.exec()
+                aud_save_notification(state["audit_id"], data)
+            except ValueError as exc:
+                QMessageBox.warning(tab, "Audit Notification", str(exc))
+                return
+            except Exception as exc:
+                logging.exception("Audit notification save failed")
+                QMessageBox.critical(tab, "Audit Notification", f"Could not save the notification.\n\n{exc}")
+                return
+            note = aud_get_notification(state["audit_id"])
+            doc_label.setText(safe(note["doc_number"]))
+            export_btn.setEnabled(True)
+            QMessageBox.information(tab, "Saved", f"Audit Notification {safe(note['doc_number'])} saved. You can now export it to Word.")
 
-    def _audit_export_master_excel(self):
-        """Export the live centralized audit register and finding/CAPA summary."""
-        path,_=QFileDialog.getSaveFileName(self,"Export Master Audit Register","Master_Audit_Register.xlsx","Excel Workbook (*.xlsx)")
-        if not path: return
-        try:
-            wb=Workbook(); ws=wb.active; ws.title="Master Audit Register"
-            ws.append([safe(company_name()),"HSE MASTER AUDIT REGISTER"]); ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=15)
-            ws.append(["Generated",datetime.now().strftime("%d-%b-%Y %H:%M")]); ws.merge_cells(start_row=2,start_column=1,end_row=2,end_column=15)
-            headers=["Audit Number","Audit Type","Procedure / Title","Audit Date","Department","Location","Auditor","Total Findings","Positive Findings","Open Findings","Closed Findings","CAPA Count","Closure %","Audit Status","Standards"]
-            ws.append(headers)
-            audits=db.fetchall("SELECT * FROM audits ORDER BY audit_date DESC,id DESC")
-            for a in audits:
-                fs=db.fetchall("SELECT * FROM audit_findings WHERE audit_id=? ORDER BY finding_number,id",(a["id"],))
-                total=len(fs); positive=sum(1 for f in fs if any(x in safe(f["finding_type"]).lower() for x in ("positive","good practice","conformity")))
-                closed=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified")); opened=total-closed
-                capas=sum(1 for f in fs if int(f["capa_required"] or 0)==1 or safe(f["capa_number"]))
-                ws.append([safe(a["number"]),safe(a["audit_type"]),safe(a["title"]),safe(a["audit_date"]),safe(a["department"]),safe(a["location"]),safe(a["auditor"] or a["lead_auditor"]),total,positive,opened,closed,capas,(closed/total if total else 0),safe(a["status"]),safe(a["standard"])])
-            for cell in ws[1]: cell.font=Font(bold=True,size=15,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D")
-            for cell in ws[2]: cell.font=Font(italic=True,color="666666")
-            for cell in ws[3]: cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="1F4E78"); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-            for row in ws.iter_rows(min_row=4):
-                for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
-                row[12].number_format="0.0%"
-            widths=[22,20,32,15,20,22,24,14,16,14,14,12,14,18,18]
-            for i,w in enumerate(widths,1): ws.column_dimensions[chr(64+i)].width=w
-            ws.freeze_panes="A4"; ws.auto_filter.ref=f"A3:O{ws.max_row}"; ws.sheet_view.showGridLines=False
-            # Detailed linked finding register is included as a second sheet.
-            fw=wb.create_sheet("Findings and CAPA")
-            fh=["Audit Number","Finding Number","Finding Reference","Location","Finding / Checklist","Corrective Action","Finding Type","Responsible Person","Target Date","CAPA Required","CAPA Number","Status","Verification"]
-            fw.append(fh)
-            rows=db.fetchall("SELECT a.number AS audit_number,a.audit_date,f.* FROM audits a JOIN audit_findings f ON f.audit_id=a.id ORDER BY a.audit_date DESC,a.id,f.finding_number,f.id")
-            for f in rows:
-                ref=safe(f["finding_reference"]) or f"{f['audit_number']}-F{int(f['finding_number'] or 0):02d}"
-                fw.append([safe(f["audit_number"]),safe(f["finding_number"]),ref,safe(f["location"]),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["finding_type"]),safe(f["responsible"]),safe(f["target_date"]),"Yes" if int(f["capa_required"] or 0)==1 or safe(f["capa_number"]) else "No",safe(f["capa_number"]),safe(f["status"]),safe(f["verification"])])
-            for cell in fw[1]: cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="1F4E78"); cell.alignment=Alignment(horizontal="center",wrap_text=True)
-            for row in fw.iter_rows(min_row=2):
-                for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
-            for i,w in enumerate([22,14,26,22,42,42,22,24,16,14,20,18,35],1): fw.column_dimensions[chr(64+i)].width=w
-            fw.freeze_panes="A2"; fw.auto_filter.ref=f"A1:M{fw.max_row}"; fw.sheet_view.showGridLines=False
-            wb.save(path); self.show_export_success(path)
-        except Exception as exc:
-            logging.exception("Master Audit Excel export failed"); QMessageBox.critical(self,"Export Error",f"Unable to export the Master Audit Register.\n\n{exc}")
-
-    def _audit_export_master_pdf(self):
-        """Generate a printable PDF summary of all audits and their closure/CAPA metrics."""
-        path,_=QFileDialog.getSaveFileName(self,"Export Master Audit Register","Master_Audit_Register.pdf","PDF Files (*.pdf)")
-        if not path: return
-        try:
-            styles=getSampleStyleSheet(); doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=24,leftMargin=24,topMargin=26,bottomMargin=24); story=[]
-            logo=report_logo_path()
-            if logo and Path(logo).exists(): story.append(RLImage(str(logo),width=82,height=48,preserveAspectRatio=True))
-            story += [Paragraph("HSE MASTER AUDIT REGISTER",styles["Title"]),Paragraph(xml_safe(company_name()),styles["Heading2"]),Paragraph(f"Generated: {datetime.now().strftime('%d-%b-%Y %H:%M')}",styles["Normal"]),Spacer(1,10)]
-            audits=db.fetchall("SELECT * FROM audits ORDER BY audit_date DESC,id DESC")
-            data=[["Audit No.","Type", "Procedure / Title","Date","Location","Auditor","Findings","Open","Closed","CAPA","Closure %","Status"]]
-            total_findings=total_open=total_closed=total_capa=0
-            cell_style=styles["Normal"]; cell_style.fontSize=6.5; cell_style.leading=7.5
-            for a in audits:
-                fs=db.fetchall("SELECT * FROM audit_findings WHERE audit_id=?",(a["id"],)); n=len(fs); cl=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified")); op=n-cl; cp=sum(1 for f in fs if int(f["capa_required"] or 0)==1 or safe(f["capa_number"]))
-                total_findings+=n; total_open+=op; total_closed+=cl; total_capa+=cp
-                vals=[safe(a["number"]),safe(a["audit_type"]),safe(a["title"]),safe(a["audit_date"]),safe(a["location"]),safe(a["auditor"] or a["lead_auditor"]),str(n),str(op),str(cl),str(cp),f"{(100*cl/n) if n else 0:.1f}%",safe(a["status"])]
-                data.append([Paragraph(xml_safe(v),cell_style) for v in vals])
-            tbl=Table(data,repeatRows=1,colWidths=[75,65,115,52,80,75,38,34,38,34,45,55])
-            tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.35,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#F3F6FA")])]))
-            story += [tbl,Spacer(1,12),Paragraph(f"Total audits: {len(audits)} | Findings: {total_findings} | Open: {total_open} | Closed: {total_closed} | CAPA: {total_capa} | Closure: {(100*total_closed/total_findings) if total_findings else 0:.1f}%",styles["Heading3"])]
-            doc.build(story); self.show_export_success(path)
-        except Exception as exc:
-            logging.exception("Master Audit PDF export failed"); QMessageBox.critical(self,"Export Error",f"Unable to export the Master Audit Register.\n\n{exc}")
-
-    def _audit_report_data(self,audit_id):
-        a=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)); fs=db.fetchall("SELECT * FROM audit_findings WHERE audit_id=? ORDER BY finding_number,id",(audit_id,)); return a,fs
-
-    def _audit_export_word(self,audit_id):
-        a,fs=self._audit_report_data(audit_id)
-        if not a:return
-        path=self._export_path(f"{a['number']}_Audit_Report.docx","Save Audit Word Report","Word Documents (*.docx)")
-        if not path:return
-        try:
-            doc=Document()
-            sec=doc.sections[0]
-            sec.orientation=WD_ORIENT.LANDSCAPE
-            sec.page_width,sec.page_height=sec.page_height,sec.page_width
-            sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35); sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35)
-            # Professional header matching the existing report style.
-            hp=sec.header.paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            if report_logo_path() and Path(report_logo_path()).exists():
-                try: hp.add_run().add_picture(report_logo_path(),width=Inches(1.05),height=Inches(0.58))
-                except Exception: logging.exception("Unable to embed audit Word logo")
-            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            r=p.add_run(f"{company_name()}\nAUDIT REPORT"); r.bold=True; r.font.size=Pt(14)
-            hdr=doc.add_table(rows=2,cols=6); hdr.alignment=WD_TABLE_ALIGNMENT.CENTER; hdr.autofit=False
-            hvals=["Audit Reference",safe(a["number"]),"Audit Date",safe(a["audit_date"]),"Document No.",f"{document_prefix()}-AUDIT"]
-            hvals2=["Audit Type",safe(a["audit_type"]),"Department",safe(a["department"]),"Location",safe(a["location"])]
-            for i,v in enumerate(hvals): hdr.cell(0,i).text=v
-            for i,v in enumerate(hvals2): hdr.cell(1,i).text=v
-            for row in hdr.rows:
-                for c in row.cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            style_docx_table(hdr,header=True,font_size=8)
-            for row in hdr.rows:
-                for i,c in enumerate(row.cells): c.width=Inches(1.18 if i%2==0 else 2.05)
-            doc.add_paragraph()
-            info=doc.add_table(rows=2,cols=4); info.alignment=WD_TABLE_ALIGNMENT.CENTER; info.autofit=False
-            vals=[("Audit Title",a["title"],"Standard",a["standard"]),("Scope",a["scope"],"Audit Criteria",a["criteria"])]
-            for ri,rowvals in enumerate(vals):
-                for ci,v in enumerate(rowvals): info.cell(ri,ci).text=safe(v)
-            for row in info.rows:
-                for c in row.cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
-            style_docx_table(info,header=False,font_size=8)
-            for row in info.rows:
-                row.cells[0].width=Inches(1.15); row.cells[1].width=Inches(4.55); row.cells[2].width=Inches(1.15); row.cells[3].width=Inches(4.55)
-
-            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            r=p.add_run("AUDIT FINDINGS"); r.bold=True; r.font.size=Pt(12)
-            # One finding = one landscape row. Evidence is embedded in the same row/cell.
-            cols=["Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence","Target Date","Close Out Evidence"]
-            ft=doc.add_table(rows=1,cols=len(cols)); ft.alignment=WD_TABLE_ALIGNMENT.CENTER; ft.autofit=False
-            for i,h in enumerate(cols): ft.cell(0,i).text=h
-            style_docx_table(ft,header=True,font_size=7)
-            widths=[0.70,0.61,0.98,0.80,0.80,1.54,1.54,0.98,1.08,0.80,1.16]
-            for row in ft.rows:
-                for i,c in enumerate(row.cells): c.width=Inches(widths[i]); c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            for f in fs:
-                cells=ft.add_row().cells
-                values=[safe(f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),safe(f["clause"]),safe(f["sub_clause"]),safe(f["finding_type"]),safe(f["location"] if "location" in f.keys() else ""),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["responsible"]),"",safe(f["target_date"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")]
-                for i,v in enumerate(values): cells[i].text=v
-                # Evidence photo(s) stay inside the Evidence cell on this same finding row.
-                evidence_cell=cells[8]
-                evidence_rows=self._audit_attachment_rows(audit_id,f["id"])
-                if not evidence_rows:
-                    evidence_cell.text="No evidence attached"
-                for ar in evidence_rows:
-                    fp=Path(safe(ar["file_path"]))
-                    if evidence_cell.paragraphs and not evidence_cell.paragraphs[0].text and not evidence_cell.paragraphs[0].runs:
-                        pp=evidence_cell.paragraphs[0]
-                    else:
-                        pp=evidence_cell.add_paragraph()
-                    pp.add_run(fp.name if fp.name else "Evidence attachment")
-                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                        try:
-                            ip=evidence_cell.add_paragraph(); ip.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                            ip.add_run().add_picture(str(fp),width=Inches(0.85),height=Inches(0.75))
-                        except Exception: logging.exception("Unable to embed audit finding evidence photo")
-                for c in cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                trPr=cells[0]._tc.getparent().get_or_add_trPr()
-                trHeight=OxmlElement("w:trHeight"); trHeight.set(qn("w:val"),str(2880)); trHeight.set(qn("w:hRule"),"atLeast"); trPr.append(trHeight)
-                for i,c in enumerate(cells): c.width=Inches(widths[i])
-            style_docx_table(ft,header=True,font_size=7)
-
-            # Include audit-level evidence files as well as finding-level evidence above.
-            general_evidence=self._audit_attachment_rows(audit_id)
-            p=doc.add_paragraph(); r=p.add_run("AUDIT-LEVEL ATTACHMENTS / EVIDENCE"); r.bold=True; r.font.size=11
-            if general_evidence:
-                at=doc.add_table(rows=1,cols=4)
-                for ci,h in enumerate(["Attachment / Evidence","Type","Uploaded By","Upload Date"]): at.cell(0,ci).text=h
-                for ar in general_evidence:
-                    fp=Path(safe(ar["file_path"]))
-                    cells=at.add_row().cells
-                    cells[0].text=fp.name or "Evidence attachment"
-                    cells[1].text=safe(ar["attachment_type"] if "attachment_type" in ar.keys() else "Evidence")
-                    cells[2].text=safe(ar["uploaded_by"] if "uploaded_by" in ar.keys() else "")
-                    cells[3].text=safe(ar["uploaded_at"] if "uploaded_at" in ar.keys() else "")
-                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                        try:
-                            pp=cells[0].add_paragraph(); pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                            pp.add_run().add_picture(str(fp),width=Inches(0.8),height=Inches(0.65))
-                        except Exception: logging.exception("Unable to embed audit-level evidence photo")
-                style_docx_table(at,header=True,font_size=7)
-            else:
-                doc.add_paragraph("No audit-level attachments recorded.")
-
-            doc.add_paragraph()
-            p=doc.add_paragraph(); r=p.add_run("REVIEW / APPROVAL"); r.bold=True; r.font.size=11
-            st=doc.add_table(rows=3,cols=4); st.alignment=WD_TABLE_ALIGNMENT.CENTER; st.autofit=False
-            sign_rows=[("AUDITOR",a["auditor"],a["auditor_position"],a["auditor_date"]),("REVIEWED BY",a["reviewer"],a["reviewer_position"],a["reviewer_date"]),("APPROVED BY",a["approver"],a["approver_position"],a["approver_date"])]
-            for ri,(role,name,pos,dt) in enumerate(sign_rows):
-                vals=[role,f"Name: {safe(name)}",f"Position: {safe(pos)}",f"Date: {safe(dt)}\nSignature: __________________"]
-                for ci,v in enumerate(vals): st.cell(ri,ci).text=v
-            for row in st.rows:
-                for i,c in enumerate(row.cells): c.width=Inches([1.35,3.3,3.0,3.5][i]); c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            style_docx_table(st,header=False,font_size=8)
-            footer=doc.add_paragraph(safe(db.setting("report_footer",""))); footer.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            doc.save(path); self.show_export_success(path)
-        except Exception as e:
-            logging.exception("Audit Word export failed"); QMessageBox.critical(self,"Export Error",str(e))
-
-    def _audit_export_excel(self,audit_id):
-        a,fs=self._audit_report_data(audit_id)
-        if not a:return
-        path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)")
-        if not path:return
-        try:
-            from openpyxl.worksheet.table import Table, TableStyleInfo
-            from openpyxl.worksheet.page import PageMargins
-
-            wb=Workbook()
-            wb.properties.title=f"Audit Report - {safe(a['number'])}"
-            wb.properties.subject="HSE Audit Report"
-            wb.properties.creator=company_name()
-
-            # ------------------------------------------------------------
-            # Professional report header helper used on each worksheet.
-            # ------------------------------------------------------------
-            def report_header(ws,title,columns_end):
-                # Keep the report header visually consistent even for sheets with
-                # only 5-7 data columns; the actual table can still use fewer columns.
-                layout_cols=max(columns_end,11)
-                ws.sheet_view.showGridLines=False
-                ws.merge_cells(start_row=1,start_column=1,end_row=3,end_column=3)
-                ws.merge_cells(start_row=1,start_column=4,end_row=3,end_column=8)
-                right_start=9
-                ws.merge_cells(start_row=1,start_column=right_start,end_row=1,end_column=layout_cols)
-                ws.merge_cells(start_row=2,start_column=right_start,end_row=2,end_column=layout_cols)
-                ws.merge_cells(start_row=3,start_column=right_start,end_row=3,end_column=layout_cols)
-                ws.cell(1,4).value=f"{title}\n{company_name()}"
-                ws.cell(1,right_start).value=f"Audit No.: {safe(a['number'])}"
-                ws.cell(2,right_start).value=f"Document No.: {document_prefix()}-AUDIT"
-                ws.cell(3,right_start).value=f"Audit Date: {safe(a['audit_date'])}"
-                logo_path=report_logo_path()
-                if logo_path and Path(logo_path).exists():
-                    try:
-                        logo=XLImage(str(logo_path)); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
-                    except Exception: logging.exception("Unable to embed audit Excel logo")
-                thin=Side(style="thin",color="A6A6A6")
-                header_fill=PatternFill("solid",fgColor="17365D")
-                light_fill=PatternFill("solid",fgColor="D9E2F3")
-                for r in range(1,4): ws.row_dimensions[r].height=24
-                ws.row_dimensions[1].height=30
-                for row in ws.iter_rows(min_row=1,max_row=3,min_col=1,max_col=layout_cols):
-                    for c in row:
-                        if isinstance(c,MergedCell): continue
-                        c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
-                        c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-                ws.cell(1,4).font=copy(ws.cell(1,4).font); ws.cell(1,4).font=ws.cell(1,4).font.copy(bold=True,size=14)
-                for ref in [f"{chr(64+right_start)}1",f"{chr(64+right_start)}2",f"{chr(64+right_start)}3"]:
-                    if ref in ws:
-                        ws[ref].fill=light_fill; ws[ref].font=ws[ref].font.copy(bold=True,size=10)
-                ws.page_setup.orientation="landscape"
-                ws.page_setup.fitToWidth=1; ws.page_setup.fitToHeight=0
-                ws.sheet_properties.pageSetUpPr.fitToPage=True
-                ws.page_margins=PageMargins(left=0.25,right=0.25,top=0.45,bottom=0.45,header=0.2,footer=0.2)
-                ws.oddFooter.center.text="Page &P of &N"
-                ws.oddFooter.right.text=company_name()
-
-            def style_data_sheet(ws,header_row,table_ref,name):
-                ws.freeze_panes=f"A{header_row+1}"
-                ws.auto_filter.ref=table_ref
-                thin=Side(style="thin",color="D0D0D0")
-                for c in ws[header_row]:
-                    if isinstance(c,MergedCell): continue
-                    c.font=c.font.copy(bold=True,color="FFFFFF")
-                    c.fill=PatternFill("solid",fgColor="17365D")
-                    c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-                    c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
-                for row in ws.iter_rows(min_row=header_row+1,max_row=ws.max_row,min_col=1,max_col=ws.max_column):
-                    for c in row:
-                        if isinstance(c,MergedCell): continue
-                        c.alignment=Alignment(vertical="top",horizontal="left",wrap_text=True)
-                        c.border=Border(bottom=thin)
-                if ws.max_row >= header_row+1:
-                    tab=Table(displayName=name,ref=table_ref)
-                    tab.tableStyleInfo=TableStyleInfo(name="TableStyleMedium2",showFirstColumn=False,showLastColumn=False,showRowStripes=True,showColumnStripes=False)
-                    ws.add_table(tab)
-
-            # ------------------------------------------------------------
-            # 1. Executive / audit summary
-            # ------------------------------------------------------------
-            ws=wb.active; ws.title="Audit Summary"
-            report_header(ws,"AUDIT REPORT",8)
-            ws["A5"]="AUDIT SUMMARY"; ws.merge_cells("A5:H5")
-            ws["A5"].font=ws["A5"].font.copy(bold=True,size=12,color="FFFFFF"); ws["A5"].fill=PatternFill("solid",fgColor="17365D"); ws["A5"].alignment=Alignment(horizontal="left",vertical="center")
-            ws.append(["Field","Value","Field","Value","Field","Value","Field","Value"])
-            summary_pairs=[
-                ("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),
-                ("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),
-                ("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),
-                ("Status",a["status"]),("Total Findings",len(fs))]
-            # Keep the summary compact but readable: two field/value pairs per row.
-            for i in range(0,len(summary_pairs),2):
-                p1=summary_pairs[i]; p2=summary_pairs[i+1] if i+1<len(summary_pairs) else ("","")
-                ws.append([safe(p1[0]),safe(p1[1]),safe(p2[0]),safe(p2[1]),"","","",""])
-            for r in range(6,ws.max_row+1):
-                for c in [1,3]:
-                    ws.cell(r,c).font=ws.cell(r,c).font.copy(bold=True)
-                    ws.cell(r,c).fill=PatternFill("solid",fgColor="EAF0F7")
-                for c in range(1,9): ws.cell(r,c).alignment=Alignment(vertical="top",wrap_text=True)
-            for col,w in {"A":22,"B":38,"C":22,"D":38,"E":4,"F":4,"G":4,"H":4}.items(): ws.column_dimensions[col].width=w
-            ws.row_dimensions[6].height=28
-
-            # ------------------------------------------------------------
-            # 2. Findings register as a real Excel Table
-            # ------------------------------------------------------------
-            fws=wb.create_sheet("Findings")
-            headers=["Finding No.","Finding Reference","Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence Photo","Target Date","CAPA Required","CAPA Number","Status","Close Out Evidence"]
-            report_header(fws,"AUDIT FINDINGS",len(headers))
-            fws.append([]); fws.append(headers)
-            for f in fs:
-                fws.append([
-                    safe(f["finding_number"]),safe(f["finding_reference"]) if "finding_reference" in f.keys() and safe(f["finding_reference"]) else f"{a['number']}-F{int(f['finding_number'] or 0):02d}",safe(f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),safe(f["clause"]),safe(f["sub_clause"]),
-                    safe(f["finding_type"]),safe(f["location"] if "location" in f.keys() else ""),safe(f["finding_detail"] or f["observation"]),
-                    safe(f["corrective_action"]),safe(f["responsible"]),"",safe(f["target_date"]),"Yes" if int(f["capa_required"] or 0)==1 else "No",safe(f["capa_number"]),
-                    "OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")
-                ])
-                rr=fws.max_row; fws.row_dimensions[rr].height=100
-                photos=[]; other_files=[]
-                for ar in self._audit_attachment_rows(audit_id,f["id"]):
-                    fp=Path(safe(ar["file_path"]))
-                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
-                    elif fp.exists(): other_files.append(fp.name)
-                if photos:
-                    try:
-                        img=XLImage(str(photos[0])); ratio=min(135/max(img.width,1),85/max(img.height,1),1); img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio)); img.anchor=f"K{rr}"; fws.add_image(img)
-                    except Exception: logging.exception("Unable to embed audit finding photo")
-                if other_files: fws.cell(rr,11).value="; ".join(other_files)
-                elif photos: fws.cell(rr,11).value="Photo evidence"
-                else: fws.cell(rr,11).value="No photo"
-            style_data_sheet(fws,5,f"A5:P{fws.max_row}","AuditFindings")
-            for col,w in {"A":13,"B":26,"C":16,"D":12,"E":18,"F":20,"G":20,"H":42,"I":42,"J":24,"K":24,"L":16,"M":14,"N":20,"O":20,"P":32}.items(): fws.column_dimensions[col].width=w
-
-            # ------------------------------------------------------------
-            # 3. Existing Internal Audit checklist responses (read-only export).
-            # The checklist definition and sequence remain owned by the existing
-            # Internal Audit workflow and are not modified by this report feature.
-            # ------------------------------------------------------------
-            qws=wb.create_sheet("Audit Checklist")
-            qheaders=["S.No.","Procedure","ISO Clause","Checklist Item","Result","Comments","Responsible","Target Date","CAPA Required","CAPA Number"]
-            report_header(qws,"AUDIT CHECKLIST",len(qheaders)); qws.append([]); qws.append(qheaders)
-            checklist_rows=db.fetchall("SELECT r.* FROM audit_checklist_responses r JOIN audit_schedule s ON s.id=r.schedule_id WHERE s.linked_audit_id=? ORDER BY r.schedule_id,r.item_no",(audit_id,))
-            for qr in checklist_rows:
-                qws.append([safe(qr["item_no"]),safe(qr["procedure_name"]),safe(qr["iso_clause"]),safe(qr["checklist_item"]),safe(qr["result"]),safe(qr["comments"]),safe(qr["responsible"] if "responsible" in qr.keys() else ""),safe(qr["target_date"] if "target_date" in qr.keys() else ""),"Yes" if int(qr["capa_required"] or 0)==1 else "No",safe(qr["capa_number"] if "capa_number" in qr.keys() else "")])
-            if qws.max_row>=5: style_data_sheet(qws,5,f"A5:J{qws.max_row}","AuditChecklist")
-            for col,w in {"A":10,"B":28,"C":16,"D":58,"E":16,"F":40,"G":24,"H":16,"I":16,"J":20}.items(): qws.column_dimensions[col].width=w
-
-            # ------------------------------------------------------------
-            # 4. Evidence / attachment register
-            # ------------------------------------------------------------
-            aws=wb.create_sheet("Attachments")
-            headers=["Finding Number","Attachment / Evidence","File Type","Uploaded By","Upload Date"]
-            report_header(aws,"AUDIT EVIDENCE REGISTER",len(headers))
-            aws.append([]); aws.append(headers)
-            attachment_rows=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
-            for f in fs: attachment_rows += [(f["finding_number"],ar) for ar in self._audit_attachment_rows(audit_id,f["id"])]
-            for label,ar in attachment_rows:
-                fp=Path(safe(ar["file_path"]))
-                aws.append([safe(label),"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
-                rr=aws.max_row; aws.row_dimensions[rr].height=90
-                if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                    try:
-                        img=XLImage(str(fp)); ratio=min(150/max(img.width,1),75/max(img.height,1),1); img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio)); img.anchor=f"B{rr}"; aws.add_image(img); aws.cell(rr,2).value="Photo evidence"
-                    except Exception: aws.cell(rr,2).value=fp.name
-                else: aws.cell(rr,2).value=fp.name
-            if aws.max_row>=5: style_data_sheet(aws,5,f"A5:E{aws.max_row}","AuditAttachments")
-            for col,w in {"A":18,"B":42,"C":15,"D":24,"E":22}.items(): aws.column_dimensions[col].width=w
-
-            # ------------------------------------------------------------
-            # 5. Corrective action tracker as a real Excel Table
-            # ------------------------------------------------------------
-            cws=wb.create_sheet("Corrective Action Tracker")
-            headers=["Finding No.","Finding Detail","Corrective Action","Responsible Person","Target Date","Status","Close Out Evidence"]
-            report_header(cws,"CORRECTIVE ACTION TRACKER",len(headers))
-            cws.append([]); cws.append(headers)
-            for f in fs:
-                cws.append([safe(f["finding_number"]),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["responsible"]),safe(f["target_date"]),"OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")])
-                cws.row_dimensions[cws.max_row].height=60
-            if cws.max_row>=5: style_data_sheet(cws,5,f"A5:G{cws.max_row}","AuditCAPA")
-            for col,w in {"A":14,"B":42,"C":42,"D":24,"E":16,"F":20,"G":32}.items(): cws.column_dimensions[col].width=w
-
-            # Consistent professional formatting / print setup.
-            for sh in wb.worksheets:
-                sh.sheet_properties.pageSetUpPr.fitToPage=True
-                sh.print_title_rows="1:5"
-                for row in sh.iter_rows():
-                    for c in row:
-                        if isinstance(c,MergedCell): continue
-                        c.alignment=Alignment(vertical="top",horizontal="left",wrap_text=True)
-                if sh.max_row>=5:
-                    for c in sh[5]:
-                        if isinstance(c,MergedCell): continue
-                        c.font=c.font.copy(bold=True,color="FFFFFF")
-                        c.fill=PatternFill("solid",fgColor="17365D")
-                        c.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-                        c.border=Border(left=Side(style="thin",color="A6A6A6"),right=Side(style="thin",color="A6A6A6"),top=Side(style="thin",color="A6A6A6"),bottom=Side(style="thin",color="A6A6A6"))
-                sh.auto_filter.ref=sh.auto_filter.ref or (f"A5:{chr(64+min(sh.max_column,26))}{sh.max_row}" if sh.max_row>=5 else None)
-
-            target=Path(path); temp=target.with_name(target.name+".tmp.xlsx")
+        def export_word():
+            if state["audit_id"] is None:
+                return
+            note = aud_get_notification(state["audit_id"])
+            if not note:
+                QMessageBox.information(tab, "Save First", "Save the notification before exporting.")
+                return
+            path, _ = QFileDialog.getSaveFileName(tab, "Export Audit Notification",
+                                                  str(REPORT_DIR / f"{safe(note['doc_number'])}_Audit_Notification.docx"),
+                                                  "Word Document (*.docx)")
+            if not path:
+                return
             try:
-                wb.save(temp)
-                with zipfile.ZipFile(temp,"r") as z:
-                    bad=z.testzip()
-                    if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
-                os.replace(temp,target)
-            finally:
-                temp.unlink(missing_ok=True)
-            self.show_export_success(path)
-        except Exception as e:
-            logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",f"Unable to generate the Audit Excel report.\n\n{e}")
+                aud_export_notification_word(state["audit_id"], path)
+                self.show_export_success(path)
+            except Exception as exc:
+                logging.exception("Audit notification export failed")
+                QMessageBox.critical(tab, "Export Failed", f"Unable to create the Word document.\n\n{exc}")
 
-    def _audit_export_pdf(self,audit_id):
-        a,fs=self._audit_report_data(audit_id)
-        if not a:return
-        path=self._export_path(f"{a['number']}_Audit_Report.pdf","Save Audit Professional Report","PDF Files (*.pdf)");
-        if not path:return
-        try:
-            styles=getSampleStyleSheet(); doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=24,leftMargin=24,topMargin=26,bottomMargin=24); story=[]
-            logo=report_logo_path()
-            if logo and Path(logo).exists(): story.append(RLImage(str(logo),width=90,height=55,preserveAspectRatio=True))
-            story += [Paragraph(f"<b>AUDIT REPORT</b>",styles["Title"]),Paragraph(f"<b>{xml_safe(company_name())}</b>",styles["Heading2"]),Spacer(1,8)]
-            meta=[["Audit Reference",a["number"]],["Audit Type",a["audit_type"]],["Audit Title",a["title"]],["Audit Date",a["audit_date"]],["Department",a["department"]],["Location",a["location"]],["Standard",a["standard"]],["Scope",a["scope"]],["Audit Criteria",a["criteria"]]]
-            mt=Table(meta,colWidths=[120,400]); mt.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.grey),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#EAF0F6")),("VALIGN",(0,0),(-1,-1),"TOP") ])); story += [mt,Spacer(1,12)]
-            ps=styles["Normal"]; ps.fontSize=5.7; ps.leading=6.7
-            story.append(Paragraph("<b>FINDINGS REGISTER</b>",styles["Heading2"]))
-            data=[["S.No.","Audit No.","Finding No.","Location","Finding (Checklist)","Corrective Action","Finding Type","Responsible","Target Date","CAPA","Status"]]
-            for i,f in enumerate(fs,1):
-                fref=safe(f["finding_reference"]) if "finding_reference" in f.keys() else ""
-                if not fref: fref=f"{a['number']}-F{int(f['finding_number'] or 0):02d}"
-                data.append([str(i),safe(a["number"]),fref,safe(f["location"]),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["finding_type"]),safe(f["responsible"]),safe(f["target_date"]),safe(f["capa_number"]) or ("Yes" if int(f["capa_required"] or 0)==1 else "No"),"OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"])])
-            pdata=[[Paragraph(xml_safe(v),ps) for v in row] for row in data]
-            ft=Table(pdata,repeatRows=1,colWidths=[22,55,68,55,105,95,55,55,48,45,45]); ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP") ])); story.append(ft)
-            checklist_rows=db.fetchall("SELECT r.* FROM audit_checklist_responses r JOIN audit_schedule s ON s.id=r.schedule_id WHERE s.linked_audit_id=? ORDER BY r.schedule_id,r.item_no",(audit_id,))
-            if checklist_rows:
-                story += [Spacer(1,12),Paragraph("<b>INTERNAL AUDIT CHECKLIST — SAVED RESPONSES</b>",styles["Heading2"])]
-                cd=[["S.No.","Procedure","Clause","Checklist Item","Result","Comments"]]
-                for qr in checklist_rows: cd.append([safe(qr["item_no"]),safe(qr["procedure_name"]),safe(qr["iso_clause"]),safe(qr["checklist_item"]),safe(qr["result"]),safe(qr["comments"])])
-                cp=[[Paragraph(xml_safe(v),ps) for v in row] for row in cd]
-                ct=Table(cp,repeatRows=1,colWidths=[28,85,42,220,45,120]); ct.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.35,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story.append(ct)
-            stats_total=len(fs); stats_closed=sum(1 for f in fs if safe(f["status"]).lower() in ("closed","verified")); stats_capa=sum(1 for f in fs if int(f["capa_required"] or 0)==1 or safe(f["capa_number"]))
-            story += [Spacer(1,8),Paragraph(f"Total findings: {stats_total} | Positive findings: {sum(1 for f in fs if 'positive' in safe(f['finding_type']).lower() or 'good practice' in safe(f['finding_type']).lower())} | Open: {stats_total-stats_closed} | Closed: {stats_closed} | CAPA: {stats_capa} | Closure: {(100*stats_closed/stats_total) if stats_total else 0:.1f}%",styles["Heading3"])]
-            # Add a consolidated evidence register so audit-level and finding-level
-            # attachments are visible in the professional PDF report.
-            story += [Spacer(1,12),Paragraph("<b>ATTACHMENTS / EVIDENCE REGISTER</b>",styles["Heading2"])]
-            evidence_data=[["Finding / Level","Attachment / Evidence","Type","Uploaded By","Upload Date"]]
-            evidence_items=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
-            for finding in fs:
-                evidence_items += [(safe(finding["finding_number"]),ar) for ar in self._audit_attachment_rows(audit_id,finding["id"])]
-            for label,ar in evidence_items:
-                fp=Path(safe(ar["file_path"]))
-                evidence_data.append([label,fp.name or "Evidence attachment",safe(ar["attachment_type"] if "attachment_type" in ar.keys() else "Evidence"),safe(ar["uploaded_by"] if "uploaded_by" in ar.keys() else ""),safe(ar["uploaded_at"] if "uploaded_at" in ar.keys() else "")])
-                if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                    try:
-                        evidence_data.append(["",Paragraph("Photo evidence",ps),"", "", ""])
-                        evidence_data[-1][1]=RLImage(str(fp),width=1.0*72,height=0.75*72,preserveAspectRatio=True)
-                    except Exception:
-                        logging.exception("Unable to embed audit evidence image in PDF")
-            if len(evidence_data)>1:
-                ep=[[Paragraph(xml_safe(str(v)) if not isinstance(v,RLImage) else "",ps) if not isinstance(v,RLImage) else v for v in row] for row in evidence_data]
-                et=Table(ep,repeatRows=1,colWidths=[65,175,55,85,80])
-                et.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story.append(et)
-            else:
-                story.append(Paragraph("No attachments or evidence files are recorded for this audit.",ps))
-            story += [Spacer(1,12),Paragraph("<b>REVIEW & APPROVAL</b>",styles["Heading2"]),Paragraph(xml_safe(f"Auditor: {a['auditor']} | {a['auditor_position']} | {a['auditor_date']}"),ps),Paragraph(xml_safe(f"Reviewer: {a['reviewer']} | {a['reviewer_position']} | {a['reviewer_date']}"),ps),Paragraph(xml_safe(f"Approver: {a['approver']} | {a['approver_position']} | {a['approver_date']}"),ps)]
-            doc.build(story); self.show_export_success(path)
-        except Exception as e: logging.exception("Audit PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
+        audit_combo.currentIndexChanged.connect(load_audit)
+        save_btn.clicked.connect(save)
+        export_btn.clicked.connect(export_word)
+        fill_combo()
+        load_audit()
+        ctx["refresh_notification_options"] = refresh_options
+        return tab
 
     def capa(self):
         w, layout = self.page("CAPA Tracking Register")
@@ -9705,3 +9479,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
