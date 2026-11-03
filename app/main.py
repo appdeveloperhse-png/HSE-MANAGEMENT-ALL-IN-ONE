@@ -558,6 +558,31 @@ class Database:
         CREATE INDEX IF NOT EXISTS idx_aud_findings_audit ON aud_findings(audit_id);
         CREATE INDEX IF NOT EXISTS idx_aud_notifications_audit ON aud_notifications(audit_id);
         """)
+
+        # Close-out / tracking workflow for Audit findings (additive only).
+        _af_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(aud_findings)").fetchall()}
+        for _col, _definition in {
+            "closeout_status": "TEXT DEFAULT 'Open'",
+            "closeout_comments": "TEXT DEFAULT ''",
+            "closeout_evidence": "TEXT DEFAULT ''",
+            "closeout_submitted_by": "TEXT DEFAULT ''",
+            "closeout_submitted_at": "TEXT DEFAULT ''",
+            "closeout_approved_by": "TEXT DEFAULT ''",
+            "closeout_approved_at": "TEXT DEFAULT ''",
+            "observation_text": "TEXT DEFAULT ''",
+        }.items():
+            if _col not in _af_cols:
+                self.conn.execute(f"ALTER TABLE aud_findings ADD COLUMN {_col} {_definition}")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS aud_finding_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            finding_id INTEGER NOT NULL,
+            file_path TEXT,
+            attachment_type TEXT DEFAULT 'Close-out Evidence',
+            uploaded_by TEXT DEFAULT '',
+            uploaded_at TEXT DEFAULT '',
+            FOREIGN KEY(finding_id) REFERENCES aud_findings(id) ON DELETE CASCADE
+        )""")
+
         self.conn.commit()
 
         # Observation multi-action + CAPA tracking link (additive only).
@@ -2598,6 +2623,215 @@ def aud_metrics():
     return {"conducted": conducted, "findings": findings, "open": open_f, "capa": capa_pending}
 
 
+
+def aud_trained_people(role="auditor"):
+    """Return employees with a current Internal Audit / Auditor training record (mirrors PTW training gate)."""
+    # Course names that qualify a person to conduct or receive internal audits.
+    like_terms = (
+        "%internal audit%", "%auditor%", "%lead auditor%", "%iso audit%",
+        "%audit training%", "%hse audit%", "%management system audit%"
+    )
+    like_sql = " OR ".join(["lower(COALESCE(c.course_name,'')) LIKE ?" for _ in like_terms])
+    rows = db.fetchall(
+        f"""SELECT DISTINCT e.id AS employee_db_id, e.employee_id, e.name, e.designation, e.company,
+                  c.course_name, tr.training_date, tr.expiry_date
+           FROM employees e
+           JOIN training_records tr ON tr.employee_db_id=e.id
+           JOIN training_courses c ON c.id=tr.course_id
+           WHERE COALESCE(e.active,1)=1
+             AND ({like_sql})
+             AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
+           ORDER BY e.name COLLATE NOCASE""",
+        (*like_terms, today())
+    )
+    return rows
+
+
+def aud_is_trained_auditor(name_or_id):
+    """True if the given name or employee_id matches a currently trained auditor."""
+    needle = safe(name_or_id).strip().casefold()
+    if not needle:
+        return False
+    for r in aud_trained_people("auditor"):
+        if needle in (safe(r["name"]).casefold(), safe(r["employee_id"]).casefold()):
+            return True
+    return False
+
+
+def aud_days_remaining(target_date, status="Open"):
+    """Return (label, overdue_bool) for close-out tracking."""
+    if not safe(target_date).strip():
+        return "—", False
+    st = safe(status)
+    if st in ("Closed", "Cancelled", "Approved"):
+        return "Closed", False
+    try:
+        target = date.fromisoformat(safe(target_date)[:10])
+    except Exception:
+        return "—", False
+    delta = (target - date.today()).days
+    if delta < 0:
+        return f"Overdue by {abs(delta)} day(s)", True
+    if delta == 0:
+        return "Due today", False
+    return f"{delta} day(s) remaining", False
+
+
+def aud_tracking_rows(include_closed=False):
+    """Open (or all) audit findings for the Tracking Register."""
+    sql = """
+        SELECT f.*, a.number AS audit_number, a.audit_type, a.audit_date, a.location, a.auditor AS audit_auditor
+        FROM aud_findings f
+        JOIN audits a ON a.id=f.audit_id
+        WHERE COALESCE(a.aud_ver,0)=2
+          AND (TRIM(COALESCE(f.evidence,''))<>'' OR TRIM(COALESCE(f.corrective_action,''))<>''
+               OR TRIM(COALESCE(f.observation_text,''))<>'' OR TRIM(COALESCE(f.checklist_pts,''))<>'')
+    """
+    if not include_closed:
+        sql += " AND COALESCE(f.closeout_status,'Open') NOT IN ('Closed','Approved') AND COALESCE(f.status,'Open')<>'Closed' "
+    sql += " ORDER BY a.audit_date DESC, f.seq, f.id"
+    return db.fetchall(sql)
+
+
+def aud_finding_attachments(finding_id):
+    return db.fetchall("SELECT * FROM aud_finding_attachments WHERE finding_id=? ORDER BY id", (finding_id,))
+
+
+def aud_add_finding_attachment(finding_id, source_path, uploaded_by="", attachment_type="Close-out Evidence"):
+    source = Path(source_path)
+    if not source.exists():
+        raise ValueError("Attachment file not found.")
+    finding = db.fetchone("SELECT finding_no FROM aud_findings WHERE id=?", (finding_id,))
+    prefix = safe(finding["finding_no"]) if finding else f"FINDING-{finding_id}"
+    dest = ATTACH_DIR / f"{prefix}_{source.name}"
+    counter = 1
+    while dest.exists():
+        dest = ATTACH_DIR / f"{prefix}_{counter}_{source.name}"
+        counter += 1
+    shutil.copy2(source, dest)
+    db.execute(
+        "INSERT INTO aud_finding_attachments(finding_id,file_path,attachment_type,uploaded_by,uploaded_at) VALUES(?,?,?,?,?)",
+        (finding_id, str(dest), attachment_type, safe(uploaded_by), aud_ts())
+    )
+    return str(dest)
+
+
+def aud_submit_closeout(finding_id, comments, evidence_paths, submitted_by):
+    """Responsible person submits close-out for senior review."""
+    f = db.fetchone("SELECT * FROM aud_findings WHERE id=?", (finding_id,))
+    if not f:
+        raise ValueError("Finding not found.")
+    if safe(f["status"]) == "Closed" or safe(f["closeout_status"]) in ("Closed", "Approved"):
+        raise ValueError("This finding is already closed.")
+    saved = []
+    for p in evidence_paths or []:
+        if safe(p).strip():
+            saved.append(aud_add_finding_attachment(finding_id, p, submitted_by, "Close-out Evidence"))
+    evidence_text = "; ".join(Path(x).name for x in saved)
+    existing_ev = safe(f["closeout_evidence"]) if "closeout_evidence" in f.keys() else ""
+    if existing_ev and evidence_text:
+        evidence_text = existing_ev + "; " + evidence_text
+    elif existing_ev:
+        evidence_text = existing_ev
+    db.execute(
+        """UPDATE aud_findings SET closeout_status=?, closeout_comments=?, closeout_evidence=?,
+           closeout_submitted_by=?, closeout_submitted_at=?, status=?, updated_at=? WHERE id=?""",
+        ("Submitted for Review", safe(comments), evidence_text, safe(submitted_by), aud_ts(),
+         "In Progress", aud_ts(), finding_id)
+    )
+    return True
+
+
+def aud_approve_closeout(finding_id, approved_by, comments=""):
+    """Senior approval closes the finding and syncs linked CAPA / observation if present."""
+    f = db.fetchone("SELECT * FROM aud_findings WHERE id=?", (finding_id,))
+    if not f:
+        raise ValueError("Finding not found.")
+    if safe(f["closeout_status"]) not in ("Submitted for Review", "Pending Approval"):
+        raise ValueError("Only findings submitted for review can be approved.")
+    note = safe(comments).strip()
+    merged = safe(f["closeout_comments"])
+    if note:
+        merged = (merged + "\n" if merged else "") + f"Approval: {note}"
+    db.execute(
+        """UPDATE aud_findings SET closeout_status=?, status=?, closeout_approved_by=?, closeout_approved_at=?,
+           closeout_comments=?, updated_at=? WHERE id=?""",
+        ("Closed", "Closed", safe(approved_by), aud_ts(), merged, aud_ts(), finding_id)
+    )
+    # Sync linked CAPA (same pattern as observation CAPA completion).
+    capa_no = safe(f["capa_number"])
+    if capa_no:
+        capa = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
+        if capa:
+            db.execute(
+                """UPDATE capa SET status=?, approval_status=?, approved_by=?, approved_date=?,
+                   verification=?, action_status=? WHERE id=?""",
+                ("Closed", "Approved", safe(approved_by), today(),
+                 f"Closed via Audit finding {safe(f['finding_no'])} close-out approval.",
+                 "CAPA Action Complete", capa["id"])
+            )
+            try:
+                sync_observation_from_capa(capa)
+            except Exception:
+                logging.exception("Observation sync from CAPA after audit close-out failed")
+    return True
+
+
+def aud_reject_closeout(finding_id, reviewer, comments=""):
+    f = db.fetchone("SELECT * FROM aud_findings WHERE id=?", (finding_id,))
+    if not f:
+        raise ValueError("Finding not found.")
+    note = safe(comments).strip() or "Returned for further close-out evidence."
+    merged = safe(f["closeout_comments"])
+    merged = (merged + "\n" if merged else "") + f"Returned by {safe(reviewer)}: {note}"
+    db.execute(
+        """UPDATE aud_findings SET closeout_status=?, status=?, closeout_comments=?, updated_at=? WHERE id=?""",
+        ("Open", "Open", merged, aud_ts(), finding_id)
+    )
+    return True
+
+
+def aud_summary_rows():
+    """Per-audit open-observation percentage for the Summary Register."""
+    audits = db.fetchall(
+        """SELECT a.id, a.number, a.audit_type, a.audit_date, a.location, a.auditor, a.auditee, a.status
+           FROM audits a WHERE COALESCE(a.aud_ver,0)=2 ORDER BY a.audit_date DESC, a.id DESC"""
+    )
+    out = []
+    for a in audits:
+        findings = db.fetchall(
+            """SELECT id, status, closeout_status FROM aud_findings
+               WHERE audit_id=? AND (TRIM(COALESCE(evidence,''))<>'' OR TRIM(COALESCE(corrective_action,''))<>''
+                     OR TRIM(COALESCE(observation_text,''))<>'')""",
+            (a["id"],)
+        )
+        total = len(findings)
+        open_n = sum(1 for f in findings if safe(f["status"]) != "Closed" and safe(f["closeout_status"]) not in ("Closed", "Approved"))
+        closed_n = total - open_n
+        pct_open = round(100.0 * open_n / total, 1) if total else 0.0
+        pct_closed = round(100.0 * closed_n / total, 1) if total else 100.0 if total == 0 else 0.0
+        out.append({
+            "id": a["id"], "number": a["number"], "audit_type": a["audit_type"], "audit_date": a["audit_date"],
+            "location": a["location"], "auditor": a["auditor"], "auditee": a["auditee"], "status": a["status"],
+            "total": total, "open_n": open_n, "closed_n": closed_n, "pct_open": pct_open, "pct_closed": pct_closed
+        })
+    return out
+
+
+def aud_cumulative_findings():
+    """All audit findings across audits for the Cumulative Register."""
+    return db.fetchall(
+        """SELECT f.*, a.number AS audit_number, a.audit_type, a.audit_date, a.location, a.auditor AS audit_auditor, a.auditee
+           FROM aud_findings f
+           JOIN audits a ON a.id=f.audit_id
+           WHERE COALESCE(a.aud_ver,0)=2
+             AND (TRIM(COALESCE(f.evidence,''))<>'' OR TRIM(COALESCE(f.corrective_action,''))<>''
+                  OR TRIM(COALESCE(f.observation_text,''))<>'' OR TRIM(COALESCE(f.checklist_pts,''))<>'')
+           ORDER BY a.audit_date DESC, f.seq, f.id"""
+    )
+
+
+
 def aud_register_table(audit_id):
     """Complete Audit Register rows (parent number repeated on every child row)."""
     aud_sync_capa_stages(audit_id)
@@ -4395,14 +4629,21 @@ class MainWindow(QMainWindow):
         check_tab = self._aud_build_checklist(ctx)
         note_tab = self._aud_build_notifications(ctx)
         register_tab = self._aud_build_master_register(ctx)
+        tracking_tab = self._aud_build_tracking_register(ctx)
+        summary_tab = self._aud_build_summary_register(ctx)
+        cumulative_tab = self._aud_build_cumulative_register(ctx)
         tabs.addTab(dash_tab, "Audit Dashboard")
         tabs.addTab(sched_tab, "Schedule Audit")
         tabs.addTab(check_tab, "Auditee && Checklist")
         tabs.addTab(register_tab, "Master Audit Register")
+        tabs.addTab(tracking_tab, "Audit Tracking Register")
+        tabs.addTab(summary_tab, "Audit Summary Register")
+        tabs.addTab(cumulative_tab, "Cumulative Findings Register")
         tabs.addTab(note_tab, "Notifications")
         refreshers = {0: ctx["refresh_dashboard"], 1: ctx["refresh_schedule"],
                       2: ctx["refresh_checklist_options"], 3: ctx["refresh_master_register"],
-                      4: ctx["refresh_notification_options"]}
+                      4: ctx["refresh_tracking"], 5: ctx["refresh_summary"],
+                      6: ctx["refresh_cumulative"], 7: ctx["refresh_notification_options"]}
         tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
         ctx["refresh_dashboard"]()
 
@@ -4713,6 +4954,9 @@ class MainWindow(QMainWindow):
         date_edit = self._aud_date_edit()
         location_edit = QLineEdit()
         auditor_edit = QLineEdit()
+        auditor_combo = QComboBox()
+        auditor_combo.setMinimumWidth(240)
+        auditor_combo.addItem("Select trained auditor (Internal Audit)", "")
         title_edit = QLineEdit()
         scope_edit = QTextEdit()
         scope_edit.setMaximumHeight(60)
@@ -4724,12 +4968,21 @@ class MainWindow(QMainWindow):
         dl.addWidget(QLabel("Location:"), 0, 2)
         dl.addWidget(location_edit, 0, 3)
         dl.addWidget(QLabel("Auditor:"), 1, 0)
-        dl.addWidget(auditor_edit, 1, 1)
+        auditor_stack = QWidget()
+        auditor_stack_lay = QHBoxLayout(auditor_stack)
+        auditor_stack_lay.setContentsMargins(0, 0, 0, 0)
+        auditor_stack_lay.addWidget(auditor_edit)
+        auditor_stack_lay.addWidget(auditor_combo)
+        dl.addWidget(auditor_stack, 1, 1)
         dl.addWidget(QLabel("Audit Title:"), 1, 2)
         dl.addWidget(title_edit, 1, 3)
         dl.addWidget(QLabel("Scope:"), 2, 0, Qt.AlignmentFlag.AlignTop)
         dl.addWidget(scope_edit, 2, 1, 1, 3)
         form_lay.addWidget(details, 3, 0, 1, 4)
+        train_hint = QLabel("Internal audits may only be conducted by personnel with a current Internal Audit / Auditor training record in the Training Register.")
+        train_hint.setWordWrap(True)
+        train_hint.setStyleSheet("color:#5A6A7A;font-size:11px;")
+        form_lay.addWidget(train_hint, 4, 0, 1, 4)
         form_lay.setColumnStretch(1, 1)
         form_lay.setColumnStretch(3, 1)
         lay.addWidget(box)
@@ -4776,6 +5029,22 @@ class MainWindow(QMainWindow):
             if row >= 0:
                 proc_list.takeItem(row)
 
+        def refresh_trained_auditors(selected_name=""):
+            auditor_combo.blockSignals(True)
+            auditor_combo.clear()
+            auditor_combo.addItem("Select trained auditor (Internal Audit)", "")
+            for r in aud_trained_people("auditor"):
+                label = f'{safe(r["name"])}  |  ID: {safe(r["employee_id"]) or "—"}  |  {safe(r["designation"]) or "—"}'
+                auditor_combo.addItem(label, safe(r["name"]))
+            if selected_name:
+                ix = auditor_combo.findData(selected_name)
+                if ix < 0:
+                    # Legacy free-text auditor still shown for historical records.
+                    auditor_combo.addItem(selected_name + " (not in training register)", selected_name)
+                    ix = auditor_combo.findData(selected_name)
+                auditor_combo.setCurrentIndex(ix if ix >= 0 else 0)
+            auditor_combo.blockSignals(False)
+
         def update_visibility():
             is_internal = aud_is_internal_type(type_combo.currentText())
             proc_label.setVisible(is_internal)
@@ -4783,6 +5052,12 @@ class MainWindow(QMainWindow):
             has_type = type_combo.currentIndex() > 0
             # Date / Location / Auditor are requested after the type (and, for Internal, the procedures) are chosen.
             details.setEnabled(has_type)
+            # Internal audits: trained auditor dropdown only (Training Register gate, same idea as PTW).
+            auditor_combo.setVisible(is_internal)
+            auditor_edit.setVisible(not is_internal)
+            if is_internal:
+                refresh_trained_auditors(auditor_combo.currentData() or auditor_edit.text().strip())
+            train_hint.setVisible(is_internal)
 
         def clear_form():
             state["id"] = None
@@ -4793,6 +5068,7 @@ class MainWindow(QMainWindow):
             date_edit.setDate(QDate.currentDate())
             location_edit.clear()
             auditor_edit.clear()
+            refresh_trained_auditors()
             title_edit.clear()
             scope_edit.clear()
             update_visibility()
@@ -4805,19 +5081,32 @@ class MainWindow(QMainWindow):
                     table.setItem(ri, ci, self._aud_item(a[key], a["id"]))
 
         def collect():
+            is_internal = aud_is_internal_type(type_combo.currentText() if type_combo.currentIndex() > 0 else "")
+            auditor_name = (safe(auditor_combo.currentData()).strip() if is_internal else auditor_edit.text().strip())
             return {
                 "audit_type": type_combo.currentText() if type_combo.currentIndex() > 0 else "",
                 "procedures": checked_procedures(),
                 "audit_date": date_edit.date().toString("yyyy-MM-dd"),
                 "location": location_edit.text(),
-                "auditor": auditor_edit.text(),
+                "auditor": auditor_name,
                 "title": title_edit.text(),
                 "scope": scope_edit.toPlainText(),
             }
 
         def do_save(status):
+            data = collect()
+            if aud_is_internal_type(data.get("audit_type")):
+                if not data.get("auditor"):
+                    QMessageBox.warning(tab, "Trained Auditor Required",
+                        "Select a trained auditor from the Training Register before scheduling or submitting an Internal Audit.")
+                    return
+                if not aud_is_trained_auditor(data["auditor"]):
+                    QMessageBox.warning(tab, "Trained Auditor Required",
+                        f"Auditor '{data['auditor']}' does not have a current Internal Audit / Auditor training record.\n\n"
+                        "Only trained auditors may conduct an Internal Audit (same control as PTW holder training).")
+                    return
             try:
-                audit_id = aud_save_audit(state["id"], collect(), status)
+                audit_id = aud_save_audit(state["id"], data, status)
             except ValueError as exc:
                 QMessageBox.warning(tab, "Audit Scheduling", str(exc))
                 return
@@ -4866,6 +5155,7 @@ class MainWindow(QMainWindow):
             date_edit.setDate(parsed if parsed.isValid() else QDate.currentDate())
             location_edit.setText(safe(audit["location"]))
             auditor_edit.setText(safe(audit["auditor"]))
+            refresh_trained_auditors(safe(audit["auditor"]))
             title_edit.setText(safe(audit["title"]))
             scope_edit.setPlainText(safe(audit["scope"]))
             update_visibility()
@@ -4920,17 +5210,27 @@ class MainWindow(QMainWindow):
         audit_combo.setMinimumWidth(320)
         auditee_edit = QLineEdit()
         auditee_edit.setPlaceholderText("Enter the Auditee")
+        auditee_combo = QComboBox()
+        auditee_combo.setMinimumWidth(260)
+        auditee_combo.addItem("Select trained auditee (Internal Audit)", "")
         type_combo = QComboBox()
         type_combo.addItem("Select type of audit...")
         type_combo.addItems(AUD_TYPES)
         top.addWidget(QLabel("Select Audit:"), 0, 0)
         top.addWidget(audit_combo, 0, 1)
         top.addWidget(QLabel("Auditee:"), 0, 2)
-        top.addWidget(auditee_edit, 0, 3)
+        auditee_wrap = QWidget()
+        aw = QHBoxLayout(auditee_wrap); aw.setContentsMargins(0,0,0,0)
+        aw.addWidget(auditee_edit); aw.addWidget(auditee_combo)
+        top.addWidget(auditee_wrap, 0, 3)
         top.addWidget(QLabel("Type of Audit:"), 0, 4)
         top.addWidget(type_combo, 0, 5)
         top.setColumnStretch(3, 1)
         lay.addLayout(top)
+        auditee_train_hint = QLabel("For Internal Audits the Auditee is selected from personnel with a current Internal Audit / related training record.")
+        auditee_train_hint.setWordWrap(True)
+        auditee_train_hint.setStyleSheet("color:#5A6A7A;font-size:11px;")
+        lay.addWidget(auditee_train_hint)
 
         standard_label = QLabel("ISO Checklist Standard:")
         standard_combo = QComboBox()
@@ -5088,6 +5388,26 @@ class MainWindow(QMainWindow):
             return [proc_list.item(i).text() for i in range(proc_list.count())
                     if proc_list.item(i).checkState() == Qt.CheckState.Checked]
 
+        def refresh_trained_auditees(selected_name=""):
+            auditee_combo.blockSignals(True)
+            auditee_combo.clear()
+            auditee_combo.addItem("Select trained auditee (Internal Audit)", "")
+            for r in aud_trained_people("auditee"):
+                label = f'{safe(r["name"])}  |  ID: {safe(r["employee_id"]) or "—"}  |  {safe(r["designation"]) or "—"}'
+                auditee_combo.addItem(label, safe(r["name"]))
+            if selected_name:
+                ix = auditee_combo.findData(selected_name)
+                if ix < 0:
+                    auditee_combo.addItem(selected_name + " (manual / not in training register)", selected_name)
+                    ix = auditee_combo.findData(selected_name)
+                auditee_combo.setCurrentIndex(ix if ix >= 0 else 0)
+            auditee_combo.blockSignals(False)
+
+        def current_auditee_value():
+            if aud_is_internal_type(type_combo.currentText()):
+                return safe(auditee_combo.currentData()).strip() or auditee_edit.text().strip()
+            return auditee_edit.text().strip()
+
         def update_type_ui():
             has_type = type_combo.currentIndex() > 0 and state["audit_id"] is not None
             uses_procs = aud_is_internal_type(type_combo.currentText())
@@ -5095,6 +5415,11 @@ class MainWindow(QMainWindow):
             standard_combo.setVisible(has_type and not uses_procs)
             proc_box.setVisible(uses_procs and state["audit_id"] is not None)
             table.setEnabled(has_type and (uses_procs or standard_combo.currentIndex() > 0))
+            auditee_combo.setVisible(uses_procs)
+            auditee_edit.setVisible(not uses_procs)
+            auditee_train_hint.setVisible(uses_procs)
+            if uses_procs:
+                refresh_trained_auditees(current_auditee_value() or auditee_edit.text().strip())
             for b in (add_btn, del_btn, meta_btn, save_btn):
                 b.setEnabled(state["audit_id"] is not None)
             if state["audit_id"] is None:
@@ -5130,6 +5455,7 @@ class MainWindow(QMainWindow):
             table.setRowCount(0)
             if not audit_id:
                 auditee_edit.clear()
+                refresh_trained_auditees()
                 type_combo.setCurrentIndex(0)
                 standard_combo.setCurrentIndex(0)
                 for i in range(proc_list.count()):
@@ -5140,6 +5466,7 @@ class MainWindow(QMainWindow):
             aud_sync_capa_stages(audit_id)
             audit = aud_get(audit_id)
             auditee_edit.setText(safe(audit["auditee"]))
+            refresh_trained_auditees(safe(audit["auditee"]))
             # Ask for / confirm the Type of Audit: pre-selected from the schedule, empty if never captured.
             idx = type_combo.findText(safe(audit["audit_type"]))
             type_combo.setCurrentIndex(idx if idx > 0 else 0)
@@ -5187,7 +5514,7 @@ class MainWindow(QMainWindow):
             load_audit(audit_combo.currentData())
 
         def persist_meta():
-            if not auditee_edit.text().strip():
+            if not current_auditee_value():
                 QMessageBox.warning(tab, "Auditee Required", "Please enter the Auditee before saving.")
                 auditee_edit.setFocus()
                 return False
@@ -5200,7 +5527,7 @@ class MainWindow(QMainWindow):
             if not is_internal and standard_combo.currentIndex() == 0:
                 QMessageBox.warning(tab, "ISO Standard Required", "Select ISO 45001, ISO 9001 or ISO 14001 to load the checklist.")
                 return False
-            aud_set_auditee(state["audit_id"], auditee_edit.text(), type_combo.currentText(), procs, standard)
+            aud_set_auditee(state["audit_id"], current_auditee_value(), type_combo.currentText(), procs, standard)
             return True
 
         def save_meta():
@@ -5301,6 +5628,395 @@ class MainWindow(QMainWindow):
     # ============================================================
     # TAB 4 - AUDIT NOTIFICATIONS (+ Word "Invites Document")
     # ============================================================
+
+    # ============================================================
+    # TAB - AUDIT TRACKING REGISTER (open findings + close-out workflow)
+    # ============================================================
+    def _aud_build_tracking_register(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        intro = QLabel(
+            "Open audit observations / findings appear here automatically. "
+            "Double-click a row to open the close-out workspace: attach evidence, add comments, "
+            "submit for senior review, then approve to close. Closed items move to the Audit Summary Register."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        filters = QHBoxLayout()
+        search = QLineEdit(); search.setPlaceholderText("Search audit no., observation, corrective action, responsible…")
+        show_closed = QCheckBox("Include closed")
+        refresh_btn = QPushButton("Refresh")
+        filters.addWidget(search, 2); filters.addWidget(show_closed); filters.addWidget(refresh_btn)
+        lay.addLayout(filters)
+        headers = ["S.No.", "Audit No.", "Observation / Finding", "Corrective Action", "Target Date",
+                   "Close-out Days", "Responsible", "Close-out Status", "CAPA No."]
+        table = self._aud_table(headers)
+        self._aud_readonly(table)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+        open_btn = QPushButton("Open Close-out Workspace")
+        open_btn.setMinimumHeight(36)
+        open_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        lay.addWidget(open_btn)
+
+        def load():
+            needle = search.text().strip().casefold()
+            rows = aud_tracking_rows(include_closed=show_closed.isChecked())
+            data = []
+            for f in rows:
+                obs = safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"])
+                action = safe(f["corrective_action"])
+                days_label, overdue = aud_days_remaining(f["target_date"], safe(f["closeout_status"]) or safe(f["status"]))
+                blob = " ".join(safe(f[k]) for k in ("audit_number", "finding_no", "evidence", "corrective_action",
+                                                     "responsible", "closeout_status", "capa_number", "observation_text")).casefold()
+                if needle and needle not in blob and needle not in obs.casefold() and needle not in action.casefold():
+                    continue
+                data.append((f, obs, action, days_label, overdue))
+            table.setRowCount(len(data))
+            for i, (f, obs, action, days_label, overdue) in enumerate(data):
+                vals = [
+                    str(i + 1), safe(f["audit_number"]), obs, action, safe(f["target_date"]),
+                    days_label, safe(f["responsible"]),
+                    safe(f["closeout_status"]) or safe(f["status"]) or "Open",
+                    safe(f["capa_number"]) or "—"
+                ]
+                for c, v in enumerate(vals):
+                    item = self._aud_item(v, f["id"])
+                    if overdue and c == 5:
+                        item.setForeground(QBrush(QColor("#B00020")))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    table.setItem(i, c, item)
+            table.resizeRowsToContents()
+
+        def open_workspace(row=None, col=None):
+            r = table.currentRow()
+            item = table.item(r, 0) if r >= 0 else None
+            if item is None:
+                QMessageBox.information(tab, "Select Finding", "Select a tracking row first.")
+                return
+            fid = item.data(Qt.ItemDataRole.UserRole)
+            self._aud_closeout_dialog(int(fid), on_change=load)
+
+        table.cellDoubleClicked.connect(open_workspace)
+        open_btn.clicked.connect(open_workspace)
+        search.textChanged.connect(lambda *_: load())
+        show_closed.toggled.connect(lambda *_: load())
+        refresh_btn.clicked.connect(load)
+        ctx["refresh_tracking"] = load
+        load()
+        return tab
+
+    def _aud_closeout_dialog(self, finding_id, on_change=None):
+        """Scrollable close-out workspace: details + evidence + submit / senior approve."""
+        f = db.fetchone(
+            """SELECT f.*, a.number AS audit_number, a.audit_type, a.audit_date, a.location,
+                      a.auditor AS audit_auditor, a.auditee
+               FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE f.id=?""",
+            (finding_id,)
+        )
+        if not f:
+            QMessageBox.warning(self, "Finding", "The selected finding could not be found.")
+            return
+        d = QDialog(self)
+        d.setWindowTitle(f"Close-out — {safe(f['finding_no'])} / {safe(f['audit_number'])}")
+        d.resize(920, 720)
+        root = QVBoxLayout(d)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        body = QWidget(); lay = QVBoxLayout(body)
+
+        title = QLabel(f"AUDIT FINDING CLOSE-OUT — {safe(f['finding_no'])}")
+        title.setStyleSheet("font-size:18px;font-weight:bold;color:#17365D;")
+        lay.addWidget(title)
+
+        info = QLabel(
+            f"<b>Audit No.:</b> {safe(f['audit_number'])} &nbsp;|&nbsp; "
+            f"<b>Type:</b> {safe(f['audit_type'])} &nbsp;|&nbsp; "
+            f"<b>Date:</b> {safe(f['audit_date'])}<br>"
+            f"<b>Location:</b> {safe(f['location'])} &nbsp;|&nbsp; "
+            f"<b>Auditor:</b> {safe(f['audit_auditor'])} &nbsp;|&nbsp; "
+            f"<b>Auditee:</b> {safe(f['auditee']) or '—'}<br>"
+            f"<b>Status:</b> {safe(f['status'])} &nbsp;|&nbsp; "
+            f"<b>Close-out Status:</b> {safe(f['closeout_status']) or 'Open'} &nbsp;|&nbsp; "
+            f"<b>CAPA:</b> {safe(f['capa_number']) or 'Not linked'}"
+        )
+        info.setTextFormat(Qt.TextFormat.RichText); info.setWordWrap(True)
+        lay.addWidget(info)
+
+        def boxed(heading, text_value):
+            g = QGroupBox(heading)
+            gl = QVBoxLayout(g)
+            lab = QLabel(xml_safe(text_value) or "—")
+            lab.setWordWrap(True)
+            gl.addWidget(lab)
+            lay.addWidget(g)
+
+        boxed("Observation / Finding", safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"]))
+        boxed("Evidence recorded during audit", safe(f["evidence"]))
+        boxed("Corrective Action", safe(f["corrective_action"]))
+        days_label, overdue = aud_days_remaining(f["target_date"], safe(f["closeout_status"]) or safe(f["status"]))
+        boxed("Responsible / Target", f"Responsible: {safe(f['responsible']) or '—'}    Target Date: {safe(f['target_date']) or '—'}    {days_label}")
+
+        evidence_box = QGroupBox("Close-out Evidence")
+        el = QVBoxLayout(evidence_box)
+        evidence_list = QListWidget()
+        for a in aud_finding_attachments(finding_id):
+            evidence_list.addItem(f"{Path(safe(a['file_path'])).name}  ({safe(a['attachment_type'])})")
+        if evidence_list.count() == 0 and safe(f["closeout_evidence"]):
+            for name in safe(f["closeout_evidence"]).split(";"):
+                if name.strip():
+                    evidence_list.addItem(name.strip())
+        el.addWidget(evidence_list)
+        pending_paths = []
+        path_row = QHBoxLayout()
+        path_edit = QLineEdit(); path_edit.setPlaceholderText("Selected file path…")
+        browse = QPushButton("Browse…")
+        add_path = QPushButton("Add File")
+        def choose():
+            p, _ = QFileDialog.getOpenFileName(d, "Select Close-out Evidence")
+            if p: path_edit.setText(p)
+        def add_file():
+            p = path_edit.text().strip()
+            if not p or not Path(p).exists():
+                QMessageBox.warning(d, "File Required", "Choose an existing evidence file.")
+                return
+            pending_paths.append(p)
+            evidence_list.addItem(f"[new] {Path(p).name}")
+            path_edit.clear()
+        browse.clicked.connect(choose); add_path.clicked.connect(add_file)
+        path_row.addWidget(path_edit, 1); path_row.addWidget(browse); path_row.addWidget(add_path)
+        el.addLayout(path_row)
+        lay.addWidget(evidence_box)
+
+        comments = QTextEdit()
+        comments.setPlaceholderText("Close-out comments / verification notes")
+        comments.setPlainText(safe(f["closeout_comments"]))
+        comments.setMaximumHeight(120)
+        lay.addWidget(QLabel("<b>Close-out Comments</b>"))
+        lay.addWidget(comments)
+
+        submitter = QLineEdit(); submitter.setPlaceholderText("Submitted by (responsible person)")
+        submitter.setText(safe(f["closeout_submitted_by"]) or safe(f["responsible"]))
+        approver = QLineEdit(); approver.setPlaceholderText("Senior approver name")
+        approver.setText(safe(f["closeout_approved_by"]))
+        form = QFormLayout()
+        form.addRow("Submitted By:", submitter)
+        form.addRow("Senior Approver:", approver)
+        lay.addLayout(form)
+
+        status_lab = QLabel(f"Current close-out status: <b>{safe(f['closeout_status']) or 'Open'}</b>")
+        status_lab.setTextFormat(Qt.TextFormat.RichText)
+        lay.addWidget(status_lab)
+
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+        btns = QHBoxLayout()
+        save_btn = QPushButton("Save Draft Comments / Evidence")
+        submit_btn = QPushButton("Save & Submit for Review")
+        approve_btn = QPushButton("Senior Approve & Close")
+        reject_btn = QPushButton("Return for Correction")
+        close_btn = QPushButton("Close Window")
+        submit_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        approve_btn.setStyleSheet("font-weight:bold;background:#1B5E20;color:white;")
+        for b in (save_btn, submit_btn, approve_btn, reject_btn, close_btn):
+            b.setMinimumHeight(36)
+            btns.addWidget(b)
+        root.addLayout(btns)
+
+        def save_draft_only():
+            try:
+                for p in list(pending_paths):
+                    aud_add_finding_attachment(finding_id, p, submitter.text().strip() or "User", "Close-out Evidence")
+                pending_paths.clear()
+                db.execute(
+                    "UPDATE aud_findings SET closeout_comments=?, updated_at=? WHERE id=?",
+                    (comments.toPlainText().strip(), aud_ts(), finding_id)
+                )
+                QMessageBox.information(d, "Saved", "Close-out comments and evidence were saved.")
+                if on_change: on_change()
+            except Exception as exc:
+                logging.exception("Close-out draft save failed")
+                QMessageBox.critical(d, "Save Failed", str(exc))
+
+        def do_submit():
+            if not submitter.text().strip():
+                QMessageBox.warning(d, "Submitter Required", "Enter the name of the person submitting the close-out.")
+                return
+            try:
+                aud_submit_closeout(finding_id, comments.toPlainText().strip(), list(pending_paths), submitter.text().strip())
+                pending_paths.clear()
+                QMessageBox.information(d, "Submitted for Review",
+                    "Close-out has been submitted for senior review. It will show as Closed only after approval.")
+                if on_change: on_change()
+                d.accept()
+            except Exception as exc:
+                logging.exception("Close-out submit failed")
+                QMessageBox.warning(d, "Submit Failed", str(exc))
+
+        def do_approve():
+            if not approver.text().strip():
+                QMessageBox.warning(d, "Approver Required", "Enter the senior approver name.")
+                return
+            try:
+                # Ensure any pending files are stored first
+                for p in list(pending_paths):
+                    aud_add_finding_attachment(finding_id, p, approver.text().strip(), "Close-out Evidence")
+                pending_paths.clear()
+                # Allow direct approve only when already submitted, otherwise force submit path
+                cur = db.fetchone("SELECT closeout_status FROM aud_findings WHERE id=?", (finding_id,))
+                if safe(cur["closeout_status"]) not in ("Submitted for Review", "Pending Approval"):
+                    aud_submit_closeout(finding_id, comments.toPlainText().strip(), [], submitter.text().strip() or approver.text().strip())
+                aud_approve_closeout(finding_id, approver.text().strip(), comments.toPlainText().strip())
+                QMessageBox.information(d, "Closed",
+                    "Finding closed after senior approval. Audit Summary Register percentages have been updated. "
+                    "Linked CAPA / observation records were synced where applicable.")
+                if on_change: on_change()
+                d.accept()
+            except Exception as exc:
+                logging.exception("Close-out approve failed")
+                QMessageBox.warning(d, "Approval Failed", str(exc))
+
+        def do_reject():
+            if not approver.text().strip():
+                QMessageBox.warning(d, "Reviewer Required", "Enter the reviewer name.")
+                return
+            try:
+                aud_reject_closeout(finding_id, approver.text().strip(), comments.toPlainText().strip())
+                QMessageBox.information(d, "Returned", "Close-out returned for further action.")
+                if on_change: on_change()
+                d.accept()
+            except Exception as exc:
+                QMessageBox.warning(d, "Return Failed", str(exc))
+
+        save_btn.clicked.connect(save_draft_only)
+        submit_btn.clicked.connect(do_submit)
+        approve_btn.clicked.connect(do_approve)
+        reject_btn.clicked.connect(do_reject)
+        close_btn.clicked.connect(d.reject)
+        d.exec()
+
+    # ============================================================
+    # TAB - AUDIT SUMMARY REGISTER (% open observations per audit)
+    # ============================================================
+    def _aud_build_summary_register(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        intro = QLabel(
+            "Audit Summary Register — percentage of open observations for each audit. "
+            "Values update automatically when findings are closed through the Tracking Register close-out workflow."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        search = QLineEdit(); search.setPlaceholderText("Search audit number, type, location, auditor…")
+        lay.addWidget(search)
+        headers = ["S.No.", "Audit No.", "Type", "Date", "Location", "Auditor", "Auditee",
+                   "Total Findings", "Open", "Closed", "% Open", "% Closed", "Audit Status"]
+        table = self._aud_table(headers)
+        self._aud_readonly(table)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+        refresh_btn = QPushButton("Refresh Summary")
+        lay.addWidget(refresh_btn)
+
+        def load():
+            needle = search.text().strip().casefold()
+            rows = aud_summary_rows()
+            filtered = []
+            for r in rows:
+                blob = " ".join(safe(r[k]) for k in ("number", "audit_type", "location", "auditor", "auditee", "status")).casefold()
+                if needle and needle not in blob:
+                    continue
+                filtered.append(r)
+            table.setRowCount(len(filtered))
+            for i, r in enumerate(filtered):
+                vals = [
+                    str(i + 1), safe(r["number"]), safe(r["audit_type"]), safe(r["audit_date"]),
+                    safe(r["location"]), safe(r["auditor"]), safe(r["auditee"]) or "—",
+                    str(r["total"]), str(r["open_n"]), str(r["closed_n"]),
+                    f"{r['pct_open']}%", f"{r['pct_closed']}%", safe(r["status"])
+                ]
+                for c, v in enumerate(vals):
+                    item = self._aud_item(v, r["id"])
+                    if c == 10 and r["pct_open"] > 0:
+                        item.setForeground(QBrush(QColor("#B00020")))
+                    elif c == 11 and r["pct_closed"] == 100 and r["total"] > 0:
+                        item.setForeground(QBrush(QColor("#1B5E20")))
+                    table.setItem(i, c, item)
+
+        search.textChanged.connect(lambda *_: load())
+        refresh_btn.clicked.connect(load)
+        ctx["refresh_summary"] = load
+        load()
+        return tab
+
+    # ============================================================
+    # TAB - CUMULATIVE AUDIT FINDINGS REGISTER
+    # ============================================================
+    def _aud_build_cumulative_register(self, ctx):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        intro = QLabel("Cumulative register of all audit findings across every audit (open and closed).")
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+        search = QLineEdit(); search.setPlaceholderText("Search finding no., audit no., observation, status, CAPA…")
+        lay.addWidget(search)
+        headers = ["S.No.", "Audit No.", "Finding No.", "Audit Date", "Type", "Observation / Evidence",
+                   "Corrective Action", "Responsible", "Target Date", "Status", "Close-out Status", "CAPA No.", "Auditor"]
+        table = self._aud_table(headers)
+        self._aud_readonly(table)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        lay.addWidget(table, 1)
+        row = QHBoxLayout()
+        refresh_btn = QPushButton("Refresh")
+        open_btn = QPushButton("Open Close-out Workspace")
+        row.addWidget(refresh_btn); row.addWidget(open_btn); row.addStretch(1)
+        lay.addLayout(row)
+
+        def load():
+            needle = search.text().strip().casefold()
+            rows = aud_cumulative_findings()
+            data = []
+            for f in rows:
+                obs = safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"])
+                blob = " ".join([
+                    safe(f["audit_number"]), safe(f["finding_no"]), obs, safe(f["corrective_action"]),
+                    safe(f["status"]), safe(f["closeout_status"]), safe(f["capa_number"]), safe(f["responsible"])
+                ]).casefold()
+                if needle and needle not in blob:
+                    continue
+                data.append((f, obs))
+            table.setRowCount(len(data))
+            for i, (f, obs) in enumerate(data):
+                vals = [
+                    str(i + 1), safe(f["audit_number"]), safe(f["finding_no"]), safe(f["audit_date"]),
+                    safe(f["audit_type"]), obs, safe(f["corrective_action"]), safe(f["responsible"]),
+                    safe(f["target_date"]), safe(f["status"]), safe(f["closeout_status"]) or "Open",
+                    safe(f["capa_number"]) or "—", safe(f["audit_auditor"]) or safe(f["auditor_name"])
+                ]
+                for c, v in enumerate(vals):
+                    table.setItem(i, c, self._aud_item(v, f["id"]))
+
+        def open_workspace():
+            r = table.currentRow()
+            item = table.item(r, 0) if r >= 0 else None
+            if item is None:
+                QMessageBox.information(tab, "Select Finding", "Select a finding row first.")
+                return
+            self._aud_closeout_dialog(int(item.data(Qt.ItemDataRole.UserRole)), on_change=load)
+
+        table.cellDoubleClicked.connect(lambda *_: open_workspace())
+        open_btn.clicked.connect(open_workspace)
+        search.textChanged.connect(lambda *_: load())
+        refresh_btn.clicked.connect(load)
+        ctx["refresh_cumulative"] = load
+        load()
+        return tab
+
+
     def _aud_build_notifications(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
