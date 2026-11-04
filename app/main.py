@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
     QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QTabWidget, QListWidgetItem,
-    QGridLayout, QDateTimeEdit, QInputDialog, QSizePolicy
+    QGridLayout, QDateTimeEdit, QInputDialog
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
@@ -4617,59 +4617,61 @@ class MainWindow(QMainWindow):
 
     # ========================================================
     # AUDIT MANAGEMENT MODULE (v2) - desktop layout
-    # Tabs: Audit Dashboard | Schedule Audit | Auditee & Checklist | Notifications
+    # Tabs: Dashboard | Schedule | Notifications | Audit | Master Register |
+    #       Findings Register (tracking+cumulative) | Summary | Close Out
     # ========================================================
     def audits(self):
         w, layout = self.page("Audit Management")
-        tabs = QTabWidget()
-        layout.addWidget(tabs, 1)
-        ctx = {"tabs": tabs}
-        dash_tab = self._aud_build_dashboard(ctx)
-        sched_tab = self._aud_build_schedule(ctx)
-        check_tab = self._aud_build_checklist(ctx)
-        note_tab = self._aud_build_notifications(ctx)
-        register_tab = self._aud_build_master_register(ctx)
-        combined_register_tab = self._aud_build_combined_register(ctx)
-        closeout_tab = self._aud_build_closeout_register(ctx)
-        tabs.addTab(dash_tab, "Audit Dashboard")
-        tabs.addTab(sched_tab, "Schedule Audit")
-        tabs.addTab(note_tab, "Notifications")
-        tabs.addTab(check_tab, "Audit")
-        ctx["audit_tab_index"] = 3
-        tabs.addTab(register_tab, "Master Audit Register")
-        tabs.addTab(combined_register_tab, "Audit Register")
-        tabs.addTab(closeout_tab, "Close Out")
-        refreshers = {0: ctx["refresh_dashboard"], 1: ctx["refresh_schedule"],
-                      2: ctx["refresh_notification_options"], 3: ctx["refresh_checklist_options"],
-                      4: ctx["refresh_master_register"], 5: ctx["refresh_register"],
-                      6: ctx["refresh_closeout"]}
-        tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
-        # Audit-only workspace controls: minimize app, close audit workspace, and magnify text.
-        controls = QWidget(); controls_lay = QHBoxLayout(controls); controls_lay.setContentsMargins(4, 0, 4, 0); controls_lay.setSpacing(4)
-        min_btn = QPushButton("—"); min_btn.setToolTip("Minimize window")
-        close_btn = QPushButton("×"); close_btn.setToolTip("Close Audit workspace")
-        zoom_btn = QPushButton("⌕"); zoom_btn.setToolTip("Magnify audit workspace text")
-        for b in (min_btn, zoom_btn, close_btn): b.setFixedSize(28, 26)
-        controls_lay.addWidget(min_btn); controls_lay.addWidget(zoom_btn); controls_lay.addWidget(close_btn)
-        tabs.setCornerWidget(controls, Qt.Corner.TopRightCorner)
-        min_btn.clicked.connect(self.showMinimized)
-        close_btn.clicked.connect(lambda: self.stack.setCurrentIndex(0) if hasattr(self, "stack") else tabs.setCurrentIndex(0))
-        def magnify():
-            current = tabs.font().pointSize()
-            value, ok = QInputDialog.getInt(w, "Magnify Audit Workspace", "Font size (points):", max(8, current + 2), 8, 24, 1)
-            if ok:
-                font = tabs.font(); font.setPointSize(value); tabs.setFont(font)
-                for i in range(tabs.count()): tabs.widget(i).setFont(font)
-        zoom_btn.clicked.connect(magnify)
-        tabs.setUsesScrollButtons(True)
-        tabs.setDocumentMode(True)
-        tabs.setStyleSheet("QTabBar::tab { min-width: 105px; padding: 7px 12px; } QTabWidget::pane { top: -1px; }")
-        ctx["refresh_dashboard"]()
+        try:
+            tabs = QTabWidget()
+            tabs.setTabsClosable(False)
+            tabs.setMovable(False)
+            layout.addWidget(tabs, 1)
+            ctx = {"tabs": tabs}
+            dash_tab = self._aud_build_dashboard(ctx)
+            sched_tab = self._aud_build_schedule(ctx)
+            note_tab = self._aud_build_notifications(ctx)
+            check_tab = self._aud_build_checklist(ctx)
+            register_tab = self._aud_build_master_register(ctx)
+            findings_tab = self._aud_build_findings_register(ctx)
+            summary_tab = self._aud_build_summary_register(ctx)
+            closeout_tab = self._aud_build_closeout_section(ctx)
+            # Order: Dashboard → Schedule → Notifications → Audit → Master → Findings → Summary → Close Out
+            tabs.addTab(dash_tab, "Audit Dashboard")
+            tabs.addTab(sched_tab, "Schedule Audit")
+            tabs.addTab(note_tab, "Notifications")
+            tabs.addTab(check_tab, "Audit")
+            tabs.addTab(register_tab, "Master Audit Register")
+            tabs.addTab(findings_tab, "Audit Findings Register")
+            tabs.addTab(summary_tab, "Audit Summary Register")
+            tabs.addTab(closeout_tab, "Close Out")
+            refreshers = {
+                0: ctx.get("refresh_dashboard", lambda: None),
+                1: ctx.get("refresh_schedule", lambda: None),
+                2: ctx.get("refresh_notification_options", lambda: None),
+                3: ctx.get("refresh_checklist_options", lambda: None),
+                4: ctx.get("refresh_master_register", lambda: None),
+                5: ctx.get("refresh_findings_register", lambda: None),
+                6: ctx.get("refresh_summary", lambda: None),
+                7: ctx.get("refresh_closeout_section", lambda: None),
+            }
+            tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
+            ctx["refresh_dashboard"]()
+        except Exception as exc:
+            logging.exception("Audit Management failed to load")
+            err = QLabel(
+                f"<b>Audit Management could not be loaded.</b><br><br>"
+                f"{type(exc).__name__}: {exc}<br><br>"
+                f"Please share this message so it can be fixed."
+            )
+            err.setWordWrap(True)
+            err.setStyleSheet("color:#B00020;padding:12px;")
+            layout.addWidget(err)
+            QMessageBox.critical(self, "Audit Management", f"Audit section failed to load:\n\n{type(exc).__name__}: {exc}")
 
     def _aud_build_master_register(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         search = QLineEdit(); search.setPlaceholderText("Search audit number, type, date, location, auditor, or status")
         lay.addWidget(search)
         table = self._aud_table(["Audit Number", "Audit Type", "Date", "Location", "Auditor", "Scope", "Status"])
@@ -4694,27 +4696,6 @@ class MainWindow(QMainWindow):
         return tab
 
     # ---------------- shared small helpers ----------------
-    def _aud_add_workspace_controls(self, tab, layout, ctx):
-        """Consistent controls on every Audit page; scoped to this module only."""
-        bar = QHBoxLayout()
-        bar.addStretch(1)
-        minimize = QPushButton("—"); minimize.setToolTip("Minimize application window")
-        magnify = QPushButton("⌕"); magnify.setToolTip("Magnify this Audit tab")
-        close = QPushButton("×"); close.setToolTip("Close this Audit tab / return to Audit Dashboard")
-        for button in (minimize, magnify, close):
-            button.setFixedSize(30, 27)
-            bar.addWidget(button)
-        layout.addLayout(bar)
-        minimize.clicked.connect(self.showMinimized)
-        close.clicked.connect(lambda: ctx["tabs"].setCurrentIndex(0))
-        def zoom():
-            current = tab.font().pointSize()
-            value, ok = QInputDialog.getInt(tab, "Magnify Audit Tab", "Font size (points):", max(8, current + 2), 8, 24, 1)
-            if ok:
-                font = tab.font(); font.setPointSize(value); tab.setFont(font)
-        magnify.clicked.connect(zoom)
-        tab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
     def _aud_table(self, headers, stretch_last=False):
         table = QTableWidget(0, len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -4772,7 +4753,6 @@ class MainWindow(QMainWindow):
     def _aud_build_dashboard(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         cards = QHBoxLayout()
         labels = {}
         for key, title in [("conducted", "Total Audits Conducted"), ("findings", "Total Findings"),
@@ -4838,7 +4818,9 @@ class MainWindow(QMainWindow):
             return
         d = QDialog(self)
         d.setWindowTitle(f"Audit Register — {safe(audit['number'])}")
+        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint)
         d.resize(1380, 780)
+        d.setMinimumSize(900, 560)
         lay = QVBoxLayout(d)
         title = QLabel(f"AUDIT REGISTER — {safe(audit['number'])}")
         title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;")
@@ -4963,7 +4945,6 @@ class MainWindow(QMainWindow):
     def _aud_build_schedule(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         state = {"id": None}
         box = QGroupBox("Schedule an Audit")
         form_lay = QGridLayout(box)
@@ -5030,25 +5011,28 @@ class MainWindow(QMainWindow):
         form_lay.setColumnStretch(3, 1)
         lay.addWidget(box)
         btn_row = QHBoxLayout()
-        save_btn = QPushButton("Save for Later")
+        save_btn = QPushButton("Save for later")
         submit_btn = QPushButton("Submit")
+        draft_btn = QPushButton("Draft")
         clear_btn = QPushButton("New / Clear")
-        for b in (save_btn, submit_btn, clear_btn):
+        for b in (save_btn, submit_btn, draft_btn, clear_btn):
             b.setMinimumHeight(38)
             b.setMinimumWidth(120)
         submit_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        save_btn.setToolTip("Save the schedule so it can be edited later (status: Scheduled).")
+        submit_btn.setToolTip("Submit the schedule. The audit then appears in the Audit tab for conducting.")
         btn_row.addStretch(1)
-        for b in (save_btn, submit_btn, clear_btn):
+        for b in (draft_btn, save_btn, submit_btn, clear_btn):
             btn_row.addWidget(b)
         lay.addLayout(btn_row)
 
-        lay.addWidget(QLabel("<b>All audits</b> — Audits saved for later can be edited; submitted audits continue in the 'Audit' tab."))
+        lay.addWidget(QLabel("<b>All audits</b> — Draft and Saved-for-later (Scheduled) audits can be edited here. Once Submitted they continue in the <b>Audit</b> tab."))
         table = self._aud_table(["Audit Number", "Audit Type", "Date", "Location", "Auditor", "Status"])
         self._aud_readonly(table)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         lay.addWidget(table, 1)
         row_btns = QHBoxLayout()
-        edit_btn = QPushButton("Edit Selected (Draft / Scheduled)")
+        edit_btn = QPushButton("Edit Selected (Draft / Save for later)")
         delete_btn = QPushButton("Delete Selected Audit")
         row_btns.addWidget(edit_btn)
         row_btns.addWidget(delete_btn)
@@ -5159,15 +5143,21 @@ class MainWindow(QMainWindow):
             audit = aud_get(audit_id)
             number = safe(audit["number"])
             if status == "Submitted":
+                auditee, ok = QInputDialog.getText(
+                    tab, "Auditee", f"Audit {number} submitted.\n\nEnter the Auditee (person / department / organisation being audited):")
+                if ok and auditee.strip():
+                    aud_set_auditee(audit_id, auditee.strip())
                 clear_form()
                 load_table()
                 ctx["refresh_checklist_options"]()
                 ctx["open_checklist"](audit_id)
-                ctx["tabs"].setCurrentIndex(ctx.get("audit_tab_index", 2))
+                # Audit tab index after re-order: Dashboard=0, Schedule=1, Notifications=2, Audit=3
+                ctx["tabs"].setCurrentIndex(3)
                 return
+            label = "Saved for later (Scheduled)" if status == "Scheduled" else status
             QMessageBox.information(tab, "Audit Scheduling",
-                                    f"Audit {number} saved as {status}." + (
-                                        "\nIt now appears in the Notifications audit list." if status == "Scheduled" else ""))
+                                    f"Audit {number} {label}." + (
+                                        "\nIt can be edited later from this list and also appears in Notifications." if status == "Scheduled" else ""))
             clear_form()
             load_table()
 
@@ -5180,7 +5170,7 @@ class MainWindow(QMainWindow):
             audit = aud_get(int(item.data(Qt.ItemDataRole.UserRole)))
             if safe(audit["status"]) not in ("Draft", "Scheduled"):
                 QMessageBox.information(tab, "Audit Submitted",
-                                        "Submitted audits can no longer be re-scheduled. Continue them in the 'Audit' tab.")
+                                        "Submitted audits can no longer be re-scheduled. Continue them in the Audit tab.")
                 return
             state["id"] = int(audit["id"])
             number_label.setText(f"Audit Number: {safe(audit['number'])}   (editing {safe(audit['status'])})")
@@ -5224,7 +5214,8 @@ class MainWindow(QMainWindow):
         type_combo.currentIndexChanged.connect(lambda *_: update_visibility())
         proc_add_btn.clicked.connect(add_selected_procedure)
         proc_remove_btn.clicked.connect(remove_selected_procedure)
-        save_btn.clicked.connect(lambda: do_save("Draft"))
+        draft_btn.clicked.connect(lambda: do_save("Draft"))
+        save_btn.clicked.connect(lambda: do_save("Scheduled"))
         submit_btn.clicked.connect(lambda: do_save("Submitted"))
         clear_btn.clicked.connect(clear_form)
         edit_btn.clicked.connect(edit_selected)
@@ -5236,12 +5227,11 @@ class MainWindow(QMainWindow):
         return tab
 
     # ============================================================
-    # TAB 3 - AUDITEE & CHECKLIST (+ CAPA routing on save)
+    # TAB - AUDIT (conduct checklist; Save for later / Submit)
     # ============================================================
     def _aud_build_checklist(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         state = {"audit_id": None, "removed": [], "loading": False}
         top = QGridLayout()
         audit_combo = QComboBox()
@@ -5302,17 +5292,19 @@ class MainWindow(QMainWindow):
         add_btn = QPushButton("+ Add Blank Row")
         del_btn = QPushButton("Delete Selected Row")
         meta_btn = QPushButton("Save Auditee && Type")
-        save_btn = QPushButton("Save for Later")
-        submit_audit_btn = QPushButton("Submit Audit")
-        for b in (add_btn, del_btn, meta_btn, save_btn, submit_audit_btn):
+        save_later_btn = QPushButton("Save for later")
+        submit_btn = QPushButton("Submit")
+        for b in (add_btn, del_btn, meta_btn, save_later_btn, submit_btn):
             b.setMinimumHeight(38)
-        save_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        save_later_btn.setToolTip("Save checklist progress so the audit can be edited later (status: In Progress).")
+        submit_btn.setToolTip("Submit the completed audit. Findings then appear in Audit Findings Register / Close Out.")
+        submit_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
         btns.addWidget(add_btn)
         btns.addWidget(del_btn)
         btns.addStretch(1)
         btns.addWidget(meta_btn)
-        btns.addWidget(save_btn)
-        btns.addWidget(submit_audit_btn)
+        btns.addWidget(save_later_btn)
+        btns.addWidget(submit_btn)
         lay.addLayout(btns)
 
         # ---- row helpers ----
@@ -5460,7 +5452,7 @@ class MainWindow(QMainWindow):
             auditee_train_hint.setVisible(uses_procs)
             if uses_procs:
                 refresh_trained_auditees(current_auditee_value() or auditee_edit.text().strip())
-            for b in (add_btn, del_btn, meta_btn, save_btn, submit_audit_btn):
+            for b in (add_btn, del_btn, meta_btn, save_later_btn, submit_btn):
                 b.setEnabled(state["audit_id"] is not None)
             if state["audit_id"] is None:
                 hint.setText("Select a submitted audit to begin.")
@@ -5611,27 +5603,44 @@ class MainWindow(QMainWindow):
             try:
                 result = aud_save_findings(state["audit_id"], collect_rows(), state["removed"])
             except ValueError as exc:
-                QMessageBox.warning(tab, "Checklist", str(exc))
+                QMessageBox.warning(tab, "Audit", str(exc))
                 return
             except Exception as exc:
                 logging.exception("Audit checklist save failed")
-                QMessageBox.critical(tab, "Checklist", f"Could not save the checklist.\n\n{exc}")
+                QMessageBox.critical(tab, "Audit", f"Could not save the checklist.\n\n{exc}")
                 return
             state["removed"] = []
-            aud_set_status(state["audit_id"], "Completed" if submit else "In Progress")
             for row, fid in result["saved"]:
                 refresh_row(row, fid)
+            # Save for later keeps the audit editable; Submit finalises for registers / close-out.
+            try:
+                if submit:
+                    aud_set_status(state["audit_id"], "Completed")
+                else:
+                    cur = aud_get(state["audit_id"])
+                    if safe(cur["status"]) in ("Submitted", "Scheduled"):
+                        aud_set_status(state["audit_id"], "In Progress")
+            except Exception:
+                logging.exception("Audit status update failed")
             msg = [f"{len(result['saved'])} finding(s) saved."]
             if result["capa_created"]:
                 msg.append("Routed to the CAPA module first (then Audit Report / Closure): " + ", ".join(result["capa_created"]))
             if result["register_only"]:
                 msg.append(f"{result['register_only']} finding(s) with CAPA = No were routed to the Audit Register only.")
             msg.extend(result["notes"])
-            msg.append("Audit submitted and moved to the Audit Register." if submit else "Saved as a draft. You can reopen this audit and continue editing later.")
-            QMessageBox.information(tab, "Audit Submitted" if submit else "Saved for Later", "\n".join(msg))
+            if submit:
+                msg.append("Audit submitted. Findings are available in Audit Findings Register and Close Out.")
+                QMessageBox.information(tab, "Audit Submitted", "\n".join(msg))
+            else:
+                msg.append("Saved for later — you can continue editing this audit from the Audit tab.")
+                QMessageBox.information(tab, "Saved for later", "\n".join(msg))
             ctx["refresh_dashboard"]()
-            ctx.get("refresh_register", lambda: None)()
-            ctx.get("refresh_closeout", lambda: None)()
+            if "refresh_findings_register" in ctx:
+                ctx["refresh_findings_register"]()
+            if "refresh_closeout_section" in ctx:
+                ctx["refresh_closeout_section"]()
+            if "refresh_summary" in ctx:
+                ctx["refresh_summary"]()
 
         def delete_row():
             row = table.currentRow()
@@ -5662,8 +5671,8 @@ class MainWindow(QMainWindow):
         add_btn.clicked.connect(add_blank)
         del_btn.clicked.connect(delete_row)
         meta_btn.clicked.connect(save_meta)
-        save_btn.clicked.connect(lambda: save_checklist(False))
-        submit_audit_btn.clicked.connect(lambda: save_checklist(True))
+        save_later_btn.clicked.connect(lambda: save_checklist(False))
+        submit_btn.clicked.connect(lambda: save_checklist(True))
         fill_audit_combo()
         update_type_ui()
         ctx["refresh_checklist_options"] = refresh_options
@@ -5675,95 +5684,37 @@ class MainWindow(QMainWindow):
     # ============================================================
 
     # ============================================================
-    # COMBINED AUDIT REGISTER: tracking + cumulative findings + summary
-    # ============================================================
-    def _aud_build_combined_register(self, ctx):
-        tab = QWidget(); lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
-        inner = QTabWidget(); lay.addWidget(inner, 1)
-        summary = self._aud_build_summary_register(ctx)
-        findings = self._aud_build_cumulative_register(ctx)
-        tracking = self._aud_build_tracking_register(ctx)
-        inner.addTab(summary, "Audit Overview")
-        inner.addTab(findings, "Cumulative Findings")
-        inner.addTab(tracking, "Tracking & Due Dates")
-        def refresh_all():
-            for key in ("refresh_summary", "refresh_cumulative", "refresh_tracking"):
-                ctx.get(key, lambda: None)()
-        ctx["refresh_register"] = refresh_all
-        return tab
-
-    # ============================================================
-    # CLOSE OUT: audit list -> open findings -> close-out workspace
-    # ============================================================
-    def _aud_build_closeout_register(self, ctx):
-        tab = QWidget(); lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
-        intro = QLabel("Select an audit to review its open observations. Select a finding to open its close-out workspace, attach evidence, save for later, submit for review, or approve.")
-        intro.setWordWrap(True); lay.addWidget(intro)
-        search = QLineEdit(); search.setPlaceholderText("Search audit number, type, date, location, auditor…"); lay.addWidget(search)
-        table = self._aud_table(["Audit No.", "Audit Type", "Date", "Location", "Auditor", "Auditee", "Open Observations", "Audit Status"])
-        self._aud_readonly(table); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(table, 1)
-        refresh_btn = QPushButton("Refresh"); lay.addWidget(refresh_btn)
-        def load():
-            needle = search.text().strip().casefold(); rows = []
-            for a in aud_list(AUD_CONDUCTED_STATUSES):
-                fs = db.fetchall("SELECT status,closeout_status,evidence,corrective_action,observation_text,checklist_pts FROM aud_findings WHERE audit_id=?", (a["id"],))
-                open_n = sum(1 for f in fs if (safe(f["evidence"]).strip() or safe(f["corrective_action"]).strip() or safe(f["observation_text"]).strip() or safe(f["checklist_pts"]).strip()) and safe(f["status"]) != "Closed" and safe(f["closeout_status"]) not in ("Closed", "Approved"))
-                blob = " ".join(safe(a[k]) for k in ("number", "audit_type", "audit_date", "location", "auditor", "auditee", "status")).casefold()
-                if not needle or needle in blob: rows.append((a, open_n))
-            table.setRowCount(len(rows))
-            for i,(a,n) in enumerate(rows):
-                vals = [safe(a["number"]),safe(a["audit_type"]),safe(a["audit_date"]),safe(a["location"]),safe(a["auditor"]),safe(a["auditee"]) or "—",str(n),safe(a["status"])]
-                for c,v in enumerate(vals): table.setItem(i,c,self._aud_item(v,a["id"],link=(c==0)))
-        def open_findings(row=None,col=None):
-            r=table.currentRow(); it=table.item(r,0) if r>=0 else None
-            if it is None: QMessageBox.information(tab,"Select Audit","Select an audit first."); return
-            aid=int(it.data(Qt.ItemDataRole.UserRole)); a=aud_get(aid)
-            d=QDialog(self); d.setWindowTitle(f"Open Findings — {safe(a['number'])}"); d.resize(1050,620)
-            dl=QVBoxLayout(d); dl.addWidget(QLabel(f"Audit {safe(a['number'])} — select a finding to open Close Out."))
-            ft=self._aud_table(["Finding No.","Observation / Finding","Corrective Action","Responsible","Due Date","Status","Close-out Status"]); self._aud_readonly(ft); ft.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); dl.addWidget(ft,1)
-            for f in aud_findings(aid):
-                if not (safe(f["evidence"]).strip() or safe(f["corrective_action"]).strip() or safe(f["observation_text"]).strip() or safe(f["checklist_pts"]).strip()): continue
-                if safe(f["status"])=="Closed" or safe(f["closeout_status"]) in ("Closed","Approved"): continue
-                rr=ft.rowCount(); ft.insertRow(rr); vals=[safe(f["finding_no"]),safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"]),safe(f["corrective_action"]),safe(f["responsible"]),safe(f["target_date"]),safe(f["status"]),safe(f["closeout_status"]) or "Open"]
-                for c,v in enumerate(vals): ft.setItem(rr,c,self._aud_item(v,f["id"],link=(c==0)))
-            def open_finding(row=None,col=None):
-                rr=ft.currentRow(); item=ft.item(rr,0) if rr>=0 else None
-                if item: self._aud_closeout_dialog(int(item.data(Qt.ItemDataRole.UserRole)),on_change=lambda:(load(),ctx.get("refresh_register",lambda:None)()))
-            ft.cellClicked.connect(open_finding)
-            open_btn=QPushButton("Open Selected Finding"); open_btn.clicked.connect(open_finding); dl.addWidget(open_btn)
-            d.exec()
-        table.cellClicked.connect(open_findings); search.textChanged.connect(load); refresh_btn.clicked.connect(load)
-        ctx["refresh_closeout"]=load; load(); return tab
-
-    # ============================================================
     # TAB - AUDIT TRACKING REGISTER (open findings + close-out workflow)
     # ============================================================
-    def _aud_build_tracking_register(self, ctx):
+    def _aud_build_findings_register(self, ctx):
+        """Combined Audit Tracking + Cumulative Findings register with due dates and full details."""
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         intro = QLabel(
-            "Open audit observations / findings appear here automatically. "
-            "Double-click a row to open the close-out workspace: attach evidence, add comments, "
-            "submit for senior review, then approve to close. Closed items move to the Audit Summary Register."
+            "Complete audit findings register (open and closed). "
+            "Shows observation, corrective action, responsible person, target / due date, days remaining, "
+            "close-out status and CAPA. Double-click a row to open the Close Out workspace."
         )
         intro.setWordWrap(True)
         lay.addWidget(intro)
         filters = QHBoxLayout()
         search = QLineEdit(); search.setPlaceholderText("Search audit no., observation, corrective action, responsible…")
-        show_closed = QCheckBox("Include closed")
+        status_filter = QComboBox()
+        status_filter.addItems(["All statuses", "Open only", "Closed only", "Submitted for Review", "Overdue"])
         refresh_btn = QPushButton("Refresh")
-        filters.addWidget(search, 2); filters.addWidget(show_closed); filters.addWidget(refresh_btn)
+        filters.addWidget(search, 2)
+        filters.addWidget(status_filter)
+        filters.addWidget(refresh_btn)
         lay.addLayout(filters)
-        headers = ["S.No.", "Audit No.", "Observation / Finding", "Corrective Action", "Target Date",
-                   "Close-out Days", "Responsible", "Close-out Status", "CAPA No."]
+        headers = ["S.No.", "Audit No.", "Finding No.", "Type", "Date", "Observation / Finding",
+                   "Corrective Action", "Responsible", "Target / Due Date", "Days Remaining",
+                   "Close-out Status", "CAPA No.", "Auditor"]
         table = self._aud_table(headers)
         self._aud_readonly(table)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setStretchLastSection(True)
+        for ci, wd in enumerate([50, 110, 110, 100, 90, 220, 200, 120, 110, 100, 130, 100, 110]):
+            table.setColumnWidth(ci, wd)
         lay.addWidget(table, 1)
         open_btn = QPushButton("Open Close-out Workspace")
         open_btn.setMinimumHeight(36)
@@ -5772,28 +5723,60 @@ class MainWindow(QMainWindow):
 
         def load():
             needle = search.text().strip().casefold()
-            rows = aud_tracking_rows(include_closed=show_closed.isChecked())
+            mode = status_filter.currentText()
+            # Prefer cumulative (all findings) when available; fall back to tracking rows.
+            try:
+                rows = aud_cumulative_findings()
+            except Exception:
+                rows = aud_tracking_rows(include_closed=True)
             data = []
             for f in rows:
-                obs = safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"])
-                action = safe(f["corrective_action"])
-                days_label, overdue = aud_days_remaining(f["target_date"], safe(f["closeout_status"]) or safe(f["status"]))
-                blob = " ".join(safe(f[k]) for k in ("audit_number", "finding_no", "evidence", "corrective_action",
-                                                     "responsible", "closeout_status", "capa_number", "observation_text")).casefold()
+                obs = safe(f["observation_text"]) if "observation_text" in f.keys() else ""
+                if not obs:
+                    obs = safe(f["evidence"]) if "evidence" in f.keys() else ""
+                if not obs:
+                    obs = safe(f["checklist_pts"]) if "checklist_pts" in f.keys() else ""
+                action = safe(f["corrective_action"]) if "corrective_action" in f.keys() else ""
+                co_status = safe(f["closeout_status"]) if "closeout_status" in f.keys() else ""
+                status = co_status or (safe(f["status"]) if "status" in f.keys() else "Open")
+                days_label, overdue = aud_days_remaining(
+                    f["target_date"] if "target_date" in f.keys() else "", status)
+                if mode == "Open only" and status.lower() in ("closed", "approved", "capa action complete"):
+                    continue
+                if mode == "Closed only" and status.lower() not in ("closed", "approved"):
+                    continue
+                if mode == "Submitted for Review" and "submit" not in status.lower():
+                    continue
+                if mode == "Overdue" and not overdue:
+                    continue
+                blob = " ".join([
+                    safe(f[k]) if k in f.keys() else ""
+                    for k in ("audit_number", "finding_no", "evidence", "corrective_action",
+                              "responsible", "closeout_status", "capa_number", "observation_text",
+                              "auditor_name", "audit_type")
+                ]).casefold()
                 if needle and needle not in blob and needle not in obs.casefold() and needle not in action.casefold():
                     continue
-                data.append((f, obs, action, days_label, overdue))
+                data.append((f, obs, action, days_label, overdue, status))
             table.setRowCount(len(data))
-            for i, (f, obs, action, days_label, overdue) in enumerate(data):
+            for i, (f, obs, action, days_label, overdue, status) in enumerate(data):
                 vals = [
-                    str(i + 1), safe(f["audit_number"]), obs, action, safe(f["target_date"]),
-                    days_label, safe(f["responsible"]),
-                    safe(f["closeout_status"]) or safe(f["status"]) or "Open",
-                    safe(f["capa_number"]) or "—"
+                    str(i + 1),
+                    safe(f["audit_number"]) if "audit_number" in f.keys() else "",
+                    safe(f["finding_no"]) if "finding_no" in f.keys() else "",
+                    safe(f["audit_type"]) if "audit_type" in f.keys() else "",
+                    safe(f["audit_date"]) if "audit_date" in f.keys() else "",
+                    obs, action,
+                    safe(f["responsible"]) if "responsible" in f.keys() else "",
+                    safe(f["target_date"]) if "target_date" in f.keys() else "",
+                    days_label, status,
+                    safe(f["capa_number"]) if "capa_number" in f.keys() else "—",
+                    safe(f["auditor_name"]) if "auditor_name" in f.keys() else (safe(f["audit_auditor"]) if "audit_auditor" in f.keys() else ""),
                 ]
+                fid = f["id"] if "id" in f.keys() else None
                 for c, v in enumerate(vals):
-                    item = self._aud_item(v, f["id"])
-                    if overdue and c == 5:
+                    item = self._aud_item(v, fid)
+                    if overdue and c == 9:
                         item.setForeground(QBrush(QColor("#B00020")))
                         item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
                     table.setItem(i, c, item)
@@ -5803,19 +5786,28 @@ class MainWindow(QMainWindow):
             r = table.currentRow()
             item = table.item(r, 0) if r >= 0 else None
             if item is None:
-                QMessageBox.information(tab, "Select Finding", "Select a tracking row first.")
+                QMessageBox.information(tab, "Select Finding", "Select a findings row first.")
                 return
             fid = item.data(Qt.ItemDataRole.UserRole)
+            if not fid:
+                return
             self._aud_closeout_dialog(int(fid), on_change=load)
 
         table.cellDoubleClicked.connect(open_workspace)
         open_btn.clicked.connect(open_workspace)
         search.textChanged.connect(lambda *_: load())
-        show_closed.toggled.connect(lambda *_: load())
+        status_filter.currentIndexChanged.connect(lambda *_: load())
         refresh_btn.clicked.connect(load)
+        ctx["refresh_findings_register"] = load
+        # Keep legacy keys so any remaining callers do not break.
         ctx["refresh_tracking"] = load
+        ctx["refresh_cumulative"] = load
         load()
         return tab
+
+    def _aud_build_tracking_register(self, ctx):
+        # Backward-compatible alias — combined findings register is the single source of truth.
+        return self._aud_build_findings_register(ctx)
 
     def _aud_closeout_dialog(self, finding_id, on_change=None):
         """Scrollable close-out workspace: details + evidence + submit / senior approve."""
@@ -5830,23 +5822,10 @@ class MainWindow(QMainWindow):
             return
         d = QDialog(self)
         d.setWindowTitle(f"Close-out — {safe(f['finding_no'])} / {safe(f['audit_number'])}")
-        d.resize(920, 720)
+        d.setWindowFlags(d.windowFlags() | Qt.WindowType.WindowMinMaxButtonsHint | Qt.WindowType.WindowCloseButtonHint)
+        d.resize(980, 760)
+        d.setMinimumSize(720, 520)
         root = QVBoxLayout(d)
-        workspace_controls = QHBoxLayout(); workspace_controls.addStretch(1)
-        minimize_workspace = QPushButton("—"); minimize_workspace.setToolTip("Minimize close-out workspace")
-        magnify_workspace = QPushButton("⌕"); magnify_workspace.setToolTip("Magnify close-out workspace")
-        close_workspace = QPushButton("×"); close_workspace.setToolTip("Close workspace")
-        for control in (minimize_workspace, magnify_workspace, close_workspace):
-            control.setFixedSize(30, 27); workspace_controls.addWidget(control)
-        root.addLayout(workspace_controls)
-        minimize_workspace.clicked.connect(d.showMinimized)
-        close_workspace.clicked.connect(d.reject)
-        def zoom_workspace():
-            current = d.font().pointSize()
-            value, ok = QInputDialog.getInt(d, "Magnify Close-out", "Font size (points):", max(8, current + 2), 8, 24, 1)
-            if ok:
-                font = d.font(); font.setPointSize(value); d.setFont(font); body.setFont(font)
-        magnify_workspace.clicked.connect(zoom_workspace)
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
         body = QWidget(); lay = QVBoxLayout(body)
 
@@ -5936,11 +5915,14 @@ class MainWindow(QMainWindow):
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
         btns = QHBoxLayout()
-        save_btn = QPushButton("Save for Later")
-        submit_btn = QPushButton("Submit for Review")
+        save_btn = QPushButton("Save for later")
+        submit_btn = QPushButton("Submit for review")
         approve_btn = QPushButton("Approve")
         reject_btn = QPushButton("Return for Correction")
         close_btn = QPushButton("Close Window")
+        save_btn.setToolTip("Save comments and evidence without submitting for review.")
+        submit_btn.setToolTip("Submit this close-out for senior review.")
+        approve_btn.setToolTip("Senior approve and close the finding.")
         submit_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
         approve_btn.setStyleSheet("font-weight:bold;background:#1B5E20;color:white;")
         for b in (save_btn, submit_btn, approve_btn, reject_btn, close_btn):
@@ -5957,7 +5939,7 @@ class MainWindow(QMainWindow):
                     "UPDATE aud_findings SET closeout_comments=?, updated_at=? WHERE id=?",
                     (comments.toPlainText().strip(), aud_ts(), finding_id)
                 )
-                QMessageBox.information(d, "Saved", "Close-out comments and evidence were saved.")
+                QMessageBox.information(d, "Saved for later", "Close-out comments and evidence were saved. You can continue editing later.")
                 if on_change: on_change()
             except Exception as exc:
                 logging.exception("Close-out draft save failed")
@@ -6026,10 +6008,9 @@ class MainWindow(QMainWindow):
     def _aud_build_summary_register(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         intro = QLabel(
             "Audit Summary Register — percentage of open observations for each audit. "
-            "Values update automatically when findings are closed through the Tracking Register close-out workflow."
+            "Values update automatically when findings are closed through the Close Out / Findings Register workflow."
         )
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -6082,7 +6063,6 @@ class MainWindow(QMainWindow):
     def _aud_build_cumulative_register(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         intro = QLabel("Cumulative register of all audit findings across every audit (open and closed).")
         intro.setWordWrap(True)
         lay.addWidget(intro)
@@ -6143,10 +6123,156 @@ class MainWindow(QMainWindow):
         return tab
 
 
+
+    def _aud_build_closeout_section(self, ctx):
+        """Close Out: audit list with open observation counts → findings → close-out workspace."""
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        intro = QLabel(
+            "Close Out — select an audit to see its open observations / findings. "
+            "Click a finding to open the Close Out workspace (evidence, Save for later, Submit for review, Approve)."
+        )
+        intro.setWordWrap(True)
+        lay.addWidget(intro)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # Left: audits with open finding counts
+        left = QWidget(); left_lay = QVBoxLayout(left); left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.addWidget(QLabel("<b>Audits</b>"))
+        search = QLineEdit(); search.setPlaceholderText("Search audit number, type, location…")
+        left_lay.addWidget(search)
+        audit_table = self._aud_table(["Audit No.", "Type", "Date", "Location", "Open Observations", "Status"])
+        self._aud_readonly(audit_table)
+        audit_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        left_lay.addWidget(audit_table, 1)
+        splitter.addWidget(left)
+
+        # Right: findings for selected audit
+        right = QWidget(); right_lay = QVBoxLayout(right); right_lay.setContentsMargins(0, 0, 0, 0)
+        right_title = QLabel("<b>Findings for selected audit</b>")
+        right_lay.addWidget(right_title)
+        finding_table = self._aud_table(
+            ["Finding No.", "Observation / Finding", "Corrective Action", "Responsible",
+             "Target Date", "Days Remaining", "Close-out Status", "CAPA No."]
+        )
+        self._aud_readonly(finding_table)
+        finding_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        finding_table.horizontalHeader().setStretchLastSection(True)
+        right_lay.addWidget(finding_table, 1)
+        open_btn = QPushButton("Open Close Out Workspace")
+        open_btn.setMinimumHeight(36)
+        open_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
+        right_lay.addWidget(open_btn)
+        splitter.addWidget(right)
+        splitter.setSizes([420, 680])
+        lay.addWidget(splitter, 1)
+
+        state = {"audit_id": None}
+
+        def open_count_for(audit_id):
+            rows = db.fetchall(
+                "SELECT closeout_status, status FROM aud_findings WHERE audit_id=?", (audit_id,)
+            )
+            open_n = 0
+            for r in rows:
+                st = (safe(r["closeout_status"]) or safe(r["status"]) or "Open").lower()
+                if st not in ("closed", "approved"):
+                    open_n += 1
+            return open_n
+
+        def load_audits():
+            needle = search.text().strip().casefold()
+            audits = aud_list(AUD_CONDUCTED_STATUSES + ("Completed",))
+            # de-dupe by id
+            seen = set(); records = []
+            for a in audits:
+                if a["id"] in seen:
+                    continue
+                seen.add(a["id"])
+                records.append(a)
+            data = []
+            for a in records:
+                blob = " ".join(safe(a[k]) for k in ("number", "audit_type", "audit_date", "location", "status")).casefold()
+                if needle and needle not in blob:
+                    continue
+                data.append((a, open_count_for(int(a["id"]))))
+            audit_table.setRowCount(len(data))
+            for i, (a, open_n) in enumerate(data):
+                vals = [safe(a["number"]), safe(a["audit_type"]), safe(a["audit_date"]),
+                        safe(a["location"]), str(open_n), safe(a["status"])]
+                for c, v in enumerate(vals):
+                    item = self._aud_item(v, a["id"])
+                    if c == 4 and open_n > 0:
+                        item.setForeground(QBrush(QColor("#B00020")))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    audit_table.setItem(i, c, item)
+            audit_table.resizeRowsToContents()
+
+        def load_findings(audit_id):
+            state["audit_id"] = audit_id
+            finding_table.setRowCount(0)
+            if not audit_id:
+                right_title.setText("<b>Findings for selected audit</b>")
+                return
+            a = aud_get(audit_id)
+            right_title.setText(f"<b>Findings — {safe(a['number']) if a else ''}</b>")
+            rows = db.fetchall(
+                "SELECT * FROM aud_findings WHERE audit_id=? ORDER BY seq, id", (audit_id,)
+            )
+            finding_table.setRowCount(len(rows))
+            for i, f in enumerate(rows):
+                obs = safe(f["observation_text"]) or safe(f["evidence"]) or safe(f["checklist_pts"])
+                status = safe(f["closeout_status"]) or safe(f["status"]) or "Open"
+                days_label, overdue = aud_days_remaining(f["target_date"], status)
+                vals = [
+                    safe(f["finding_no"]), obs, safe(f["corrective_action"]), safe(f["responsible"]),
+                    safe(f["target_date"]), days_label, status, safe(f["capa_number"]) or "—"
+                ]
+                for c, v in enumerate(vals):
+                    item = self._aud_item(v, f["id"])
+                    if overdue and c == 5:
+                        item.setForeground(QBrush(QColor("#B00020")))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    finding_table.setItem(i, c, item)
+            finding_table.resizeRowsToContents()
+
+        def on_audit_clicked(row, col=None):
+            item = audit_table.item(row, 0)
+            if item is None:
+                return
+            load_findings(item.data(Qt.ItemDataRole.UserRole))
+
+        def open_workspace():
+            r = finding_table.currentRow()
+            item = finding_table.item(r, 0) if r >= 0 else None
+            if item is None:
+                QMessageBox.information(tab, "Select Finding", "Select a finding row first.")
+                return
+            fid = item.data(Qt.ItemDataRole.UserRole)
+            def after():
+                if state["audit_id"]:
+                    load_findings(state["audit_id"])
+                load_audits()
+                if "refresh_findings_register" in ctx:
+                    ctx["refresh_findings_register"]()
+                if "refresh_summary" in ctx:
+                    ctx["refresh_summary"]()
+            self._aud_closeout_dialog(int(fid), on_change=after)
+
+        audit_table.cellClicked.connect(on_audit_clicked)
+        audit_table.cellDoubleClicked.connect(on_audit_clicked)
+        finding_table.cellDoubleClicked.connect(lambda *_: open_workspace())
+        open_btn.clicked.connect(open_workspace)
+        search.textChanged.connect(lambda *_: load_audits())
+        ctx["refresh_closeout_section"] = load_audits
+        load_audits()
+        return tab
+
+
     def _aud_build_notifications(self, ctx):
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        self._aud_add_workspace_controls(tab, lay, ctx)
         state = {"audit_id": None, "loading": False}
         top = QHBoxLayout()
         audit_combo = QComboBox()
