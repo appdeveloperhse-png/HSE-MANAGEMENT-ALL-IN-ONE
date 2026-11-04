@@ -4622,40 +4622,52 @@ class MainWindow(QMainWindow):
     # ========================================================
     def audits(self):
         w, layout = self.page("Audit Management")
-        tabs = QTabWidget()
-        tabs.setTabsClosable(False)
-        tabs.setMovable(False)
-        layout.addWidget(tabs, 1)
-        ctx = {"tabs": tabs}
-        dash_tab = self._aud_build_dashboard(ctx)
-        sched_tab = self._aud_build_schedule(ctx)
-        note_tab = self._aud_build_notifications(ctx)
-        check_tab = self._aud_build_checklist(ctx)
-        register_tab = self._aud_build_master_register(ctx)
-        findings_tab = self._aud_build_findings_register(ctx)
-        summary_tab = self._aud_build_summary_register(ctx)
-        closeout_tab = self._aud_build_closeout_section(ctx)
-        # Order: Dashboard → Schedule → Notifications → Audit → Master → Findings → Summary → Close Out
-        tabs.addTab(dash_tab, "Audit Dashboard")
-        tabs.addTab(sched_tab, "Schedule Audit")
-        tabs.addTab(note_tab, "Notifications")
-        tabs.addTab(check_tab, "Audit")
-        tabs.addTab(register_tab, "Master Audit Register")
-        tabs.addTab(findings_tab, "Audit Findings Register")
-        tabs.addTab(summary_tab, "Audit Summary Register")
-        tabs.addTab(closeout_tab, "Close Out")
-        refreshers = {
-            0: ctx.get("refresh_dashboard", lambda: None),
-            1: ctx.get("refresh_schedule", lambda: None),
-            2: ctx.get("refresh_notification_options", lambda: None),
-            3: ctx.get("refresh_checklist_options", lambda: None),
-            4: ctx.get("refresh_master_register", lambda: None),
-            5: ctx.get("refresh_findings_register", lambda: None),
-            6: ctx.get("refresh_summary", lambda: None),
-            7: ctx.get("refresh_closeout_section", lambda: None),
-        }
-        tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
-        ctx["refresh_dashboard"]()
+        try:
+            tabs = QTabWidget()
+            tabs.setTabsClosable(False)
+            tabs.setMovable(False)
+            layout.addWidget(tabs, 1)
+            ctx = {"tabs": tabs}
+            dash_tab = self._aud_build_dashboard(ctx)
+            sched_tab = self._aud_build_schedule(ctx)
+            note_tab = self._aud_build_notifications(ctx)
+            check_tab = self._aud_build_checklist(ctx)
+            register_tab = self._aud_build_master_register(ctx)
+            findings_tab = self._aud_build_findings_register(ctx)
+            summary_tab = self._aud_build_summary_register(ctx)
+            closeout_tab = self._aud_build_closeout_section(ctx)
+            # Order: Dashboard → Schedule → Notifications → Audit → Master → Findings → Summary → Close Out
+            tabs.addTab(dash_tab, "Audit Dashboard")
+            tabs.addTab(sched_tab, "Schedule Audit")
+            tabs.addTab(note_tab, "Notifications")
+            tabs.addTab(check_tab, "Audit")
+            tabs.addTab(register_tab, "Master Audit Register")
+            tabs.addTab(findings_tab, "Audit Findings Register")
+            tabs.addTab(summary_tab, "Audit Summary Register")
+            tabs.addTab(closeout_tab, "Close Out")
+            refreshers = {
+                0: ctx.get("refresh_dashboard", lambda: None),
+                1: ctx.get("refresh_schedule", lambda: None),
+                2: ctx.get("refresh_notification_options", lambda: None),
+                3: ctx.get("refresh_checklist_options", lambda: None),
+                4: ctx.get("refresh_master_register", lambda: None),
+                5: ctx.get("refresh_findings_register", lambda: None),
+                6: ctx.get("refresh_summary", lambda: None),
+                7: ctx.get("refresh_closeout_section", lambda: None),
+            }
+            tabs.currentChanged.connect(lambda index: refreshers.get(index, lambda: None)())
+            ctx["refresh_dashboard"]()
+        except Exception as exc:
+            logging.exception("Audit Management failed to load")
+            err = QLabel(
+                f"<b>Audit Management could not be loaded.</b><br><br>"
+                f"{type(exc).__name__}: {exc}<br><br>"
+                f"Please share this message so it can be fixed."
+            )
+            err.setWordWrap(True)
+            err.setStyleSheet("color:#B00020;padding:12px;")
+            layout.addWidget(err)
+            QMessageBox.critical(self, "Audit Management", f"Audit section failed to load:\n\n{type(exc).__name__}: {exc}")
 
     def _aud_build_master_register(self, ctx):
         tab = QWidget()
@@ -5440,7 +5452,7 @@ class MainWindow(QMainWindow):
             auditee_train_hint.setVisible(uses_procs)
             if uses_procs:
                 refresh_trained_auditees(current_auditee_value() or auditee_edit.text().strip())
-            for b in (add_btn, del_btn, meta_btn, save_btn):
+            for b in (add_btn, del_btn, meta_btn, save_later_btn, submit_btn):
                 b.setEnabled(state["audit_id"] is not None)
             if state["audit_id"] is None:
                 hint.setText("Select a submitted audit to begin.")
