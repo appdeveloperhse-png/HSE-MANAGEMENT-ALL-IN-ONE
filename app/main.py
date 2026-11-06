@@ -7352,18 +7352,18 @@ class MainWindow(QMainWindow):
         grid_status = QLabel("")
         grid_status.setStyleSheet("font-weight:bold; padding:4px;")
         grid_layout.addWidget(grid_status)
-        matrix_subtabs.addTab(grid_page, "2. Matrix Grid (Ready-to-Use)")
+        # grid_page is hosted on the main Training tabs only
 
-        tabs.addTab(matrix_page, "3. Matrix List View")
-
+        
         # ---------------- Training Register ----------------
         register_page = QWidget()
         register_layout = QVBoxLayout(register_page)
         register_layout.setContentsMargins(8, 8, 8, 8)
         register_layout.setSpacing(8)
         register_help = QLabel(
-            "TRACKING VIEW — each row is one employee; training columns show status at a glance. "
-            "Click a training cell to record or update dates. Mandatory % uses the matrix for the employee’s trade."
+            "EMPLOYEE DETAILS & TRACKER — add workers (single or bulk), then track training. "
+            "Each row is one employee; course cells show Mandatory/Optional, training date, expiry and days remaining. "
+            "Click a training cell to record dates. Mandatory % uses the matrix for the employee trade."
         )
         register_help.setWordWrap(True)
         register_help.setStyleSheet("color:#17365D; font-weight:600; padding:6px; background:#E8F1FB; border-radius:4px;")
@@ -7379,7 +7379,7 @@ class MainWindow(QMainWindow):
         )
         register_layout.addWidget(register_legend)
 
-        employee_box = QGroupBox("Add employee to the training register")
+        employee_box = QGroupBox("Employee Details — ID, Name, Company, Trade (single or bulk)")
         employee_form = QGridLayout(employee_box)
         employee_id_input = QLineEdit()
         employee_id_input.setPlaceholderText("Employee ID (optional)")
@@ -7424,6 +7424,67 @@ class MainWindow(QMainWindow):
         employee_form.addWidget(delete_employee_btn, 2, 5)
         register_layout.addWidget(employee_box)
 
+        # ---- Bulk employee entry (multiple workers at once) ----
+        bulk_emp_box = QGroupBox("Bulk add workers (one per line: ID | Name | Trade | Company)")
+        bulk_emp_lay = QVBoxLayout(bulk_emp_box)
+        bulk_emp_hint = QLabel(
+            "Paste or type several workers. Format per line:  ID | Name | Trade | Company\n"
+            "Example:  E-1001 | John Smith | Scaffolder | ABC Contracting\n"
+            "Trade must match a matrix designation when possible. Company is optional."
+        )
+        bulk_emp_hint.setWordWrap(True)
+        bulk_emp_text = QTextEdit()
+        bulk_emp_text.setPlaceholderText("E-1001 | John Smith | Scaffolder | ABC Contracting\nE-1002 | Sara Ali | Welder | XYZ LLC")
+        bulk_emp_text.setMaximumHeight(110)
+        bulk_emp_btn = QPushButton("Submit Bulk Workers")
+        bulk_emp_btn.setMinimumHeight(34)
+        bulk_emp_lay.addWidget(bulk_emp_hint)
+        bulk_emp_lay.addWidget(bulk_emp_text)
+        bulk_emp_lay.addWidget(bulk_emp_btn)
+        register_layout.addWidget(bulk_emp_box)
+
+        def submit_bulk_workers():
+            lines = [ln.strip() for ln in bulk_emp_text.toPlainText().splitlines() if ln.strip()]
+            if not lines:
+                return QMessageBox.warning(self, "Bulk Workers", "Enter at least one line: ID | Name | Trade | Company")
+            added = 0
+            updated = 0
+            skipped = []
+            for ln in lines:
+                parts = [p.strip() for p in re.split(r"[|\t;]", ln) if p.strip()]
+                if len(parts) < 3:
+                    skipped.append(ln)
+                    continue
+                emp_id, name, trade = parts[0], parts[1], parts[2]
+                company = parts[3] if len(parts) > 3 else ""
+                if not emp_id or not name:
+                    skipped.append(ln)
+                    continue
+                existing = db.fetchone(
+                    "SELECT id FROM employees WHERE lower(trim(COALESCE(employee_id,'')))=lower(trim(?)) LIMIT 1",
+                    (emp_id,)
+                )
+                if existing:
+                    db.execute(
+                        "UPDATE employees SET name=?, designation=?, company=?, active=1 WHERE id=?",
+                        (name, trade, company, existing["id"])
+                    )
+                    updated += 1
+                else:
+                    db.execute(
+                        "INSERT INTO employees (employee_id,name,designation,company,department,active) VALUES (?,?,?,?,?,1)",
+                        (emp_id, name, trade, company, "")
+                    )
+                    added += 1
+            bulk_emp_text.clear()
+            load_register()
+            msg = f"Bulk complete. Added: {added}, Updated: {updated}."
+            if skipped:
+                msg += f" Skipped {len(skipped)} line(s) (need ID | Name | Trade)."
+            QMessageBox.information(self, "Bulk Workers", msg)
+
+        bulk_emp_btn.clicked.connect(submit_bulk_workers)
+
         register_toolbar = QHBoxLayout()
         register_search = QLineEdit()
         register_search.setPlaceholderText("Search employee, ID, trade or company…")
@@ -7467,8 +7528,7 @@ class MainWindow(QMainWindow):
             }
         """)
         register_layout.addWidget(register_table, 1)
-        tabs.addTab(register_page, "4. Training Register / Tracker")
-
+        
         # ---------------- Master Training Record ----------------
         master_page = QWidget()
         master_layout = QVBoxLayout(master_page)
@@ -7506,7 +7566,10 @@ class MainWindow(QMainWindow):
         master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         master_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         master_layout.addWidget(master_table, 1)
-        tabs.addTab(master_page, "5. Master Training Register")
+        # Final Training tab order
+        tabs.addTab(register_page, "1. Employee Details & Training Tracker")
+        tabs.addTab(grid_page, "2. Matrix Grid")
+        tabs.addTab(master_page, "3. Master Training Register")
 
         # ---------------- Bulk Training Entry ----------------
         bulk_page = QWidget()
@@ -7595,7 +7658,8 @@ class MainWindow(QMainWindow):
             bulk_btns.addWidget(b)
         bulk_btns.addStretch(1)
         bulk_layout.addLayout(bulk_btns)
-        tabs.addTab(bulk_page, "6. Bulk Training Entry")
+        # Bulk Training Entry tab removed — use Employee Details bulk paste + Register cells instead
+        # tabs.addTab(bulk_page, "6. Bulk Training Entry")
 
         selected_course_id = {"value": None}
 
@@ -8036,7 +8100,7 @@ class MainWindow(QMainWindow):
                 grid_state["dirty"] = False
 
         def render_matrix_grid():
-            # COLUMNS = Position/Designation · ROWS = Training courses
+            # Professional layout: Training Name | Validity | then each trade/position column
             designations = list(MATRIX_DESIGNATIONS)
             extra = []
             for (_, desig) in grid_state["cells"].keys():
@@ -8048,41 +8112,47 @@ class MainWindow(QMainWindow):
             designations = designations + sorted(extra, key=lambda x: x.lower())
             courses = list(grid_state["courses"])
             matrix_grid.clear()
-            # +1 first column for validity display on each training row
             matrix_grid.setRowCount(len(courses))
-            matrix_grid.setColumnCount(1 + len(designations))
-            headers = ["Validity"] + designations
+            matrix_grid.setColumnCount(2 + len(designations))
+            headers = ["Training Name", "Validity (months)"] + designations
             matrix_grid.setHorizontalHeaderLabels(headers)
-            row_labels = []
-            for cname in courses:
-                row_labels.append(cname)
-            matrix_grid.setVerticalHeaderLabels(row_labels)
+            matrix_grid.verticalHeader().setVisible(False)
+            matrix_grid.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+            matrix_grid.setShowGrid(True)
+            matrix_grid.setAlternatingRowColors(True)
             for r, cname in enumerate(courses):
+                name_item = QTableWidgetItem(cname)
+                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                name_item.setBackground(QBrush(QColor("#EEF4FB")))
+                name_item.setForeground(QBrush(QColor("#17365D")))
+                font = name_item.font(); font.setBold(True); name_item.setFont(font)
+                name_item.setToolTip(cname)
+                matrix_grid.setItem(r, 0, name_item)
                 months = int(grid_state["validity"].get(cname, 0) or 0)
-                val_item = QTableWidgetItem(f"{months} mo" if months > 0 else "No expiry")
+                val_item = QTableWidgetItem(str(months) if months > 0 else "0")
                 val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                val_item.setBackground(QBrush(QColor("#EEF4FB")))
+                val_item.setBackground(QBrush(QColor("#F7FAFC")))
                 val_item.setForeground(QBrush(QColor("#17365D")))
-                font = val_item.font(); font.setBold(True); val_item.setFont(font)
-                val_item.setToolTip("Course validity (months). Change with the Validity control above, then Add / Update Course Column.")
-                matrix_grid.setItem(r, 0, val_item)
+                val_item.setToolTip("Course validity in months. Use the Validity control above to change, then Add / Update Course.")
+                matrix_grid.setItem(r, 1, val_item)
                 for c, desig in enumerate(designations):
                     req = grid_state["cells"].get((cname, desig), "Not Applicable")
                     item = QTableWidgetItem()
                     item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
                     _style_matrix_cell(item, req)
-                    matrix_grid.setItem(r, c + 1, item)
-            matrix_grid.setColumnWidth(0, 90)
-            for col in range(1, matrix_grid.columnCount()):
-                matrix_grid.setColumnWidth(col, max(88, matrix_grid.columnWidth(col)))
-            matrix_grid.resizeRowsToContents()
+                    matrix_grid.setItem(r, c + 2, item)
+            matrix_grid.setColumnWidth(0, 240)
+            matrix_grid.setColumnWidth(1, 120)
+            for col in range(2, matrix_grid.columnCount()):
+                matrix_grid.setColumnWidth(col, 92)
+            matrix_grid.verticalHeader().setDefaultSectionSize(30)
             n_m = sum(1 for v in grid_state["cells"].values() if v == "Mandatory")
             n_o = sum(1 for v in grid_state["cells"].values() if v == "Optional")
             n_b = sum(1 for v in grid_state["cells"].values() if v == "Before Job")
             grid_status.setText(
-                f"Trainings (rows): {len(courses)}  |  Positions (columns): {len(designations)}  |  "
-                f"Mandatory: {n_m}  |  Optional: {n_o}  |  Before Job: {n_b}"
+                f"Trainings: {len(courses)}  |  Trades: {len(designations)}  |  "
+                f"M: {n_m}  |  O: {n_o}  |  B: {n_b}"
                 + ("  |  Unsaved changes" if grid_state["dirty"] else "")
             )
 
@@ -8108,11 +8178,12 @@ class MainWindow(QMainWindow):
             render_matrix_grid()
 
         def matrix_cell_double_clicked(row, column):
-            # column 0 = Validity (not editable here); columns 1+ = positions
-            if column <= 0:
+            # column 0 = Training Name, column 1 = Validity; columns 2+ = trades
+            if column <= 1:
                 return QMessageBox.information(
                     self, "Matrix Grid",
-                    "Validity is set with the Validity control and Add / Update Course Column button above."
+                    "Training name and validity are set with the controls above (Add / Update Course).\n"
+                    "Double-click a trade cell (M / O / B / —) to change the requirement."
                 )
             item = matrix_grid.item(row, column)
             if not item:
@@ -8122,7 +8193,7 @@ class MainWindow(QMainWindow):
             cname = grid_state["courses"][row]
             header = matrix_grid.horizontalHeaderItem(column)
             desig = header.text() if header else ""
-            if not desig:
+            if not desig or desig in ("Training Name", "Validity (months)"):
                 return
             current = item.data(Qt.ItemDataRole.UserRole) or "Not Applicable"
             choice, ok = QInputDialog.getItem(
@@ -8709,11 +8780,27 @@ class MainWindow(QMainWindow):
                         set_status_style(item, "N/A", course)
                     else:
                         status = training_status(record, course)
-                        item.setText(format_register_status_cell(status, record))
+                        req_label = "M" if int(course["mandatory"] or 0) else "O"
+                        # Prefer matrix cell requirement for this trade when available
+                        try:
+                            trade = safe(employee["designation"])
+                            mreq = grid_state["cells"].get((safe(course["course_name"]), trade)) or grid_state["cells"].get((safe(course.get("display_course_name", course["course_name"])), trade))
+                            if mreq == "Mandatory":
+                                req_label = "M"
+                            elif mreq == "Optional":
+                                req_label = "O"
+                            elif mreq == "Before Job":
+                                req_label = "B"
+                        except Exception:
+                            pass
+                        cell_txt = format_register_status_cell(status, record)
+                        if cell_txt and not cell_txt.startswith("—"):
+                            cell_txt = f"{req_label} · {cell_txt}"
+                        item.setText(cell_txt)
                         training_date_text = safe(record["training_date"]) if record else ""
                         expiry_text = safe(record["expiry_date"]) if record else ""
                         item.setToolTip(
-                            "Status: " + status +
+                            "Requirement: " + req_label + "  |  Status: " + status +
                             "\nTraining date: " + (training_date_text or "—") +
                             "\nExpiry date: " + (expiry_text or "No expiry recorded") +
                             "\nTraining type: " + safe(course["provider_type"]) +
