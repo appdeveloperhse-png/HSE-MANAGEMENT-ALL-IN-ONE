@@ -7374,9 +7374,9 @@ class MainWindow(QMainWindow):
         employee_id_input.setPlaceholderText("Employee ID (optional)")
         employee_name_input = QLineEdit()
         employee_name_input.setPlaceholderText("Employee full name")
-        employee_department_input = QComboBox()
-        employee_department_input.setEditable(True)
-        fill_combo(employee_department_input, department_options + distinct_values("department"), "Select department", "")
+        employee_company_input = QLineEdit()
+        employee_company_input.setPlaceholderText("Company / Contractor name")
+        employee_company_input.setClearButtonEnabled(True)
         employee_trade_input = QComboBox()
         employee_trade_input.setEditable(True)
         fill_combo(employee_trade_input, trade_options + distinct_values("designation"), "Select trade", "")
@@ -7400,8 +7400,8 @@ class MainWindow(QMainWindow):
         employee_form.addWidget(employee_id_input, 0, 1)
         employee_form.addWidget(QLabel("Employee name *"), 0, 2)
         employee_form.addWidget(employee_name_input, 0, 3)
-        employee_form.addWidget(QLabel("Department"), 0, 4)
-        employee_form.addWidget(employee_department_input, 0, 5)
+        employee_form.addWidget(QLabel("Company"), 0, 4)
+        employee_form.addWidget(employee_company_input, 0, 5)
         employee_form.addWidget(QLabel("Trade"), 1, 0)
         employee_form.addWidget(employee_trade_input, 1, 1)
         employee_form.addWidget(QLabel("Date joined"), 1, 2)
@@ -7415,7 +7415,7 @@ class MainWindow(QMainWindow):
 
         register_toolbar = QHBoxLayout()
         register_search = QLineEdit()
-        register_search.setPlaceholderText("Search employee, ID, trade or department…")
+        register_search.setPlaceholderText("Search employee, ID, trade or company…")
         register_search.setClearButtonEnabled(True)
         refresh_register_btn = QPushButton("Refresh Register")
         export_register_btn = QPushButton("Export Register to Excel")
@@ -7468,7 +7468,7 @@ class MainWindow(QMainWindow):
         master_layout.addWidget(master_info)
         master_toolbar = QHBoxLayout()
         master_search = QLineEdit()
-        master_search.setPlaceholderText("Search employee, course, trade or department…")
+        master_search.setPlaceholderText("Search employee, course, trade or company…")
         master_search.setClearButtonEnabled(True)
         refresh_master_btn = QPushButton("Refresh Master Record")
         export_master_excel_btn = QPushButton("Export Master Record to Excel")
@@ -7728,35 +7728,223 @@ class MainWindow(QMainWindow):
             "Security Guard", "Camp Boss / Facilities", "Cook / Catering", "Cleaner",
             "Helper", "General Worker", "Labourer", "Other"
         ]
+        # Industry-typical validity (months) for oil & gas and construction HSE training.
+        # Sources: OPITO (H2S 24m, BOSIET/IMIST 48m), Energy Safety Canada H2S Alive (36m common),
+        # common operator practice for PTW/WAH/CSE/Scaffold (12–36m). Adjust in matrix if site rule differs.
         DEFAULT_GRID_COURSES = [
             ("HSE / Company Induction", 12),
             ("Site / Project HSE Induction", 12),
             ("Permit to Work (PTW)", 24),
-            ("Work at Height", 24),
+            ("Work at Height / Fall Protection", 24),
+            ("Scaffolding Safety (User)", 24),
+            ("Scaffold Erector / Inspector", 24),
             ("Confined Space Entry", 24),
             ("Hot Work Safety", 24),
-            ("Lifting Operations Safety", 24),
-            ("Rigging and Slinging", 24),
-            ("Scaffolding Safety", 24),
+            ("H2S Awareness", 24),
+            ("Basic Fire Fighting / Fire Watch", 24),
             ("Fire Safety Awareness", 12),
-            ("Basic Fire Fighting", 24),
-            ("First Aid", 24),
-            ("H2S Awareness", 12),
+            ("First Aid / CPR", 36),
             ("Manual Handling", 24),
+            ("Hand and Power Tools Safety", 24),
+            ("PPE Awareness", 12),
             ("Electrical Safety", 24),
             ("Lockout / Tagout (LOTO)", 24),
-            ("Hazard Identification and Risk Assessment", 24),
+            ("Lifting Operations Safety", 24),
+            ("Rigging and Slinging", 24),
+            ("Banksman / Signaler", 24),
+            ("Excavation & Trenching Safety", 24),
+            ("Chemical / HAZCOM / SDS", 24),
             ("Job Safety Analysis (JSA / JHA)", 24),
+            ("Hazard Identification and Risk Assessment", 24),
             ("Incident Reporting and Investigation", 36),
-            ("Accident / Incident Investigation", 36),
-            ("Internal HSE Auditor", 36),
-            ("Hand and Power Tools Safety", 24),
-            ("PPE", 12),
             ("Emergency Response and Evacuation", 12),
-            ("Environmental Awareness", 24),
+            ("Environmental Awareness / Spill Response", 24),
+            ("Defensive Driving", 36),
+            ("Abrasive Blasting / Painting Safety", 24),
+            ("Welding & Cutting Safety", 24),
+            ("Radiography / NDT Safety", 24),
             ("Supervisor HSE Leadership", 36),
             ("HSE for Managers", 36),
+            ("Internal HSE Auditor", 36),
+            ("BOSIET / Offshore Survival (if applicable)", 48),
+            ("IMIST / MIST (if applicable)", 48),
         ]
+
+        # Suggested requirement seed: designation keyword -> list of (course_name, requirement)
+        # M = Mandatory, B = Before Job (job-specific), O = Optional. Unlisted = Not Applicable.
+        DEFAULT_MATRIX_SEED = {
+            "_ALL_FIELD_": [  # applied to most site trades
+                ("HSE / Company Induction", "Mandatory"),
+                ("Site / Project HSE Induction", "Mandatory"),
+                ("PPE Awareness", "Mandatory"),
+                ("Fire Safety Awareness", "Mandatory"),
+                ("Emergency Response and Evacuation", "Mandatory"),
+                ("Manual Handling", "Mandatory"),
+                ("Hand and Power Tools Safety", "Mandatory"),
+                ("Hazard Identification and Risk Assessment", "Mandatory"),
+                ("Job Safety Analysis (JSA / JHA)", "Mandatory"),
+                ("Incident Reporting and Investigation", "Mandatory"),
+            ],
+            "Scaffolder": [
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Scaffolding Safety (User)", "Mandatory"),
+                ("Scaffold Erector / Inspector", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Basic Fire Fighting / Fire Watch", "Before Job"),
+                ("First Aid / CPR", "Optional"),
+            ],
+            "Scaffold Inspector": [
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Scaffolding Safety (User)", "Mandatory"),
+                ("Scaffold Erector / Inspector", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Welder": [
+                ("Hot Work Safety", "Mandatory"),
+                ("Welding & Cutting Safety", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Confined Space Entry", "Before Job"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("Basic Fire Fighting / Fire Watch", "Mandatory"),
+            ],
+            "Pipe Fitter": [
+                ("Hot Work Safety", "Before Job"),
+                ("Confined Space Entry", "Before Job"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("Lifting Operations Safety", "Before Job"),
+            ],
+            "Rigger": [
+                ("Lifting Operations Safety", "Mandatory"),
+                ("Rigging and Slinging", "Mandatory"),
+                ("Banksman / Signaler", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Banksman / Signaler": [
+                ("Lifting Operations Safety", "Mandatory"),
+                ("Banksman / Signaler", "Mandatory"),
+                ("Rigging and Slinging", "Before Job"),
+                ("Permit to Work (PTW)", "Mandatory"),
+            ],
+            "Crane Operator": [
+                ("Lifting Operations Safety", "Mandatory"),
+                ("Banksman / Signaler", "Before Job"),
+                ("Rigging and Slinging", "Before Job"),
+                ("Permit to Work (PTW)", "Mandatory"),
+            ],
+            "Electrician": [
+                ("Electrical Safety", "Mandatory"),
+                ("Lockout / Tagout (LOTO)", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Confined Space Entry", "Before Job"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Painter / Blaster": [
+                ("Abrasive Blasting / Painting Safety", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Confined Space Entry", "Before Job"),
+                ("Chemical / HAZCOM / SDS", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Excavator Operator": [
+                ("Excavation & Trenching Safety", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Lifting Operations Safety", "Before Job"),
+            ],
+            "Heavy Equipment Operator": [
+                ("Excavation & Trenching Safety", "Before Job"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Defensive Driving", "Before Job"),
+            ],
+            "Driver": [
+                ("Defensive Driving", "Mandatory"),
+                ("Permit to Work (PTW)", "Optional"),
+            ],
+            "Heavy Vehicle Driver": [
+                ("Defensive Driving", "Mandatory"),
+            ],
+            "Light Vehicle Driver": [
+                ("Defensive Driving", "Mandatory"),
+            ],
+            "HSE Officer": [
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Confined Space Entry", "Mandatory"),
+                ("First Aid / CPR", "Mandatory"),
+                ("Incident Reporting and Investigation", "Mandatory"),
+                ("Supervisor HSE Leadership", "Mandatory"),
+                ("Internal HSE Auditor", "Optional"),
+            ],
+            "HSE Supervisor": [
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("Confined Space Entry", "Mandatory"),
+                ("First Aid / CPR", "Mandatory"),
+                ("Supervisor HSE Leadership", "Mandatory"),
+                ("Internal HSE Auditor", "Optional"),
+            ],
+            "HSE Manager": [
+                ("HSE for Managers", "Mandatory"),
+                ("Internal HSE Auditor", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Incident Reporting and Investigation", "Mandatory"),
+            ],
+            "Supervisor": [
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Supervisor HSE Leadership", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+                ("First Aid / CPR", "Optional"),
+            ],
+            "Foreman": [
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Supervisor HSE Leadership", "Mandatory"),
+                ("Work at Height / Fall Protection", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Site Manager": [
+                ("HSE for Managers", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("Supervisor HSE Leadership", "Mandatory"),
+            ],
+            "Project Manager": [
+                ("HSE for Managers", "Mandatory"),
+                ("Permit to Work (PTW)", "Optional"),
+            ],
+            "Helper": [
+                ("Work at Height / Fall Protection", "Before Job"),
+                ("H2S Awareness", "Mandatory"),
+                ("Permit to Work (PTW)", "Before Job"),
+            ],
+            "General Worker": [
+                ("Work at Height / Fall Protection", "Before Job"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Labourer": [
+                ("Work at Height / Fall Protection", "Before Job"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+            "Admin / Office Staff": [
+                ("Fire Safety Awareness", "Mandatory"),
+                ("Emergency Response and Evacuation", "Mandatory"),
+                ("HSE / Company Induction", "Mandatory"),
+            ],
+            "NDE Technician": [
+                ("Radiography / NDT Safety", "Mandatory"),
+                ("Permit to Work (PTW)", "Mandatory"),
+                ("H2S Awareness", "Mandatory"),
+            ],
+        }
         # In-memory grid state: course_name -> validity_months; cells (course, designation) -> requirement
         grid_state = {"courses": [], "validity": {}, "cells": {}, "dirty": False}
 
@@ -7960,9 +8148,40 @@ class MainWindow(QMainWindow):
                 if cname not in grid_state["courses"]:
                     grid_state["courses"].append(cname)
                 grid_state["validity"][cname] = months
+            # Seed recommended Mandatory / Before Job / Optional by trade (does not overwrite existing non-N/A cells)
+            for desig in MATRIX_DESIGNATIONS:
+                # base field requirements for most operational roles
+                apply_all = desig not in (
+                    "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
+                    "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
+                    "Cook / Catering", "Cleaner"
+                )
+                seeds = []
+                if apply_all:
+                    seeds.extend(DEFAULT_MATRIX_SEED.get("_ALL_FIELD_", []))
+                # exact designation match
+                seeds.extend(DEFAULT_MATRIX_SEED.get(desig, []))
+                # keyword partial matches for close trade names
+                for key, items in DEFAULT_MATRIX_SEED.items():
+                    if key.startswith("_"):
+                        continue
+                    if key != desig and key.lower() in desig.lower():
+                        seeds.extend(items)
+                for cname, req in seeds:
+                    if cname not in grid_state["courses"]:
+                        continue
+                    k = (cname, desig)
+                    cur = grid_state["cells"].get(k, "Not Applicable")
+                    if cur in ("", "Not Applicable"):
+                        grid_state["cells"][k] = req
             grid_state["dirty"] = True
             render_matrix_grid()
-            QMessageBox.information(self, "Matrix Grid", "Default courses added. Set Mandatory / Optional / Before Job per designation, then Save Matrix Grid.")
+            QMessageBox.information(
+                self, "Matrix Grid",
+                "Default oil & gas / construction courses added with typical validity periods.\n"
+                "Recommended Mandatory / Before Job / Optional values were seeded by trade "
+                "(existing non-empty cells were kept). Review the grid, adjust as needed, then Save Matrix Grid."
+            )
 
         def sync_grid_to_training_courses():
             """Push Mandatory / Optional / Before Job cells into training_courses so register % stays correct."""
@@ -8240,7 +8459,8 @@ class MainWindow(QMainWindow):
             trade_match = not allowed_trades or emp_trade in allowed_trades or "all trades" in allowed_trades or "all designations" in allowed_trades
             course_dept = safe(course["department"]).strip().lower()
             emp_dept = safe(employee["department"]).strip().lower()
-            return trade_match and (not course_dept or course_dept == emp_dept or course_dept == "all departments")
+            # Training applicability is by trade/designation only (department removed from Training UI).
+            return trade_match
 
         def training_status(record, course=None):
             if not record:
@@ -8289,36 +8509,55 @@ class MainWindow(QMainWindow):
             item.setFont(font)
 
         def format_register_status_cell(status, record):
-            """Short, scannable cell text for the training register."""
+            """Short, scannable cell: requirement marker, training date, expiry, days remaining."""
             train = safe(record["training_date"]) if record else ""
             expiry = safe(record["expiry_date"]) if record else ""
+            days_txt = ""
+            if expiry:
+                try:
+                    days = (date.fromisoformat(expiry) - date.today()).days
+                    if days < 0:
+                        days_txt = f"{abs(days)}d overdue"
+                    else:
+                        days_txt = f"{days}d left"
+                except Exception:
+                    days_txt = ""
             if status == "N/A":
                 return "—"
             if status == "Training Required":
-                return "✗ Required"
+                return "M · Required" if True else "✗ Required"
             if status == "Expired":
-                line = "✗ Expired"
-                if expiry:
-                    line += "\n" + expiry
-                return line
-            if status == "Due Soon":
-                line = "⚠ Due Soon"
-                if expiry:
-                    line += "\nExp: " + expiry
-                return line
-            if status in ("Valid", "Completed"):
-                mark = "✓ Valid" if status == "Valid" else "✓ Done"
-                line = mark
+                parts = ["✗ Expired"]
                 if train:
-                    line += "\n" + train
-                elif expiry:
-                    line += "\nExp: " + expiry
-                return line
+                    parts.append("Trained: " + train)
+                if expiry:
+                    parts.append("Exp: " + expiry)
+                if days_txt:
+                    parts.append(days_txt)
+                return "\n".join(parts)
+            if status == "Due Soon":
+                parts = ["⚠ Due Soon"]
+                if train:
+                    parts.append("Trained: " + train)
+                if expiry:
+                    parts.append("Exp: " + expiry)
+                if days_txt:
+                    parts.append(days_txt)
+                return "\n".join(parts)
+            if status in ("Valid", "Completed"):
+                parts = ["✓ Valid" if status == "Valid" else "✓ Done"]
+                if train:
+                    parts.append("Trained: " + train)
+                if expiry:
+                    parts.append("Exp: " + expiry)
+                if days_txt:
+                    parts.append(days_txt)
+                return "\n".join(parts)
             return status
 
         def get_employees():
             return db.fetchall(
-                "SELECT id,employee_id,name,designation,department,active,date_joining,safety_induction_date "
+                "SELECT id,employee_id,name,designation,department,company,active,date_joining,safety_induction_date "
                 "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
             )
 
@@ -8370,7 +8609,7 @@ class MainWindow(QMainWindow):
             raw_courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 OR EXISTS (SELECT 1 FROM training_records tr WHERE tr.course_id=training_courses.id) ORDER BY active DESC, course_name COLLATE NOCASE")
             courses = expanded_course_entries(raw_courses)
             active_only = [c for c in raw_courses if int(c["active"] or 0) == 1]
-            base_headers = ["Employee ID", "Employee Name", "Department", "Trade", "Mandatory %", "Date Joined", "Safety Induction Date"]
+            base_headers = ["S.No.", "Employee ID", "Employee Name", "Company", "Trade", "Mandatory %", "Date Joined", "Safety Induction"]
             headers = base_headers + [safe(c["display_course_name"]) for c in courses]
             register_table.clear()
             register_table.setColumnCount(len(headers))
@@ -8384,8 +8623,10 @@ class MainWindow(QMainWindow):
                 else:
                     pct_text = f"{pct}% ({done}/{total})"
                     pct_tip = f"Mandatory trainings completed for this trade: {done} of {total} ({pct}%). Based on active Mandatory courses in the Training Matrix that apply to the employee's trade."
+                company_name_val = safe(employee["company"]) if "company" in employee.keys() else ""
                 fixed_values = [
-                    safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
+                    str(r + 1),
+                    safe(employee["employee_id"]), safe(employee["name"]), company_name_val,
                     safe(employee["designation"]), pct_text, safe(employee["date_joining"]), safe(employee["safety_induction_date"])
                 ]
                 for c, value in enumerate(fixed_values):
@@ -8393,11 +8634,11 @@ class MainWindow(QMainWindow):
                     if c == 0:
                         item.setData(Qt.ItemDataRole.UserRole, int(employee["id"]))
                     # Identity columns — calm blue band for easy scanning
-                    if c in (0, 1, 2, 3):
+                    if c in (0, 1, 2, 3, 4):
                         item.setBackground(QBrush(QColor("#EEF4FB")))
-                    if c == 1:
+                    if c == 2:
                         font = item.font(); font.setBold(True); item.setFont(font)
-                    if c == 4:
+                    if c == 5:
                         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         item.setToolTip(pct_tip)
                         if pct is None:
@@ -8507,7 +8748,7 @@ class MainWindow(QMainWindow):
             selected_employee_id["value"] = None
             employee_id_input.clear()
             employee_name_input.clear()
-            employee_department_input.setCurrentIndex(0)
+            employee_company_input.clear()
             employee_trade_input.setCurrentIndex(0)
             joining_date.setDate(QDate.currentDate())
             safety_induction_date.setDate(QDate(2000, 1, 1))
@@ -8526,13 +8767,10 @@ class MainWindow(QMainWindow):
             selected_employee_id["value"] = int(emp_db_id)
             employee_id_input.setText(safe(employee["employee_id"]))
             employee_name_input.setText(safe(employee["name"]))
-            dept = safe(employee["department"])
             trade = safe(employee["designation"])
-            if dept and employee_department_input.findText(dept) < 0:
-                employee_department_input.addItem(dept, dept)
             if trade and employee_trade_input.findText(trade) < 0:
                 employee_trade_input.addItem(trade, trade)
-            employee_department_input.setCurrentText(dept or "Select department")
+            employee_company_input.setText(safe(employee["company"]) if "company" in employee.keys() else "")
             employee_trade_input.setCurrentText(trade or "Select trade")
             joined = QDate.fromString(safe(employee["date_joining"]), "yyyy-MM-dd")
             joining_date.setDate(joined if joined.isValid() else QDate.currentDate())
@@ -8543,10 +8781,10 @@ class MainWindow(QMainWindow):
         def add_employee():
             name = employee_name_input.text().strip()
             emp_id = employee_id_input.text().strip()
-            dept = employee_department_input.currentText().strip()
+            company_val = employee_company_input.text().strip()
             trade = employee_trade_input.currentText().strip()
-            if dept.lower() == "select department": dept = ""
             if trade.lower() == "select trade": trade = ""
+            dept = ""  # department removed from Training UI; trade/designation drives matrix
             if not name:
                 QMessageBox.warning(self, "Training Register", "Enter the employee name.")
                 employee_name_input.setFocus()
@@ -8558,12 +8796,12 @@ class MainWindow(QMainWindow):
                 return
             induction = safety_induction_date.date().toString("yyyy-MM-dd")
             if induction == "2000-01-01": induction = ""
-            values = (emp_id, name, trade, dept, joining_date.date().toString("yyyy-MM-dd"), induction)
+            values = (emp_id, name, trade, dept, company_val, joining_date.date().toString("yyyy-MM-dd"), induction)
             if selected_employee_id["value"] is None:
-                db.execute("INSERT INTO employees (employee_id,name,designation,department,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,1)", values)
-                message = "Employee saved and training applicability refreshed."
+                db.execute("INSERT INTO employees (employee_id,name,designation,department,company,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,?,1)", values)
+                message = "Employee saved and training applicability refreshed from the matrix."
             else:
-                db.execute("UPDATE employees SET employee_id=?,name=?,designation=?,department=?,date_joining=?,safety_induction_date=? WHERE id=?", values + (selected_employee_id["value"],))
+                db.execute("UPDATE employees SET employee_id=?,name=?,designation=?,department=?,company=?,date_joining=?,safety_induction_date=? WHERE id=?", values + (selected_employee_id["value"],))
                 message = "Employee updated and training applicability refreshed."
             reset_employee_form()
             load_register()
@@ -8837,13 +9075,14 @@ class MainWindow(QMainWindow):
             wb = Workbook()
             ws = wb.active
             ws.title = "Training Register"
-            headers = ["Employee ID", "Employee Name", "Department", "Trade", "Mandatory %", "Date Joined", "Safety Induction Date"] + [safe(c["display_course_name"]) for c in courses]
+            headers = ["S.No.", "Employee ID", "Employee Name", "Company", "Trade", "Mandatory %", "Date Joined", "Safety Induction"] + [safe(c["display_course_name"]) for c in courses]
             style_excel(ws, "HSE TRAINING REGISTER", headers)
             register_attachment_links = []
-            for employee in employees:
+            for sn, employee in enumerate(employees, 1):
                 pct, done, total = mandatory_completion_pct(employee, active_only)
                 pct_text = "N/A" if pct is None else f"{pct}% ({done}/{total})"
-                values = [safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]), safe(employee["designation"]), pct_text, safe(employee["date_joining"]), safe(employee["safety_induction_date"])]
+                company_val = safe(employee["company"]) if "company" in employee.keys() else ""
+                values = [sn, safe(employee["employee_id"]), safe(employee["name"]), company_val, safe(employee["designation"]), pct_text, safe(employee["date_joining"]), safe(employee["safety_induction_date"])]
                 employee_links = []
                 for course in courses:
                     if not course_applies(course, employee):
