@@ -351,6 +351,16 @@ class Database:
         # Older versions offered "Either"; the current Training Type choices are Internal or External.
         self.conn.execute("UPDATE training_courses SET provider_type='Internal' WHERE lower(COALESCE(provider_type,''))='either'")
 
+        course_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(training_courses)").fetchall()}
+        if "training_hours" not in course_cols:
+            self.conn.execute("ALTER TABLE training_courses ADD COLUMN training_hours REAL DEFAULT 0")
+        matrix_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(training_matrix_cells)").fetchall()}
+        if "training_hours" not in matrix_cols:
+            self.conn.execute("ALTER TABLE training_matrix_cells ADD COLUMN training_hours REAL DEFAULT 0")
+        if "provider_type" not in matrix_cols:
+            self.conn.execute("ALTER TABLE training_matrix_cells ADD COLUMN provider_type TEXT DEFAULT 'Internal'")
+
+
         # Backward-compatible migrations for existing installations.
         self.conn.execute("CREATE TABLE IF NOT EXISTS incident_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS audit_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)")
@@ -7040,8 +7050,9 @@ class MainWindow(QMainWindow):
     def training(self):
         w, layout = self.page("Training Management")
         intro = QLabel(
-            "Training Matrix Grid (rows = trainings, columns = positions Chairman→Helper, cells = Mandatory / Optional / Before Job / N/A with validity), "
-            "Course Catalogue, Training Register with mandatory completion %, Master Training Record, and Bulk Training Entry."
+            "Tabs: Course Catalogue · Matrix Grid (ready-to-use M/O/B by trade) · Training Matrix · Training Register "
+            "(enter person → matrix requirements appear; cells show training date / expiry / days remaining + mandatory %) · "
+            "Master Training Record · Bulk Training Entry. Department is not used — trade/designation drives the matrix."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -7275,7 +7286,7 @@ class MainWindow(QMainWindow):
         course_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         course_table.setColumnHidden(0, True)
         catalogue_layout.addWidget(course_table, 1)
-        matrix_subtabs.addTab(catalogue_page, "Course Catalogue")
+        matrix_subtabs.addTab(catalogue_page, "1. Course Catalogue")
 
         # ---- Editable Designation × Training Grid ----
         grid_page = QWidget()
@@ -7341,9 +7352,9 @@ class MainWindow(QMainWindow):
         grid_status = QLabel("")
         grid_status.setStyleSheet("font-weight:bold; padding:4px;")
         grid_layout.addWidget(grid_status)
-        matrix_subtabs.addTab(grid_page, "Matrix Grid — Rows: Training · Columns: Position")
+        matrix_subtabs.addTab(grid_page, "2. Matrix Grid (Ready-to-Use)")
 
-        tabs.addTab(matrix_page, "Training Matrix")
+        tabs.addTab(matrix_page, "3. Matrix List View")
 
         # ---------------- Training Register ----------------
         register_page = QWidget()
@@ -7456,7 +7467,7 @@ class MainWindow(QMainWindow):
             }
         """)
         register_layout.addWidget(register_table, 1)
-        tabs.addTab(register_page, "Training Register")
+        tabs.addTab(register_page, "4. Training Register / Tracker")
 
         # ---------------- Master Training Record ----------------
         master_page = QWidget()
@@ -7495,7 +7506,7 @@ class MainWindow(QMainWindow):
         master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         master_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         master_layout.addWidget(master_table, 1)
-        tabs.addTab(master_page, "Master Training Record")
+        tabs.addTab(master_page, "5. Master Training Register")
 
         # ---------------- Bulk Training Entry ----------------
         bulk_page = QWidget()
@@ -7584,7 +7595,7 @@ class MainWindow(QMainWindow):
             bulk_btns.addWidget(b)
         bulk_btns.addStretch(1)
         bulk_layout.addLayout(bulk_btns)
-        tabs.addTab(bulk_page, "Bulk Training Entry")
+        tabs.addTab(bulk_page, "6. Bulk Training Entry")
 
         selected_course_id = {"value": None}
 
@@ -7993,7 +8004,36 @@ class MainWindow(QMainWindow):
                 if cname and cname not in grid_state["courses"]:
                     grid_state["courses"].append(cname)
                     grid_state["validity"][cname] = int(crow["validity_months"] or 0)
-            grid_state["dirty"] = False
+            # First-time use: install ready-to-use construction / oil & gas matrix automatically
+            if not grid_state["courses"]:
+                for cname, months in DEFAULT_GRID_COURSES:
+                    if cname not in grid_state["courses"]:
+                        grid_state["courses"].append(cname)
+                    grid_state["validity"][cname] = months
+                for desig in MATRIX_DESIGNATIONS:
+                    apply_all = desig not in (
+                        "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
+                        "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
+                        "Cook / Catering", "Cleaner"
+                    )
+                    seeds = []
+                    if apply_all:
+                        seeds.extend(DEFAULT_MATRIX_SEED.get("_ALL_FIELD_", []))
+                    seeds.extend(DEFAULT_MATRIX_SEED.get(desig, []))
+                    for key, items in DEFAULT_MATRIX_SEED.items():
+                        if key.startswith("_"):
+                            continue
+                        if key != desig and key.lower() in desig.lower():
+                            seeds.extend(items)
+                    for cname, req in seeds:
+                        if cname not in grid_state["courses"]:
+                            continue
+                        k = (cname, desig)
+                        if grid_state["cells"].get(k, "Not Applicable") in ("", "Not Applicable"):
+                            grid_state["cells"][k] = req
+                grid_state["dirty"] = True
+            else:
+                grid_state["dirty"] = False
 
         def render_matrix_grid():
             # COLUMNS = Position/Designation · ROWS = Training courses
