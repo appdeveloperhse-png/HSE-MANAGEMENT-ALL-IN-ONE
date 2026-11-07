@@ -7050,15 +7050,14 @@ class MainWindow(QMainWindow):
     # ========================================================
 
     def training(self):
-        """Enterprise HSE Training & Competency Management — 3 tabs only.
-        Tab 1 Employee Details · Tab 2 Matrix Grid · Tab 3 Tracking Register.
+        """Training Management — Enrol · Employee Register · Matrix Grid · Add Course · Tracking.
         Other application modules are not modified.
         """
         w, layout = self.page("Training Management")
         intro = QLabel(
-            "HSE Training & Competency — Employee Register · Training Matrix (M / O / B) · "
-            "Interactive Tracking with expiry, due days and mandatory completion %. "
-            "Desktop layout; only this module is active here."
+            "1 Enrol Employee  ·  2 Employee Register  ·  3 Training Matrix Grid  ·  "
+            "4 Add Training Course  ·  5 Tracking Register (full screen). "
+            "Matrix rules drive mandatory/optional training and expiry on the Tracking Register."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#17365D; font-weight:600; padding:6px 8px; background:#E8F1FB; border-radius:4px;")
@@ -7068,7 +7067,6 @@ class MainWindow(QMainWindow):
         tabs.setDocumentMode(True)
         layout.addWidget(tabs, 1)
 
-        # ---------- Shared catalogues ----------
         MATRIX_DESIGNATIONS = [
             "Managing Director / MD", "CEO", "General Manager", "Project Director", "Project Manager",
             "Construction Manager", "Site Manager", "Operations Manager", "HSE Manager", "QA/QC Manager",
@@ -7333,17 +7331,17 @@ class MainWindow(QMainWindow):
             return QColor("#F0F2F5"), QColor("#555555")
 
         # =====================================================================
-        # TAB 1 — Employee Details Register & Form
+        # TAB 1 — Enrol Employee (form + bulk only)
         # =====================================================================
-        emp_page = QWidget()
-        emp_layout = QVBoxLayout(emp_page)
-        emp_layout.setContentsMargins(8, 8, 8, 8)
-        emp_layout.setSpacing(8)
+        enrol_page = QWidget()
+        enrol_layout = QVBoxLayout(enrol_page)
+        enrol_layout.setContentsMargins(12, 12, 12, 12)
+        enrol_layout.setSpacing(10)
 
-        form_box = QGroupBox("Employee Details")
+        form_box = QGroupBox("Enrol Employee — ID, Name, Trade, Company")
         form = QGridLayout(form_box)
-        form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(8)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(10)
 
         emp_id_in = QLineEdit(); emp_id_in.setPlaceholderText("Employee / Badge ID *")
         emp_name_in = QLineEdit(); emp_name_in.setPlaceholderText("Full name *")
@@ -7355,7 +7353,7 @@ class MainWindow(QMainWindow):
         emp_induction = QDateEdit(QDate.currentDate()); emp_induction.setCalendarPopup(True); emp_induction.setDisplayFormat("yyyy-MM-dd")
         emp_photo_path = {"value": ""}
         emp_photo_lbl = QLabel("No photo")
-        emp_photo_lbl.setFixedSize(96, 96)
+        emp_photo_lbl.setFixedSize(100, 100)
         emp_photo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         emp_photo_lbl.setStyleSheet("border:1px solid #C8D5E3; background:#F7FAFC; border-radius:4px;")
         emp_photo_btn = QPushButton("Upload Photo")
@@ -7376,43 +7374,24 @@ class MainWindow(QMainWindow):
         btn_save_draft = QPushButton("Save & Exit")
         btn_submit = QPushButton("Submit")
         btn_submit.setStyleSheet("font-weight:bold;")
-        btn_delete = QPushButton("Delete")
         btn_clear = QPushButton("Clear Form")
-        for b in (btn_save_draft, btn_submit, btn_delete, btn_clear):
-            b.setMinimumHeight(34)
+        for b in (btn_save_draft, btn_submit, btn_clear):
+            b.setMinimumHeight(36)
             btn_row.addWidget(b)
         btn_row.addStretch()
         form.addLayout(btn_row, 3, 0, 1, 5)
-        emp_layout.addWidget(form_box)
+        enrol_layout.addWidget(form_box)
 
-        bulk_box = QGroupBox("Bulk add workers (one per line: ID | Name | Trade | Company)")
+        bulk_box = QGroupBox("Bulk enrol workers (one per line: ID | Name | Trade | Company)")
         bulk_lay = QVBoxLayout(bulk_box)
         bulk_text = QTextEdit()
         bulk_text.setPlaceholderText("E-1001 | John Smith | Scaffolder | ABC Contracting")
-        bulk_text.setMaximumHeight(90)
+        bulk_text.setMinimumHeight(160)
         bulk_btn = QPushButton("Submit Bulk Workers")
+        bulk_btn.setMinimumHeight(36)
         bulk_lay.addWidget(bulk_text)
         bulk_lay.addWidget(bulk_btn)
-        emp_layout.addWidget(bulk_box)
-
-        search_row = QHBoxLayout()
-        emp_search = QLineEdit(); emp_search.setPlaceholderText("Search ID, name, trade, company…"); emp_search.setClearButtonEnabled(True)
-        emp_refresh = QPushButton("Refresh")
-        emp_export_xlsx = QPushButton("Export Excel")
-        emp_export_docx = QPushButton("Export Word")
-        search_row.addWidget(emp_search, 1); search_row.addWidget(emp_refresh)
-        search_row.addWidget(emp_export_xlsx); search_row.addWidget(emp_export_docx)
-        emp_layout.addLayout(search_row)
-
-        emp_table = QTableWidget(0, 6)
-        emp_table.setHorizontalHeaderLabels(["Photo", "Employee ID", "Full Name", "Trade", "Company", "Induction"])
-        emp_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        emp_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        emp_table.setAlternatingRowColors(True)
-        emp_table.verticalHeader().setDefaultSectionSize(56)
-        emp_table.horizontalHeader().setStretchLastSection(True)
-        emp_table.setMaximumHeight(420)
-        emp_layout.addWidget(emp_table, 1)
+        enrol_layout.addWidget(bulk_box, 1)
 
         selected_emp = {"id": None}
 
@@ -7422,7 +7401,7 @@ class MainWindow(QMainWindow):
             if p and p.is_file():
                 pix = QPixmap(str(p))
                 if not pix.isNull():
-                    emp_photo_lbl.setPixmap(pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    emp_photo_lbl.setPixmap(pix.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
                     emp_photo_lbl.setText("")
                     return
             emp_photo_lbl.setPixmap(QPixmap())
@@ -7442,9 +7421,6 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "Photo", f"Could not save photo.\\n{exc}")
 
-        def clear_photo():
-            set_photo_preview("")
-
         def clear_emp_form():
             selected_emp["id"] = None
             emp_id_in.clear(); emp_name_in.clear(); emp_company_in.clear()
@@ -7452,8 +7428,108 @@ class MainWindow(QMainWindow):
             emp_induction.setDate(QDate.currentDate())
             set_photo_preview("")
 
-        def refresh_emp_table():
-            needle = emp_search.text().strip().lower()
+        def save_employee(submit=True):
+            emp_id = emp_id_in.text().strip()
+            name = emp_name_in.text().strip()
+            trade = emp_trade_in.currentText().strip()
+            if trade.lower().startswith("select"):
+                trade = ""
+            company = emp_company_in.text().strip()
+            if not emp_id or not name:
+                return QMessageBox.warning(self, "Enrol Employee", "Employee ID and Full Name are required.")
+            if submit and not trade:
+                return QMessageBox.warning(self, "Enrol Employee", "Select Trade / Designation before Submit.")
+            induction = emp_induction.date().toString("yyyy-MM-dd")
+            photo = emp_photo_path["value"]
+            dup = db.fetchone(
+                "SELECT id FROM employees WHERE lower(employee_id)=lower(?) AND id<>COALESCE(?, -1)",
+                (emp_id, selected_emp["id"])
+            )
+            if dup:
+                return QMessageBox.warning(self, "Enrol Employee", "That Employee ID already exists.")
+            if selected_emp["id"] is None:
+                db.execute(
+                    "INSERT INTO employees (employee_id,name,designation,company,department,safety_induction_date,photo_path,active) VALUES (?,?,?,?,?,?,?,1)",
+                    (emp_id, name, trade, company, "", induction, photo)
+                )
+            else:
+                db.execute(
+                    "UPDATE employees SET employee_id=?,name=?,designation=?,company=?,safety_induction_date=?,photo_path=?,active=1 WHERE id=?",
+                    (emp_id, name, trade, company, induction, photo, selected_emp["id"])
+                )
+            clear_emp_form()
+            refresh_register()
+            load_tracker()
+            if submit:
+                QMessageBox.information(self, "Enrol Employee", "Employee submitted. Open Employee Register or Tracking Register to view.")
+            else:
+                QMessageBox.information(self, "Enrol Employee", "Draft saved.")
+
+        def submit_bulk():
+            lines = [ln.strip() for ln in bulk_text.toPlainText().splitlines() if ln.strip()]
+            if not lines:
+                return QMessageBox.warning(self, "Bulk Enrol", "Enter lines as: ID | Name | Trade | Company")
+            added = updated = skipped = 0
+            for ln in lines:
+                parts = [p.strip() for p in re.split(r"[|\t;]", ln) if p.strip()]
+                if len(parts) < 3:
+                    skipped += 1
+                    continue
+                eid, name, trade = parts[0], parts[1], parts[2]
+                company = parts[3] if len(parts) > 3 else ""
+                existing = db.fetchone("SELECT id FROM employees WHERE lower(trim(COALESCE(employee_id,'')))=lower(trim(?))", (eid,))
+                if existing:
+                    db.execute("UPDATE employees SET name=?, designation=?, company=?, active=1 WHERE id=?", (name, trade, company, existing["id"]))
+                    updated += 1
+                else:
+                    db.execute("INSERT INTO employees (employee_id,name,designation,company,department,active) VALUES (?,?,?,?,?,1)", (eid, name, trade, company, ""))
+                    added += 1
+            bulk_text.clear()
+            refresh_register()
+            load_tracker()
+            QMessageBox.information(self, "Bulk Enrol", f"Added: {added} · Updated: {updated} · Skipped: {skipped}")
+
+        emp_photo_btn.clicked.connect(choose_photo)
+        emp_photo_clear.clicked.connect(lambda: set_photo_preview(""))
+        btn_save_draft.clicked.connect(lambda: save_employee(submit=False))
+        btn_submit.clicked.connect(lambda: save_employee(submit=True))
+        btn_clear.clicked.connect(clear_emp_form)
+        bulk_btn.clicked.connect(submit_bulk)
+        tabs.addTab(enrol_page, "1. Enrol Employee")
+
+        # =====================================================================
+        # TAB 2 — Employee Register (list only)
+        # =====================================================================
+        reg_page = QWidget()
+        reg_layout = QVBoxLayout(reg_page)
+        reg_layout.setContentsMargins(8, 8, 8, 8)
+        reg_layout.setSpacing(8)
+        reg_tools = QHBoxLayout()
+        reg_search = QLineEdit(); reg_search.setPlaceholderText("Search ID, name, trade, company…"); reg_search.setClearButtonEnabled(True)
+        reg_refresh = QPushButton("Refresh")
+        reg_edit = QPushButton("Edit Selected")
+        reg_delete = QPushButton("Delete Selected")
+        reg_export_xlsx = QPushButton("Export Excel")
+        reg_export_docx = QPushButton("Export Word")
+        for b in (reg_refresh, reg_edit, reg_delete, reg_export_xlsx, reg_export_docx):
+            b.setMinimumHeight(34)
+        reg_tools.addWidget(reg_search, 1)
+        reg_tools.addWidget(reg_refresh); reg_tools.addWidget(reg_edit); reg_tools.addWidget(reg_delete)
+        reg_tools.addWidget(reg_export_xlsx); reg_tools.addWidget(reg_export_docx)
+        reg_layout.addLayout(reg_tools)
+
+        reg_table = QTableWidget(0, 7)
+        reg_table.setHorizontalHeaderLabels(["S.No.", "Employee ID", "Full Name", "Trade", "Company", "Induction", "Photo"])
+        reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        reg_table.setAlternatingRowColors(True)
+        reg_table.verticalHeader().setVisible(False)
+        reg_table.verticalHeader().setDefaultSectionSize(48)
+        reg_table.horizontalHeader().setStretchLastSection(True)
+        reg_layout.addWidget(reg_table, 1)
+
+        def refresh_register():
+            needle = reg_search.text().strip().lower()
             rows = db.fetchall(
                 "SELECT id, employee_id, name, designation, company, safety_induction_date, photo_path "
                 "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
@@ -7464,28 +7540,34 @@ class MainWindow(QMainWindow):
                 if needle and needle not in blob:
                     continue
                 data.append(r)
-            emp_table.setRowCount(len(data))
+            reg_table.setRowCount(len(data))
             for i, r in enumerate(data):
-                # photo
+                vals = [str(i + 1), safe(r["employee_id"]), safe(r["name"]), safe(r["designation"]),
+                        safe(r["company"]), safe(r["safety_induction_date"])]
+                for j, v in enumerate(vals):
+                    it = QTableWidgetItem(v)
+                    if j == 1:
+                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    reg_table.setItem(i, j, it)
                 photo_item = QTableWidgetItem()
-                photo_item.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
                 p = Path(safe(r["photo_path"])) if safe(r["photo_path"]) else None
                 if p and p.is_file():
                     pix = QPixmap(str(p))
                     if not pix.isNull():
-                        photo_item.setData(Qt.ItemDataRole.DecorationRole, pix.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                emp_table.setItem(i, 0, photo_item)
-                for j, key in enumerate(("employee_id", "name", "designation", "company", "safety_induction_date"), start=1):
-                    it = QTableWidgetItem(safe(r[key]))
-                    if j == 1:
-                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
-                    emp_table.setItem(i, j, it)
+                        photo_item.setData(Qt.ItemDataRole.DecorationRole, pix.scaled(40, 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                reg_table.setItem(i, 6, photo_item)
+            reg_table.setColumnWidth(0, 56)
+            reg_table.setColumnWidth(1, 110)
+            reg_table.setColumnWidth(2, 180)
+            reg_table.setColumnWidth(3, 150)
+            reg_table.setColumnWidth(4, 150)
+            reg_table.setColumnWidth(5, 110)
 
-        def load_emp_row():
-            row = emp_table.currentRow()
-            if row < 0 or not emp_table.item(row, 1):
-                return
-            eid = emp_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        def edit_selected_employee():
+            row = reg_table.currentRow()
+            if row < 0 or not reg_table.item(row, 1):
+                return QMessageBox.information(self, "Edit", "Select an employee row first.")
+            eid = reg_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
             r = db.fetchone("SELECT * FROM employees WHERE id=?", (eid,))
             if not r:
                 return
@@ -7505,167 +7587,97 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             set_photo_preview(safe(r["photo_path"]) if "photo_path" in r.keys() else "")
+            tabs.setCurrentWidget(enrol_page)
 
-        def save_employee(submit=True):
-            emp_id = emp_id_in.text().strip()
-            name = emp_name_in.text().strip()
-            trade = emp_trade_in.currentText().strip()
-            if trade.lower().startswith("select"):
-                trade = ""
-            company = emp_company_in.text().strip()
-            if not emp_id or not name:
-                return QMessageBox.warning(self, "Employee Details", "Employee ID and Full Name are required.")
-            if submit and not trade:
-                return QMessageBox.warning(self, "Employee Details", "Select Trade / Designation before Submit.")
-            induction = emp_induction.date().toString("yyyy-MM-dd")
-            photo = emp_photo_path["value"]
-            dup = db.fetchone(
-                "SELECT id FROM employees WHERE lower(employee_id)=lower(?) AND id<>COALESCE(?, -1)",
-                (emp_id, selected_emp["id"])
-            )
-            if dup:
-                return QMessageBox.warning(self, "Employee Details", "That Employee ID already exists.")
-            if selected_emp["id"] is None:
-                db.execute(
-                    "INSERT INTO employees (employee_id,name,designation,company,department,safety_induction_date,photo_path,active) VALUES (?,?,?,?,?,?,?,1)",
-                    (emp_id, name, trade, company, "", induction, photo)
-                )
-            else:
-                db.execute(
-                    "UPDATE employees SET employee_id=?,name=?,designation=?,company=?,safety_induction_date=?,photo_path=?,active=1 WHERE id=?",
-                    (emp_id, name, trade, company, induction, photo, selected_emp["id"])
-                )
-            clear_emp_form()
-            refresh_emp_table()
-            if submit:
-                load_tracker()
-                QMessageBox.information(self, "Employee Details", "Employee submitted and synced to the Training Tracking Register.")
-            else:
-                QMessageBox.information(self, "Employee Details", "Draft saved.")
-
-        def delete_employee():
-            row = emp_table.currentRow()
-            if row < 0 or not emp_table.item(row, 1):
-                return QMessageBox.information(self, "Delete", "Select an employee in the register first.")
-            eid = emp_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+        def delete_selected_employee():
+            row = reg_table.currentRow()
+            if row < 0 or not reg_table.item(row, 1):
+                return QMessageBox.information(self, "Delete", "Select an employee row first.")
+            eid = reg_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
             r = db.fetchone("SELECT employee_id, name FROM employees WHERE id=?", (eid,))
             if not r:
                 return
             if QMessageBox.question(
                 self, "Delete Employee",
-                f"Remove {safe(r['name'])} ({safe(r['employee_id'])}) from the training register?\\nTraining history records will remain for audit.",
+                f"Remove {safe(r['name'])} ({safe(r['employee_id'])}) from the register?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             ) != QMessageBox.StandardButton.Yes:
                 return
             db.execute("UPDATE employees SET active=0 WHERE id=?", (eid,))
-            clear_emp_form()
-            refresh_emp_table()
+            refresh_register()
             load_tracker()
 
-        def submit_bulk():
-            lines = [ln.strip() for ln in bulk_text.toPlainText().splitlines() if ln.strip()]
-            if not lines:
-                return QMessageBox.warning(self, "Bulk Workers", "Enter lines as: ID | Name | Trade | Company")
-            added = updated = 0
-            skipped = 0
-            for ln in lines:
-                parts = [p.strip() for p in re.split(r"[|\t;]", ln) if p.strip()]
-                if len(parts) < 3:
-                    skipped += 1
-                    continue
-                eid, name, trade = parts[0], parts[1], parts[2]
-                company = parts[3] if len(parts) > 3 else ""
-                existing = db.fetchone("SELECT id FROM employees WHERE lower(trim(COALESCE(employee_id,'')))=lower(trim(?))", (eid,))
-                if existing:
-                    db.execute("UPDATE employees SET name=?, designation=?, company=?, active=1 WHERE id=?", (name, trade, company, existing["id"]))
-                    updated += 1
-                else:
-                    db.execute("INSERT INTO employees (employee_id,name,designation,company,department,active) VALUES (?,?,?,?,?,1)", (eid, name, trade, company, ""))
-                    added += 1
-            bulk_text.clear()
-            refresh_emp_table()
-            load_tracker()
-            QMessageBox.information(self, "Bulk Workers", f"Added: {added} · Updated: {updated} · Skipped: {skipped}")
-
-        def export_employees_excel():
+        def export_reg_excel():
             path, _ = QFileDialog.getSaveFileName(self, "Export Employee Register", "Employee_Register.xlsx", "Excel Workbook (*.xlsx)")
             if not path:
                 return
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
             wb = Workbook(); ws = wb.active; ws.title = "Employees"
-            ws.append(["EMPLOYEE DETAILS REGISTER"])
+            ws.append(["EMPLOYEE REGISTER"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
             ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="17365D")
             ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-            headers = ["Employee ID", "Full Name", "Trade", "Company", "Induction Date", "Photo Path"]
-            ws.append(headers)
+            ws.append(["S.No.", "Employee ID", "Full Name", "Trade", "Company", "Induction Date"])
             for cell in ws[2]:
                 cell.font = Font(bold=True, color="17365D"); cell.fill = PatternFill("solid", fgColor="D9EAF7")
-            rows = db.fetchall("SELECT employee_id,name,designation,company,safety_induction_date,photo_path FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE")
-            for r in rows:
-                ws.append([safe(r["employee_id"]), safe(r["name"]), safe(r["designation"]), safe(r["company"]), safe(r["safety_induction_date"]), safe(r["photo_path"])])
+            for r in range(reg_table.rowCount()):
+                ws.append([(reg_table.item(r, c).text() if reg_table.item(r, c) else "") for c in range(6)])
             wb.save(path)
-            QMessageBox.information(self, "Export", f"Employee register exported:\\n{path}")
+            QMessageBox.information(self, "Export", f"Exported:\\n{path}")
 
-        def export_employees_word():
+        def export_reg_word():
             path, _ = QFileDialog.getSaveFileName(self, "Export Employee Register", "Employee_Register.docx", "Word Document (*.docx)")
             if not path:
                 return
             if not path.lower().endswith(".docx"):
                 path += ".docx"
             doc = Document()
-            add_docx_report_header(doc, "EMPLOYEE DETAILS REGISTER", "TRN", f"{document_prefix()}-EMP-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-            rows = db.fetchall("SELECT employee_id,name,designation,company,safety_induction_date FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE")
-            table = doc.add_table(rows=1, cols=5)
-            for i, h in enumerate(["Employee ID", "Full Name", "Trade", "Company", "Induction"]):
+            add_docx_report_header(doc, "EMPLOYEE REGISTER", "TRN", f"{document_prefix()}-EMP-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+            table = doc.add_table(rows=1, cols=6)
+            for i, h in enumerate(["S.No.", "Employee ID", "Full Name", "Trade", "Company", "Induction"]):
                 table.rows[0].cells[i].text = h
-            for r in rows:
+            for r in range(reg_table.rowCount()):
                 cells = table.add_row().cells
-                for i, key in enumerate(("employee_id", "name", "designation", "company", "safety_induction_date")):
-                    cells[i].text = xml_safe(r[key])
+                for c in range(6):
+                    it = reg_table.item(r, c)
+                    cells[c].text = xml_safe(it.text() if it else "")
             style_docx_table(table, header=True, font_size=8)
             add_docx_footer(doc)
             save_docx_validated(doc, path)
-            QMessageBox.information(self, "Export", f"Employee register exported:\\n{path}")
+            QMessageBox.information(self, "Export", f"Exported:\\n{path}")
 
-        emp_photo_btn.clicked.connect(choose_photo)
-        emp_photo_clear.clicked.connect(clear_photo)
-        btn_save_draft.clicked.connect(lambda: save_employee(submit=False))
-        btn_submit.clicked.connect(lambda: save_employee(submit=True))
-        btn_delete.clicked.connect(delete_employee)
-        btn_clear.clicked.connect(clear_emp_form)
-        bulk_btn.clicked.connect(submit_bulk)
-        emp_refresh.clicked.connect(refresh_emp_table)
-        emp_search.textChanged.connect(refresh_emp_table)
-        emp_table.itemSelectionChanged.connect(load_emp_row)
-        emp_export_xlsx.clicked.connect(export_employees_excel)
-        emp_export_docx.clicked.connect(export_employees_word)
-        refresh_emp_table()
-        tabs.addTab(emp_page, "1. Employee Details")
+        reg_refresh.clicked.connect(refresh_register)
+        reg_search.textChanged.connect(refresh_register)
+        reg_edit.clicked.connect(edit_selected_employee)
+        reg_delete.clicked.connect(delete_selected_employee)
+        reg_export_xlsx.clicked.connect(export_reg_excel)
+        reg_export_docx.clicked.connect(export_reg_word)
+        reg_table.doubleClicked.connect(lambda *_: edit_selected_employee())
+        refresh_register()
+        tabs.addTab(reg_page, "2. Employee Register")
 
         # =====================================================================
-        # TAB 2 — Training Matrix Grid (rules engine — keep previous approach)
+        # TAB 3 — Training Matrix Grid (full screen)
         # =====================================================================
         grid_page = QWidget()
         grid_layout = QVBoxLayout(grid_page)
-        grid_layout.setContentsMargins(8, 8, 8, 8)
-        grid_help = QLabel(
-            "Training Matrix — rows = courses, columns = trades. "
-            "M = Mandatory · O = Optional · B = Before Job · — = N/A. "
-            "Double-click a cell to set requirement. Validity (months) drives expiry on the Tracking Register."
-        )
-        grid_help.setWordWrap(True)
-        grid_layout.addWidget(grid_help)
+        grid_layout.setContentsMargins(6, 6, 6, 6)
+        grid_layout.setSpacing(6)
         grid_tools = QHBoxLayout()
         btn_load_ready = QPushButton("Load Ready-to-Use Matrix")
         btn_save_grid = QPushButton("Save Matrix Grid")
         btn_reload_grid = QPushButton("Reload")
+        btn_rename_course = QPushButton("Rename Selected Course")
+        btn_delete_course = QPushButton("Delete Selected Course")
         grid_status = QLabel("")
-        grid_tools.addWidget(btn_load_ready); grid_tools.addWidget(btn_save_grid); grid_tools.addWidget(btn_reload_grid)
-        grid_tools.addStretch(); grid_tools.addWidget(grid_status)
+        for b in (btn_load_ready, btn_save_grid, btn_reload_grid, btn_rename_course, btn_delete_course):
+            b.setMinimumHeight(32)
+            grid_tools.addWidget(b)
+        grid_tools.addStretch()
+        grid_tools.addWidget(grid_status)
         grid_layout.addLayout(grid_tools)
         matrix_grid = QTableWidget()
         matrix_grid.setAlternatingRowColors(True)
@@ -7673,8 +7685,7 @@ class MainWindow(QMainWindow):
         matrix_grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         matrix_grid.horizontalHeader().setDefaultSectionSize(88)
         matrix_grid.verticalHeader().setDefaultSectionSize(28)
-        matrix_grid.setMinimumHeight(320)
-        matrix_grid.setMaximumHeight(560)
+        matrix_grid.verticalHeader().setVisible(False)
         grid_layout.addWidget(matrix_grid, 1)
 
         def render_matrix_grid():
@@ -7684,23 +7695,24 @@ class MainWindow(QMainWindow):
             matrix_grid.setRowCount(len(courses))
             matrix_grid.setColumnCount(2 + len(designations))
             matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)"] + designations)
-            matrix_grid.verticalHeader().setVisible(False)
             for r, cname in enumerate(courses):
                 name_item = QTableWidgetItem(cname)
                 name_item.setBackground(QBrush(QColor("#EEF4FB")))
                 f = name_item.font(); f.setBold(True); name_item.setFont(f)
+                name_item.setToolTip("Double-click to rename this training course")
                 matrix_grid.setItem(r, 0, name_item)
                 months = int(grid_state["validity"].get(cname, 0) or 0)
                 val_item = QTableWidgetItem(str(months))
                 val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 val_item.setBackground(QBrush(QColor("#F7FAFC")))
+                val_item.setToolTip("Double-click to change validity (months)")
                 matrix_grid.setItem(r, 1, val_item)
                 for c, desig in enumerate(designations):
                     req = grid_state["cells"].get((cname, desig), "Not Applicable")
                     it = QTableWidgetItem()
                     _style_req(it, req)
                     matrix_grid.setItem(r, c + 2, it)
-            matrix_grid.setColumnWidth(0, 240)
+            matrix_grid.setColumnWidth(0, 260)
             matrix_grid.setColumnWidth(1, 120)
             for col in range(2, matrix_grid.columnCount()):
                 matrix_grid.setColumnWidth(col, 90)
@@ -7709,26 +7721,63 @@ class MainWindow(QMainWindow):
         def on_grid_dbl(row, column):
             if row < 0 or row >= len(grid_state["courses"]):
                 return
-            cname = grid_state["courses"][row]
+            old_name = grid_state["courses"][row]
+            if column == 0:
+                new_name, ok = QInputDialog.getText(self, "Rename Training", "Training name:", text=old_name)
+                new_name = safe(new_name).strip()
+                if not ok or not new_name or new_name == old_name:
+                    return
+                if new_name in grid_state["courses"]:
+                    return QMessageBox.warning(self, "Rename Training", "A course with that name already exists.")
+                grid_state["courses"][row] = new_name
+                if old_name in grid_state["validity"]:
+                    grid_state["validity"][new_name] = grid_state["validity"].pop(old_name)
+                new_cells = {}
+                for (cn, desig), req in list(grid_state["cells"].items()):
+                    if cn == old_name:
+                        new_cells[(new_name, desig)] = req
+                    else:
+                        new_cells[(cn, desig)] = req
+                grid_state["cells"] = new_cells
+                grid_state["dirty"] = True
+                render_matrix_grid()
+                return
             if column == 1:
-                months, ok = QInputDialog.getInt(self, "Validity", f"Validity months for {cname}:", int(grid_state["validity"].get(cname, 0) or 0), 0, 120)
+                months, ok = QInputDialog.getInt(self, "Validity", f"Validity months for {old_name}:", int(grid_state["validity"].get(old_name, 0) or 0), 0, 120)
                 if ok:
-                    grid_state["validity"][cname] = months
+                    grid_state["validity"][old_name] = months
                     grid_state["dirty"] = True
                     render_matrix_grid()
                 return
-            if column < 2:
-                return
             desig = MATRIX_DESIGNATIONS[column - 2]
-            current = grid_state["cells"].get((cname, desig), "Not Applicable")
-            choice, ok = QInputDialog.getItem(self, "Set requirement", f"{cname}\\n{desig}", MATRIX_REQ_OPTIONS, max(0, MATRIX_REQ_OPTIONS.index(current) if current in MATRIX_REQ_OPTIONS else 0), False)
+            current = grid_state["cells"].get((old_name, desig), "Not Applicable")
+            choice, ok = QInputDialog.getItem(self, "Set requirement", f"{old_name}\\n{desig}", MATRIX_REQ_OPTIONS, max(0, MATRIX_REQ_OPTIONS.index(current) if current in MATRIX_REQ_OPTIONS else 0), False)
             if ok:
-                grid_state["cells"][(cname, desig)] = choice
+                grid_state["cells"][(old_name, desig)] = choice
                 grid_state["dirty"] = True
                 render_matrix_grid()
 
+        def rename_selected_course():
+            row = matrix_grid.currentRow()
+            if row < 0:
+                return QMessageBox.information(self, "Rename", "Select a course row first.")
+            on_grid_dbl(row, 0)
+
+        def delete_selected_course():
+            row = matrix_grid.currentRow()
+            if row < 0 or row >= len(grid_state["courses"]):
+                return QMessageBox.information(self, "Delete Course", "Select a course row first.")
+            cname = grid_state["courses"][row]
+            if QMessageBox.question(self, "Delete Course", f"Remove '{cname}' from the matrix?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            grid_state["courses"].pop(row)
+            grid_state["validity"].pop(cname, None)
+            grid_state["cells"] = {k: v for k, v in grid_state["cells"].items() if k[0] != cname}
+            grid_state["dirty"] = True
+            render_matrix_grid()
+
         def do_load_ready():
-            if QMessageBox.question(self, "Load Matrix", "Load ready-to-use OSHA / IOSH / construction matrix into empty cells?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            if QMessageBox.question(self, "Load Matrix", "Load ready-to-use matrix into empty cells?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
                 return
             seed_ready_matrix(force=False)
             render_matrix_grid()
@@ -7737,37 +7786,107 @@ class MainWindow(QMainWindow):
             save_grid_state()
             render_matrix_grid()
             load_tracker()
-            QMessageBox.information(self, "Matrix Grid", "Matrix saved. Tracking Register will use these rules.")
+            QMessageBox.information(self, "Matrix Grid", "Matrix saved.")
 
         matrix_grid.cellDoubleClicked.connect(on_grid_dbl)
         btn_load_ready.clicked.connect(do_load_ready)
         btn_save_grid.clicked.connect(do_save_grid)
         btn_reload_grid.clicked.connect(lambda: (load_grid_state(), render_matrix_grid()))
+        btn_rename_course.clicked.connect(rename_selected_course)
+        btn_delete_course.clicked.connect(delete_selected_course)
         load_grid_state()
         render_matrix_grid()
-        tabs.addTab(grid_page, "2. Training Matrix Grid")
+        tabs.addTab(grid_page, "3. Training Matrix Grid")
 
         # =====================================================================
-        # TAB 3 — Interactive Training Tracking Register
+        # TAB 4 — Add Training Course (goes into matrix)
+        # =====================================================================
+        add_page = QWidget()
+        add_layout = QVBoxLayout(add_page)
+        add_layout.setContentsMargins(16, 16, 16, 16)
+        add_box = QGroupBox("Add Training Course — appears on Matrix Grid")
+        add_form = QGridLayout(add_box)
+        add_form.setHorizontalSpacing(12)
+        add_form.setVerticalSpacing(10)
+        add_name = QLineEdit(); add_name.setPlaceholderText("Training / course name *")
+        add_valid = QSpinBox(); add_valid.setRange(0, 120); add_valid.setValue(24); add_valid.setSuffix(" months")
+        add_default_req = QComboBox(); add_default_req.addItems(["Not Applicable", "Mandatory", "Optional", "Before Job"])
+        add_default_req.setCurrentText("Mandatory")
+        add_apply_trade = QComboBox(); add_apply_trade.setEditable(True)
+        add_apply_trade.addItem("All field trades (recommended)", "__ALL_FIELD__")
+        add_apply_trade.addItem("No trades (set M/O/B on matrix)", "__NONE__")
+        for t in MATRIX_DESIGNATIONS:
+            add_apply_trade.addItem(t, t)
+        add_btn = QPushButton("Add to Matrix Grid")
+        add_btn.setMinimumHeight(38)
+        add_btn.setStyleSheet("font-weight:bold;")
+        add_form.addWidget(QLabel("Training Name *"), 0, 0); add_form.addWidget(add_name, 0, 1, 1, 3)
+        add_form.addWidget(QLabel("Validity"), 1, 0); add_form.addWidget(add_valid, 1, 1)
+        add_form.addWidget(QLabel("Default requirement"), 1, 2); add_form.addWidget(add_default_req, 1, 3)
+        add_form.addWidget(QLabel("Apply to trade"), 2, 0); add_form.addWidget(add_apply_trade, 2, 1, 1, 3)
+        add_form.addWidget(add_btn, 3, 0, 1, 4)
+        add_layout.addWidget(add_box)
+        add_hint = QLabel(
+            "After adding, open Tab 3 (Training Matrix Grid) to fine-tune M / O / B per trade, "
+            "then click Save Matrix Grid. Tracking Register uses the saved matrix."
+        )
+        add_hint.setWordWrap(True)
+        add_layout.addWidget(add_hint)
+        add_layout.addStretch()
+
+        def add_course_to_matrix():
+            cname = add_name.text().strip()
+            if not cname:
+                return QMessageBox.warning(self, "Add Training", "Enter a training name.")
+            if cname not in grid_state["courses"]:
+                grid_state["courses"].append(cname)
+            grid_state["validity"][cname] = int(add_valid.value())
+            req = add_default_req.currentText()
+            target = add_apply_trade.currentData() or add_apply_trade.currentText()
+            office = {"Managing Director / MD", "CEO", "General Manager", "Admin / Office Staff", "Document Controller", "Visitor"}
+            if target == "__ALL_FIELD__":
+                for desig in MATRIX_DESIGNATIONS:
+                    if desig not in office:
+                        grid_state["cells"][(cname, desig)] = req
+                    else:
+                        grid_state["cells"].setdefault((cname, desig), "Not Applicable")
+            elif target == "__NONE__":
+                for desig in MATRIX_DESIGNATIONS:
+                    grid_state["cells"].setdefault((cname, desig), "Not Applicable")
+            else:
+                for desig in MATRIX_DESIGNATIONS:
+                    grid_state["cells"].setdefault((cname, desig), "Not Applicable")
+                grid_state["cells"][(cname, target)] = req
+            grid_state["dirty"] = True
+            render_matrix_grid()
+            add_name.clear()
+            tabs.setCurrentWidget(grid_page)
+            QMessageBox.information(self, "Add Training", f"'{cname}' added to the matrix. Set M/O/B cells if needed, then Save Matrix Grid.")
+
+        add_btn.clicked.connect(add_course_to_matrix)
+        tabs.addTab(add_page, "4. Add Training Course")
+
+        # =====================================================================
+        # TAB 5 — Tracking Register (full screen + actions only)
         # =====================================================================
         track_page = QWidget()
         track_layout = QVBoxLayout(track_page)
-        track_layout.setContentsMargins(8, 8, 8, 8)
-        track_help = QLabel(
-            "Tracking Register — one row per employee from Tab 1. "
-            "Cells show M/O/B · status · training date · expiry · days remaining. "
-            "Click a cell to log training date; expiry is calculated from the Matrix validity."
-        )
-        track_help.setWordWrap(True)
-        track_layout.addWidget(track_help)
+        track_layout.setContentsMargins(6, 6, 6, 6)
+        track_layout.setSpacing(6)
         track_tools = QHBoxLayout()
         track_search = QLineEdit(); track_search.setPlaceholderText("Search ID, name, trade, company…"); track_search.setClearButtonEnabled(True)
         track_refresh = QPushButton("Refresh")
+        track_edit = QPushButton("Edit Selected Cell")
+        track_delete = QPushButton("Clear Selected Cell")
         track_export_xlsx = QPushButton("Export Excel")
         track_export_docx = QPushButton("Export Word")
-        track_tools.addWidget(track_search, 1); track_tools.addWidget(track_refresh)
+        for b in (track_refresh, track_edit, track_delete, track_export_xlsx, track_export_docx):
+            b.setMinimumHeight(32)
+        track_tools.addWidget(track_search, 1)
+        track_tools.addWidget(track_refresh); track_tools.addWidget(track_edit); track_tools.addWidget(track_delete)
         track_tools.addWidget(track_export_xlsx); track_tools.addWidget(track_export_docx)
         track_layout.addLayout(track_tools)
+
         track_table = QTableWidget()
         track_table.setAlternatingRowColors(True)
         track_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -7775,8 +7894,6 @@ class MainWindow(QMainWindow):
         track_table.horizontalHeader().setDefaultSectionSize(130)
         track_table.verticalHeader().setDefaultSectionSize(52)
         track_table.setWordWrap(True)
-        track_table.setMinimumHeight(360)
-        track_table.setMaximumHeight(580)
         track_layout.addWidget(track_table, 1)
         track_state = {"employees": [], "courses": []}
 
@@ -7788,14 +7905,13 @@ class MainWindow(QMainWindow):
             needle = track_search.text().strip().lower()
             if needle:
                 employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
-            # Union of courses that appear as requirements for at least one employee trade
             course_set = []
             for e in employees:
                 for cname, req, validity in requirements_for_trade(e["designation"]):
                     if cname not in course_set:
                         course_set.append(cname)
             if not course_set:
-                course_set = list(grid_state["courses"])[:20]
+                course_set = list(grid_state["courses"])[:25]
             track_state["employees"] = employees
             track_state["courses"] = course_set
             headers = ["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"] + course_set
@@ -7857,7 +7973,7 @@ class MainWindow(QMainWindow):
                         lines.append(days_txt)
                     it = QTableWidgetItem("\\n".join(lines))
                     it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req})
+                    it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req, "record_id": int(rec["id"]) if rec else None})
                     bg, fg = color_status(st)
                     it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
                     track_table.setItem(r, col, it)
@@ -7868,9 +7984,13 @@ class MainWindow(QMainWindow):
             track_table.setColumnWidth(4, 120)
             track_table.setColumnWidth(5, 110)
 
-        def on_track_cell(row, column):
-            if column < 6:
-                return
+        def log_or_edit_cell(row=None, column=None):
+            if row is None:
+                row = track_table.currentRow()
+            if column is None:
+                column = track_table.currentColumn()
+            if row < 0 or column is None or column < 6:
+                return QMessageBox.information(self, "Tracking", "Select a training cell (not identity columns).")
             item = track_table.item(row, column)
             if not item:
                 return
@@ -7933,16 +8053,35 @@ class MainWindow(QMainWindow):
                 )
             load_tracker()
 
+        def clear_selected_cell():
+            row = track_table.currentRow()
+            column = track_table.currentColumn()
+            if row < 0 or column < 6:
+                return QMessageBox.information(self, "Clear", "Select a training cell first.")
+            item = track_table.item(row, column)
+            if not item:
+                return
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(data, dict):
+                return
+            rec = latest_record(data["emp_id"], data["course"])
+            if not rec:
+                return QMessageBox.information(self, "Clear", "No training record on this cell.")
+            if QMessageBox.question(self, "Clear Cell", f"Delete training record for {data['course']}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            db.execute("DELETE FROM training_records WHERE id=?", (rec["id"],))
+            load_tracker()
+
         def export_tracker_excel():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Training Tracking Register", "Training_Tracking_Register.xlsx", "Excel Workbook (*.xlsx)")
+            path, _ = QFileDialog.getSaveFileName(self, "Export Tracking Register", "Training_Tracking_Register.xlsx", "Excel Workbook (*.xlsx)")
             if not path:
                 return
             if not path.lower().endswith(".xlsx"):
                 path += ".xlsx"
             load_tracker()
             wb = Workbook(); ws = wb.active; ws.title = "Tracking Register"
-            ws.append(["HSE TRAINING TRACKING REGISTER"])
             headers = [track_table.horizontalHeaderItem(c).text() for c in range(track_table.columnCount())]
+            ws.append(["HSE TRAINING TRACKING REGISTER"])
             ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
             ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="17365D")
@@ -7960,7 +8099,7 @@ class MainWindow(QMainWindow):
                     low = safe(val).lower()
                     if "expired" in low or "not completed" in low or "overdue" in low:
                         cell.fill = PatternFill("solid", fgColor="FDE2E2")
-                    elif "expiring" in low or "due soon" in low:
+                    elif "expiring" in low:
                         cell.fill = PatternFill("solid", fgColor="FFF4CE")
                     elif "valid" in low:
                         cell.fill = PatternFill("solid", fgColor="DDF5E5")
@@ -7971,10 +8110,10 @@ class MainWindow(QMainWindow):
                 longest = max((len(str(c.value or "").split("\\n")[0]) for c in col), default=10)
                 ws.column_dimensions[letter].width = min(max(longest + 2, 12), 28)
             wb.save(path)
-            QMessageBox.information(self, "Export", f"Tracking register exported:\\n{path}")
+            QMessageBox.information(self, "Export", f"Exported:\\n{path}")
 
         def export_tracker_word():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Training Tracking Register", "Training_Tracking_Register.docx", "Word Document (*.docx)")
+            path, _ = QFileDialog.getSaveFileName(self, "Export Tracking Register", "Training_Tracking_Register.docx", "Word Document (*.docx)")
             if not path:
                 return
             if not path.lower().endswith(".docx"):
@@ -7983,7 +8122,6 @@ class MainWindow(QMainWindow):
             doc = Document()
             set_docx_landscape(doc)
             add_docx_report_header(doc, "HSE TRAINING TRACKING REGISTER", "TRN", f"{document_prefix()}-TRN-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-            # Compact: identity + mandatory % only for Word readability
             table = doc.add_table(rows=1, cols=6)
             for i, h in enumerate(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"]):
                 table.rows[0].cells[i].text = h
@@ -7993,21 +8131,20 @@ class MainWindow(QMainWindow):
                     it = track_table.item(r, c)
                     cells[c].text = xml_safe(it.text() if it else "")
             style_docx_table(table, header=True, font_size=8)
-            doc.add_paragraph("Note: Full course-level status is available in the Excel export and on-screen Tracking Register.")
+            doc.add_paragraph("Full course-level status is available in the Excel export and on-screen register.")
             add_docx_footer(doc)
             save_docx_validated(doc, path)
-            QMessageBox.information(self, "Export", f"Tracking register exported:\\n{path}")
+            QMessageBox.information(self, "Export", f"Exported:\\n{path}")
 
-        track_table.cellDoubleClicked.connect(on_track_cell)
+        track_table.cellDoubleClicked.connect(log_or_edit_cell)
         track_refresh.clicked.connect(load_tracker)
         track_search.textChanged.connect(load_tracker)
+        track_edit.clicked.connect(lambda: log_or_edit_cell())
+        track_delete.clicked.connect(clear_selected_cell)
         track_export_xlsx.clicked.connect(export_tracker_excel)
         track_export_docx.clicked.connect(export_tracker_word)
         load_tracker()
-        tabs.addTab(track_page, "3. Training Tracking Register")
-
-        # Keep tab widgets within typical desktop height
-        tabs.setMinimumHeight(520)
+        tabs.addTab(track_page, "5. Tracking Register")
 
     def settings_page(self):
         w,layout=self.page("Settings")
