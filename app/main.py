@@ -7,6 +7,7 @@ import zipfile
 import logging
 import json
 import re
+import calendar
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -362,6 +363,76 @@ class Database:
         if "provider_type" not in matrix_cols:
             self.conn.execute("ALTER TABLE training_matrix_cells ADD COLUMN provider_type TEXT DEFAULT 'Internal'")
 
+        # Training-only compliance extensions. All migrations are additive; legacy
+        # records default to Verified so existing PTW/Audit eligibility behaviour is
+        # not unexpectedly broken by upgrading the Training module.
+        course_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(training_courses)").fetchall()}
+        for col, definition in {
+            "category": "TEXT DEFAULT 'General HSE'",
+            "assessment_required": "INTEGER DEFAULT 0",
+            "expiry_policy": "TEXT DEFAULT 'Validity Months'",
+        }.items():
+            if col not in course_cols:
+                self.conn.execute(f"ALTER TABLE training_courses ADD COLUMN {col} {definition}")
+
+        record_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(training_records)").fetchall()}
+        for col, definition in {
+            "verification_status": "TEXT DEFAULT 'Verified'",
+            "verified_by": "TEXT DEFAULT ''",
+            "verified_at": "TEXT DEFAULT ''",
+            "assessment_result": "TEXT DEFAULT 'Not Required'",
+            "assessment_score": "REAL",
+        }.items():
+            if col not in record_cols:
+                self.conn.execute(f"ALTER TABLE training_records ADD COLUMN {col} {definition}")
+
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS training_record_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            original_record_id INTEGER,
+            employee_db_id INTEGER NOT NULL,
+            course_id INTEGER NOT NULL,
+            training_date TEXT NOT NULL,
+            expiry_date TEXT DEFAULT '',
+            provider TEXT DEFAULT '',
+            certificate_no TEXT DEFAULT '',
+            attachment_path TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            archived_by TEXT DEFAULT 'Local User',
+            archive_reason TEXT DEFAULT '',
+            verification_status TEXT DEFAULT 'Verified',
+            verified_by TEXT DEFAULT '',
+            verified_at TEXT DEFAULT '',
+            assessment_result TEXT DEFAULT 'Not Required',
+            assessment_score REAL
+        );
+        CREATE TABLE IF NOT EXISTS training_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id INTEGER,
+            action TEXT NOT NULL,
+            details TEXT DEFAULT '',
+            changed_by TEXT DEFAULT 'Local User',
+            changed_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS training_matrix_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            course_name TEXT NOT NULL,
+            designation TEXT NOT NULL,
+            requirement TEXT DEFAULT 'Not Applicable',
+            validity_months INTEGER DEFAULT 0,
+            notes TEXT DEFAULT '',
+            updated_at TEXT DEFAULT '',
+            archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            archive_reason TEXT DEFAULT 'Matrix updated'
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_record_history_emp_course
+            ON training_record_history(employee_db_id, course_id, training_date);
+        CREATE INDEX IF NOT EXISTS idx_training_audit_entity
+            ON training_audit_log(entity_type, entity_id, changed_at);
+        """)
 
         # Backward-compatible migrations for existing installations.
         self.conn.execute("CREATE TABLE IF NOT EXISTS incident_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)")
@@ -7056,8 +7127,8 @@ class MainWindow(QMainWindow):
         w, layout = self.page("Training Management")
         intro = QLabel(
             "1 Enrol Employee  ·  2 Employee Register  ·  3 Training Matrix Grid  ·  "
-            "4 Add Training Course  ·  5 Tracking Register (full screen). "
-            "Matrix rules drive mandatory/optional training and expiry on the Tracking Register."
+            "Compliance Dashboard  ·  Enrolment  ·  Employee Register  ·  Training Matrix  ·  Course Catalogue  ·  Tracking Register. "
+            "Training-only changes: certificate evidence, verification status, calendar-month expiry and record history."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#17365D; font-weight:600; padding:6px 8px; background:#E8F1FB; border-radius:4px;")
@@ -7065,6 +7136,10 @@ class MainWindow(QMainWindow):
 
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        tabs.tabBar().setExpanding(False)
+        tabs.tabBar().setMovable(False)
+        tabs.setMinimumHeight(360)
         layout.addWidget(tabs, 1)
 
         MATRIX_DESIGNATIONS = [
@@ -7239,6 +7314,15 @@ class MainWindow(QMainWindow):
             grid_state["dirty"] = True
 
         def save_grid_state():
+            # Preserve the previous matrix configuration before applying edits.
+            try:
+                db.execute("""INSERT INTO training_matrix_history
+                    (course_name, designation, requirement, validity_months, notes, updated_at, archive_reason)
+                    SELECT course_name, designation, requirement, validity_months, notes, updated_at, 'Matrix revised'
+                    FROM training_matrix_cells""")
+            except Exception:
+                logging.exception("Training matrix history snapshot failed")
+                raise
             db.execute("DELETE FROM training_matrix_cells")
             for cname in grid_state["courses"]:
                 months = int(grid_state["validity"].get(cname, 0) or 0)
@@ -7299,22 +7383,54 @@ class MainWindow(QMainWindow):
             )
             return int(cur.lastrowid)
 
+        def add_calendar_months(source_date, months):
+            """Add true calendar months, clamping month-end dates safely."""
+            months = int(months or 0)
+            month_index = source_date.month - 1 + months
+            year = source_date.year + month_index // 12
+            month = month_index % 12 + 1
+            day = min(source_date.day, calendar.monthrange(year, month)[1])
+            return date(year, month, day)
+
         def status_of(record, validity_months):
             if not record:
                 return "Not Completed", None, None
+            try:
+                if "verification_status" in record.keys() and safe(record["verification_status"]).strip().lower() not in ("", "verified", "approved"):
+                    return "Pending Verification", safe(record["training_date"]), safe(record["expiry_date"])
+            except Exception:
+                pass
+            try:
+                assessment_result = safe(record["assessment_result"]).strip().lower()
+                if assessment_result == "fail":
+                    return "Failed Assessment", safe(record["training_date"]), safe(record["expiry_date"])
+                if assessment_result == "pending":
+                    return "Assessment Pending", safe(record["training_date"]), safe(record["expiry_date"])
+                course_meta = db.fetchone(
+                    "SELECT certificate_required, assessment_required FROM training_courses WHERE id=?",
+                    (record["course_id"],)
+                )
+                if course_meta and int(course_meta["certificate_required"] or 0) and (not safe(record["certificate_no"]) or not safe(record["attachment_path"])):
+                    return "Certificate Missing", safe(record["training_date"]), safe(record["expiry_date"])
+                if course_meta and int(course_meta["assessment_required"] or 0) and assessment_result != "pass":
+                    return "Assessment Pending", safe(record["training_date"]), safe(record["expiry_date"])
+            except Exception:
+                pass
             expiry = safe(record["expiry_date"])
             train = safe(record["training_date"])
-            if not expiry and train and validity_months:
+            if not expiry and train and int(validity_months or 0) > 0:
                 try:
-                    expiry = (date.fromisoformat(train) + timedelta(days=int(validity_months) * 30)).isoformat()
+                    expiry = add_calendar_months(date.fromisoformat(train), int(validity_months)).isoformat()
                 except Exception:
-                    expiry = ""
+                    return "Invalid Date", train, ""
+            # A zero-validity course is treated as non-expiring only when configured
+            # with zero months. Legacy courses therefore remain compatible.
             if not expiry:
-                return "Valid", train, expiry
+                return ("Valid", train, "") if int(validity_months or 0) == 0 else ("Invalid Date", train, "")
             try:
                 days = (date.fromisoformat(expiry) - date.today()).days
             except Exception:
-                return "Valid", train, expiry
+                return "Invalid Date", train, expiry
             if days < 0:
                 return "Expired", train, expiry
             if days <= 30:
@@ -7322,7 +7438,11 @@ class MainWindow(QMainWindow):
             return "Valid", train, expiry
 
         def color_status(status):
-            if status in ("Expired", "Not Completed"):
+            if status in ("Expired", "Not Completed", "Invalid Date", "Failed Assessment", "Certificate Missing"):
+                return QColor("#FDE2E2"), QColor("#B42318")
+            if status in ("Pending Verification", "Assessment Pending"):
+                return QColor("#FFF4CE"), QColor("#9A6700")
+            if status == "Failed Assessment":
                 return QColor("#FDE2E2"), QColor("#B42318")
             if status == "Expiring Soon":
                 return QColor("#FFF4CE"), QColor("#9A6700")
@@ -7867,7 +7987,49 @@ class MainWindow(QMainWindow):
         tabs.addTab(add_page, "4. Add Training Course")
 
         # =====================================================================
-        # TAB 5 — Tracking Register (full screen + actions only)
+        # TAB 5 — Compliance Dashboard (Training module only)
+        # =====================================================================
+        compliance_page = QWidget()
+        compliance_layout = QVBoxLayout(compliance_page)
+        compliance_layout.setContentsMargins(10, 10, 10, 10)
+        compliance_layout.setSpacing(8)
+        compliance_title = QLabel("COMPANY TRAINING COMPLIANCE OVERVIEW")
+        compliance_title.setStyleSheet("font-size:16px;font-weight:700;color:#17365D;padding:5px;")
+        compliance_layout.addWidget(compliance_title)
+        compliance_kpis = QGridLayout()
+        compliance_values = {}
+        for idx, (key, caption) in enumerate([
+            ("employees", "Active Employees"), ("compliance", "Mandatory Compliance"),
+            ("expired", "Expired Requirements"), ("expiring", "Expiring ≤ 30 Days"),
+            ("missing", "Not Completed"), ("pending", "Pending Verification"),
+        ]):
+            card = QGroupBox(caption)
+            card_layout = QVBoxLayout(card)
+            value_label = QLabel("—")
+            value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value_label.setStyleSheet("font-size:22px;font-weight:700;color:#17365D;padding:7px;")
+            card_layout.addWidget(value_label)
+            compliance_values[key] = value_label
+            compliance_kpis.addWidget(card, idx // 3, idx % 3)
+        compliance_layout.addLayout(compliance_kpis)
+        compliance_hint = QLabel("Compliance is calculated from applicable Mandatory requirements. Before Job requirements are tracked separately in the employee register.")
+        compliance_hint.setWordWrap(True)
+        compliance_hint.setStyleSheet("color:#475467;padding:5px;background:#F2F4F7;border-radius:4px;")
+        compliance_layout.addWidget(compliance_hint)
+        compliance_refresh = QPushButton("Refresh Compliance")
+        compliance_refresh.setMinimumHeight(34)
+        compliance_layout.addWidget(compliance_refresh, 0, Qt.AlignmentFlag.AlignLeft)
+        compliance_table = QTableWidget()
+        compliance_table.setColumnCount(6)
+        compliance_table.setHorizontalHeaderLabels(["Employee ID", "Name", "Company", "Trade", "Non-compliant", "Expired"])
+        compliance_table.setAlternatingRowColors(True)
+        compliance_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        compliance_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        compliance_table.setMinimumHeight(180)
+        compliance_layout.addWidget(compliance_table, 1)
+
+        # =====================================================================
+        # TAB 6 — Tracking Register (full screen + actions only)
         # =====================================================================
         track_page = QWidget()
         track_layout = QVBoxLayout(track_page)
@@ -7877,7 +8039,7 @@ class MainWindow(QMainWindow):
         track_search = QLineEdit(); track_search.setPlaceholderText("Search ID, name, trade, company…"); track_search.setClearButtonEnabled(True)
         track_refresh = QPushButton("Refresh")
         track_edit = QPushButton("Edit Selected Cell")
-        track_delete = QPushButton("Clear Selected Cell")
+        track_delete = QPushButton("Archive Selected Record")
         track_export_xlsx = QPushButton("Export Excel")
         track_export_docx = QPushButton("Export Word")
         for b in (track_refresh, track_edit, track_delete, track_export_xlsx, track_export_docx):
@@ -7894,6 +8056,8 @@ class MainWindow(QMainWindow):
         track_table.horizontalHeader().setDefaultSectionSize(130)
         track_table.verticalHeader().setDefaultSectionSize(52)
         track_table.setWordWrap(True)
+        track_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        track_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         track_layout.addWidget(track_table, 1)
         track_state = {"employees": [], "courses": []}
 
@@ -7984,6 +8148,58 @@ class MainWindow(QMainWindow):
             track_table.setColumnWidth(4, 120)
             track_table.setColumnWidth(5, 110)
 
+        def refresh_compliance_dashboard():
+            employees = db.fetchall(
+                "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
+            )
+            total_required = 0
+            compliant_required = 0
+            expired_count = 0
+            expiring_count = 0
+            missing_count = 0
+            pending_count = 0
+            exceptions = []
+            for emp in employees:
+                reqs = requirements_for_trade(emp["designation"])
+                non_compliant = 0
+                emp_expired = 0
+                for cname, req, validity in reqs:
+                    if req != "Mandatory":
+                        continue
+                    total_required += 1
+                    rec = latest_record(emp["id"], cname)
+                    st, _, _ = status_of(rec, validity)
+                    if st in ("Valid", "Expiring Soon"):
+                        compliant_required += 1
+                    else:
+                        non_compliant += 1
+                        if st == "Expired":
+                            expired_count += 1
+                            emp_expired += 1
+                        elif st == "Pending Verification":
+                            pending_count += 1
+                        else:
+                            missing_count += 1
+                    if st == "Expiring Soon":
+                        expiring_count += 1
+                if non_compliant:
+                    exceptions.append((emp, non_compliant, emp_expired))
+            compliance_pct = (100.0 * compliant_required / total_required) if total_required else 100.0
+            compliance_values["employees"].setText(str(len(employees)))
+            compliance_values["compliance"].setText(f"{compliance_pct:.1f}%")
+            compliance_values["expired"].setText(str(expired_count))
+            compliance_values["expiring"].setText(str(expiring_count))
+            compliance_values["missing"].setText(str(missing_count))
+            compliance_values["pending"].setText(str(pending_count))
+            compliance_table.setRowCount(len(exceptions))
+            for row_idx, (emp, non_compliant, emp_expired) in enumerate(exceptions):
+                values = [safe(emp["employee_id"]), safe(emp["name"]), safe(emp["company"]), safe(emp["designation"]), str(non_compliant), str(emp_expired)]
+                for col_idx, value in enumerate(values):
+                    compliance_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+            compliance_table.sortItems(4, Qt.SortOrder.DescendingOrder)
+
+        compliance_refresh.clicked.connect(lambda: (load_grid_state(), refresh_compliance_dashboard()))
+
         def log_or_edit_cell(row=None, column=None):
             if row is None:
                 row = track_table.currentRow()
@@ -8013,11 +8229,15 @@ class MainWindow(QMainWindow):
                 if td.isValid():
                     d_train.setDate(td)
             d_exp = QDateEdit(QDate.currentDate()); d_exp.setCalendarPopup(True); d_exp.setDisplayFormat("yyyy-MM-dd")
+            no_expiry = QCheckBox("No expiry — this course does not expire")
+            no_expiry.setChecked(bool(not validity and not (rec and safe(rec["expiry_date"]))))
+            d_exp.setEnabled(not no_expiry.isChecked())
+            no_expiry.toggled.connect(d_exp.setDisabled)
             def auto_exp(*_):
-                if validity:
+                if validity and not no_expiry.isChecked():
                     try:
                         base = date(d_train.date().year(), d_train.date().month(), d_train.date().day())
-                        exp = base + timedelta(days=int(validity) * 30)
+                        exp = add_calendar_months(base, int(validity))
                         d_exp.setDate(QDate(exp.year, exp.month, exp.day))
                     except Exception:
                         pass
@@ -8027,12 +8247,52 @@ class MainWindow(QMainWindow):
                 ed = QDate.fromString(safe(rec["expiry_date"]), "yyyy-MM-dd")
                 if ed.isValid():
                     d_exp.setDate(ed)
+                    no_expiry.setChecked(False)
             trainer = QLineEdit(safe(rec["provider"]) if rec else "")
+            cert_no = QLineEdit(safe(rec["certificate_no"]) if rec else "")
             notes = QLineEdit(safe(rec["notes"]) if rec else "")
+            attachment_path = QLineEdit(safe(rec["attachment_path"]) if rec else "")
+            attachment_path.setReadOnly(True)
+            attachment_btn = QPushButton("Browse…")
+            attachment_row = QHBoxLayout()
+            attachment_row.addWidget(attachment_path, 1)
+            attachment_row.addWidget(attachment_btn)
+            def choose_training_attachment():
+                selected, _ = QFileDialog.getOpenFileName(
+                    dlg, "Select Training Certificate / Evidence", "",
+                    "Evidence Files (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)"
+                )
+                if not selected:
+                    return
+                try:
+                    source = Path(selected)
+                    evidence_dir = ATTACH_DIR / "training"
+                    evidence_dir.mkdir(parents=True, exist_ok=True)
+                    destination = evidence_dir / f"training_{emp_id}_{re.sub(r'[^A-Za-z0-9_-]+', '_', cname)[:45]}_{datetime.now().strftime('%Y%m%d%H%M%S')}{source.suffix.lower()}"
+                    shutil.copy2(source, destination)
+                    attachment_path.setText(str(destination))
+                except Exception as exc:
+                    QMessageBox.critical(dlg, "Attachment Error", f"Unable to copy evidence file.\n\n{exc}")
+            attachment_btn.clicked.connect(choose_training_attachment)
+            verification = QComboBox()
+            verification.addItems(["Verified", "Pending Verification"])
+            current_verification = safe(rec["verification_status"]) if rec and "verification_status" in rec.keys() else "Verified"
+            verification.setCurrentText(current_verification if current_verification in ("Verified", "Pending Verification") else "Verified")
+            assessment = QComboBox()
+            assessment.addItems(["Not Required", "Pending", "Pass", "Fail"])
+            current_assessment = safe(rec["assessment_result"]) if rec and "assessment_result" in rec.keys() else "Not Required"
+            assessment.setCurrentText(current_assessment if current_assessment in ("Not Required", "Pending", "Pass", "Fail") else "Not Required")
             form.addRow("Date of Training *", d_train)
             form.addRow("Expiry Date", d_exp)
+            form.addRow("Expiry Policy", no_expiry)
             form.addRow("Trainer / Provider", trainer)
+            form.addRow("Certificate Number", cert_no)
+            form.addRow("Certificate / Evidence", attachment_row)
+            form.addRow("Verification Status", verification)
+            form.addRow("Assessment Result", assessment)
             form.addRow("Notes", notes)
+            dlg.resize(620, 480)
+            dlg.setMinimumSize(540, 400)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             form.addRow(buttons)
             buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
@@ -8040,17 +8300,43 @@ class MainWindow(QMainWindow):
                 return
             course_id = ensure_course(cname, validity)
             tdate = d_train.date().toString("yyyy-MM-dd")
-            edate = d_exp.date().toString("yyyy-MM-dd")
+            edate = "" if no_expiry.isChecked() else d_exp.date().toString("yyyy-MM-dd")
+            verify_status = verification.currentText()
+            assess_result = assessment.currentText()
+            if verify_status == "Verified":
+                verified_by = "Local User"
+                verified_at = datetime.now().isoformat(timespec="seconds")
+            else:
+                verified_by = ""
+                verified_at = ""
             if rec:
                 db.execute(
-                    "UPDATE training_records SET training_date=?, expiry_date=?, provider=?, notes=? WHERE id=?",
-                    (tdate, edate, trainer.text().strip(), notes.text().strip(), rec["id"])
+                    """UPDATE training_records SET training_date=?, expiry_date=?, provider=?,
+                       certificate_no=?, attachment_path=?, notes=?, verification_status=?,
+                       verified_by=?, verified_at=?, assessment_result=? WHERE id=?""",
+                    (tdate, edate, trainer.text().strip(), cert_no.text().strip(), attachment_path.text().strip(),
+                     notes.text().strip(), verify_status, verified_by, verified_at, assess_result, rec["id"])
                 )
+                record_id = int(rec["id"])
+                action = "Updated"
             else:
-                db.execute(
-                    "INSERT INTO training_records (employee_db_id, course_id, training_date, expiry_date, provider, notes) VALUES (?,?,?,?,?,?)",
-                    (emp_id, course_id, tdate, edate, trainer.text().strip(), notes.text().strip())
+                cur = db.execute(
+                    """INSERT INTO training_records
+                       (employee_db_id, course_id, training_date, expiry_date, provider,
+                        certificate_no, attachment_path, notes, verification_status,
+                        verified_by, verified_at, assessment_result)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (emp_id, course_id, tdate, edate, trainer.text().strip(), cert_no.text().strip(),
+                     attachment_path.text().strip(), notes.text().strip(), verify_status,
+                     verified_by, verified_at, assess_result)
                 )
+                record_id = int(cur.lastrowid)
+                action = "Created"
+            db.execute(
+                "INSERT INTO training_audit_log (entity_type, entity_id, action, details) VALUES (?,?,?,?)",
+                ("training_record", record_id, action,
+                 f"Employee DB ID={emp_id}; course={cname}; training_date={tdate}; verification={verify_status}; assessment={assess_result}")
+            )
             load_tracker()
 
         def clear_selected_cell():
@@ -8067,9 +8353,34 @@ class MainWindow(QMainWindow):
             rec = latest_record(data["emp_id"], data["course"])
             if not rec:
                 return QMessageBox.information(self, "Clear", "No training record on this cell.")
-            if QMessageBox.question(self, "Clear Cell", f"Delete training record for {data['course']}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            reason, ok = QInputDialog.getText(self, "Archive Training Record", "Reason for removing this record from the active register:")
+            if not ok:
                 return
-            db.execute("DELETE FROM training_records WHERE id=?", (rec["id"],))
+            if not reason.strip():
+                return QMessageBox.warning(self, "Reason Required", "Enter a reason. The record will be retained in Training History.")
+            try:
+                db.conn.execute("BEGIN")
+                db.conn.execute("""INSERT INTO training_record_history
+                    (original_record_id, employee_db_id, course_id, training_date, expiry_date,
+                     provider, certificate_no, attachment_path, notes, created_at,
+                     archived_by, archive_reason, verification_status, verified_by, verified_at,
+                     assessment_result, assessment_score)
+                    SELECT id, employee_db_id, course_id, training_date, expiry_date,
+                           provider, certificate_no, attachment_path, notes, created_at,
+                           'Local User', ?, verification_status, verified_by, verified_at,
+                           assessment_result, assessment_score
+                    FROM training_records WHERE id=?""", (reason.strip(), rec["id"]))
+                db.conn.execute("DELETE FROM training_records WHERE id=?", (rec["id"],))
+                db.conn.execute(
+                    "INSERT INTO training_audit_log (entity_type, entity_id, action, details) VALUES (?,?,?,?)",
+                    ("training_record", int(rec["id"]), "Archived", reason.strip())
+                )
+                db.conn.commit()
+            except Exception as exc:
+                db.conn.rollback()
+                logging.exception("Training record archive failed")
+                QMessageBox.critical(self, "Archive Error", f"The training record was not changed.\n\n{exc}")
+                return
             load_tracker()
 
         def export_tracker_excel():
@@ -8144,7 +8455,9 @@ class MainWindow(QMainWindow):
         track_export_xlsx.clicked.connect(export_tracker_excel)
         track_export_docx.clicked.connect(export_tracker_word)
         load_tracker()
-        tabs.addTab(track_page, "5. Tracking Register")
+        tabs.addTab(track_page, "6. Tracking Register")
+        tabs.insertTab(0, compliance_page, "1. Compliance Dashboard")
+        refresh_compliance_dashboard()
 
     def settings_page(self):
         w,layout=self.page("Settings")
