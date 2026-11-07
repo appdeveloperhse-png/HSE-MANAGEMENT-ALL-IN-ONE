@@ -348,6 +348,8 @@ class Database:
             self.conn.execute("ALTER TABLE employees ADD COLUMN date_joining TEXT DEFAULT ''")
         if "safety_induction_date" not in employee_columns:
             self.conn.execute("ALTER TABLE employees ADD COLUMN safety_induction_date TEXT DEFAULT ''")
+        if "photo_path" not in employee_columns:
+            self.conn.execute("ALTER TABLE employees ADD COLUMN photo_path TEXT DEFAULT ''")
         # Older versions offered "Either"; the current Training Type choices are Internal or External.
         self.conn.execute("UPDATE training_courses SET provider_type='Internal' WHERE lower(COALESCE(provider_type,''))='either'")
 
@@ -7048,767 +7050,50 @@ class MainWindow(QMainWindow):
     # ========================================================
 
     def training(self):
+        """Enterprise HSE Training & Competency Management — 3 tabs only.
+        Tab 1 Employee Details · Tab 2 Matrix Grid · Tab 3 Tracking Register.
+        Other application modules are not modified.
+        """
         w, layout = self.page("Training Management")
         intro = QLabel(
-            "Tabs: Course Catalogue · Matrix Grid (ready-to-use M/O/B by trade) · Training Matrix · Training Register "
-            "(enter person → matrix requirements appear; cells show training date / expiry / days remaining + mandatory %) · "
-            "Master Training Record · Bulk Training Entry. Department is not used — trade/designation drives the matrix."
+            "HSE Training & Competency — Employee Register · Training Matrix (M / O / B) · "
+            "Interactive Tracking with expiry, due days and mandatory completion %. "
+            "Desktop layout; only this module is active here."
         )
         intro.setWordWrap(True)
+        intro.setStyleSheet("color:#17365D; font-weight:600; padding:6px 8px; background:#E8F1FB; border-radius:4px;")
         layout.addWidget(intro)
 
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
         layout.addWidget(tabs, 1)
 
-        trade_options = [
-            "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
-            "Project Director", "Project Manager", "Construction Manager",
-            "Site Manager", "Operations Manager", "HSE Manager", "QA/QC Manager", "Department Manager",
-            "Superintendent", "Supervisor", "Foreman", "Chargehand", "Team Leader",
-            "HSE Officer", "HSE Supervisor", "HSE Advisor", "HSE Coordinator", "Safety Representative",
-            "Engineer", "Civil Engineer", "Mechanical Engineer", "Electrical Engineer", "Instrument Engineer",
-            "Process Engineer", "Planning Engineer", "QA/QC Engineer", "Welding Engineer",
-            "Technician", "Mechanical Technician", "Electrical Technician", "Instrument Technician",
-            "HVAC Technician", "NDE Technician", "Laboratory Technician",
-            "Welder", "Pipe Fitter", "Fabricator", "Plater", "Grinder", "Painter / Blaster",
-            "Rigger", "Banksman / Signaler", "Lifting Supervisor", "Crane Operator", "Forklift Operator",
-            "MEWP / Manlift Operator", "Heavy Equipment Operator", "Excavator Operator",
-            "Scaffolder", "Scaffold Inspector", "Carpenter", "Mason / Bricklayer", "Steel Fixer",
-            "Electrician", "Cable Jointer", "Lineman", "Insulator", "Millwright",
-            "Driver", "Heavy Vehicle Driver", "Light Vehicle Driver", "Bus Driver",
-            "Storekeeper", "Warehouse Supervisor", "Logistics Coordinator", "Material Controller",
-            "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
-            "Security Guard", "Camp Boss / Facilities", "Cook / Catering", "Cleaner",
-            "Helper", "General Worker", "Labourer", "Other"
-        ]
-        department_options = [
-            "HSE", "Operations", "Construction", "Maintenance", "Engineering", "Electrical",
-            "Mechanical", "Welding", "Fabrication", "Rigging", "Scaffolding", "Logistics",
-            "Warehouse", "Transport", "Administration", "HR", "IT", "Quality", "Environment",
-            "Security", "Facilities", "Other"
-        ]
-
-        def distinct_values(column):
-            try:
-                rows = db.fetchall(
-                    f"SELECT DISTINCT {column} AS value FROM employees "
-                    f"WHERE COALESCE(active,1)=1 AND COALESCE({column},'')<>'' ORDER BY {column} COLLATE NOCASE"
-                )
-                return [safe(row["value"]).strip() for row in rows if safe(row["value"]).strip()]
-            except Exception:
-                return []
-
-        def fill_combo(combo, options, first_label=None, first_data=""):
-            combo.clear()
-            if first_label is not None:
-                combo.addItem(first_label, first_data)
-            for value in options:
-                if value and value not in [combo.itemText(i) for i in range(combo.count())]:
-                    combo.addItem(value, value)
-
-        # ---------------- Training Matrix ----------------
-        matrix_page = QWidget()
-        matrix_layout = QVBoxLayout(matrix_page)
-        matrix_layout.setContentsMargins(4, 4, 4, 4)
-        matrix_layout.setSpacing(6)
-        matrix_subtabs = QTabWidget()
-        matrix_subtabs.setDocumentMode(True)
-        matrix_layout.addWidget(matrix_subtabs, 1)
-
-        catalogue_page = QWidget()
-        catalogue_layout = QVBoxLayout(catalogue_page)
-        catalogue_layout.setContentsMargins(8, 8, 8, 8)
-        catalogue_layout.setSpacing(8)
-        form_box = QGroupBox("Course catalogue — assign courses to trades (legacy editor)")
-        form_layout = QGridLayout(form_box)
-        form_layout.setHorizontalSpacing(8)
-        form_layout.setVerticalSpacing(7)
-
-        # Standard course catalogue covering common oil & gas, construction, marine,
-        # offshore, logistics and support activities. Applicability is set per trade,
-        # department, project and risk assessment in the matrix below.
-        standard_training_courses = [
-            "HSE / Company Induction", "Site / Project HSE Induction", "Client / QatarEnergy Induction",
-            "Safety Orientation for Visitors", "New Employee Safety Induction", "Toolbox Talk / Safety Briefing",
-            "Stop Work Authority (SWA)", "Hazard Identification and Risk Assessment", "Job Safety Analysis (JSA / JHA)",
-            "Permit to Work (PTW)", "Electronic Permit to Work (ePTW)", "Permit Applicant / Originator Training",
-            "Permit Holder Training", "Area Authority Training", "Issuing Authority Training",
-            "Gas Tester / Authorised Gas Tester", "Gas Monitor Training", "Confined Space Entry",
-            "Confined Space Attendant / Standby Man", "Confined Space Entry Supervisor", "Confined Space Rescue",
-            "Hot Work Safety", "Cold Work Safety", "Work at Height", "Working at Height Rescue",
-            "Scaffolding Safety", "Scaffold Inspector", "Scaffold Erector / Dismantler", "Ladder Safety",
-            "Lifting Operations Safety", "Lifting Supervisor", "Appointed Person for Lifting", "Crane Operator",
-            "Mobile Crane Operator", "Tower Crane Operator", "Banksman / Slinger", "Rigger", "Lifting Gear Inspector",
-            "Forklift Operator", "Manlift / MEWP Operator", "Telehandler Operator", "Hoist Operator",
-            "Rigging and Slinging", "Manual Handling", "Ergonomics", "Fire Safety Awareness", "Basic Fire Fighting",
-            "Fire Warden / Fire Watcher", "Fire Watch for Hot Work", "Emergency Response and Evacuation",
-            "Emergency Response Team (ERT)", "Incident Command / Emergency Controller", "First Aid",
-            "Basic Life Support (BLS)", "CPR and AED", "Advanced First Aid", "Occupational Health Awareness",
-            "Heat Stress Prevention", "H2S Awareness", "Basic H2S Training", "H2S and Breathing Apparatus",
-            "Escape Set / EEBD Training", "Self-Contained Breathing Apparatus (SCBA)", "Respiratory Protection",
-            "Personal Protective Equipment (PPE)", "Chemical Handling and Safety", "SDS / COSHH Awareness",
-            "Hazardous Substances and Spill Response", "Oil Spill Response", "Environmental Awareness",
-            "Waste Management and Segregation", "Environmental Incident Reporting", "Noise Awareness and Hearing Protection",
-            "Hand Safety / Hand Injury Prevention", "Eye Protection", "Electrical Safety", "Electrical Awareness",
-            "Lockout / Tagout (LOTO)", "Electrical Isolation / Authorised Person", "High Voltage Safety",
-            "Low Voltage Switching", "Arc Flash Awareness", "Portable Electrical Tools Safety", "Power Tools Safety",
-            "Machine Guarding", "Mechanical Isolation", "Pressure Systems Safety", "Stored Energy Awareness",
-            "Excavation / Trenching Safety", "Underground Services Detection", "Demolition Safety", "Road and Traffic Safety",
-            "Defensive Driving", "4x4 Off-Road Driving", "Heavy Vehicle / Bus Driver Safety", "Journey Management",
-            "Loading and Unloading Safety", "Warehouse Safety", "Material Storage and Handling", "Working Near Water",
-            "Marine Safety Awareness", "Boat Transfer Safety", "Travel Safely by Boat (TSbB)", "Sea Survival",
-            "Personal Survival Techniques (STCW)", "STCW Basic Safety Training", "Fire Prevention and Fire Fighting (STCW)",
-            "Elementary First Aid (STCW)", "Personal Safety and Social Responsibilities (STCW)",
-            "Helicopter Underwater Escape Training (HUET)", "BOSIET", "T-BOSIET", "FOET", "T-FOET",
-            "CA-EBS Training", "IMIST", "Offshore Safety Induction", "Offshore Emergency Response",
-            "Offshore Lifeboat Coxswain", "Helideck Operations", "Helideck Emergency Response",
-            "Dropped Objects Prevention", "Working in Adverse Weather", "Diving Safety Awareness",
-            "Radiation Safety Awareness", "NORM Awareness", "Laser Safety", "Welding Safety",
-            "Welding and Cutting Operations", "Grinding Safety", "Fabrication Shop Safety", "Rigger / Banksman Safety",
-            "Construction Safety", "Civil Works Safety", "Rebar / Steel Fixing Safety", "Concrete Works Safety",
-            "Formwork and Falsework Safety", "Painting and Coating Safety", "Abrasive Blasting Safety",
-            "Hydrotesting Safety", "Pressure Testing Safety", "Pipeline Safety", "Flange Management",
-            "Process Safety Awareness", "Major Accident Hazard Awareness", "SIMOPS Awareness", "MOC Awareness",
-            "Asset Integrity Awareness", "Quality Awareness", "Food Hygiene", "Security Awareness",
-            "Cybersecurity Awareness", "Fatigue Management", "Supervisor HSE Leadership", "HSE for Managers",
-            "IOSH Working Safely", "IOSH Managing Safely", "NEBOSH General Certificate", "NEBOSH HSE Certificate in Process Safety",
-            "Incident Reporting and Investigation", "Root Cause Analysis", "Accident Investigation",
-            "Internal HSE Auditor", "Lead Auditor (ISO 45001 / 14001)", "Risk Assessment Workshop",
-            "Behaviour-Based Safety", "HSE Statistics and Reporting", "Weekly Safety Meeting / TBT Facilitator",
-            "Accident / Incident Investigation", "Root Cause Analysis (RCA)", "ICAM Investigation",
-            "Corrective and Preventive Action (CAPA)", "Management of Change (MOC)",
-            "Emergency Drill Coordination", "Spill Response Team", "Rescue Team Member",
-            "Working Alone Awareness", "Night Work Safety", "SIMOPS Coordinator",
-            "Hand and Power Tools Safety", "Abrasive Wheels", "Pressure Testing Authorised Person",
-            "Flange Bolting / Joint Integrity", "Well Integrity Awareness", "Process Safety Management",
-            "Other"
-        ]
-        course_name = QComboBox()
-        course_name.setMinimumWidth(260)
-        course_name.setEditable(False)
-        course_name.addItems(standard_training_courses)
-        course_name.setCurrentIndex(-1)
-        course_name.setPlaceholderText("Select a training course…")
-        course_other_label = QLabel("Other training name")
-        course_other_input = QLineEdit()
-        course_other_input.setPlaceholderText("Enter the specific training course name")
-        course_other_label.setVisible(False)
-        course_other_input.setVisible(False)
-        trade_combo = QComboBox()
-        trade_combo.setEditable(True)
-        trade_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        trade_combo.setToolTip("Open the dropdown and check every trade this course applies to. Select All Trades for universal applicability.")
-        trade_model = QStandardItemModel(trade_combo)
-        trade_combo.setModel(trade_model)
-        for trade_label in ["All Trades"] + trade_options:
-            trade_item = QStandardItem(trade_label)
-            trade_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-            trade_item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-            trade_model.appendRow(trade_item)
-        trade_combo.lineEdit().setReadOnly(True)
-        trade_combo.lineEdit().setPlaceholderText("Select one or more trades…")
-        trade_other_label = QLabel("Other trade")
-        trade_other_input = QLineEdit()
-        trade_other_input.setPlaceholderText("Enter other trade name")
-        trade_other_label.setVisible(False)
-        trade_other_input.setVisible(False)
-        department = QComboBox()
-        fill_combo(department, department_options + distinct_values("department"), "All Departments", "")
-        mandatory = QComboBox()
-        mandatory.addItems(["Mandatory", "Recommended"])
-        training_type = QComboBox()
-        training_type.addItems(["Internal", "External"])
-        validity = QSpinBox()
-        validity.setRange(0, 600)
-        validity.setSuffix(" months")
-        validity.setSpecialValueText("No expiry / not set")
-        source = QComboBox()
-        source.addItems([
-            "Qatar law / regulation", "Regulatory / authority requirement", "Client / project requirement",
-            "Risk assessment", "Company procedure / policy", "Contractual requirement", "Other"
-        ])
-        certificate_required = QCheckBox("Certificate required")
-        active = QCheckBox("Active requirement")
-        active.setChecked(True)
-
-        form_layout.addWidget(QLabel("Training name"), 0, 0)
-        form_layout.addWidget(course_name, 0, 1, 1, 2)
-        form_layout.addWidget(course_other_label, 4, 0)
-        form_layout.addWidget(course_other_input, 4, 1, 1, 2)
-        form_layout.addWidget(QLabel("Applicable trade(s)"), 0, 3)
-        form_layout.addWidget(trade_combo, 0, 4, 1, 2)
-        form_layout.addWidget(QLabel("Department"), 1, 0)
-        form_layout.addWidget(department, 1, 1)
-        form_layout.addWidget(QLabel("Requirement"), 1, 2)
-        form_layout.addWidget(mandatory, 1, 3)
-        form_layout.addWidget(QLabel("Training type"), 1, 4)
-        form_layout.addWidget(training_type, 1, 5)
-        form_layout.addWidget(QLabel("Validity"), 2, 0)
-        form_layout.addWidget(validity, 2, 1)
-        form_layout.addWidget(QLabel("Requirement source"), 2, 2)
-        form_layout.addWidget(source, 2, 3, 1, 2)
-        form_layout.addWidget(certificate_required, 2, 5)
-        form_layout.addWidget(active, 3, 0, 1, 2)
-        form_layout.addWidget(trade_other_label, 3, 2)
-        form_layout.addWidget(trade_other_input, 3, 3, 1, 3)
-        trade_other_label.setVisible(False)
-        form_layout.setColumnStretch(1, 2)
-        form_layout.setColumnStretch(4, 2)
-        catalogue_layout.addWidget(form_box)
-
-        matrix_buttons = QHBoxLayout()
-        save_course_btn = QPushButton("Save Course")
-        clear_course_btn = QPushButton("Clear Form")
-        deactivate_course_btn = QPushButton("Delete Selected")
-        export_matrix_btn = QPushButton("Export Matrix to Excel")
-        refresh_matrix_btn = QPushButton("Refresh")
-        for btn in (save_course_btn, clear_course_btn, deactivate_course_btn, export_matrix_btn, refresh_matrix_btn):
-            btn.setMinimumHeight(34)
-            btn.setMinimumWidth(100)
-            matrix_buttons.addWidget(btn)
-        matrix_buttons.addStretch(1)
-        catalogue_layout.addLayout(matrix_buttons)
-
-        course_table = QTableWidget()
-        course_table.setColumnCount(9)
-        course_table.setHorizontalHeaderLabels([
-            "ID", "Training Course", "Applicable Trade(s)", "Department", "Requirement",
-            "Training Type", "Validity (months)", "Requirement Source", "Status"
-        ])
-        course_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        course_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        course_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        course_table.setAlternatingRowColors(True)
-        course_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        course_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        course_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        course_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
-        course_table.setColumnHidden(0, True)
-        catalogue_layout.addWidget(course_table, 1)
-        matrix_subtabs.addTab(catalogue_page, "1. Course Catalogue")
-
-        # ---- Editable Designation × Training Grid ----
-        grid_page = QWidget()
-        grid_layout = QVBoxLayout(grid_page)
-        grid_layout.setContentsMargins(8, 8, 8, 8)
-        grid_layout.setSpacing(8)
-        grid_help = QLabel(
-            "LAYOUT: ROWS = Training courses  ·  COLUMNS = Position / Designation (Chairman → Helper). "
-            "Double-click a cell to set Mandatory, Optional, Before Job, or Not Applicable. "
-            "Validity (months) is shown on each training row. "
-            "Save Matrix Grid to feed Training Register mandatory % tracking."
-        )
-        grid_help.setWordWrap(True)
-        grid_layout.addWidget(grid_help)
-
-        grid_toolbar = QHBoxLayout()
-        grid_course_pick = QComboBox()
-        grid_course_pick.setEditable(True)
-        grid_course_pick.setMinimumWidth(260)
-        grid_validity_spin = QSpinBox()
-        grid_validity_spin.setRange(0, 600)
-        grid_validity_spin.setSuffix(" months")
-        grid_validity_spin.setSpecialValueText("No expiry")
-        grid_add_col_btn = QPushButton("Add / Update Training Row")
-        grid_remove_col_btn = QPushButton("Remove Selected Training Row")
-        grid_save_btn = QPushButton("Save Matrix Grid")
-        grid_refresh_btn = QPushButton("Refresh Grid")
-        grid_export_btn = QPushButton("Export Grid to Excel")
-        grid_fill_default_btn = QPushButton("Seed Default Courses")
-        for b in (grid_add_col_btn, grid_remove_col_btn, grid_save_btn, grid_refresh_btn, grid_export_btn, grid_fill_default_btn):
-            b.setMinimumHeight(34)
-        grid_toolbar.addWidget(QLabel("Course"))
-        grid_toolbar.addWidget(grid_course_pick, 1)
-        grid_toolbar.addWidget(QLabel("Validity"))
-        grid_toolbar.addWidget(grid_validity_spin)
-        grid_toolbar.addWidget(grid_add_col_btn)
-        grid_toolbar.addWidget(grid_remove_col_btn)
-        grid_toolbar.addWidget(grid_save_btn)
-        grid_toolbar.addWidget(grid_refresh_btn)
-        grid_toolbar.addWidget(grid_export_btn)
-        grid_toolbar.addWidget(grid_fill_default_btn)
-        grid_layout.addLayout(grid_toolbar)
-
-        grid_legend = QLabel(
-            "ROWS = Training  ·  COLUMNS = Position  ·  "
-            "M = Mandatory (red)  |  O = Optional (green)  |  B = Before Job (amber)  |  — = Not Applicable.  "
-            "Double-click any cell to edit."
-        )
-        grid_legend.setStyleSheet("color:#17365D; font-weight:600; padding:4px; background:#E8F1FB; border-radius:4px;")
-        grid_layout.addWidget(grid_legend)
-
-        matrix_grid = QTableWidget()
-        matrix_grid.setAlternatingRowColors(True)
-        matrix_grid.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        matrix_grid.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
-        matrix_grid.verticalHeader().setDefaultSectionSize(28)
-        matrix_grid.horizontalHeader().setDefaultSectionSize(120)
-        matrix_grid.horizontalHeader().setMinimumSectionSize(90)
-        matrix_grid.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        matrix_grid.setWordWrap(True)
-        grid_layout.addWidget(matrix_grid, 1)
-
-        grid_status = QLabel("")
-        grid_status.setStyleSheet("font-weight:bold; padding:4px;")
-        grid_layout.addWidget(grid_status)
-        # grid_page is hosted on the main Training tabs only
-
-        
-        # ---------------- Training Register ----------------
-        register_page = QWidget()
-        register_layout = QVBoxLayout(register_page)
-        register_layout.setContentsMargins(8, 8, 8, 8)
-        register_layout.setSpacing(8)
-        register_help = QLabel(
-            "EMPLOYEE DETAILS & TRACKER — add workers (single or bulk), then track training. "
-            "Each row is one employee; course cells show Mandatory/Optional, training date, expiry and days remaining. "
-            "Click a training cell to record dates. Mandatory % uses the matrix for the employee trade."
-        )
-        register_help.setWordWrap(True)
-        register_help.setStyleSheet("color:#17365D; font-weight:600; padding:6px; background:#E8F1FB; border-radius:4px;")
-        register_layout.addWidget(register_help)
-
-        register_legend = QLabel(
-            "  ✓ Valid / Completed   ·   ⚠ Due Soon   ·   ✗ Expired / Required   ·   — N/A (not required for this trade)   ·   "
-            "Mandatory % = completed mandatory courses for the employee’s trade"
-        )
-        register_legend.setWordWrap(True)
-        register_legend.setStyleSheet(
-            "padding:6px 8px; background:#F7F9FC; border:1px solid #D0D7DE; border-radius:4px; color:#333;"
-        )
-        register_layout.addWidget(register_legend)
-
-        employee_box = QGroupBox("Employee Details — ID, Name, Company, Trade (single or bulk)")
-        employee_form = QGridLayout(employee_box)
-        employee_id_input = QLineEdit()
-        employee_id_input.setPlaceholderText("Employee ID (optional)")
-        employee_name_input = QLineEdit()
-        employee_name_input.setPlaceholderText("Employee full name")
-        employee_company_input = QLineEdit()
-        employee_company_input.setPlaceholderText("Company / Contractor name")
-        employee_company_input.setClearButtonEnabled(True)
-        employee_trade_input = QComboBox()
-        employee_trade_input.setEditable(True)
-        fill_combo(employee_trade_input, trade_options + distinct_values("designation"), "Select trade", "")
-        joining_date = QDateEdit()
-        joining_date.setCalendarPopup(True)
-        joining_date.setDisplayFormat("yyyy-MM-dd")
-        joining_date.setDate(QDate.currentDate())
-        safety_induction_date = QDateEdit()
-        safety_induction_date.setCalendarPopup(True)
-        safety_induction_date.setDisplayFormat("yyyy-MM-dd")
-        safety_induction_date.setSpecialValueText("Not completed")
-        safety_induction_date.setDate(QDate(2000, 1, 1))
-        safety_induction_date.setMinimumDate(QDate(2000, 1, 1))
-        safety_induction_date.setMaximumDate(QDate.currentDate().addYears(20))
-        safety_induction_date.setToolTip("Set to 2000-01-01 if safety induction has not yet been completed.")
-        add_employee_btn = QPushButton("Save Employee")
-        edit_employee_btn = QPushButton("Edit Selected Person")
-        delete_employee_btn = QPushButton("Delete Selected Person")
-        selected_employee_id = {"value": None}
-        employee_form.addWidget(QLabel("Employee ID"), 0, 0)
-        employee_form.addWidget(employee_id_input, 0, 1)
-        employee_form.addWidget(QLabel("Employee name *"), 0, 2)
-        employee_form.addWidget(employee_name_input, 0, 3)
-        employee_form.addWidget(QLabel("Company"), 0, 4)
-        employee_form.addWidget(employee_company_input, 0, 5)
-        employee_form.addWidget(QLabel("Trade"), 1, 0)
-        employee_form.addWidget(employee_trade_input, 1, 1)
-        employee_form.addWidget(QLabel("Date joined"), 1, 2)
-        employee_form.addWidget(joining_date, 1, 3)
-        employee_form.addWidget(QLabel("Safety induction date"), 1, 4)
-        employee_form.addWidget(safety_induction_date, 1, 5)
-        employee_form.addWidget(add_employee_btn, 2, 3)
-        employee_form.addWidget(edit_employee_btn, 2, 4)
-        employee_form.addWidget(delete_employee_btn, 2, 5)
-        register_layout.addWidget(employee_box)
-
-        # ---- Bulk employee entry (multiple workers at once) ----
-        bulk_emp_box = QGroupBox("Bulk add workers (one per line: ID | Name | Trade | Company)")
-        bulk_emp_lay = QVBoxLayout(bulk_emp_box)
-        bulk_emp_hint = QLabel(
-            "Paste or type several workers. Format per line:  ID | Name | Trade | Company\n"
-            "Example:  E-1001 | John Smith | Scaffolder | ABC Contracting\n"
-            "Trade must match a matrix designation when possible. Company is optional."
-        )
-        bulk_emp_hint.setWordWrap(True)
-        bulk_emp_text = QTextEdit()
-        bulk_emp_text.setPlaceholderText("E-1001 | John Smith | Scaffolder | ABC Contracting\nE-1002 | Sara Ali | Welder | XYZ LLC")
-        bulk_emp_text.setMaximumHeight(110)
-        bulk_emp_btn = QPushButton("Submit Bulk Workers")
-        bulk_emp_btn.setMinimumHeight(34)
-        bulk_emp_lay.addWidget(bulk_emp_hint)
-        bulk_emp_lay.addWidget(bulk_emp_text)
-        bulk_emp_lay.addWidget(bulk_emp_btn)
-        register_layout.addWidget(bulk_emp_box)
-
-        def submit_bulk_workers():
-            lines = [ln.strip() for ln in bulk_emp_text.toPlainText().splitlines() if ln.strip()]
-            if not lines:
-                return QMessageBox.warning(self, "Bulk Workers", "Enter at least one line: ID | Name | Trade | Company")
-            added = 0
-            updated = 0
-            skipped = []
-            for ln in lines:
-                parts = [p.strip() for p in re.split(r"[|\t;]", ln) if p.strip()]
-                if len(parts) < 3:
-                    skipped.append(ln)
-                    continue
-                emp_id, name, trade = parts[0], parts[1], parts[2]
-                company = parts[3] if len(parts) > 3 else ""
-                if not emp_id or not name:
-                    skipped.append(ln)
-                    continue
-                existing = db.fetchone(
-                    "SELECT id FROM employees WHERE lower(trim(COALESCE(employee_id,'')))=lower(trim(?)) LIMIT 1",
-                    (emp_id,)
-                )
-                if existing:
-                    db.execute(
-                        "UPDATE employees SET name=?, designation=?, company=?, active=1 WHERE id=?",
-                        (name, trade, company, existing["id"])
-                    )
-                    updated += 1
-                else:
-                    db.execute(
-                        "INSERT INTO employees (employee_id,name,designation,company,department,active) VALUES (?,?,?,?,?,1)",
-                        (emp_id, name, trade, company, "")
-                    )
-                    added += 1
-            bulk_emp_text.clear()
-            load_register()
-            msg = f"Bulk complete. Added: {added}, Updated: {updated}."
-            if skipped:
-                msg += f" Skipped {len(skipped)} line(s) (need ID | Name | Trade)."
-            QMessageBox.information(self, "Bulk Workers", msg)
-
-        bulk_emp_btn.clicked.connect(submit_bulk_workers)
-
-        register_toolbar = QHBoxLayout()
-        register_search = QLineEdit()
-        register_search.setPlaceholderText("Search employee, ID, trade or company…")
-        register_search.setClearButtonEnabled(True)
-        refresh_register_btn = QPushButton("Refresh Register")
-        export_register_btn = QPushButton("Export Register to Excel")
-        register_toolbar.addWidget(register_search, 1)
-        register_toolbar.addWidget(refresh_register_btn)
-        register_toolbar.addWidget(export_register_btn)
-        register_layout.addLayout(register_toolbar)
-        status_summary = QLabel("")
-        status_summary.setStyleSheet("font-weight: bold; padding: 4px;")
-        register_layout.addWidget(status_summary)
-        register_table = QTableWidget()
-        register_table.setAlternatingRowColors(True)
-        register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectItems)
-        register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        register_table.setWordWrap(True)
-        register_table.setShowGrid(True)
-        register_table.horizontalHeader().setMinimumSectionSize(110)
-        register_table.horizontalHeader().setDefaultSectionSize(150)
-        register_table.horizontalHeader().setStretchLastSection(False)
-        register_table.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        register_table.verticalHeader().setDefaultSectionSize(52)
-        register_table.verticalHeader().setVisible(True)
-        register_table.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #D0D7DE;
-                font-size: 12px;
-                selection-background-color: #D0E3F5;
-            }
-            QHeaderView::section {
-                background-color: #17365D;
-                color: white;
-                font-weight: bold;
-                padding: 6px;
-                border: 1px solid #0F2744;
-            }
-            QTableWidget::item {
-                padding: 4px;
-            }
-        """)
-        register_layout.addWidget(register_table, 1)
-        
-        # ---------------- Master Training Record ----------------
-        master_page = QWidget()
-        master_layout = QVBoxLayout(master_page)
-        master_layout.setContentsMargins(8, 8, 8, 8)
-        master_layout.setSpacing(8)
-        master_info = QLabel("Complete employee-by-course history, including joining date, safety induction, trade, training dates, expiry, type and compliance status.")
-        master_info.setWordWrap(True)
-        master_layout.addWidget(master_info)
-        master_toolbar = QHBoxLayout()
-        master_search = QLineEdit()
-        master_search.setPlaceholderText("Search employee, course, trade or company…")
-        master_search.setClearButtonEnabled(True)
-        refresh_master_btn = QPushButton("Refresh Master Record")
-        export_master_excel_btn = QPushButton("Export Master Record to Excel")
-        export_master_word_btn = QPushButton("Export Master Record to Word")
-        delete_master_record_btn = QPushButton("Delete Selected Training Record")
-        for btn in (refresh_master_btn, export_master_excel_btn, export_master_word_btn, delete_master_record_btn):
-            btn.setMinimumHeight(34)
-        master_toolbar.addWidget(master_search, 1)
-        master_toolbar.addWidget(refresh_master_btn)
-        master_toolbar.addWidget(export_master_excel_btn)
-        master_toolbar.addWidget(export_master_word_btn)
-        master_toolbar.addWidget(delete_master_record_btn)
-        master_layout.addLayout(master_toolbar)
-        master_table = QTableWidget()
-        master_table.setColumnCount(14)
-        master_table.setHorizontalHeaderLabels([
-            "Employee ID", "Employee Name", "Department", "Trade", "Date Joined", "Safety Induction Date",
-            "Training Course", "Training Type", "Requirement Source", "Training Date", "Expiry Date",
-            "Status", "Certificate No.", "Attachment"
-        ])
-        master_table.setAlternatingRowColors(True)
-        master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        master_table.setWordWrap(True)
-        master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        master_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        master_layout.addWidget(master_table, 1)
-        # Final Training tab order
-        tabs.addTab(register_page, "1. Employee Details & Training Tracker")
-        tabs.addTab(grid_page, "2. Matrix Grid")
-        tabs.addTab(master_page, "3. Master Training Register")
-
-        # ---------------- Bulk Training Entry ----------------
-        bulk_page = QWidget()
-        bulk_layout = QVBoxLayout(bulk_page)
-        bulk_layout.setContentsMargins(8, 8, 8, 8)
-        bulk_layout.setSpacing(8)
-        bulk_help = QLabel(
-            "Record one training course for many employees at once. Filter by trade or department, "
-            "select attendees, set the training date and validity, preview the list, then confirm to write "
-            "individual records into the Training Register / Master Training Record."
-        )
-        bulk_help.setWordWrap(True)
-        bulk_layout.addWidget(bulk_help)
-
-        bulk_form_box = QGroupBox("Training details")
-        bulk_form = QGridLayout(bulk_form_box)
-        bulk_course = QComboBox()
-        bulk_course.setMinimumWidth(320)
-        bulk_provider = QLineEdit()
-        bulk_provider.setPlaceholderText("Provider / trainer (optional)")
-        bulk_cert = QLineEdit()
-        bulk_cert.setPlaceholderText("Certificate number (optional — same value applied to all)")
-        bulk_notes = QLineEdit()
-        bulk_notes.setPlaceholderText("Notes (optional)")
-        bulk_train_date = QDateEdit()
-        bulk_train_date.setCalendarPopup(True)
-        bulk_train_date.setDisplayFormat("yyyy-MM-dd")
-        bulk_train_date.setDate(QDate.currentDate())
-        bulk_expiry = QDateEdit()
-        bulk_expiry.setCalendarPopup(True)
-        bulk_expiry.setDisplayFormat("yyyy-MM-dd")
-        bulk_expiry.setSpecialValueText("No expiry")
-        bulk_expiry.setDate(QDate(2000, 1, 1))
-        bulk_expiry.setMinimumDate(QDate(2000, 1, 1))
-        bulk_auto_expiry = QCheckBox("Auto-set expiry from course validity")
-        bulk_auto_expiry.setChecked(True)
-        bulk_form.addWidget(QLabel("Training course *"), 0, 0)
-        bulk_form.addWidget(bulk_course, 0, 1, 1, 3)
-        bulk_form.addWidget(QLabel("Training date *"), 1, 0)
-        bulk_form.addWidget(bulk_train_date, 1, 1)
-        bulk_form.addWidget(QLabel("Expiry date"), 1, 2)
-        bulk_form.addWidget(bulk_expiry, 1, 3)
-        bulk_form.addWidget(bulk_auto_expiry, 2, 1, 1, 2)
-        bulk_form.addWidget(QLabel("Provider"), 3, 0)
-        bulk_form.addWidget(bulk_provider, 3, 1)
-        bulk_form.addWidget(QLabel("Certificate No."), 3, 2)
-        bulk_form.addWidget(bulk_cert, 3, 3)
-        bulk_form.addWidget(QLabel("Notes"), 4, 0)
-        bulk_form.addWidget(bulk_notes, 4, 1, 1, 3)
-        bulk_layout.addWidget(bulk_form_box)
-
-        bulk_filter_box = QGroupBox("Employee filters and selection")
-        bulk_filter = QGridLayout(bulk_filter_box)
-        bulk_filter_trade = QComboBox()
-        bulk_filter_trade.setEditable(True)
-        bulk_filter_dept = QComboBox()
-        bulk_filter_dept.setEditable(True)
-        bulk_filter_search = QLineEdit()
-        bulk_filter_search.setPlaceholderText("Search name or employee ID…")
-        bulk_filter_search.setClearButtonEnabled(True)
-        bulk_select_all_btn = QPushButton("Select All Visible")
-        bulk_clear_sel_btn = QPushButton("Clear Selection")
-        bulk_filter.addWidget(QLabel("Trade"), 0, 0)
-        bulk_filter.addWidget(bulk_filter_trade, 0, 1)
-        bulk_filter.addWidget(QLabel("Department"), 0, 2)
-        bulk_filter.addWidget(bulk_filter_dept, 0, 3)
-        bulk_filter.addWidget(QLabel("Search"), 1, 0)
-        bulk_filter.addWidget(bulk_filter_search, 1, 1, 1, 2)
-        bulk_filter.addWidget(bulk_select_all_btn, 1, 3)
-        bulk_filter.addWidget(bulk_clear_sel_btn, 1, 4)
-        bulk_emp_list = QListWidget()
-        bulk_emp_list.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
-        bulk_emp_list.setMinimumHeight(220)
-        bulk_filter.addWidget(bulk_emp_list, 2, 0, 1, 5)
-        bulk_layout.addWidget(bulk_filter_box, 1)
-
-        bulk_preview = QLabel("Selected employees: 0")
-        bulk_preview.setStyleSheet("font-weight: bold; padding: 4px;")
-        bulk_layout.addWidget(bulk_preview)
-        bulk_btns = QHBoxLayout()
-        bulk_preview_btn = QPushButton("Preview Selection")
-        bulk_save_btn = QPushButton("Confirm & Save Bulk Training")
-        bulk_save_btn.setMinimumHeight(36)
-        bulk_refresh_btn = QPushButton("Refresh Lists")
-        for b in (bulk_preview_btn, bulk_save_btn, bulk_refresh_btn):
-            bulk_btns.addWidget(b)
-        bulk_btns.addStretch(1)
-        bulk_layout.addLayout(bulk_btns)
-        # Bulk Training Entry tab removed — use Employee Details bulk paste + Register cells instead
-        # tabs.addTab(bulk_page, "6. Bulk Training Entry")
-
-        selected_course_id = {"value": None}
-
-        def checked_trades():
-            selected = []
-            all_item = trade_model.item(0)
-            if all_item and all_item.checkState() == Qt.CheckState.Checked:
-                return []
-            for idx in range(1, trade_model.rowCount()):
-                item = trade_model.item(idx)
-                if item and item.checkState() == Qt.CheckState.Checked:
-                    value = item.text().strip()
-                    if value == "Other":
-                        other_value = trade_other_input.text().strip()
-                        if other_value:
-                            selected.append(other_value)
-                    else:
-                        selected.append(value)
-            return list(dict.fromkeys(selected))
-
-        def update_trade_summary(*args):
-            all_item = trade_model.item(0)
-            selected = checked_trades()
-            if all_item and all_item.checkState() == Qt.CheckState.Checked:
-                summary = "All Trades"
-            else:
-                labels = []
-                for idx in range(1, trade_model.rowCount()):
-                    item = trade_model.item(idx)
-                    if item and item.checkState() == Qt.CheckState.Checked:
-                        labels.append(item.text())
-                summary = ", ".join(labels) if labels else "Select trade(s)…"
-            trade_combo.lineEdit().setText(summary)
-            show_other = any(trade_model.item(i).text() == "Other" and trade_model.item(i).checkState() == Qt.CheckState.Checked for i in range(1, trade_model.rowCount()))
-            trade_other_label.setVisible(show_other)
-            trade_other_input.setVisible(show_other)
-
-        def toggle_trade_item(index):
-            if not index.isValid():
-                return
-            item = trade_model.itemFromIndex(index)
-            if not item:
-                return
-            new_state = Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked
-            if item.row() == 0 and new_state == Qt.CheckState.Checked:
-                for idx in range(1, trade_model.rowCount()):
-                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
-            elif item.row() > 0 and new_state == Qt.CheckState.Checked:
-                trade_model.item(0).setCheckState(Qt.CheckState.Unchecked)
-            item.setCheckState(new_state)
-            update_trade_summary()
-
-        trade_combo.view().pressed.connect(toggle_trade_item)
-        trade_other_input.textChanged.connect(update_trade_summary)
-
-        def update_course_other_visibility(*args):
-            show_other = course_name.currentText().strip() == "Other"
-            course_other_label.setVisible(show_other)
-            course_other_input.setVisible(show_other)
-        course_name.currentTextChanged.connect(update_course_other_visibility)
-
-        def selected_course_name():
-            return course_other_input.text().strip() if course_name.currentText().strip() == "Other" else course_name.currentText().strip()
-
-        def set_trade_selection(saved_trade):
-            saved = [x.strip().lower() for x in safe(saved_trade).split(",") if x.strip()]
-            if not saved:
-                trade_model.item(0).setCheckState(Qt.CheckState.Checked)
-                for idx in range(1, trade_model.rowCount()):
-                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
-                trade_other_input.clear()
-            else:
-                trade_model.item(0).setCheckState(Qt.CheckState.Unchecked)
-                known = {trade_model.item(i).text().lower(): i for i in range(1, trade_model.rowCount())}
-                other_saved = []
-                for idx in range(1, trade_model.rowCount()):
-                    trade_model.item(idx).setCheckState(Qt.CheckState.Unchecked)
-                for trade in saved:
-                    if trade in known and trade != "other":
-                        trade_model.item(known[trade]).setCheckState(Qt.CheckState.Checked)
-                    elif trade == "other":
-                        trade_model.item(known[trade]).setCheckState(Qt.CheckState.Checked)
-                    elif trade not in known:
-                        # Backward compatibility for custom trade values already saved in older matrix records.
-                        trade_other_input.setText(trade)
-                        trade_model.item(known["other"]).setCheckState(Qt.CheckState.Checked)
-                if "other" not in saved and not any(x not in known for x in saved):
-                    trade_other_input.clear()
-            update_trade_summary()
-
-        def reset_course_form():
-            selected_course_id["value"] = None
-            course_table.clearSelection()
-            course_name.setCurrentIndex(-1)
-            course_other_input.clear()
-            update_course_other_visibility()
-            set_trade_selection("")
-            trade_other_input.clear()
-            department.setCurrentIndex(0)
-            mandatory.setCurrentIndex(0)
-            training_type.setCurrentIndex(0)
-            validity.setValue(0)
-            source.setCurrentText("Company procedure / policy")
-            certificate_required.setChecked(False)
-            active.setChecked(True)
-            save_course_btn.setText("Save Course")
-
-        # ---- Matrix Grid helpers (Designation rows × Training columns) ----
-        MATRIX_REQ_OPTIONS = ["Not Applicable", "Mandatory", "Optional", "Before Job"]
-        MATRIX_REQ_SHORT = {
-            "Not Applicable": "—",
-            "Mandatory": "M",
-            "Optional": "O",
-            "Before Job": "B",
-        }
-        MATRIX_REQ_COLORS = {
-            "Not Applicable": ("#777777", None),
-            "Mandatory": ("#FFFFFF", "#B42318"),
-            "Optional": ("#176B3A", "#DDF5E5"),
-            "Before Job": ("#9A6700", "#FFF2CC"),
-        }
-        # Fixed designation track: Chairman → Helper (rows of the matrix)
+        # ---------- Shared catalogues ----------
         MATRIX_DESIGNATIONS = [
-            "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
-            "Project Director", "Project Manager", "Construction Manager", "Site Manager",
-            "Operations Manager", "HSE Manager", "QA/QC Manager", "Department Manager",
+            "Managing Director / MD", "CEO", "General Manager", "Project Director", "Project Manager",
+            "Construction Manager", "Site Manager", "Operations Manager", "HSE Manager", "QA/QC Manager",
             "Superintendent", "Supervisor", "Foreman", "Chargehand", "Team Leader",
-            "HSE Officer", "HSE Supervisor", "HSE Advisor", "HSE Coordinator", "Safety Representative",
-            "Engineer", "Civil Engineer", "Mechanical Engineer", "Electrical Engineer", "Instrument Engineer",
-            "Process Engineer", "Planning Engineer", "QA/QC Engineer", "Welding Engineer",
-            "Technician", "Mechanical Technician", "Electrical Technician", "Instrument Technician",
-            "HVAC Technician", "NDE Technician", "Laboratory Technician",
+            "HSE Officer", "HSE Supervisor", "HSE Advisor", "Safety Representative",
+            "Site Engineer", "Civil Engineer", "Mechanical Engineer", "Electrical Engineer", "Instrument Engineer",
+            "Process Engineer", "QA/QC Engineer", "Welding Engineer", "Planning Engineer",
+            "Mechanical Technician", "Electrical Technician", "Instrument Technician", "NDE Technician",
             "Welder", "Pipe Fitter", "Fabricator", "Plater", "Grinder", "Painter / Blaster",
-            "Rigger", "Banksman / Signaler", "Lifting Supervisor", "Crane Operator", "Forklift Operator",
-            "MEWP / Manlift Operator", "Heavy Equipment Operator", "Excavator Operator",
+            "Rigger", "Banksman / Signaler", "Lifting Supervisor", "Crane Operator",
+            "Forklift Operator", "MEWP / Manlift Operator", "Heavy Equipment Operator", "Excavator Operator",
             "Scaffolder", "Scaffold Inspector", "Carpenter", "Mason / Bricklayer", "Steel Fixer",
             "Electrician", "Cable Jointer", "Lineman", "Insulator", "Millwright",
-            "Driver", "Heavy Vehicle Driver", "Light Vehicle Driver", "Bus Driver",
-            "Storekeeper", "Warehouse Supervisor", "Logistics Coordinator", "Material Controller",
-            "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
-            "Security Guard", "Camp Boss / Facilities", "Cook / Catering", "Cleaner",
-            "Helper", "General Worker", "Labourer", "Other"
+            "Driver", "Heavy Vehicle Driver", "Light Vehicle Driver",
+            "Storekeeper", "Warehouse Supervisor", "Admin / Office Staff", "Document Controller",
+            "Security Guard", "Helper", "General Worker", "Labourer", "General Helper", "Visitor", "Other"
         ]
-        # Industry-typical validity (months) for oil & gas and construction HSE training.
-        # Sources: OPITO (H2S 24m, BOSIET/IMIST 48m), Energy Safety Canada H2S Alive (36m common),
-        # common operator practice for PTW/WAH/CSE/Scaffold (12–36m). Adjust in matrix if site rule differs.
-        DEFAULT_GRID_COURSES = [
+        READY_COURSES = [
             ("HSE / Company Induction", 12),
             ("Site / Project HSE Induction", 12),
+            ("Visitor Induction", 12),
+            ("OSHA 10 Construction (or equivalent)", 60),
+            ("OSHA 30 Construction (or equivalent)", 60),
+            ("IOSH Working Safely", 36),
+            ("IOSH Managing Safely", 36),
             ("Permit to Work (PTW)", 24),
             ("Work at Height / Fall Protection", 24),
             ("Scaffolding Safety (User)", 24),
@@ -7816,9 +7101,10 @@ class MainWindow(QMainWindow):
             ("Confined Space Entry", 24),
             ("Hot Work Safety", 24),
             ("H2S Awareness", 24),
-            ("Basic Fire Fighting / Fire Watch", 24),
             ("Fire Safety Awareness", 12),
+            ("Basic Fire Fighting / Fire Watch", 24),
             ("First Aid / CPR", 36),
+            ("Heat Stress Awareness", 12),
             ("Manual Handling", 24),
             ("Hand and Power Tools Safety", 24),
             ("PPE Awareness", 12),
@@ -7841,209 +7127,73 @@ class MainWindow(QMainWindow):
             ("Supervisor HSE Leadership", 36),
             ("HSE for Managers", 36),
             ("Internal HSE Auditor", 36),
-            ("BOSIET / Offshore Survival (if applicable)", 48),
-            ("IMIST / MIST (if applicable)", 48),
         ]
-
-        # Suggested requirement seed: designation keyword -> list of (course_name, requirement)
-        # M = Mandatory, B = Before Job (job-specific), O = Optional. Unlisted = Not Applicable.
-        DEFAULT_MATRIX_SEED = {
-            "_ALL_FIELD_": [  # applied to most site trades
-                ("HSE / Company Induction", "Mandatory"),
-                ("Site / Project HSE Induction", "Mandatory"),
-                ("PPE Awareness", "Mandatory"),
-                ("Fire Safety Awareness", "Mandatory"),
-                ("Emergency Response and Evacuation", "Mandatory"),
-                ("Manual Handling", "Mandatory"),
-                ("Hand and Power Tools Safety", "Mandatory"),
-                ("Hazard Identification and Risk Assessment", "Mandatory"),
-                ("Job Safety Analysis (JSA / JHA)", "Mandatory"),
-                ("Incident Reporting and Investigation", "Mandatory"),
-            ],
-            "Scaffolder": [
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Scaffolding Safety (User)", "Mandatory"),
-                ("Scaffold Erector / Inspector", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Basic Fire Fighting / Fire Watch", "Before Job"),
-                ("First Aid / CPR", "Optional"),
-            ],
-            "Scaffold Inspector": [
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Scaffolding Safety (User)", "Mandatory"),
-                ("Scaffold Erector / Inspector", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Welder": [
-                ("Hot Work Safety", "Mandatory"),
-                ("Welding & Cutting Safety", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Confined Space Entry", "Before Job"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("Basic Fire Fighting / Fire Watch", "Mandatory"),
-            ],
-            "Pipe Fitter": [
-                ("Hot Work Safety", "Before Job"),
-                ("Confined Space Entry", "Before Job"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("Lifting Operations Safety", "Before Job"),
-            ],
-            "Rigger": [
-                ("Lifting Operations Safety", "Mandatory"),
-                ("Rigging and Slinging", "Mandatory"),
-                ("Banksman / Signaler", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Banksman / Signaler": [
-                ("Lifting Operations Safety", "Mandatory"),
-                ("Banksman / Signaler", "Mandatory"),
-                ("Rigging and Slinging", "Before Job"),
-                ("Permit to Work (PTW)", "Mandatory"),
-            ],
-            "Crane Operator": [
-                ("Lifting Operations Safety", "Mandatory"),
-                ("Banksman / Signaler", "Before Job"),
-                ("Rigging and Slinging", "Before Job"),
-                ("Permit to Work (PTW)", "Mandatory"),
-            ],
-            "Electrician": [
-                ("Electrical Safety", "Mandatory"),
-                ("Lockout / Tagout (LOTO)", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Confined Space Entry", "Before Job"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Painter / Blaster": [
-                ("Abrasive Blasting / Painting Safety", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Confined Space Entry", "Before Job"),
-                ("Chemical / HAZCOM / SDS", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Excavator Operator": [
-                ("Excavation & Trenching Safety", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Lifting Operations Safety", "Before Job"),
-            ],
-            "Heavy Equipment Operator": [
-                ("Excavation & Trenching Safety", "Before Job"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Defensive Driving", "Before Job"),
-            ],
-            "Driver": [
-                ("Defensive Driving", "Mandatory"),
-                ("Permit to Work (PTW)", "Optional"),
-            ],
-            "Heavy Vehicle Driver": [
-                ("Defensive Driving", "Mandatory"),
-            ],
-            "Light Vehicle Driver": [
-                ("Defensive Driving", "Mandatory"),
-            ],
-            "HSE Officer": [
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Confined Space Entry", "Mandatory"),
-                ("First Aid / CPR", "Mandatory"),
-                ("Incident Reporting and Investigation", "Mandatory"),
-                ("Supervisor HSE Leadership", "Mandatory"),
-                ("Internal HSE Auditor", "Optional"),
-            ],
-            "HSE Supervisor": [
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("Confined Space Entry", "Mandatory"),
-                ("First Aid / CPR", "Mandatory"),
-                ("Supervisor HSE Leadership", "Mandatory"),
-                ("Internal HSE Auditor", "Optional"),
-            ],
-            "HSE Manager": [
-                ("HSE for Managers", "Mandatory"),
-                ("Internal HSE Auditor", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Incident Reporting and Investigation", "Mandatory"),
-            ],
-            "Supervisor": [
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Supervisor HSE Leadership", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-                ("First Aid / CPR", "Optional"),
-            ],
-            "Foreman": [
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Supervisor HSE Leadership", "Mandatory"),
-                ("Work at Height / Fall Protection", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Site Manager": [
-                ("HSE for Managers", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("Supervisor HSE Leadership", "Mandatory"),
-            ],
-            "Project Manager": [
-                ("HSE for Managers", "Mandatory"),
-                ("Permit to Work (PTW)", "Optional"),
-            ],
-            "Helper": [
-                ("Work at Height / Fall Protection", "Before Job"),
-                ("H2S Awareness", "Mandatory"),
-                ("Permit to Work (PTW)", "Before Job"),
-            ],
-            "General Worker": [
-                ("Work at Height / Fall Protection", "Before Job"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Labourer": [
-                ("Work at Height / Fall Protection", "Before Job"),
-                ("H2S Awareness", "Mandatory"),
-            ],
-            "Admin / Office Staff": [
-                ("Fire Safety Awareness", "Mandatory"),
-                ("Emergency Response and Evacuation", "Mandatory"),
-                ("HSE / Company Induction", "Mandatory"),
-            ],
-            "NDE Technician": [
-                ("Radiography / NDT Safety", "Mandatory"),
-                ("Permit to Work (PTW)", "Mandatory"),
-                ("H2S Awareness", "Mandatory"),
-            ],
+        FIELD_BASE = [
+            ("HSE / Company Induction", "Mandatory"),
+            ("Site / Project HSE Induction", "Mandatory"),
+            ("PPE Awareness", "Mandatory"),
+            ("Fire Safety Awareness", "Mandatory"),
+            ("Emergency Response and Evacuation", "Mandatory"),
+            ("Manual Handling", "Mandatory"),
+            ("Hand and Power Tools Safety", "Mandatory"),
+            ("Hazard Identification and Risk Assessment", "Mandatory"),
+            ("Job Safety Analysis (JSA / JHA)", "Mandatory"),
+            ("Heat Stress Awareness", "Mandatory"),
+            ("Incident Reporting and Investigation", "Mandatory"),
+        ]
+        TRADE_SEED = {
+            "Scaffolder": [("Work at Height / Fall Protection", "Mandatory"), ("Scaffolding Safety (User)", "Mandatory"), ("Scaffold Erector / Inspector", "Mandatory"), ("H2S Awareness", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Scaffold Inspector": [("Work at Height / Fall Protection", "Mandatory"), ("Scaffolding Safety (User)", "Mandatory"), ("Scaffold Erector / Inspector", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Welder": [("Hot Work Safety", "Mandatory"), ("Welding & Cutting Safety", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Before Job"), ("Permit to Work (PTW)", "Mandatory"), ("Basic Fire Fighting / Fire Watch", "Mandatory")],
+            "Pipe Fitter": [("Hot Work Safety", "Before Job"), ("Confined Space Entry", "Before Job"), ("Work at Height / Fall Protection", "Mandatory"), ("Permit to Work (PTW)", "Mandatory"), ("Lifting Operations Safety", "Before Job")],
+            "Rigger": [("Lifting Operations Safety", "Mandatory"), ("Rigging and Slinging", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Banksman / Signaler": [("Lifting Operations Safety", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Rigging and Slinging", "Before Job")],
+            "Lifting Supervisor": [("Lifting Operations Safety", "Mandatory"), ("Rigging and Slinging", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory")],
+            "Crane Operator": [("Lifting Operations Safety", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Electrician": [("Electrical Safety", "Mandatory"), ("Lockout / Tagout (LOTO)", "Mandatory"), ("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Before Job")],
+            "Heavy Equipment Operator": [("Excavation & Trenching Safety", "Before Job"), ("Permit to Work (PTW)", "Mandatory"), ("Defensive Driving", "Before Job")],
+            "Excavator Operator": [("Excavation & Trenching Safety", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Painter / Blaster": [("Abrasive Blasting / Painting Safety", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Chemical / HAZCOM / SDS", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "HSE Officer": [("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Mandatory"), ("First Aid / CPR", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"), ("IOSH Managing Safely", "Optional")],
+            "HSE Supervisor": [("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Mandatory"), ("First Aid / CPR", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory")],
+            "HSE Manager": [("HSE for Managers", "Mandatory"), ("IOSH Managing Safely", "Mandatory"), ("Internal HSE Auditor", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
+            "Supervisor": [("Permit to Work (PTW)", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory")],
+            "Foreman": [("Permit to Work (PTW)", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory")],
+            "Site Manager": [("HSE for Managers", "Mandatory"), ("IOSH Managing Safely", "Optional"), ("Permit to Work (PTW)", "Mandatory")],
+            "Project Manager": [("HSE for Managers", "Mandatory"), ("IOSH Managing Safely", "Optional")],
+            "Site Engineer": [("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Job Safety Analysis (JSA / JHA)", "Mandatory")],
+            "Helper": [("Work at Height / Fall Protection", "Before Job"), ("Permit to Work (PTW)", "Before Job")],
+            "General Helper": [("Work at Height / Fall Protection", "Before Job"), ("Permit to Work (PTW)", "Before Job")],
+            "General Worker": [("Work at Height / Fall Protection", "Before Job")],
+            "Labourer": [("Work at Height / Fall Protection", "Before Job")],
+            "Visitor": [("Visitor Induction", "Mandatory"), ("PPE Awareness", "Mandatory"), ("Emergency Response and Evacuation", "Mandatory")],
+            "Admin / Office Staff": [("HSE / Company Induction", "Mandatory"), ("Fire Safety Awareness", "Mandatory"), ("Emergency Response and Evacuation", "Mandatory")],
         }
-        # In-memory grid state: course_name -> validity_months; cells (course, designation) -> requirement
+        MATRIX_REQ_OPTIONS = ["Not Applicable", "Mandatory", "Optional", "Before Job"]
+        MATRIX_REQ_SHORT = {"Not Applicable": "—", "Mandatory": "M", "Optional": "O", "Before Job": "B"}
+        MATRIX_REQ_COLORS = {
+            "Not Applicable": ("#777777", None),
+            "Mandatory": ("#FFFFFF", "#B42318"),
+            "Optional": ("#176B3A", "#DDF5E5"),
+            "Before Job": ("#9A6700", "#FFF2CC"),
+        }
         grid_state = {"courses": [], "validity": {}, "cells": {}, "dirty": False}
 
-        def _matrix_req_display(req):
+        def _style_req(item, req):
             req = safe(req) or "Not Applicable"
             if req not in MATRIX_REQ_OPTIONS:
                 req = "Not Applicable"
-            return MATRIX_REQ_SHORT.get(req, "—"), req
-
-        def _style_matrix_cell(item, req):
-            short, full = _matrix_req_display(req)
-            item.setText(short)
-            item.setData(Qt.ItemDataRole.UserRole, full)
+            item.setText(MATRIX_REQ_SHORT.get(req, "—"))
+            item.setData(Qt.ItemDataRole.UserRole, req)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item.setToolTip(f"{full}\nDouble-click to change")
-            fg, bg = MATRIX_REQ_COLORS.get(full, ("#000000", None))
+            item.setToolTip(req + " — double-click to change")
+            fg, bg = MATRIX_REQ_COLORS.get(req, ("#000000", None))
             item.setForeground(QBrush(QColor(fg)))
             if bg:
                 item.setBackground(QBrush(QColor(bg)))
-            font = item.font()
-            font.setBold(full != "Not Applicable")
-            item.setFont(font)
+            f = item.font(); f.setBold(req != "Not Applicable"); item.setFont(f)
 
-        def load_grid_state_from_db():
+        def load_grid_state():
             grid_state["courses"] = []
             grid_state["validity"] = {}
             grid_state["cells"] = {}
@@ -8054,2234 +7204,810 @@ class MainWindow(QMainWindow):
             for row in rows:
                 cname = safe(row["course_name"]).strip()
                 desig = safe(row["designation"]).strip()
-                req = safe(row["requirement"]).strip() or "Not Applicable"
-                months = int(row["validity_months"] or 0)
-                if cname and cname not in grid_state["courses"]:
+                if not cname:
+                    continue
+                if cname not in grid_state["courses"]:
                     grid_state["courses"].append(cname)
-                if cname:
-                    grid_state["validity"][cname] = months
-                if cname and desig:
-                    grid_state["cells"][(cname, desig)] = req
-            # Also pick up courses already in training_courses that may not be in cells yet
-            for crow in db.fetchall("SELECT DISTINCT course_name, validity_months FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"):
-                cname = safe(crow["course_name"]).strip()
-                if cname and cname not in grid_state["courses"]:
-                    grid_state["courses"].append(cname)
-                    grid_state["validity"][cname] = int(crow["validity_months"] or 0)
-            # First-time use: install ready-to-use construction / oil & gas matrix automatically
+                if int(row["validity_months"] or 0):
+                    grid_state["validity"][cname] = int(row["validity_months"] or 0)
+                if desig:
+                    grid_state["cells"][(cname, desig)] = safe(row["requirement"]) or "Not Applicable"
+            for cname, months in READY_COURSES:
+                grid_state["validity"].setdefault(cname, months)
             if not grid_state["courses"]:
-                for cname, months in DEFAULT_GRID_COURSES:
-                    if cname not in grid_state["courses"]:
-                        grid_state["courses"].append(cname)
-                    grid_state["validity"][cname] = months
-                for desig in MATRIX_DESIGNATIONS:
-                    apply_all = desig not in (
-                        "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
-                        "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
-                        "Cook / Catering", "Cleaner"
-                    )
-                    seeds = []
-                    if apply_all:
-                        seeds.extend(DEFAULT_MATRIX_SEED.get("_ALL_FIELD_", []))
-                    seeds.extend(DEFAULT_MATRIX_SEED.get(desig, []))
-                    for key, items in DEFAULT_MATRIX_SEED.items():
-                        if key.startswith("_"):
-                            continue
-                        if key != desig and key.lower() in desig.lower():
-                            seeds.extend(items)
-                    for cname, req in seeds:
-                        if cname not in grid_state["courses"]:
-                            continue
-                        k = (cname, desig)
-                        if grid_state["cells"].get(k, "Not Applicable") in ("", "Not Applicable"):
-                            grid_state["cells"][k] = req
-                grid_state["dirty"] = True
-            else:
-                grid_state["dirty"] = False
+                seed_ready_matrix(force=True)
+            grid_state["dirty"] = False
 
-        def render_matrix_grid():
-            # Professional layout: Training Name | Validity | then each trade/position column
-            designations = list(MATRIX_DESIGNATIONS)
-            extra = []
-            for (_, desig) in grid_state["cells"].keys():
-                if desig and desig not in designations and desig not in extra and desig != "_GRID_META_":
-                    extra.append(desig)
-            for t in distinct_values("designation"):
-                if t and t not in designations and t not in extra:
-                    extra.append(t)
-            designations = designations + sorted(extra, key=lambda x: x.lower())
-            courses = list(grid_state["courses"])
-            matrix_grid.clear()
-            matrix_grid.setRowCount(len(courses))
-            matrix_grid.setColumnCount(2 + len(designations))
-            headers = ["Training Name", "Validity (months)"] + designations
-            matrix_grid.setHorizontalHeaderLabels(headers)
-            matrix_grid.verticalHeader().setVisible(False)
-            matrix_grid.horizontalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-            matrix_grid.setShowGrid(True)
-            matrix_grid.setAlternatingRowColors(True)
-            for r, cname in enumerate(courses):
-                name_item = QTableWidgetItem(cname)
-                name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                name_item.setBackground(QBrush(QColor("#EEF4FB")))
-                name_item.setForeground(QBrush(QColor("#17365D")))
-                font = name_item.font(); font.setBold(True); name_item.setFont(font)
-                name_item.setToolTip(cname)
-                matrix_grid.setItem(r, 0, name_item)
-                months = int(grid_state["validity"].get(cname, 0) or 0)
-                val_item = QTableWidgetItem(str(months) if months > 0 else "0")
-                val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                val_item.setFlags(val_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                val_item.setBackground(QBrush(QColor("#F7FAFC")))
-                val_item.setForeground(QBrush(QColor("#17365D")))
-                val_item.setToolTip("Course validity in months. Use the Validity control above to change, then Add / Update Course.")
-                matrix_grid.setItem(r, 1, val_item)
-                for c, desig in enumerate(designations):
-                    req = grid_state["cells"].get((cname, desig), "Not Applicable")
-                    item = QTableWidgetItem()
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-                    _style_matrix_cell(item, req)
-                    matrix_grid.setItem(r, c + 2, item)
-            matrix_grid.setColumnWidth(0, 240)
-            matrix_grid.setColumnWidth(1, 120)
-            for col in range(2, matrix_grid.columnCount()):
-                matrix_grid.setColumnWidth(col, 92)
-            matrix_grid.verticalHeader().setDefaultSectionSize(30)
-            n_m = sum(1 for v in grid_state["cells"].values() if v == "Mandatory")
-            n_o = sum(1 for v in grid_state["cells"].values() if v == "Optional")
-            n_b = sum(1 for v in grid_state["cells"].values() if v == "Before Job")
-            grid_status.setText(
-                f"Trainings: {len(courses)}  |  Trades: {len(designations)}  |  "
-                f"M: {n_m}  |  O: {n_o}  |  B: {n_b}"
-                + ("  |  Unsaved changes" if grid_state["dirty"] else "")
-            )
-
-        def refresh_matrix_grid():
-            load_grid_state_from_db()
-            # Fill course picker
-            grid_course_pick.blockSignals(True)
-            current = grid_course_pick.currentText().strip()
-            grid_course_pick.clear()
-            for name in standard_training_courses:
-                if name != "Other":
-                    grid_course_pick.addItem(name)
-            for name in grid_state["courses"]:
-                if name and name not in [grid_course_pick.itemText(i) for i in range(grid_course_pick.count())]:
-                    grid_course_pick.addItem(name)
-            if current:
-                ix = grid_course_pick.findText(current)
-                if ix >= 0:
-                    grid_course_pick.setCurrentIndex(ix)
-                else:
-                    grid_course_pick.setEditText(current)
-            grid_course_pick.blockSignals(False)
-            render_matrix_grid()
-
-        def matrix_cell_double_clicked(row, column):
-            # column 0 = Training Name, column 1 = Validity; columns 2+ = trades
-            if column <= 1:
-                return QMessageBox.information(
-                    self, "Matrix Grid",
-                    "Training name and validity are set with the controls above (Add / Update Course).\n"
-                    "Double-click a trade cell (M / O / B / —) to change the requirement."
-                )
-            item = matrix_grid.item(row, column)
-            if not item:
-                return
-            if row < 0 or row >= len(grid_state["courses"]):
-                return
-            cname = grid_state["courses"][row]
-            header = matrix_grid.horizontalHeaderItem(column)
-            desig = header.text() if header else ""
-            if not desig or desig in ("Training Name", "Validity (months)"):
-                return
-            current = item.data(Qt.ItemDataRole.UserRole) or "Not Applicable"
-            choice, ok = QInputDialog.getItem(
-                self, "Set requirement",
-                f"Training: {cname}\nPosition: {desig}\n\nSelect requirement:",
-                MATRIX_REQ_OPTIONS,
-                max(0, MATRIX_REQ_OPTIONS.index(current) if current in MATRIX_REQ_OPTIONS else 0),
-                False
-            )
-            if not ok:
-                return
-            grid_state["cells"][(cname, desig)] = choice
-            grid_state["dirty"] = True
-            _style_matrix_cell(item, choice)
-            grid_status.setText(grid_status.text().replace("  |  Unsaved changes", "") + "  |  Unsaved changes")
-
-        def add_or_update_grid_course():
-            cname = grid_course_pick.currentText().strip()
-            if not cname or cname.lower() in ("select training course…", "other"):
-                return QMessageBox.warning(self, "Matrix Grid", "Enter or select a training course name.")
-            months = int(grid_validity_spin.value())
-            if cname not in grid_state["courses"]:
-                grid_state["courses"].append(cname)
-            grid_state["validity"][cname] = months
-            # Persist validity for existing cells of this course
-            for desig in MATRIX_DESIGNATIONS:
-                key = (cname, desig)
-                if key not in grid_state["cells"]:
-                    grid_state["cells"][key] = "Not Applicable"
-            grid_state["dirty"] = True
-            render_matrix_grid()
-            QMessageBox.information(self, "Matrix Grid", f"Training row '{cname}' is on the grid (validity: {months or 'none'} months). Set cell requirements per position column, then Save Matrix Grid.")
-
-        def remove_selected_grid_course():
-            row = matrix_grid.currentRow()
-            if row < 0 or row >= len(grid_state["courses"]):
-                return QMessageBox.information(self, "Matrix Grid", "Select a training row first (click any cell in that row).")
-            cname = grid_state["courses"][row]
-            if QMessageBox.question(
-                self, "Remove Training Row",
-                f"Remove training '{cname}' from the matrix grid?\nSaved cell values for this course will be deleted when you Save.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            ) != QMessageBox.StandardButton.Yes:
-                return
-            grid_state["courses"].pop(row)
-            grid_state["validity"].pop(cname, None)
-            for key in list(grid_state["cells"].keys()):
-                if key[0] == cname:
-                    del grid_state["cells"][key]
-            grid_state["dirty"] = True
-            render_matrix_grid()
-
-        def seed_default_grid_courses():
-            if grid_state["courses"] and QMessageBox.question(
-                self, "Seed Default Courses",
-                "Add the standard default trainings as rows? Existing rows and cell values are kept.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes
-            ) != QMessageBox.StandardButton.Yes:
-                return
-            for cname, months in DEFAULT_GRID_COURSES:
+        def seed_ready_matrix(force=False):
+            for cname, months in READY_COURSES:
                 if cname not in grid_state["courses"]:
                     grid_state["courses"].append(cname)
                 grid_state["validity"][cname] = months
-            # Seed recommended Mandatory / Before Job / Optional by trade (does not overwrite existing non-N/A cells)
+            office = {"Managing Director / MD", "CEO", "General Manager", "Admin / Office Staff", "Document Controller", "Visitor"}
             for desig in MATRIX_DESIGNATIONS:
-                # base field requirements for most operational roles
-                apply_all = desig not in (
-                    "Chairman", "Board Member", "Managing Director / MD", "CEO", "General Manager",
-                    "Admin / Office Staff", "Document Controller", "HR / Admin", "IT Support",
-                    "Cook / Catering", "Cleaner"
-                )
                 seeds = []
-                if apply_all:
-                    seeds.extend(DEFAULT_MATRIX_SEED.get("_ALL_FIELD_", []))
-                # exact designation match
-                seeds.extend(DEFAULT_MATRIX_SEED.get(desig, []))
-                # keyword partial matches for close trade names
-                for key, items in DEFAULT_MATRIX_SEED.items():
-                    if key.startswith("_"):
-                        continue
+                if desig not in office:
+                    seeds.extend(FIELD_BASE)
+                seeds.extend(TRADE_SEED.get(desig, []))
+                for key, items in TRADE_SEED.items():
                     if key != desig and key.lower() in desig.lower():
                         seeds.extend(items)
                 for cname, req in seeds:
                     if cname not in grid_state["courses"]:
                         continue
                     k = (cname, desig)
-                    cur = grid_state["cells"].get(k, "Not Applicable")
-                    if cur in ("", "Not Applicable"):
+                    if force or grid_state["cells"].get(k, "Not Applicable") in ("", "Not Applicable"):
                         grid_state["cells"][k] = req
             grid_state["dirty"] = True
-            render_matrix_grid()
-            QMessageBox.information(
-                self, "Matrix Grid",
-                "Default oil & gas / construction courses added with typical validity periods.\n"
-                "Recommended Mandatory / Before Job / Optional values were seeded by trade "
-                "(existing non-empty cells were kept). Review the grid, adjust as needed, then Save Matrix Grid."
-            )
 
-        def sync_grid_to_training_courses():
-            """Push Mandatory / Optional / Before Job cells into training_courses so register % stays correct."""
-            # Group by course_name
-            by_course = {}
-            for (cname, desig), req in grid_state["cells"].items():
-                if req in ("Not Applicable", ""):
-                    continue
-                by_course.setdefault(cname, {"Mandatory": [], "Optional": [], "Before Job": []})
-                if req in by_course[cname]:
-                    by_course[cname][req].append(desig)
-            for cname, groups in by_course.items():
-                months = int(grid_state["validity"].get(cname, 0) or 0)
-                # Mandatory row
-                mand_trades = groups.get("Mandatory", []) + groups.get("Before Job", [])
-                opt_trades = groups.get("Optional", [])
-                # Upsert mandatory course entry (trades combined)
-                def upsert(trades, mandatory_flag, source_label):
-                    if not trades:
-                        return
-                    trade_csv = ", ".join(trades)
-                    existing = db.fetchone(
-                        "SELECT id FROM training_courses WHERE lower(course_name)=lower(?) AND active=1 "
-                        "AND COALESCE(mandatory,0)=? LIMIT 1",
-                        (cname, mandatory_flag)
-                    )
-                    if existing:
-                        db.execute(
-                            "UPDATE training_courses SET designation=?, validity_months=?, requirement_source=? WHERE id=?",
-                            (trade_csv, months, source_label, existing["id"])
-                        )
-                    else:
-                        db.execute(
-                            """INSERT INTO training_courses
-                               (course_name, designation, department, mandatory, provider_type, validity_months,
-                                requirement_source, certificate_required, active)
-                               VALUES (?,?,?,?,?,?,?,?,1)""",
-                            (cname, trade_csv, "", mandatory_flag, "Internal", months, source_label, 0)
-                        )
-                upsert(mand_trades, 1, "Training matrix (Mandatory / Before Job)")
-                upsert(opt_trades, 0, "Training matrix (Optional)")
-
-        def save_matrix_grid():
-            # Replace all cells for courses currently on the grid
-            course_set = set(grid_state["courses"])
-            # Delete existing rows for these courses, then re-insert
-            for cname in course_set:
-                db.execute("DELETE FROM training_matrix_cells WHERE course_name=?", (cname,))
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        def save_grid_state():
+            db.execute("DELETE FROM training_matrix_cells")
             for cname in grid_state["courses"]:
                 months = int(grid_state["validity"].get(cname, 0) or 0)
-                # Always store at least one row per course so validity is retained
-                any_cell = False
                 for desig in MATRIX_DESIGNATIONS:
                     req = grid_state["cells"].get((cname, desig), "Not Applicable")
-                    if req == "Not Applicable":
-                        continue
-                    any_cell = True
                     db.execute(
-                        """INSERT INTO training_matrix_cells
-                           (course_name, designation, requirement, validity_months, updated_at)
-                           VALUES (?,?,?,?,?)
-                           ON CONFLICT(course_name, designation) DO UPDATE SET
-                             requirement=excluded.requirement,
-                             validity_months=excluded.validity_months,
-                             updated_at=excluded.updated_at""",
-                        (cname, desig, req, months, now)
+                        "INSERT INTO training_matrix_cells (course_name, designation, requirement, validity_months, notes, updated_at) VALUES (?,?,?,?,?,?)",
+                        (cname, desig, req, months, "", today())
                     )
-                if not any_cell:
-                    # placeholder so course remains listed
+                mand = [d for d in MATRIX_DESIGNATIONS if grid_state["cells"].get((cname, d)) in ("Mandatory", "Before Job")]
+                opt = [d for d in MATRIX_DESIGNATIONS if grid_state["cells"].get((cname, d)) == "Optional"]
+                trade_csv = ", ".join(mand + opt)
+                existing = db.fetchone("SELECT id FROM training_courses WHERE lower(course_name)=lower(?) AND active=1 LIMIT 1", (cname,))
+                if existing:
                     db.execute(
-                        """INSERT INTO training_matrix_cells
-                           (course_name, designation, requirement, validity_months, updated_at)
-                           VALUES (?,?,?,?,?)
-                           ON CONFLICT(course_name, designation) DO UPDATE SET
-                             validity_months=excluded.validity_months,
-                             updated_at=excluded.updated_at""",
-                        (cname, "_GRID_META_", "Not Applicable", months, now)
+                        "UPDATE training_courses SET designation=?, validity_months=?, mandatory=?, requirement_source=? WHERE id=?",
+                        (trade_csv, months, 1 if mand else 0, "Matrix Grid", existing["id"])
                     )
-            sync_grid_to_training_courses()
-            grid_state["dirty"] = False
-            load_courses()
-            refresh_matrix_grid()
-            QMessageBox.information(
-                self, "Matrix Grid Saved",
-                "Training matrix grid saved.\n"
-                "Mandatory / Before Job designations feed the Training Register mandatory % calculation."
-            )
-
-        def export_matrix_grid_excel():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Training Matrix Grid", "Training_Matrix_Grid.xlsx", "Excel Workbook (*.xlsx)")
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            try:
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Training Matrix Grid"
-                courses = list(grid_state["courses"])
-                designations = list(MATRIX_DESIGNATIONS)
-                extra = []
-                for (_, desig) in grid_state["cells"].keys():
-                    if desig and desig not in designations and desig not in extra and desig != "_GRID_META_":
-                        extra.append(desig)
-                designations = designations + sorted(extra, key=lambda x: x.lower())
-                headers = ["Training Course", "Validity (months)"] + designations
-                style_excel(ws, "HSE TRAINING MATRIX — ROWS: TRAINING · COLUMNS: POSITION", headers)
-                for cname in courses:
-                    months = int(grid_state["validity"].get(cname, 0) or 0)
-                    row_vals = [cname, months if months > 0 else "No expiry"]
-                    for desig in designations:
-                        row_vals.append(grid_state["cells"].get((cname, desig), "Not Applicable"))
-                    ws.append(row_vals)
-                for col in range(1, len(headers) + 1):
-                    ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 16 if col > 2 else 28
-                ws.freeze_panes = "C3"
-                wb.save(path)
-                QMessageBox.information(self, "Matrix Grid", f"Exported:\n{path}")
-            except Exception as exc:
-                logging.exception("Matrix grid export failed")
-                QMessageBox.critical(self, "Matrix Grid", f"Export failed:\n{exc}")
-
-        def load_courses():
-
-            rows = db.fetchall("SELECT * FROM training_courses ORDER BY active DESC, course_name COLLATE NOCASE")
-            course_table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                saved_trades = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()]
-                trade_display = "All Trades" if not saved_trades else "\n• " + "\n• ".join(saved_trades)
-                values = [
-                    row["id"], row["course_name"], trade_display,
-                    row["department"] or "All Departments", "Mandatory" if row["mandatory"] else "Recommended",
-                    row["provider_type"] or "Internal", row["validity_months"] or 0,
-                    row["requirement_source"] or "Company procedure / policy", "Active" if row["active"] else "Inactive"
-                ]
-                for c, value in enumerate(values):
-                    item = QTableWidgetItem(str(value))
-                    if c == 0:
-                        item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
-                    course_table.setItem(r, c, item)
-            course_table.resizeRowsToContents()
-            load_register()
-            load_master_record()
-
-        def select_course_row(row, column=0):
-            item = course_table.item(row, 0)
-            if not item:
-                return
-            course_id = item.data(Qt.ItemDataRole.UserRole)
-            rec = db.fetchone("SELECT * FROM training_courses WHERE id=?", (course_id,))
-            if not rec:
-                return
-            selected_course_id["value"] = int(course_id)
-            saved_course_name = safe(rec["course_name"]).strip()
-            idx = course_name.findText(saved_course_name, Qt.MatchFlag.MatchFixedString)
-            if idx >= 0:
-                course_name.setCurrentIndex(idx)
-                course_other_input.clear()
-            else:
-                other_idx = course_name.findText("Other", Qt.MatchFlag.MatchFixedString)
-                if other_idx < 0:
-                    course_name.addItem("Other")
-                    other_idx = course_name.findText("Other", Qt.MatchFlag.MatchFixedString)
-                course_name.setCurrentIndex(other_idx)
-                course_other_input.setText(saved_course_name)
-            update_course_other_visibility()
-            saved_trade = safe(rec["designation"]).strip()
-            set_trade_selection(saved_trade)
-            saved_dept = safe(rec["department"]).strip()
-            if department.findText(saved_dept) < 0 and saved_dept:
-                department.addItem(saved_dept, saved_dept)
-            department.setCurrentText(saved_dept if saved_dept else "All Departments")
-            mandatory.setCurrentIndex(0 if rec["mandatory"] else 1)
-            training_type.setCurrentText(safe(rec["provider_type"]) if safe(rec["provider_type"]) in ("Internal", "External") else "Internal")
-            validity.setValue(int(rec["validity_months"] or 0))
-            req_source = safe(rec["requirement_source"])
-            if source.findText(req_source) < 0 and req_source:
-                source.addItem(req_source)
-            source.setCurrentText(req_source or "Company procedure / policy")
-            certificate_required.setChecked(bool(rec["certificate_required"]))
-            active.setChecked(bool(rec["active"]))
-            save_course_btn.setText("Update Course")
-
-        def save_course():
-            name = selected_course_name()
-            if not name or (course_name.currentText().strip() == "Other" and not course_other_input.text().strip()):
-                QMessageBox.warning(self, "Training Matrix", "Select a training course. If Other is selected, enter the specific training name.")
-                course_name.setFocus()
-                return
-            trades_selected = checked_trades()
-            all_checked = bool(trade_model.item(0) and trade_model.item(0).checkState() == Qt.CheckState.Checked)
-            if not all_checked and not trades_selected:
-                QMessageBox.warning(self, "Training Matrix", "Select All Trades or at least one applicable trade.")
-                return
-            if any(trade_model.item(i).text() == "Other" and trade_model.item(i).checkState() == Qt.CheckState.Checked for i in range(1, trade_model.rowCount())) and not trade_other_input.text().strip():
-                QMessageBox.warning(self, "Training Matrix", "Enter the trade name in the Other trade box.")
-                trade_other_input.setFocus()
-                return
-            trades = "" if all_checked else ", ".join(dict.fromkeys(trades_selected))
-            dept_text = department.currentText().strip()
-            dept = "" if dept_text.lower() in ("all departments", "") else dept_text
-            values = (
-                name, trades, dept, 1 if mandatory.currentIndex() == 0 else 0,
-                training_type.currentText(), int(validity.value()), source.currentText(),
-                1 if certificate_required.isChecked() else 0, 1 if active.isChecked() else 0
-            )
-            existing = db.fetchone(
-                "SELECT id FROM training_courses WHERE lower(course_name)=lower(?) "
-                "AND COALESCE(designation,'')=? AND COALESCE(department,'')=? AND active=1 AND id<>COALESCE(?, -1)",
-                (name, trades, dept, selected_course_id["value"])
-            )
-            if existing:
-                QMessageBox.warning(self, "Training Matrix", "An active course with the same course name, trade(s) and department already exists.")
-                return
-            if selected_course_id["value"] is None:
-                db.execute(
-                    """INSERT INTO training_courses
-                    (course_name,designation,department,mandatory,provider_type,validity_months,requirement_source,certificate_required,active)
-                    VALUES (?,?,?,?,?,?,?,?,?)""", values
-                )
-            else:
-                db.execute(
-                    """UPDATE training_courses SET course_name=?,designation=?,department=?,mandatory=?,provider_type=?,
-                    validity_months=?,requirement_source=?,certificate_required=?,active=? WHERE id=?""",
-                    values + (selected_course_id["value"],)
-                )
-            reset_course_form()
-            load_courses()
-
-        def deactivate_course():
-            row = course_table.currentRow()
-            if row < 0:
-                QMessageBox.information(self, "Training Matrix", "Select a course first.")
-                return
-            course_id = course_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-            history = db.fetchone("SELECT COUNT(*) AS n FROM training_records WHERE course_id=?", (course_id,))
-            has_history = bool(history and int(history["n"] or 0) > 0)
-            message = ("Training records exist for this course. Delete is not destructive: the course will be marked inactive and historical records retained. Continue?"
-                       if has_history else "Delete this training course from the matrix?")
-            answer = QMessageBox.question(
-                self, "Delete Training Course", message,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                if has_history:
-                    db.execute("UPDATE training_courses SET active=0 WHERE id=?", (course_id,))
                 else:
-                    db.execute("DELETE FROM training_courses WHERE id=?", (course_id,))
-                reset_course_form()
-                load_courses()
+                    db.execute(
+                        "INSERT INTO training_courses (course_name, designation, department, mandatory, provider_type, validity_months, requirement_source, active) VALUES (?,?,?,?,?,?,?,1)",
+                        (cname, trade_csv, "", 1 if mand else 0, "Internal", months, "Matrix Grid")
+                    )
+            grid_state["dirty"] = False
 
-        def add_months(date_text, months):
-            try:
-                base = datetime.strptime(date_text, "%Y-%m-%d").date()
-                month_index = base.month - 1 + int(months)
-                year = base.year + month_index // 12
-                month = month_index % 12 + 1
-                import calendar
-                day = min(base.day, calendar.monthrange(year, month)[1])
-                return date(year, month, day).isoformat()
-            except Exception:
-                return ""
-
-        def latest_training(employee_db_id, course_id):
-            return db.fetchone(
-                "SELECT * FROM training_records WHERE employee_db_id=? AND course_id=? ORDER BY training_date DESC, id DESC LIMIT 1",
-                (employee_db_id, course_id)
-            )
-
-        def course_applies(course, employee):
-            raw_trades = safe(course["designation"]).strip()
-            emp_trade = safe(employee["designation"]).strip().lower()
-            allowed_trades = [t.strip().lower() for t in raw_trades.split(",") if t.strip()]
-            trade_match = not allowed_trades or emp_trade in allowed_trades or "all trades" in allowed_trades or "all designations" in allowed_trades
-            course_dept = safe(course["department"]).strip().lower()
-            emp_dept = safe(employee["department"]).strip().lower()
-            # Training applicability is by trade/designation only (department removed from Training UI).
-            return trade_match
-
-        def training_status(record, course=None):
-            if not record:
-                return "Training Required"
-            expiry = safe(record["expiry_date"]).strip()
-            if not expiry:
-                return "Completed"
-            try:
-                expiry_day = datetime.strptime(expiry, "%Y-%m-%d").date()
-                days_left = (expiry_day - date.today()).days
-                if days_left < 0:
-                    return "Expired"
-                if course and safe(course["provider_type"]).lower() == "external" and days_left <= 45:
-                    return "Due Soon"
-                if course and safe(course["provider_type"]).lower() == "internal" and days_left <= 30:
-                    return "Due Soon"
-                return "Valid"
-            except Exception:
-                return "Completed"
-
-        def set_status_style(item, status, course=None):
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item.setToolTip(item.toolTip() or status)
-            bg = None
-            fg = QColor("#333333")
-            if status in ("Expired", "Training Required"):
-                bg = QColor("#FDE2E2")
-                fg = QColor("#B42318")
-            elif status == "Due Soon":
-                bg = QColor("#FFF4CE")
-                fg = QColor("#9A6700")
-            elif status in ("Valid", "Completed"):
-                bg = QColor("#DDF5E5")
-                fg = QColor("#176B3A")
-            elif status == "N/A":
-                bg = QColor("#F0F2F5")
-                fg = QColor("#8A9199")
-            else:
-                bg = QColor("#FFF4CE")
-                fg = QColor("#9A6700")
-            item.setForeground(QBrush(fg))
-            if bg:
-                item.setBackground(QBrush(bg))
-            font = item.font()
-            font.setBold(status not in ("N/A",))
-            item.setFont(font)
-
-        def format_register_status_cell(status, record):
-            """Short, scannable cell: requirement marker, training date, expiry, days remaining."""
-            train = safe(record["training_date"]) if record else ""
-            expiry = safe(record["expiry_date"]) if record else ""
-            days_txt = ""
-            if expiry:
-                try:
-                    days = (date.fromisoformat(expiry) - date.today()).days
-                    if days < 0:
-                        days_txt = f"{abs(days)}d overdue"
-                    else:
-                        days_txt = f"{days}d left"
-                except Exception:
-                    days_txt = ""
-            if status == "N/A":
-                return "—"
-            if status == "Training Required":
-                return "M · Required" if True else "✗ Required"
-            if status == "Expired":
-                parts = ["✗ Expired"]
-                if train:
-                    parts.append("Trained: " + train)
-                if expiry:
-                    parts.append("Exp: " + expiry)
-                if days_txt:
-                    parts.append(days_txt)
-                return "\n".join(parts)
-            if status == "Due Soon":
-                parts = ["⚠ Due Soon"]
-                if train:
-                    parts.append("Trained: " + train)
-                if expiry:
-                    parts.append("Exp: " + expiry)
-                if days_txt:
-                    parts.append(days_txt)
-                return "\n".join(parts)
-            if status in ("Valid", "Completed"):
-                parts = ["✓ Valid" if status == "Valid" else "✓ Done"]
-                if train:
-                    parts.append("Trained: " + train)
-                if expiry:
-                    parts.append("Exp: " + expiry)
-                if days_txt:
-                    parts.append(days_txt)
-                return "\n".join(parts)
-            return status
-
-        def get_employees():
-            return db.fetchall(
-                "SELECT id,employee_id,name,designation,department,company,active,date_joining,safety_induction_date "
-                "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
-            )
-
-        def expanded_course_entries(courses):
-            entries = []
-            for course in courses:
-                saved_trades = [x.strip() for x in safe(course["designation"]).split(",") if x.strip()]
-                if not saved_trades:
-                    saved_trades = [""]
-                for trade_label in saved_trades:
-                    entry = dict(course)
-                    entry["designation"] = trade_label
-                    entry["display_course_name"] = safe(course["course_name"]) if not trade_label else f"{safe(course['course_name'])} ({trade_label})"
-                    entries.append(entry)
-            return entries
-
-        def mandatory_courses_for_employee(employee, active_courses):
-            """Mandatory matrix courses that apply to this employee's trade/department."""
+        def requirements_for_trade(trade):
+            trade = safe(trade).strip()
             out = []
-            seen = set()
-            for course in active_courses:
-                if int(course["mandatory"] or 0) != 1:
-                    continue
-                if not course_applies(course, employee):
-                    continue
-                cid = int(course["id"])
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                out.append(course)
+            for cname in grid_state["courses"]:
+                req = grid_state["cells"].get((cname, trade), "Not Applicable")
+                if req == "Not Applicable":
+                    for desig in MATRIX_DESIGNATIONS:
+                        if trade and (desig.lower() == trade.lower() or trade.lower() in desig.lower()):
+                            req = grid_state["cells"].get((cname, desig), req)
+                            if req != "Not Applicable":
+                                break
+                if req in ("Mandatory", "Optional", "Before Job"):
+                    out.append((cname, req, int(grid_state["validity"].get(cname, 0) or 0)))
             return out
 
-        def mandatory_completion_pct(employee, active_courses):
-            required = mandatory_courses_for_employee(employee, active_courses)
-            total = len(required)
-            if total == 0:
-                return None, 0, 0  # no mandatory requirements defined for this trade
-            done = 0
-            for course in required:
-                record = latest_training(employee["id"], course["id"])
-                status = training_status(record, course)
-                if status in ("Valid", "Completed", "Due Soon"):
-                    done += 1
-            pct = int(round(100 * done / total)) if total else 0
-            return pct, done, total
+        def latest_record(emp_db_id, course_name):
+            course = db.fetchone("SELECT id FROM training_courses WHERE lower(course_name)=lower(?) ORDER BY active DESC, id DESC LIMIT 1", (course_name,))
+            if not course:
+                return None
+            return db.fetchone(
+                "SELECT * FROM training_records WHERE employee_db_id=? AND course_id=? ORDER BY training_date DESC, id DESC LIMIT 1",
+                (emp_db_id, course["id"])
+            )
 
-        def load_register():
-            employees = get_employees()
-            raw_courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 OR EXISTS (SELECT 1 FROM training_records tr WHERE tr.course_id=training_courses.id) ORDER BY active DESC, course_name COLLATE NOCASE")
-            courses = expanded_course_entries(raw_courses)
-            active_only = [c for c in raw_courses if int(c["active"] or 0) == 1]
-            base_headers = ["S.No.", "Employee ID", "Employee Name", "Company", "Trade", "Mandatory %", "Date Joined", "Safety Induction"]
-            headers = base_headers + [safe(c["display_course_name"]) for c in courses]
-            register_table.clear()
-            register_table.setColumnCount(len(headers))
-            register_table.setHorizontalHeaderLabels(headers)
-            register_table.setRowCount(len(employees))
-            for r, employee in enumerate(employees):
-                pct, done, total = mandatory_completion_pct(employee, active_only)
-                if pct is None:
-                    pct_text = "N/A"
-                    pct_tip = "No mandatory training defined in the matrix for this trade/department."
-                else:
-                    pct_text = f"{pct}% ({done}/{total})"
-                    pct_tip = f"Mandatory trainings completed for this trade: {done} of {total} ({pct}%). Based on active Mandatory courses in the Training Matrix that apply to the employee's trade."
-                company_name_val = safe(employee["company"]) if "company" in employee.keys() else ""
-                fixed_values = [
-                    str(r + 1),
-                    safe(employee["employee_id"]), safe(employee["name"]), company_name_val,
-                    safe(employee["designation"]), pct_text, safe(employee["date_joining"]), safe(employee["safety_induction_date"])
-                ]
-                for c, value in enumerate(fixed_values):
-                    item = QTableWidgetItem(value)
-                    if c == 0:
-                        item.setData(Qt.ItemDataRole.UserRole, int(employee["id"]))
-                    # Identity columns — calm blue band for easy scanning
-                    if c in (0, 1, 2, 3, 4):
-                        item.setBackground(QBrush(QColor("#EEF4FB")))
-                    if c == 2:
-                        font = item.font(); font.setBold(True); item.setFont(font)
-                    if c == 5:
-                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        item.setToolTip(pct_tip)
-                        if pct is None:
-                            item.setBackground(QBrush(QColor("#F0F2F5")))
-                            item.setForeground(QBrush(QColor("#8A9199")))
-                        elif pct >= 100:
-                            item.setBackground(QBrush(QColor("#DDF5E5")))
-                            item.setForeground(QBrush(QColor("#176B3A")))
-                            item.setText(f"✓ {pct}%  ({done}/{total})")
-                        elif pct >= 50:
-                            item.setBackground(QBrush(QColor("#FFF4CE")))
-                            item.setForeground(QBrush(QColor("#9A6700")))
-                            item.setText(f"● {pct}%  ({done}/{total})")
-                        else:
-                            item.setBackground(QBrush(QColor("#FDE2E2")))
-                            item.setForeground(QBrush(QColor("#B42318")))
-                            item.setText(f"✗ {pct}%  ({done}/{total})")
-                        font = item.font(); font.setBold(True); item.setFont(font)
-                    register_table.setItem(r, c, item)
-                for offset, course in enumerate(courses, start=7):
-                    item = QTableWidgetItem()
-                    item.setData(Qt.ItemDataRole.UserRole, int(course["id"]))
-                    record = latest_training(employee["id"], course["id"])
-                    applicable = course_applies(course, employee)
-                    if not applicable and not record:
-                        item.setText("—")
-                        item.setToolTip("Not applicable to this employee's trade/department. Click if you still need to record optional/event training.")
-                        set_status_style(item, "N/A", course)
-                    else:
-                        status = training_status(record, course)
-                        req_label = "M" if int(course["mandatory"] or 0) else "O"
-                        # Prefer matrix cell requirement for this trade when available
-                        try:
-                            trade = safe(employee["designation"])
-                            mreq = grid_state["cells"].get((safe(course["course_name"]), trade)) or grid_state["cells"].get((safe(course.get("display_course_name", course["course_name"])), trade))
-                            if mreq == "Mandatory":
-                                req_label = "M"
-                            elif mreq == "Optional":
-                                req_label = "O"
-                            elif mreq == "Before Job":
-                                req_label = "B"
-                        except Exception:
-                            pass
-                        cell_txt = format_register_status_cell(status, record)
-                        if cell_txt and not cell_txt.startswith("—"):
-                            cell_txt = f"{req_label} · {cell_txt}"
-                        item.setText(cell_txt)
-                        training_date_text = safe(record["training_date"]) if record else ""
-                        expiry_text = safe(record["expiry_date"]) if record else ""
-                        item.setToolTip(
-                            "Requirement: " + req_label + "  |  Status: " + status +
-                            "\nTraining date: " + (training_date_text or "—") +
-                            "\nExpiry date: " + (expiry_text or "No expiry recorded") +
-                            "\nTraining type: " + safe(course["provider_type"]) +
-                            "\nClick to add or edit this training record."
-                        )
-                        set_status_style(item, status, course)
-                    register_table.setItem(r, offset, item)
-            register_table.resizeRowsToContents()
-            for col in range(min(7, register_table.columnCount())):
-                register_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-            for col in range(7, register_table.columnCount()):
-                register_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-                register_table.setColumnWidth(col, max(register_table.columnWidth(col), 120))
-            counts = {"Training Required": 0, "Expired": 0, "Due Soon": 0, "Valid": 0, "Completed": 0, "N/A": 0}
-            for r in range(register_table.rowCount()):
-                for c in range(7, register_table.columnCount()):
-                    cell = register_table.item(r, c)
-                    if not cell:
-                        continue
-                    tip = cell.toolTip() or ""
-                    if tip.startswith("Status: "):
-                        status = tip.split("\n")[0].replace("Status: ", "")
-                    else:
-                        status = cell.text().split("\n")[0]
-                        if status in ("—", "N/A"):
-                            status = "N/A"
-                        elif "Required" in status:
-                            status = "Training Required"
-                        elif "Expired" in status:
-                            status = "Expired"
-                        elif "Due" in status:
-                            status = "Due Soon"
-                        elif "Valid" in status:
-                            status = "Valid"
-                        elif "Done" in status:
-                            status = "Completed"
-                    if status in counts:
-                        counts[status] += 1
-            # Compliance snapshot across employees
-            pct_values = []
-            for r in range(register_table.rowCount()):
-                cell = register_table.item(r, 4)
-                if not cell:
+        def ensure_course(course_name, validity):
+            row = db.fetchone("SELECT id FROM training_courses WHERE lower(course_name)=lower(?) AND active=1 LIMIT 1", (course_name,))
+            if row:
+                db.execute("UPDATE training_courses SET validity_months=? WHERE id=?", (validity, row["id"]))
+                return int(row["id"])
+            cur = db.execute(
+                "INSERT INTO training_courses (course_name, designation, department, mandatory, provider_type, validity_months, requirement_source, active) VALUES (?,?,?,?,?,?,?,1)",
+                (course_name, "", "", 1, "Internal", validity, "Matrix Grid")
+            )
+            return int(cur.lastrowid)
+
+        def status_of(record, validity_months):
+            if not record:
+                return "Not Completed", None, None
+            expiry = safe(record["expiry_date"])
+            train = safe(record["training_date"])
+            if not expiry and train and validity_months:
+                try:
+                    expiry = (date.fromisoformat(train) + timedelta(days=int(validity_months) * 30)).isoformat()
+                except Exception:
+                    expiry = ""
+            if not expiry:
+                return "Valid", train, expiry
+            try:
+                days = (date.fromisoformat(expiry) - date.today()).days
+            except Exception:
+                return "Valid", train, expiry
+            if days < 0:
+                return "Expired", train, expiry
+            if days <= 30:
+                return "Expiring Soon", train, expiry
+            return "Valid", train, expiry
+
+        def color_status(status):
+            if status in ("Expired", "Not Completed"):
+                return QColor("#FDE2E2"), QColor("#B42318")
+            if status == "Expiring Soon":
+                return QColor("#FFF4CE"), QColor("#9A6700")
+            if status == "Valid":
+                return QColor("#DDF5E5"), QColor("#176B3A")
+            return QColor("#F0F2F5"), QColor("#555555")
+
+        # =====================================================================
+        # TAB 1 — Employee Details Register & Form
+        # =====================================================================
+        emp_page = QWidget()
+        emp_layout = QVBoxLayout(emp_page)
+        emp_layout.setContentsMargins(8, 8, 8, 8)
+        emp_layout.setSpacing(8)
+
+        form_box = QGroupBox("Employee Details")
+        form = QGridLayout(form_box)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+
+        emp_id_in = QLineEdit(); emp_id_in.setPlaceholderText("Employee / Badge ID *")
+        emp_name_in = QLineEdit(); emp_name_in.setPlaceholderText("Full name *")
+        emp_trade_in = QComboBox(); emp_trade_in.setEditable(True)
+        emp_trade_in.addItem("Select trade / designation", "")
+        for t in MATRIX_DESIGNATIONS:
+            emp_trade_in.addItem(t, t)
+        emp_company_in = QLineEdit(); emp_company_in.setPlaceholderText("Company / Subcontractor")
+        emp_induction = QDateEdit(QDate.currentDate()); emp_induction.setCalendarPopup(True); emp_induction.setDisplayFormat("yyyy-MM-dd")
+        emp_photo_path = {"value": ""}
+        emp_photo_lbl = QLabel("No photo")
+        emp_photo_lbl.setFixedSize(96, 96)
+        emp_photo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        emp_photo_lbl.setStyleSheet("border:1px solid #C8D5E3; background:#F7FAFC; border-radius:4px;")
+        emp_photo_btn = QPushButton("Upload Photo")
+        emp_photo_clear = QPushButton("Clear Photo")
+
+        form.addWidget(QLabel("Employee ID *"), 0, 0); form.addWidget(emp_id_in, 0, 1)
+        form.addWidget(QLabel("Full Name *"), 0, 2); form.addWidget(emp_name_in, 0, 3)
+        form.addWidget(QLabel("Trade / Designation *"), 1, 0); form.addWidget(emp_trade_in, 1, 1)
+        form.addWidget(QLabel("Company / Subcontractor"), 1, 2); form.addWidget(emp_company_in, 1, 3)
+        form.addWidget(QLabel("Induction Date"), 2, 0); form.addWidget(emp_induction, 2, 1)
+        photo_col = QVBoxLayout()
+        photo_col.addWidget(emp_photo_lbl, 0, Qt.AlignmentFlag.AlignCenter)
+        photo_btns = QHBoxLayout(); photo_btns.addWidget(emp_photo_btn); photo_btns.addWidget(emp_photo_clear)
+        photo_col.addLayout(photo_btns)
+        form.addLayout(photo_col, 0, 4, 3, 1)
+
+        btn_row = QHBoxLayout()
+        btn_save_draft = QPushButton("Save & Exit")
+        btn_submit = QPushButton("Submit")
+        btn_submit.setStyleSheet("font-weight:bold;")
+        btn_delete = QPushButton("Delete")
+        btn_clear = QPushButton("Clear Form")
+        for b in (btn_save_draft, btn_submit, btn_delete, btn_clear):
+            b.setMinimumHeight(34)
+            btn_row.addWidget(b)
+        btn_row.addStretch()
+        form.addLayout(btn_row, 3, 0, 1, 5)
+        emp_layout.addWidget(form_box)
+
+        bulk_box = QGroupBox("Bulk add workers (one per line: ID | Name | Trade | Company)")
+        bulk_lay = QVBoxLayout(bulk_box)
+        bulk_text = QTextEdit()
+        bulk_text.setPlaceholderText("E-1001 | John Smith | Scaffolder | ABC Contracting")
+        bulk_text.setMaximumHeight(90)
+        bulk_btn = QPushButton("Submit Bulk Workers")
+        bulk_lay.addWidget(bulk_text)
+        bulk_lay.addWidget(bulk_btn)
+        emp_layout.addWidget(bulk_box)
+
+        search_row = QHBoxLayout()
+        emp_search = QLineEdit(); emp_search.setPlaceholderText("Search ID, name, trade, company…"); emp_search.setClearButtonEnabled(True)
+        emp_refresh = QPushButton("Refresh")
+        emp_export_xlsx = QPushButton("Export Excel")
+        emp_export_docx = QPushButton("Export Word")
+        search_row.addWidget(emp_search, 1); search_row.addWidget(emp_refresh)
+        search_row.addWidget(emp_export_xlsx); search_row.addWidget(emp_export_docx)
+        emp_layout.addLayout(search_row)
+
+        emp_table = QTableWidget(0, 6)
+        emp_table.setHorizontalHeaderLabels(["Photo", "Employee ID", "Full Name", "Trade", "Company", "Induction"])
+        emp_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        emp_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        emp_table.setAlternatingRowColors(True)
+        emp_table.verticalHeader().setDefaultSectionSize(56)
+        emp_table.horizontalHeader().setStretchLastSection(True)
+        emp_table.setMaximumHeight(420)
+        emp_layout.addWidget(emp_table, 1)
+
+        selected_emp = {"id": None}
+
+        def set_photo_preview(path_str):
+            emp_photo_path["value"] = safe(path_str)
+            p = Path(safe(path_str)) if path_str else None
+            if p and p.is_file():
+                pix = QPixmap(str(p))
+                if not pix.isNull():
+                    emp_photo_lbl.setPixmap(pix.scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    emp_photo_lbl.setText("")
+                    return
+            emp_photo_lbl.setPixmap(QPixmap())
+            emp_photo_lbl.setText("No photo")
+
+        def choose_photo():
+            path, _ = QFileDialog.getOpenFileName(self, "Select Passport Photo", "", "Images (*.png *.jpg *.jpeg *.bmp)")
+            if not path:
+                return
+            dest_dir = ATTACH_DIR / "employee_photos"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            src = Path(path)
+            dest = dest_dir / f"{emp_id_in.text().strip() or 'emp'}_{src.name}"
+            try:
+                shutil.copy2(src, dest)
+                set_photo_preview(str(dest))
+            except Exception as exc:
+                QMessageBox.warning(self, "Photo", f"Could not save photo.\\n{exc}")
+
+        def clear_photo():
+            set_photo_preview("")
+
+        def clear_emp_form():
+            selected_emp["id"] = None
+            emp_id_in.clear(); emp_name_in.clear(); emp_company_in.clear()
+            emp_trade_in.setCurrentIndex(0)
+            emp_induction.setDate(QDate.currentDate())
+            set_photo_preview("")
+
+        def refresh_emp_table():
+            needle = emp_search.text().strip().lower()
+            rows = db.fetchall(
+                "SELECT id, employee_id, name, designation, company, safety_induction_date, photo_path "
+                "FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
+            )
+            data = []
+            for r in rows:
+                blob = " ".join(safe(r[k]).lower() for k in ("employee_id", "name", "designation", "company"))
+                if needle and needle not in blob:
                     continue
-                t = cell.text()
-                if "%" in t:
-                    try:
-                        pct_values.append(int(t.replace("✓", "").replace("●", "").replace("✗", "").strip().split("%")[0].strip()))
-                    except Exception:
-                        pass
-            avg_pct = int(round(sum(pct_values) / len(pct_values))) if pct_values else None
-            full_comp = sum(1 for p in pct_values if p >= 100)
-            status_summary.setText(
-                f"  Employees: {len(employees)}   ·   Courses tracked: {len(courses)}   ·   "
-                f"Fully compliant: {full_comp}/{len(pct_values) if pct_values else 0}"
-                + (f"   ·   Avg mandatory %: {avg_pct}%" if avg_pct is not None else "   ·   Avg mandatory %: N/A")
-                + f"   ·   ✗ Required: {counts['Training Required']}   ·   ✗ Expired: {counts['Expired']}   ·   "
-                f"⚠ Due soon: {counts['Due Soon']}   ·   ✓ Valid: {counts['Valid'] + counts['Completed']}"
+                data.append(r)
+            emp_table.setRowCount(len(data))
+            for i, r in enumerate(data):
+                # photo
+                photo_item = QTableWidgetItem()
+                photo_item.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                p = Path(safe(r["photo_path"])) if safe(r["photo_path"]) else None
+                if p and p.is_file():
+                    pix = QPixmap(str(p))
+                    if not pix.isNull():
+                        photo_item.setData(Qt.ItemDataRole.DecorationRole, pix.scaled(48, 48, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                emp_table.setItem(i, 0, photo_item)
+                for j, key in enumerate(("employee_id", "name", "designation", "company", "safety_induction_date"), start=1):
+                    it = QTableWidgetItem(safe(r[key]))
+                    if j == 1:
+                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    emp_table.setItem(i, j, it)
+
+        def load_emp_row():
+            row = emp_table.currentRow()
+            if row < 0 or not emp_table.item(row, 1):
+                return
+            eid = emp_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            r = db.fetchone("SELECT * FROM employees WHERE id=?", (eid,))
+            if not r:
+                return
+            selected_emp["id"] = eid
+            emp_id_in.setText(safe(r["employee_id"]))
+            emp_name_in.setText(safe(r["name"]))
+            emp_company_in.setText(safe(r["company"]))
+            trade = safe(r["designation"])
+            ix = emp_trade_in.findText(trade)
+            if ix < 0 and trade:
+                emp_trade_in.addItem(trade, trade); ix = emp_trade_in.findText(trade)
+            emp_trade_in.setCurrentIndex(ix if ix >= 0 else 0)
+            try:
+                d = QDate.fromString(safe(r["safety_induction_date"]), "yyyy-MM-dd")
+                if d.isValid():
+                    emp_induction.setDate(d)
+            except Exception:
+                pass
+            set_photo_preview(safe(r["photo_path"]) if "photo_path" in r.keys() else "")
+
+        def save_employee(submit=True):
+            emp_id = emp_id_in.text().strip()
+            name = emp_name_in.text().strip()
+            trade = emp_trade_in.currentText().strip()
+            if trade.lower().startswith("select"):
+                trade = ""
+            company = emp_company_in.text().strip()
+            if not emp_id or not name:
+                return QMessageBox.warning(self, "Employee Details", "Employee ID and Full Name are required.")
+            if submit and not trade:
+                return QMessageBox.warning(self, "Employee Details", "Select Trade / Designation before Submit.")
+            induction = emp_induction.date().toString("yyyy-MM-dd")
+            photo = emp_photo_path["value"]
+            dup = db.fetchone(
+                "SELECT id FROM employees WHERE lower(employee_id)=lower(?) AND id<>COALESCE(?, -1)",
+                (emp_id, selected_emp["id"])
             )
-            status_summary.setStyleSheet(
-                "font-weight:bold; padding:8px; background:#17365D; color:white; border-radius:4px;"
-            )
-            apply_register_filter()
-
-        def apply_register_filter(*args):
-            query = register_search.text().strip().lower()
-            for r in range(register_table.rowCount()):
-                haystack = " ".join(register_table.item(r, c).text() for c in range(min(7, register_table.columnCount())) if register_table.item(r, c)).lower()
-                register_table.setRowHidden(r, bool(query) and query not in haystack)
-
-        def reset_employee_form():
-            selected_employee_id["value"] = None
-            employee_id_input.clear()
-            employee_name_input.clear()
-            employee_company_input.clear()
-            employee_trade_input.setCurrentIndex(0)
-            joining_date.setDate(QDate.currentDate())
-            safety_induction_date.setDate(QDate(2000, 1, 1))
-            add_employee_btn.setText("Save Employee")
-
-        def select_employee_from_register(row, column=0):
-            if column >= 7:
-                return
-            item = register_table.item(row, 0)
-            if not item:
-                return
-            emp_db_id = item.data(Qt.ItemDataRole.UserRole)
-            employee = db.fetchone("SELECT * FROM employees WHERE id=?", (emp_db_id,))
-            if not employee:
-                return
-            selected_employee_id["value"] = int(emp_db_id)
-            employee_id_input.setText(safe(employee["employee_id"]))
-            employee_name_input.setText(safe(employee["name"]))
-            trade = safe(employee["designation"])
-            if trade and employee_trade_input.findText(trade) < 0:
-                employee_trade_input.addItem(trade, trade)
-            employee_company_input.setText(safe(employee["company"]) if "company" in employee.keys() else "")
-            employee_trade_input.setCurrentText(trade or "Select trade")
-            joined = QDate.fromString(safe(employee["date_joining"]), "yyyy-MM-dd")
-            joining_date.setDate(joined if joined.isValid() else QDate.currentDate())
-            induction = QDate.fromString(safe(employee["safety_induction_date"]), "yyyy-MM-dd")
-            safety_induction_date.setDate(induction if induction.isValid() else QDate(2000, 1, 1))
-            add_employee_btn.setText("Update Employee")
-
-        def add_employee():
-            name = employee_name_input.text().strip()
-            emp_id = employee_id_input.text().strip()
-            company_val = employee_company_input.text().strip()
-            trade = employee_trade_input.currentText().strip()
-            if trade.lower() == "select trade": trade = ""
-            dept = ""  # department removed from Training UI; trade/designation drives matrix
-            if not name:
-                QMessageBox.warning(self, "Training Register", "Enter the employee name.")
-                employee_name_input.setFocus()
-                return
-            duplicate = db.fetchone("SELECT id FROM employees WHERE lower(employee_id)=lower(?) AND id<>COALESCE(?, -1)", (emp_id, selected_employee_id["value"])) if emp_id else None
-            if duplicate:
-                QMessageBox.warning(self, "Training Register", "That employee ID already exists. Enter a different ID.")
-                employee_id_input.setFocus()
-                return
-            induction = safety_induction_date.date().toString("yyyy-MM-dd")
-            if induction == "2000-01-01": induction = ""
-            values = (emp_id, name, trade, dept, company_val, joining_date.date().toString("yyyy-MM-dd"), induction)
-            if selected_employee_id["value"] is None:
-                db.execute("INSERT INTO employees (employee_id,name,designation,department,company,date_joining,safety_induction_date,active) VALUES (?,?,?,?,?,?,?,1)", values)
-                message = "Employee saved and training applicability refreshed from the matrix."
+            if dup:
+                return QMessageBox.warning(self, "Employee Details", "That Employee ID already exists.")
+            if selected_emp["id"] is None:
+                db.execute(
+                    "INSERT INTO employees (employee_id,name,designation,company,department,safety_induction_date,photo_path,active) VALUES (?,?,?,?,?,?,?,1)",
+                    (emp_id, name, trade, company, "", induction, photo)
+                )
             else:
-                db.execute("UPDATE employees SET employee_id=?,name=?,designation=?,department=?,company=?,date_joining=?,safety_induction_date=? WHERE id=?", values + (selected_employee_id["value"],))
-                message = "Employee updated and training applicability refreshed."
-            reset_employee_form()
-            load_register()
-            load_master_record()
-            QMessageBox.information(self, "Training Register", message)
-
-        def delete_selected_employee():
-            row = register_table.currentRow()
-            item = register_table.item(row, 0) if row >= 0 else None
-            emp_db_id = item.data(Qt.ItemDataRole.UserRole) if item else selected_employee_id["value"]
-            if emp_db_id is None:
-                QMessageBox.information(self, "Training Register", "Select a person in the register first.")
-                return
-            history = db.fetchone("SELECT COUNT(*) AS n FROM training_records WHERE employee_db_id=?", (emp_db_id,))
-            has_history = bool(history and int(history["n"] or 0))
-            message = ("This person has training history. The person will be marked inactive and all training records will be retained. Continue?" if has_history else "Delete this person from the training register?")
-            answer = QMessageBox.question(self, "Delete Person", message, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if answer != QMessageBox.StandardButton.Yes: return
-            if has_history:
-                db.execute("UPDATE employees SET active=0 WHERE id=?", (emp_db_id,))
+                db.execute(
+                    "UPDATE employees SET employee_id=?,name=?,designation=?,company=?,safety_induction_date=?,photo_path=?,active=1 WHERE id=?",
+                    (emp_id, name, trade, company, induction, photo, selected_emp["id"])
+                )
+            clear_emp_form()
+            refresh_emp_table()
+            if submit:
+                load_tracker()
+                QMessageBox.information(self, "Employee Details", "Employee submitted and synced to the Training Tracking Register.")
             else:
-                db.execute("DELETE FROM employees WHERE id=?", (emp_db_id,))
-            reset_employee_form()
-            load_register()
-            load_master_record()
+                QMessageBox.information(self, "Employee Details", "Draft saved.")
 
-        def edit_training_cell(row, column):
-            if column < 7:
+        def delete_employee():
+            row = emp_table.currentRow()
+            if row < 0 or not emp_table.item(row, 1):
+                return QMessageBox.information(self, "Delete", "Select an employee in the register first.")
+            eid = emp_table.item(row, 1).data(Qt.ItemDataRole.UserRole)
+            r = db.fetchone("SELECT employee_id, name FROM employees WHERE id=?", (eid,))
+            if not r:
                 return
-            employee_item = register_table.item(row, 0)
-            course_item = register_table.item(row, column)
-            if not employee_item or not course_item:
+            if QMessageBox.question(
+                self, "Delete Employee",
+                f"Remove {safe(r['name'])} ({safe(r['employee_id'])}) from the training register?\\nTraining history records will remain for audit.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            ) != QMessageBox.StandardButton.Yes:
                 return
-            employee_db_id = employee_item.data(Qt.ItemDataRole.UserRole)
-            course_id = course_item.data(Qt.ItemDataRole.UserRole)
-            employee = db.fetchone("SELECT * FROM employees WHERE id=?", (employee_db_id,))
-            course = db.fetchone("SELECT * FROM training_courses WHERE id=?", (course_id,))
-            if not employee or not course:
-                return
-            record = latest_training(employee_db_id, course_id)
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Record Training — " + safe(course["course_name"]))
-            dialog.setMinimumSize(540, 460)
-            dialog.resize(620, 520)
-            dlg_layout = QVBoxLayout(dialog)
-            form = QFormLayout()
-            employee_label = QLabel(f"{safe(employee['name'])} | {safe(employee['designation'])} | {safe(employee['department'])}")
-            employee_label.setWordWrap(True)
-            form.addRow("Employee", employee_label)
-            training_date = QDateEdit()
-            training_date.setCalendarPopup(True)
-            training_date.setDisplayFormat("yyyy-MM-dd")
-            training_date.setDate(QDate.currentDate())
-            expiry_date = QDateEdit()
-            expiry_date.setCalendarPopup(True)
-            expiry_date.setDisplayFormat("yyyy-MM-dd")
-            expiry_date.setDate(QDate.currentDate().addMonths(max(1, int(course["validity_months"] or 1))))
-            no_expiry = QCheckBox("No expiry date")
-            provider = QLineEdit()
-            provider.setPlaceholderText("Internal trainer / external training organisation")
-            provider_type_label = QLabel(safe(course["provider_type"]))
-            cert_no = QLineEdit()
-            cert_no.setPlaceholderText("Certificate or record reference")
-            attachment = QLineEdit()
-            attachment.setReadOnly(True)
-            attachment.setPlaceholderText("Optional certificate file")
-            browse_attachment = QPushButton("Browse…")
-            attachment_row = QHBoxLayout()
-            attachment_row.addWidget(attachment, 1)
-            attachment_row.addWidget(browse_attachment)
-            notes = QTextEdit()
-            notes.setPlaceholderText("Assessment result, remarks or competency notes")
-            notes.setMaximumHeight(85)
-            form.addRow("Training type", provider_type_label)
-            form.addRow("Training date", training_date)
-            form.addRow("Expiry date", expiry_date)
-            form.addRow("", no_expiry)
-            form.addRow("Trainer / organisation", provider)
-            form.addRow("Certificate number", cert_no)
-            form.addRow("Attachment", attachment_row)
-            form.addRow("Notes", notes)
-            dlg_layout.addLayout(form)
-            validity_months = int(course["validity_months"] or 0)
+            db.execute("UPDATE employees SET active=0 WHERE id=?", (eid,))
+            clear_emp_form()
+            refresh_emp_table()
+            load_tracker()
 
-            def update_expiry_from_training(qdate=None):
-                if validity_months <= 0 or no_expiry.isChecked():
-                    return
-                calculated = add_months(training_date.date().toString("yyyy-MM-dd"), validity_months)
-                if calculated:
-                    parsed = QDate.fromString(calculated, "yyyy-MM-dd")
-                    if parsed.isValid():
-                        expiry_date.setDate(parsed)
-
-            training_date.dateChanged.connect(update_expiry_from_training)
-            no_expiry.toggled.connect(lambda checked: expiry_date.setEnabled(not checked))
-            no_expiry.setChecked(validity_months <= 0)
-            if validity_months > 0:
-                update_expiry_from_training()
-            if record:
-                parsed = QDate.fromString(safe(record["training_date"]), "yyyy-MM-dd")
-                if parsed.isValid():
-                    training_date.setDate(parsed)
-                if safe(record["expiry_date"]):
-                    parsed = QDate.fromString(safe(record["expiry_date"]), "yyyy-MM-dd")
-                    if parsed.isValid():
-                        expiry_date.setDate(parsed)
-                    no_expiry.setChecked(False)
+        def submit_bulk():
+            lines = [ln.strip() for ln in bulk_text.toPlainText().splitlines() if ln.strip()]
+            if not lines:
+                return QMessageBox.warning(self, "Bulk Workers", "Enter lines as: ID | Name | Trade | Company")
+            added = updated = 0
+            skipped = 0
+            for ln in lines:
+                parts = [p.strip() for p in re.split(r"[|\t;]", ln) if p.strip()]
+                if len(parts) < 3:
+                    skipped += 1
+                    continue
+                eid, name, trade = parts[0], parts[1], parts[2]
+                company = parts[3] if len(parts) > 3 else ""
+                existing = db.fetchone("SELECT id FROM employees WHERE lower(trim(COALESCE(employee_id,'')))=lower(trim(?))", (eid,))
+                if existing:
+                    db.execute("UPDATE employees SET name=?, designation=?, company=?, active=1 WHERE id=?", (name, trade, company, existing["id"]))
+                    updated += 1
                 else:
-                    no_expiry.setChecked(True)
-                provider.setText(safe(record["provider"]))
-                cert_no.setText(safe(record["certificate_no"]))
-                attachment.setText(safe(record["attachment_path"]))
-                notes.setPlainText(safe(record["notes"]))
-            browse_attachment.clicked.connect(lambda: attachment.setText(
-                QFileDialog.getOpenFileName(dialog, "Select Training Certificate", "",
-                "Documents and Images (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)")[0] or attachment.text()))
-            button_row = QHBoxLayout()
-            save_btn = QPushButton("Save Training Record")
-            delete_training_btn = QPushButton("Delete Training Record")
-            delete_training_btn.setEnabled(bool(record))
-            cancel_btn = QPushButton("Cancel")
-            button_row.addStretch(1)
-            button_row.addWidget(save_btn)
-            button_row.addWidget(delete_training_btn)
-            button_row.addWidget(cancel_btn)
-            dlg_layout.addLayout(button_row)
+                    db.execute("INSERT INTO employees (employee_id,name,designation,company,department,active) VALUES (?,?,?,?,?,1)", (eid, name, trade, company, ""))
+                    added += 1
+            bulk_text.clear()
+            refresh_emp_table()
+            load_tracker()
+            QMessageBox.information(self, "Bulk Workers", f"Added: {added} · Updated: {updated} · Skipped: {skipped}")
 
-            def save_training_record():
-                date_text = training_date.date().toString("yyyy-MM-dd")
-                expiry_text = "" if no_expiry.isChecked() else expiry_date.date().toString("yyyy-MM-dd")
-                if expiry_text and expiry_text < date_text:
-                    QMessageBox.warning(dialog, "Training Register", "Expiry date cannot be before the training date.")
-                    return
-                record_values = (date_text, expiry_text, provider.text().strip(), cert_no.text().strip(), attachment.text().strip(), notes.toPlainText().strip())
-                if record:
-                    db.execute("UPDATE training_records SET training_date=?,expiry_date=?,provider=?,certificate_no=?,attachment_path=?,notes=? WHERE id=?", record_values + (record["id"],))
-                else:
-                    db.execute("INSERT INTO training_records (employee_db_id,course_id,training_date,expiry_date,provider,certificate_no,attachment_path,notes) VALUES (?,?,?,?,?,?,?,?)", (employee_db_id, course_id) + record_values)
-                dialog.accept()
-                load_register()
-                load_master_record()
-
-            def delete_training_record():
-                if not record:
-                    return
-                answer = QMessageBox.question(dialog, "Delete Training Record", "Delete this employee's training record for this course? This cannot be undone.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if answer == QMessageBox.StandardButton.Yes:
-                    db.execute("DELETE FROM training_records WHERE id=?", (record["id"],))
-                    dialog.accept()
-                    load_register()
-                    load_master_record()
-
-            save_btn.clicked.connect(save_training_record)
-            delete_training_btn.clicked.connect(delete_training_record)
-            cancel_btn.clicked.connect(dialog.reject)
-            dialog.exec()
-
-        def master_rows():
-            result = []
-            employees = get_employees()
-            courses = expanded_course_entries(db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE"))
-            for employee in employees:
-                applicable_found = False
-                for course in courses:
-                    record = latest_training(employee["id"], course["id"])
-                    if not course_applies(course, employee) and not record:
-                        continue
-                    applicable_found = True
-                    status = training_status(record, course)
-                    result.append([
-                        safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
-                        safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
-                        safe(course["display_course_name"]), safe(course["provider_type"]), safe(course["requirement_source"]),
-                        safe(record["training_date"]) if record else "", safe(record["expiry_date"]) if record else "",
-                        status, safe(record["certificate_no"]) if record else "", safe(record["attachment_path"]) if record else ""
-                    ])
-                if not applicable_found:
-                    result.append([
-                        safe(employee["employee_id"]), safe(employee["name"]), safe(employee["department"]),
-                        safe(employee["designation"]), safe(employee["date_joining"]), safe(employee["safety_induction_date"]),
-                        "No applicable course configured", "", "", "", "", "N/A", "", ""
-                    ])
-            return result
-
-        def load_master_record():
-            rows = master_rows()
-            master_table.setRowCount(len(rows))
-            for r, values in enumerate(rows):
-                for c, value in enumerate(values):
-                    item = QTableWidgetItem(str(value or ""))
-                    if c == 9 and values[6] != "No applicable course configured":
-                        employee_match = db.fetchone("SELECT id FROM employees WHERE COALESCE(employee_id,'')=? AND name=? LIMIT 1", (values[0], values[1]))
-                        display_course = safe(values[6])
-                        course_name_base = display_course.split(" (", 1)[0]
-                        trade_suffix = display_course[len(course_name_base):].strip()
-                        trade_suffix = trade_suffix[1:-1].strip() if trade_suffix.startswith("(") and trade_suffix.endswith(")") else ""
-                        course_match = db.fetchone("SELECT id FROM training_courses WHERE course_name=? AND (COALESCE(designation,'')=? OR COALESCE(designation,'')='' OR designation LIKE ?) ORDER BY active DESC LIMIT 1", (course_name_base, trade_suffix, '%' + trade_suffix + '%'))
-                        if employee_match and course_match:
-                            rec_match = latest_training(employee_match["id"], course_match["id"])
-                            if rec_match:
-                                item.setData(Qt.ItemDataRole.UserRole, int(rec_match["id"]))
-                    if c == 11:
-                        course = {"provider_type": values[7]} if values[6] != "No applicable course configured" else None
-                        set_status_style(item, values[11], course)
-                    master_table.setItem(r, c, item)
-            master_table.resizeRowsToContents()
-            apply_master_filter()
-
-        def delete_selected_master_training_record():
-            row = master_table.currentRow()
-            item = master_table.item(row, 9) if row >= 0 else None
-            record_id = item.data(Qt.ItemDataRole.UserRole) if item else None
-            if record_id is None:
-                QMessageBox.information(self, "Master Training Record", "Select a row with an existing training date first.")
+        def export_employees_excel():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Employee Register", "Employee_Register.xlsx", "Excel Workbook (*.xlsx)")
+            if not path:
                 return
-            answer = QMessageBox.question(self, "Delete Training Record", "Delete this training record? The employee and training course will remain.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if answer == QMessageBox.StandardButton.Yes:
-                db.execute("DELETE FROM training_records WHERE id=?", (record_id,))
-                load_register()
-                load_master_record()
-
-        def apply_master_filter(*args):
-            query = master_search.text().strip().lower()
-            for r in range(master_table.rowCount()):
-                haystack = " ".join(master_table.item(r, c).text() for c in range(master_table.columnCount()) if master_table.item(r, c)).lower()
-                master_table.setRowHidden(r, bool(query) and query not in haystack)
-
-        def style_excel(ws, title, headers):
-            ws.append([title])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
-            ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            wb = Workbook(); ws = wb.active; ws.title = "Employees"
+            ws.append(["EMPLOYEE DETAILS REGISTER"])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+            ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="17365D")
             ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-            ws.row_dimensions[1].height = 28
+            headers = ["Employee ID", "Full Name", "Trade", "Company", "Induction Date", "Photo Path"]
             ws.append(headers)
             for cell in ws[2]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="245486")
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-            thin = Side(style="thin", color="D5DADF")
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-                    cell.alignment = Alignment(vertical="top", wrap_text=True)
-            ws.freeze_panes = "A3"
-            ws.auto_filter.ref = f"A2:{ws.cell(row=max(2, ws.max_row), column=len(headers)).coordinate}"
-            ws.sheet_view.showGridLines = False
-            for col in range(1, len(headers) + 1):
-                ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 22
+                cell.font = Font(bold=True, color="17365D"); cell.fill = PatternFill("solid", fgColor="D9EAF7")
+            rows = db.fetchall("SELECT employee_id,name,designation,company,safety_induction_date,photo_path FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE")
+            for r in rows:
+                ws.append([safe(r["employee_id"]), safe(r["name"]), safe(r["designation"]), safe(r["company"]), safe(r["safety_induction_date"]), safe(r["photo_path"])])
+            wb.save(path)
+            QMessageBox.information(self, "Export", f"Employee register exported:\\n{path}")
 
-        def finish_excel(ws, headers):
-            thin = Side(style="thin", color="D5DADF")
-            for row in ws.iter_rows(min_row=2):
-                for cell in row:
-                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-                    cell.alignment = Alignment(vertical="top", wrap_text=True)
-            ws.freeze_panes = "A3"
-            ws.auto_filter.ref = f"A2:{ws.cell(row=max(2, ws.max_row), column=len(headers)).coordinate}"
-            ws.sheet_view.showGridLines = False
-
-        def export_training_register():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Training Register", "Training_Register.xlsx", "Excel Workbook (*.xlsx)")
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            employees = get_employees()
-            raw_courses = db.fetchall("SELECT * FROM training_courses WHERE active=1 OR EXISTS (SELECT 1 FROM training_records tr WHERE tr.course_id=training_courses.id) ORDER BY active DESC, course_name COLLATE NOCASE")
-            courses = expanded_course_entries(raw_courses)
-            active_only = [c for c in raw_courses if int(c["active"] or 0) == 1]
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Training Register"
-            headers = ["S.No.", "Employee ID", "Employee Name", "Company", "Trade", "Mandatory %", "Date Joined", "Safety Induction"] + [safe(c["display_course_name"]) for c in courses]
-            style_excel(ws, "HSE TRAINING REGISTER", headers)
-            register_attachment_links = []
-            for sn, employee in enumerate(employees, 1):
-                pct, done, total = mandatory_completion_pct(employee, active_only)
-                pct_text = "N/A" if pct is None else f"{pct}% ({done}/{total})"
-                company_val = safe(employee["company"]) if "company" in employee.keys() else ""
-                values = [sn, safe(employee["employee_id"]), safe(employee["name"]), company_val, safe(employee["designation"]), pct_text, safe(employee["date_joining"]), safe(employee["safety_induction_date"])]
-                employee_links = []
-                for course in courses:
-                    if not course_applies(course, employee):
-                        values.append("N/A")
-                        employee_links.append(None)
-                        continue
-                    record = latest_training(employee["id"], course["id"])
-                    status = training_status(record, course)
-                    if record:
-                        text_value = status + "\nTraining: " + safe(record["training_date"])
-                        if safe(record["expiry_date"]):
-                            text_value += "\nExpiry: " + safe(record["expiry_date"])
-                        attachment_path = safe(record["attachment_path"]).strip()
-                        if attachment_path:
-                            text_value += "\nAttachment: " + Path(attachment_path).name
-                        values.append(text_value)
-                        employee_links.append(attachment_path or None)
-                    else:
-                        values.append("Training Required")
-                        employee_links.append(None)
-                ws.append(values)
-                register_attachment_links.append(employee_links)
-            for col in range(1, len(headers) + 1):
-                ws.column_dimensions[ws.cell(row=2, column=col).column_letter].width = 20 if col <= 7 else 24
-            ws.freeze_panes = "H3"
-            logo_path = report_logo_path()
-            if logo_path and Path(logo_path).exists():
-                try:
-                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
-                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
-                except Exception:
-                    logging.exception("Unable to embed Training Register Excel logo")
-            # Preserve each original certificate attachment as a clickable link in its employee/course cell.
-            for row_offset, employee_links in enumerate(register_attachment_links, start=3):
-                for course_offset, attachment_path in enumerate(employee_links, start=7):
-                    if attachment_path:
-                        cell = ws.cell(row=row_offset, column=course_offset)
-                        cell.hyperlink = Path(attachment_path).resolve().as_uri() if Path(attachment_path).exists() else attachment_path
-                        cell.style = "Hyperlink"
-            finish_excel(ws, headers)
-            try:
-                wb.save(path)
-                QMessageBox.information(self, "Training Register", f"Register exported successfully:\n{path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Training Register", f"Could not export Excel file:\n{exc}")
-
-        def export_training_matrix():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Training Matrix", "Training_Matrix.xlsx", "Excel Workbook (*.xlsx)")
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            rows = db.fetchall("SELECT * FROM training_courses ORDER BY course_name COLLATE NOCASE")
-            headers = ["Course", "Applicable Trade(s)", "Department", "Mandatory", "Training Type", "Validity (months)", "Requirement Source", "Certificate Required", "Status"]
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Training Matrix"
-            style_excel(ws, "HSE TRAINING MATRIX", headers)
-            for row in rows:
-                trades_for_export = [x.strip() for x in safe(row["designation"]).split(",") if x.strip()]
-                trade_cell = "All Trades" if not trades_for_export else "\n• " + "\n• ".join(trades_for_export)
-                ws.append([safe(row["course_name"]), trade_cell, safe(row["department"]) or "All Departments", "Mandatory" if row["mandatory"] else "Recommended", safe(row["provider_type"]), int(row["validity_months"] or 0), safe(row["requirement_source"]), "Yes" if row["certificate_required"] else "No", "Active" if row["active"] else "Inactive"])
-            logo_path = report_logo_path()
-            if logo_path and Path(logo_path).exists():
-                try:
-                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
-                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
-                except Exception:
-                    logging.exception("Unable to embed Training Matrix Excel logo")
-            finish_excel(ws, headers)
-            try:
-                wb.save(path)
-                QMessageBox.information(self, "Training Matrix", f"Matrix exported successfully:\n{path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Training Matrix", f"Could not export Excel file:\n{exc}")
-
-        def export_master_excel():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Master Training Record", "Master_Training_Record.xlsx", "Excel Workbook (*.xlsx)")
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            headers = [master_table.horizontalHeaderItem(i).text() for i in range(master_table.columnCount())]
-            rows = master_rows()
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Master Training Record"
-            style_excel(ws, "MASTER TRAINING RECORD", headers)
-            for row in rows:
-                ws.append(row)
-            logo_path = report_logo_path()
-            if logo_path and Path(logo_path).exists():
-                try:
-                    logo = XLImage(str(logo_path)); logo.width = 115; logo.height = 58; logo.anchor = "A1"; ws.add_image(logo)
-                    ws.row_dimensions[1].height = max(ws.row_dimensions[1].height or 15, 48)
-                except Exception:
-                    logging.exception("Unable to embed Master Training Record Excel logo")
-            attachment_col = headers.index("Attachment") + 1 if "Attachment" in headers else None
-            if attachment_col:
-                for row_idx in range(3, ws.max_row + 1):
-                    cell = ws.cell(row=row_idx, column=attachment_col)
-                    attachment_path = str(cell.value or "").strip()
-                    if attachment_path:
-                        cell.value = Path(attachment_path).name
-                        cell.hyperlink = Path(attachment_path).resolve().as_uri() if Path(attachment_path).exists() else attachment_path
-                        cell.style = "Hyperlink"
-            finish_excel(ws, headers)
-            try:
-                wb.save(path)
-                QMessageBox.information(self, "Master Training Record", f"Excel export completed:\n{path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Master Training Record", f"Could not export Excel file:\n{exc}")
-
-        def export_master_word():
-            path, _ = QFileDialog.getSaveFileName(self, "Export Master Training Record", "Master_Training_Record.docx", "Word Document (*.docx)")
+        def export_employees_word():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Employee Register", "Employee_Register.docx", "Word Document (*.docx)")
             if not path:
                 return
             if not path.lower().endswith(".docx"):
                 path += ".docx"
-            headers = [master_table.horizontalHeaderItem(i).text() for i in range(master_table.columnCount())]
-            rows = master_rows()
             doc = Document()
-            section = doc.sections[0]
-            section.orientation = WD_ORIENT.LANDSCAPE
-            section.page_width, section.page_height = section.page_height, section.page_width
-            doc.add_heading("Master Training Record", 0)
-            doc.add_paragraph(f"Organisation: {safe(company_name())} | Generated: {date.today().isoformat()}")
-            table = doc.add_table(rows=1, cols=len(headers))
-            table.style = "Table Grid"
-            table.alignment = WD_TABLE_ALIGNMENT.CENTER
-            for i, header in enumerate(headers):
-                table.rows[0].cells[i].text = header
-            for row in rows:
+            add_docx_report_header(doc, "EMPLOYEE DETAILS REGISTER", "TRN", f"{document_prefix()}-EMP-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+            rows = db.fetchall("SELECT employee_id,name,designation,company,safety_induction_date FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE")
+            table = doc.add_table(rows=1, cols=5)
+            for i, h in enumerate(["Employee ID", "Full Name", "Trade", "Company", "Induction"]):
+                table.rows[0].cells[i].text = h
+            for r in rows:
                 cells = table.add_row().cells
-                for i, value in enumerate(row):
-                    cells[i].text = str(value or "")
-                    cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            for cell in table.rows[0].cells:
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        run.bold = True
-                        run.font.size = Pt(8)
-            for row in table.rows[1:]:
-                for cell in row.cells:
-                    for paragraph in cell.paragraphs:
-                        for run in paragraph.runs:
-                            run.font.size = Pt(7)
-            try:
-                doc.save(path)
-                QMessageBox.information(self, "Master Training Record", f"Word export completed:\n{path}")
-            except Exception as exc:
-                QMessageBox.critical(self, "Master Training Record", f"Could not export Word file:\n{exc}")
+                for i, key in enumerate(("employee_id", "name", "designation", "company", "safety_induction_date")):
+                    cells[i].text = xml_safe(r[key])
+            style_docx_table(table, header=True, font_size=8)
+            add_docx_footer(doc)
+            save_docx_validated(doc, path)
+            QMessageBox.information(self, "Export", f"Employee register exported:\\n{path}")
 
-        def filter_course_rows(*args):
-            return
+        emp_photo_btn.clicked.connect(choose_photo)
+        emp_photo_clear.clicked.connect(clear_photo)
+        btn_save_draft.clicked.connect(lambda: save_employee(submit=False))
+        btn_submit.clicked.connect(lambda: save_employee(submit=True))
+        btn_delete.clicked.connect(delete_employee)
+        btn_clear.clicked.connect(clear_emp_form)
+        bulk_btn.clicked.connect(submit_bulk)
+        emp_refresh.clicked.connect(refresh_emp_table)
+        emp_search.textChanged.connect(refresh_emp_table)
+        emp_table.itemSelectionChanged.connect(load_emp_row)
+        emp_export_xlsx.clicked.connect(export_employees_excel)
+        emp_export_docx.clicked.connect(export_employees_word)
+        refresh_emp_table()
+        tabs.addTab(emp_page, "1. Employee Details")
 
-        save_course_btn.clicked.connect(save_course)
-        clear_course_btn.clicked.connect(reset_course_form)
-        deactivate_course_btn.clicked.connect(deactivate_course)
-        export_matrix_btn.clicked.connect(export_training_matrix)
-        refresh_matrix_btn.clicked.connect(load_courses)
-        course_table.cellClicked.connect(select_course_row)
-        add_employee_btn.clicked.connect(add_employee)
-        edit_employee_btn.clicked.connect(lambda: select_employee_from_register(register_table.currentRow(), 0) if register_table.currentRow() >= 0 else QMessageBox.information(self, "Training Register", "Select a person first."))
-        delete_employee_btn.clicked.connect(delete_selected_employee)
-        refresh_register_btn.clicked.connect(load_register)
-        export_register_btn.clicked.connect(export_training_register)
-        register_search.textChanged.connect(apply_register_filter)
-        register_table.cellClicked.connect(lambda row, column: select_employee_from_register(row, column) if column < 7 else edit_training_cell(row, column))
-        refresh_master_btn.clicked.connect(load_master_record)
-        delete_master_record_btn.clicked.connect(delete_selected_master_training_record)
-        export_master_excel_btn.clicked.connect(export_master_excel)
-        export_master_word_btn.clicked.connect(export_master_word)
-        master_search.textChanged.connect(apply_master_filter)
+        # =====================================================================
+        # TAB 2 — Training Matrix Grid (rules engine — keep previous approach)
+        # =====================================================================
+        grid_page = QWidget()
+        grid_layout = QVBoxLayout(grid_page)
+        grid_layout.setContentsMargins(8, 8, 8, 8)
+        grid_help = QLabel(
+            "Training Matrix — rows = courses, columns = trades. "
+            "M = Mandatory · O = Optional · B = Before Job · — = N/A. "
+            "Double-click a cell to set requirement. Validity (months) drives expiry on the Tracking Register."
+        )
+        grid_help.setWordWrap(True)
+        grid_layout.addWidget(grid_help)
+        grid_tools = QHBoxLayout()
+        btn_load_ready = QPushButton("Load Ready-to-Use Matrix")
+        btn_save_grid = QPushButton("Save Matrix Grid")
+        btn_reload_grid = QPushButton("Reload")
+        grid_status = QLabel("")
+        grid_tools.addWidget(btn_load_ready); grid_tools.addWidget(btn_save_grid); grid_tools.addWidget(btn_reload_grid)
+        grid_tools.addStretch(); grid_tools.addWidget(grid_status)
+        grid_layout.addLayout(grid_tools)
+        matrix_grid = QTableWidget()
+        matrix_grid.setAlternatingRowColors(True)
+        matrix_grid.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        matrix_grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        matrix_grid.horizontalHeader().setDefaultSectionSize(88)
+        matrix_grid.verticalHeader().setDefaultSectionSize(28)
+        matrix_grid.setMinimumHeight(320)
+        matrix_grid.setMaximumHeight(560)
+        grid_layout.addWidget(matrix_grid, 1)
 
-        def refresh_bulk_lists():
-            bulk_course.blockSignals(True)
-            current_cid = bulk_course.currentData()
-            bulk_course.clear()
-            bulk_course.addItem("Select training course…", None)
-            for c in db.fetchall("SELECT id, course_name, designation, validity_months, mandatory FROM training_courses WHERE active=1 ORDER BY course_name COLLATE NOCASE"):
-                label = safe(c["course_name"])
-                trades = safe(c["designation"]).strip()
-                if trades:
-                    label += f"  [{trades}]"
-                if int(c["mandatory"] or 0) == 1:
-                    label += "  (Mandatory)"
-                bulk_course.addItem(label, int(c["id"]))
-            if current_cid is not None:
-                ix = bulk_course.findData(current_cid)
-                if ix >= 0:
-                    bulk_course.setCurrentIndex(ix)
-            bulk_course.blockSignals(False)
-            fill_combo(bulk_filter_trade, trade_options + distinct_values("designation"), "All trades", "")
-            fill_combo(bulk_filter_dept, department_options + distinct_values("department"), "All departments", "")
-            apply_bulk_employee_filter()
+        def render_matrix_grid():
+            designations = list(MATRIX_DESIGNATIONS)
+            courses = list(grid_state["courses"])
+            matrix_grid.clear()
+            matrix_grid.setRowCount(len(courses))
+            matrix_grid.setColumnCount(2 + len(designations))
+            matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)"] + designations)
+            matrix_grid.verticalHeader().setVisible(False)
+            for r, cname in enumerate(courses):
+                name_item = QTableWidgetItem(cname)
+                name_item.setBackground(QBrush(QColor("#EEF4FB")))
+                f = name_item.font(); f.setBold(True); name_item.setFont(f)
+                matrix_grid.setItem(r, 0, name_item)
+                months = int(grid_state["validity"].get(cname, 0) or 0)
+                val_item = QTableWidgetItem(str(months))
+                val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                val_item.setBackground(QBrush(QColor("#F7FAFC")))
+                matrix_grid.setItem(r, 1, val_item)
+                for c, desig in enumerate(designations):
+                    req = grid_state["cells"].get((cname, desig), "Not Applicable")
+                    it = QTableWidgetItem()
+                    _style_req(it, req)
+                    matrix_grid.setItem(r, c + 2, it)
+            matrix_grid.setColumnWidth(0, 240)
+            matrix_grid.setColumnWidth(1, 120)
+            for col in range(2, matrix_grid.columnCount()):
+                matrix_grid.setColumnWidth(col, 90)
+            grid_status.setText(f"{len(courses)} courses × {len(designations)} trades" + (" · Unsaved" if grid_state["dirty"] else ""))
 
-        def apply_bulk_employee_filter(*_args):
-            trade_f = bulk_filter_trade.currentText().strip().lower()
-            if trade_f in ("", "all trades"):
-                trade_f = ""
-            dept_f = bulk_filter_dept.currentText().strip().lower()
-            if dept_f in ("", "all departments"):
-                dept_f = ""
-            needle = bulk_filter_search.text().strip().lower()
-            previously = {item.data(Qt.ItemDataRole.UserRole) for item in bulk_emp_list.selectedItems()}
-            bulk_emp_list.clear()
-            for emp in get_employees():
-                if trade_f and safe(emp["designation"]).strip().lower() != trade_f:
-                    continue
-                if dept_f and safe(emp["department"]).strip().lower() != dept_f:
-                    continue
-                label = f"{safe(emp['name'])}  |  ID: {safe(emp['employee_id']) or '—'}  |  {safe(emp['designation']) or '—'}  |  {safe(emp['department']) or '—'}"
-                if needle and needle not in label.lower():
-                    continue
-                item = QListWidgetItem(label)
-                item.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
-                bulk_emp_list.addItem(item)
-                if int(emp["id"]) in previously:
-                    item.setSelected(True)
-            update_bulk_preview_count()
-
-        def update_bulk_preview_count(*_args):
-            n = len(bulk_emp_list.selectedItems())
-            bulk_preview.setText(f"Selected employees: {n}")
-
-        def bulk_select_all_visible():
-            bulk_emp_list.selectAll()
-            update_bulk_preview_count()
-
-        def bulk_clear_selection():
-            bulk_emp_list.clearSelection()
-            update_bulk_preview_count()
-
-        def bulk_course_changed(*_args):
-            if not bulk_auto_expiry.isChecked():
+        def on_grid_dbl(row, column):
+            if row < 0 or row >= len(grid_state["courses"]):
                 return
-            cid = bulk_course.currentData()
-            if not cid:
+            cname = grid_state["courses"][row]
+            if column == 1:
+                months, ok = QInputDialog.getInt(self, "Validity", f"Validity months for {cname}:", int(grid_state["validity"].get(cname, 0) or 0), 0, 120)
+                if ok:
+                    grid_state["validity"][cname] = months
+                    grid_state["dirty"] = True
+                    render_matrix_grid()
                 return
-            course = db.fetchone("SELECT validity_months FROM training_courses WHERE id=?", (cid,))
-            if not course:
+            if column < 2:
                 return
-            months = int(course["validity_months"] or 0)
-            train_d = bulk_train_date.date()
-            if months <= 0:
-                bulk_expiry.setDate(QDate(2000, 1, 1))
-            else:
-                bulk_expiry.setDate(train_d.addMonths(months))
+            desig = MATRIX_DESIGNATIONS[column - 2]
+            current = grid_state["cells"].get((cname, desig), "Not Applicable")
+            choice, ok = QInputDialog.getItem(self, "Set requirement", f"{cname}\\n{desig}", MATRIX_REQ_OPTIONS, max(0, MATRIX_REQ_OPTIONS.index(current) if current in MATRIX_REQ_OPTIONS else 0), False)
+            if ok:
+                grid_state["cells"][(cname, desig)] = choice
+                grid_state["dirty"] = True
+                render_matrix_grid()
 
-        def preview_bulk_training():
-            cid = bulk_course.currentData()
-            selected = bulk_emp_list.selectedItems()
-            if not cid:
-                return QMessageBox.warning(self, "Bulk Training Entry", "Select a training course first.")
-            if not selected:
-                return QMessageBox.warning(self, "Bulk Training Entry", "Select at least one employee.")
-            course = db.fetchone("SELECT * FROM training_courses WHERE id=?", (cid,))
-            names = []
-            for item in selected[:40]:
-                emp = db.fetchone("SELECT name, employee_id FROM employees WHERE id=?", (item.data(Qt.ItemDataRole.UserRole),))
-                if emp:
-                    names.append(f"• {safe(emp['name'])} ({safe(emp['employee_id']) or 'no ID'})")
-            extra = "" if len(selected) <= 40 else f"\n… and {len(selected) - 40} more"
-            expiry_text = bulk_expiry.date().toString("yyyy-MM-dd")
-            if bulk_expiry.date() <= QDate(2000, 1, 1):
-                expiry_text = "No expiry"
-            msg = (
-                f"Course: {safe(course['course_name'])}\n"
-                f"Training date: {bulk_train_date.date().toString('yyyy-MM-dd')}\n"
-                f"Expiry: {expiry_text}\n"
-                f"Provider: {bulk_provider.text().strip() or '—'}\n"
-                f"Employees ({len(selected)}):\n" + "\n".join(names) + extra
+        def do_load_ready():
+            if QMessageBox.question(self, "Load Matrix", "Load ready-to-use OSHA / IOSH / construction matrix into empty cells?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+                return
+            seed_ready_matrix(force=False)
+            render_matrix_grid()
+
+        def do_save_grid():
+            save_grid_state()
+            render_matrix_grid()
+            load_tracker()
+            QMessageBox.information(self, "Matrix Grid", "Matrix saved. Tracking Register will use these rules.")
+
+        matrix_grid.cellDoubleClicked.connect(on_grid_dbl)
+        btn_load_ready.clicked.connect(do_load_ready)
+        btn_save_grid.clicked.connect(do_save_grid)
+        btn_reload_grid.clicked.connect(lambda: (load_grid_state(), render_matrix_grid()))
+        load_grid_state()
+        render_matrix_grid()
+        tabs.addTab(grid_page, "2. Training Matrix Grid")
+
+        # =====================================================================
+        # TAB 3 — Interactive Training Tracking Register
+        # =====================================================================
+        track_page = QWidget()
+        track_layout = QVBoxLayout(track_page)
+        track_layout.setContentsMargins(8, 8, 8, 8)
+        track_help = QLabel(
+            "Tracking Register — one row per employee from Tab 1. "
+            "Cells show M/O/B · status · training date · expiry · days remaining. "
+            "Click a cell to log training date; expiry is calculated from the Matrix validity."
+        )
+        track_help.setWordWrap(True)
+        track_layout.addWidget(track_help)
+        track_tools = QHBoxLayout()
+        track_search = QLineEdit(); track_search.setPlaceholderText("Search ID, name, trade, company…"); track_search.setClearButtonEnabled(True)
+        track_refresh = QPushButton("Refresh")
+        track_export_xlsx = QPushButton("Export Excel")
+        track_export_docx = QPushButton("Export Word")
+        track_tools.addWidget(track_search, 1); track_tools.addWidget(track_refresh)
+        track_tools.addWidget(track_export_xlsx); track_tools.addWidget(track_export_docx)
+        track_layout.addLayout(track_tools)
+        track_table = QTableWidget()
+        track_table.setAlternatingRowColors(True)
+        track_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        track_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        track_table.horizontalHeader().setDefaultSectionSize(130)
+        track_table.verticalHeader().setDefaultSectionSize(52)
+        track_table.setWordWrap(True)
+        track_table.setMinimumHeight(360)
+        track_table.setMaximumHeight(580)
+        track_layout.addWidget(track_table, 1)
+        track_state = {"employees": [], "courses": []}
+
+        def load_tracker():
+            load_grid_state()
+            employees = db.fetchall(
+                "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
             )
-            QMessageBox.information(self, "Bulk Training Preview", msg)
+            needle = track_search.text().strip().lower()
+            if needle:
+                employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
+            # Union of courses that appear as requirements for at least one employee trade
+            course_set = []
+            for e in employees:
+                for cname, req, validity in requirements_for_trade(e["designation"]):
+                    if cname not in course_set:
+                        course_set.append(cname)
+            if not course_set:
+                course_set = list(grid_state["courses"])[:20]
+            track_state["employees"] = employees
+            track_state["courses"] = course_set
+            headers = ["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"] + course_set
+            track_table.clear()
+            track_table.setColumnCount(len(headers))
+            track_table.setHorizontalHeaderLabels(headers)
+            track_table.setRowCount(len(employees))
+            for r, emp in enumerate(employees):
+                reqs = requirements_for_trade(emp["designation"])
+                mand = [x for x in reqs if x[1] == "Mandatory"]
+                done = 0
+                for cname, req, validity in mand:
+                    st, _, _ = status_of(latest_record(emp["id"], cname), validity)
+                    if st in ("Valid", "Expiring Soon"):
+                        done += 1
+                pct = int(round(100 * done / len(mand))) if mand else None
+                pct_text = "N/A" if pct is None else f"{pct}% ({done}/{len(mand)})"
+                base = [str(r + 1), safe(emp["employee_id"]), safe(emp["name"]), safe(emp["designation"]), safe(emp["company"]), pct_text]
+                for c, val in enumerate(base):
+                    it = QTableWidgetItem(val)
+                    if c < 5:
+                        it.setBackground(QBrush(QColor("#EEF4FB")))
+                    if c == 2:
+                        f = it.font(); f.setBold(True); it.setFont(f)
+                    if c == 5 and pct is not None:
+                        bg, fg = color_status("Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed"))
+                        it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                        f = it.font(); f.setBold(True); it.setFont(f)
+                    if c == 1:
+                        it.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
+                    track_table.setItem(r, c, it)
+                req_map = {x[0]: x for x in reqs}
+                for offset, cname in enumerate(course_set):
+                    col = 6 + offset
+                    if cname not in req_map:
+                        it = QTableWidgetItem("—")
+                        it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        bg, fg = color_status("")
+                        it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                        track_table.setItem(r, col, it)
+                        continue
+                    req, validity = req_map[cname][1], req_map[cname][2]
+                    rec = latest_record(emp["id"], cname)
+                    st, train, expiry = status_of(rec, validity)
+                    days = None
+                    if expiry:
+                        try:
+                            days = (date.fromisoformat(expiry) - date.today()).days
+                        except Exception:
+                            days = None
+                    days_txt = "" if days is None else (f"{days}d left" if days >= 0 else f"{abs(days)}d overdue")
+                    short = {"Mandatory": "M", "Optional": "O", "Before Job": "B"}.get(req, "")
+                    lines = [f"{short} · {st}"]
+                    if train:
+                        lines.append(train)
+                    if expiry:
+                        lines.append("Exp " + expiry)
+                    if days_txt:
+                        lines.append(days_txt)
+                    it = QTableWidgetItem("\\n".join(lines))
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req})
+                    bg, fg = color_status(st)
+                    it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                    track_table.setItem(r, col, it)
+            track_table.setColumnWidth(0, 48)
+            track_table.setColumnWidth(1, 90)
+            track_table.setColumnWidth(2, 140)
+            track_table.setColumnWidth(3, 120)
+            track_table.setColumnWidth(4, 120)
+            track_table.setColumnWidth(5, 110)
 
-        def save_bulk_training():
-            cid = bulk_course.currentData()
-            selected = bulk_emp_list.selectedItems()
-            if not cid:
-                return QMessageBox.warning(self, "Bulk Training Entry", "Select a training course first.")
-            if not selected:
-                return QMessageBox.warning(self, "Bulk Training Entry", "Select at least one employee.")
-            train_date = bulk_train_date.date().toString("yyyy-MM-dd")
-            expiry_date = ""
-            if bulk_expiry.date() > QDate(2000, 1, 1):
-                expiry_date = bulk_expiry.date().toString("yyyy-MM-dd")
-                if bulk_expiry.date() < bulk_train_date.date():
-                    return QMessageBox.warning(self, "Bulk Training Entry", "Expiry date cannot be before the training date.")
-            course = db.fetchone("SELECT * FROM training_courses WHERE id=?", (cid,))
-            answer = QMessageBox.question(
-                self, "Confirm Bulk Training Entry",
-                f"Create training records for {len(selected)} employee(s) on course:\n"
-                f"{safe(course['course_name'])}\nDate: {train_date}\n\nContinue?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+        def on_track_cell(row, column):
+            if column < 6:
                 return
-            provider = bulk_provider.text().strip()
-            cert_no = bulk_cert.text().strip()
-            notes = bulk_notes.text().strip()
-            created = 0
-            for item in selected:
-                emp_id = item.data(Qt.ItemDataRole.UserRole)
+            item = track_table.item(row, column)
+            if not item:
+                return
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not isinstance(data, dict):
+                return
+            emp_id = data["emp_id"]
+            cname = data["course"]
+            validity = int(data.get("validity") or 0)
+            req = data.get("req", "")
+            rec = latest_record(emp_id, cname)
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Log Training — {cname}")
+            dlg.setMinimumWidth(360)
+            form = QFormLayout(dlg)
+            form.addRow(QLabel(f"Requirement: {req} · Validity: {validity} months"))
+            d_train = QDateEdit(QDate.currentDate()); d_train.setCalendarPopup(True); d_train.setDisplayFormat("yyyy-MM-dd")
+            if rec and safe(rec["training_date"]):
+                td = QDate.fromString(safe(rec["training_date"]), "yyyy-MM-dd")
+                if td.isValid():
+                    d_train.setDate(td)
+            d_exp = QDateEdit(QDate.currentDate()); d_exp.setCalendarPopup(True); d_exp.setDisplayFormat("yyyy-MM-dd")
+            def auto_exp(*_):
+                if validity:
+                    try:
+                        base = date(d_train.date().year(), d_train.date().month(), d_train.date().day())
+                        exp = base + timedelta(days=int(validity) * 30)
+                        d_exp.setDate(QDate(exp.year, exp.month, exp.day))
+                    except Exception:
+                        pass
+            d_train.dateChanged.connect(auto_exp)
+            auto_exp()
+            if rec and safe(rec["expiry_date"]):
+                ed = QDate.fromString(safe(rec["expiry_date"]), "yyyy-MM-dd")
+                if ed.isValid():
+                    d_exp.setDate(ed)
+            trainer = QLineEdit(safe(rec["provider"]) if rec else "")
+            notes = QLineEdit(safe(rec["notes"]) if rec else "")
+            form.addRow("Date of Training *", d_train)
+            form.addRow("Expiry Date", d_exp)
+            form.addRow("Trainer / Provider", trainer)
+            form.addRow("Notes", notes)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+            form.addRow(buttons)
+            buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            course_id = ensure_course(cname, validity)
+            tdate = d_train.date().toString("yyyy-MM-dd")
+            edate = d_exp.date().toString("yyyy-MM-dd")
+            if rec:
                 db.execute(
-                    """INSERT INTO training_records
-                       (employee_db_id, course_id, training_date, expiry_date, provider, certificate_no, attachment_path, notes)
-                       VALUES (?,?,?,?,?,?,?,?)""",
-                    (emp_id, cid, train_date, expiry_date, provider, cert_no, "", notes)
+                    "UPDATE training_records SET training_date=?, expiry_date=?, provider=?, notes=? WHERE id=?",
+                    (tdate, edate, trainer.text().strip(), notes.text().strip(), rec["id"])
                 )
-                created += 1
-            QMessageBox.information(
-                self, "Bulk Training Saved",
-                f"{created} training record(s) saved for '{safe(course['course_name'])}'.\n"
-                "Open the Training Register or Master Training Record to review."
-            )
-            load_register()
-            load_master_record()
+            else:
+                db.execute(
+                    "INSERT INTO training_records (employee_db_id, course_id, training_date, expiry_date, provider, notes) VALUES (?,?,?,?,?,?)",
+                    (emp_id, course_id, tdate, edate, trainer.text().strip(), notes.text().strip())
+                )
+            load_tracker()
 
-        bulk_filter_trade.currentTextChanged.connect(apply_bulk_employee_filter)
-        bulk_filter_dept.currentTextChanged.connect(apply_bulk_employee_filter)
-        bulk_filter_search.textChanged.connect(apply_bulk_employee_filter)
-        bulk_emp_list.itemSelectionChanged.connect(update_bulk_preview_count)
-        bulk_select_all_btn.clicked.connect(bulk_select_all_visible)
-        bulk_clear_sel_btn.clicked.connect(bulk_clear_selection)
-        bulk_course.currentIndexChanged.connect(bulk_course_changed)
-        bulk_train_date.dateChanged.connect(bulk_course_changed)
-        bulk_auto_expiry.toggled.connect(bulk_course_changed)
-        bulk_preview_btn.clicked.connect(preview_bulk_training)
-        bulk_save_btn.clicked.connect(save_bulk_training)
-        bulk_refresh_btn.clicked.connect(refresh_bulk_lists)
-
-        matrix_grid.cellDoubleClicked.connect(matrix_cell_double_clicked)
-        grid_add_col_btn.clicked.connect(add_or_update_grid_course)
-        grid_remove_col_btn.clicked.connect(remove_selected_grid_course)
-        grid_save_btn.clicked.connect(save_matrix_grid)
-        grid_refresh_btn.clicked.connect(refresh_matrix_grid)
-        grid_export_btn.clicked.connect(export_matrix_grid_excel)
-        grid_fill_default_btn.clicked.connect(seed_default_grid_courses)
-
-        load_courses()
-        refresh_matrix_grid()
-        refresh_bulk_lists()
-        matrix_subtabs.setCurrentIndex(1)  # Matrix Grid first: rows=Training, columns=Position
-        tabs.setCurrentIndex(0)
-
-    def reports(self):
-        w, layout = self.page("Reports & Export")
-        banner = QHBoxLayout()
-        logo_path = db.setting("company_logo", "")
-        logo = QLabel()
-        logo.setFixedSize(90, 70)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        if logo_path and Path(logo_path).exists():
-            pix = QPixmap(logo_path)
-            logo.setPixmap(pix.scaled(80, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        banner.addWidget(logo)
-        company_label = QLabel(f"<b>{safe(company_name())}</b><br>Reports & Export<br>Project: {safe(db.setting('project_name',''))}")
-        company_label.setStyleSheet("font-size:16px;padding:6px;")
-        banner.addWidget(company_label, 1)
-        open_folder = QPushButton("Open Reports Folder")
-        open_folder.clicked.connect(self.open_reports_folder)
-        banner.addWidget(open_folder)
-        layout.addLayout(banner)
-
-        info = QLabel("Select a register and format. The report is extracted from the saved HSE database and can be saved to any folder on the computer.")
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        for title, table_name in [
-            ("HSE Inspection / Observation Report", "observations"),
-            ("Incident Investigation Register Report", "incidents"),
-            ("Audit Register Report", "audits"),
-            ("CAPA Register Report", "capa")
-        ]:
-            box = QGroupBox(title)
-            row = QHBoxLayout(box)
-            for label, handler in [
-                ("Download CSV", lambda t=table_name: self.export_csv(t)),
-                ("Download Excel", lambda t=table_name: self.export_excel(t)),
-                ("Download PDF", lambda t=table_name: self.export_pdf(t)),
-                ("Download Word", lambda t=table_name: self.export_docx(t))
-            ]:
-                b = QPushButton(label)
-                b.setMinimumHeight(38)
-                row.addWidget(b)
-                b.clicked.connect(handler)
-            layout.addWidget(box)
-
-        incident_box = QGroupBox("Professional Incident Investigation Word Report")
-        ir = QHBoxLayout(incident_box)
-        incident_combo = QComboBox()
-        incidents = db.fetchall("SELECT id,number FROM incidents ORDER BY id DESC")
-        for row in incidents:
-            incident_combo.addItem(safe(row["number"]), row["id"])
-        ir.addWidget(QLabel("Investigation:"))
-        ir.addWidget(incident_combo, 1)
-        b = QPushButton("Download Investigation Report")
-        b.setMinimumHeight(38)
-        ir.addWidget(b)
-
-        def generate():
-            if incident_combo.count() == 0:
-                QMessageBox.information(self, "No Incidents", "No incident investigations are available.")
-                return
-            incident_id = incident_combo.currentData()
-            number = incident_combo.currentText()
-            default_path = str(REPORT_DIR / f"{number}_Investigation_Report.docx")
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Investigation Report", default_path, "Word Document (*.docx)"
-            )
+        def export_tracker_excel():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Training Tracking Register", "Training_Tracking_Register.xlsx", "Excel Workbook (*.xlsx)")
             if not path:
                 return
-            try:
-                generate_incident_docx(int(incident_id), path)
-                self.show_export_success(path)
-            except Exception as e:
-                logging.exception("Incident report failed")
-                QMessageBox.critical(self, "Report Error", str(e))
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            load_tracker()
+            wb = Workbook(); ws = wb.active; ws.title = "Tracking Register"
+            ws.append(["HSE TRAINING TRACKING REGISTER"])
+            headers = [track_table.horizontalHeaderItem(c).text() for c in range(track_table.columnCount())]
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
+            ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            ws.append(headers)
+            for cell in ws[2]:
+                cell.font = Font(bold=True, color="17365D"); cell.fill = PatternFill("solid", fgColor="D9EAF7")
+                cell.alignment = Alignment(wrap_text=True, horizontal="center")
+            for r in range(track_table.rowCount()):
+                vals = [(track_table.item(r, c).text() if track_table.item(r, c) else "") for c in range(track_table.columnCount())]
+                ws.append(vals)
+                for c, val in enumerate(vals, start=1):
+                    cell = ws.cell(ws.max_row, c)
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                    low = safe(val).lower()
+                    if "expired" in low or "not completed" in low or "overdue" in low:
+                        cell.fill = PatternFill("solid", fgColor="FDE2E2")
+                    elif "expiring" in low or "due soon" in low:
+                        cell.fill = PatternFill("solid", fgColor="FFF4CE")
+                    elif "valid" in low:
+                        cell.fill = PatternFill("solid", fgColor="DDF5E5")
+            ws.freeze_panes = "A3"
+            from openpyxl.utils import get_column_letter
+            for col in ws.columns:
+                letter = get_column_letter(col[0].column)
+                longest = max((len(str(c.value or "").split("\\n")[0]) for c in col), default=10)
+                ws.column_dimensions[letter].width = min(max(longest + 2, 12), 28)
+            wb.save(path)
+            QMessageBox.information(self, "Export", f"Tracking register exported:\\n{path}")
 
-        b.clicked.connect(generate)
-        layout.addWidget(incident_box)
-        layout.addStretch(1)
-
-    def show_export_success(self, path):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Export Complete")
-        msg.setIcon(QMessageBox.Icon.Information)
-        msg.setText("Report created successfully.")
-        msg.setInformativeText(str(path))
-        open_button = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
-        msg.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
-        msg.exec()
-        if msg.clickedButton() == open_button:
-            self.open_path(Path(path).parent)
-
-    def open_path(self, path):
-        try:
-            path = Path(path)
-            if sys.platform.startswith("win"):
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                os.system(f'open "{path}"')
-            else:
-                os.system(f'xdg-open "{path}"')
-        except Exception as e:
-            logging.exception("Unable to open path")
-            QMessageBox.warning(self, "Open Folder", f"Unable to open folder.\n\n{e}")
-
-    def open_reports_folder(self):
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        self.open_path(REPORT_DIR)
-
-    def _export_path(self, filename, title, file_filter):
-        REPORT_DIR.mkdir(parents=True, exist_ok=True)
-        return QFileDialog.getSaveFileName(self, title, str(REPORT_DIR / filename), file_filter)[0]
-
-    @staticmethod
-    def table_data_static(table_name, record_ids=None):
-        allowed = {"observations", "incidents", "audits", "capa"}
-        if table_name not in allowed:
-            raise ValueError("Invalid report table.")
-        if table_name == "observations":
-            columns, data, _ = observation_export_rows(record_ids)
-            return columns, data
-        params = []
-        where = ""
-        if record_ids:
-            placeholders = ",".join("?" for _ in record_ids)
-            where = f" WHERE id IN ({placeholders})"
-            params = list(record_ids)
-        rows = db.fetchall(f"SELECT * FROM {table_name}{where} ORDER BY id DESC", params)
-        if not rows:
-            return [], []
-        columns = list(rows[0].keys())
-        attach_table = attachment_export_map(table_name)
-        if attach_table and "Attachments" not in columns:
-            columns.append("Attachments")
-        data=[]
-        id_key="id"
-        for row in rows:
-            values=[xml_safe(row[c]) for c in columns if c != "Attachments"]
-            if attach_table:
-                values.append(xml_safe(attachment_names(attach_table, row[id_key])))
-            data.append(values)
-        return columns, data
-
-    def table_data(self, table_name, record_ids=None):
-        return self.table_data_static(table_name, record_ids=record_ids)
-
-    def selected_id(self, table, title):
-        r=table.currentRow()
-        if r < 0 or not table.item(r,0):
-            QMessageBox.warning(self, title, "Select a record first.")
-            return None
-        return int(table.item(r,0).text())
-
-    def delete_selected_record(self, table, table_name, attachment_table, title, refresh):
-        record_id=self.selected_id(table, title)
-        if record_id is None:
-            return
-        record=db.fetchone(f"SELECT number FROM {table_name} WHERE id=?", (record_id,))
-        if not record:
-            return
-        if QMessageBox.question(self, "Confirm Delete", f"Delete {title.lower()} {record['number']} and its evidence?\n\nThis cannot be undone.") != QMessageBox.Yes:
-            return
-        for a in attachment_rows(attachment_table, record_id):
-            try: Path(safe(a["file_path"])).unlink(missing_ok=True)
-            except Exception: logging.exception("Unable to remove attachment")
-        db.execute(f"DELETE FROM {table_name} WHERE id=?", (record_id,))
-        refresh()
-
-    def export_csv(self, table_name, record_ids=None):
-        try:
-            columns, data = self.table_data(table_name, record_ids)
-            if not columns:
-                QMessageBox.information(self, "No Data", "There is no data to export.")
+        def export_tracker_word():
+            path, _ = QFileDialog.getSaveFileName(self, "Export Training Tracking Register", "Training_Tracking_Register.docx", "Word Document (*.docx)")
+            if not path:
                 return
-            path = self._export_path(f"{table_name}_report.csv", "Download CSV Report", "CSV Files (*.csv)")
-            if not path: return
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer=csv.writer(f); writer.writerow(columns); writer.writerows(data)
-            self.show_export_success(path)
-        except Exception as e:
-            logging.exception("CSV export failed"); QMessageBox.critical(self,"Export Error",str(e))
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
+            load_tracker()
+            doc = Document()
+            set_docx_landscape(doc)
+            add_docx_report_header(doc, "HSE TRAINING TRACKING REGISTER", "TRN", f"{document_prefix()}-TRN-{datetime.now().strftime('%Y%m%d%H%M%S')}")
+            # Compact: identity + mandatory % only for Word readability
+            table = doc.add_table(rows=1, cols=6)
+            for i, h in enumerate(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"]):
+                table.rows[0].cells[i].text = h
+            for r in range(track_table.rowCount()):
+                cells = table.add_row().cells
+                for c in range(6):
+                    it = track_table.item(r, c)
+                    cells[c].text = xml_safe(it.text() if it else "")
+            style_docx_table(table, header=True, font_size=8)
+            doc.add_paragraph("Note: Full course-level status is available in the Excel export and on-screen Tracking Register.")
+            add_docx_footer(doc)
+            save_docx_validated(doc, path)
+            QMessageBox.information(self, "Export", f"Tracking register exported:\\n{path}")
 
-    def export_excel(self, table_name, record_ids=None):
-        try:
-            columns, data = self.table_data(table_name, record_ids)
-            if not columns:
-                QMessageBox.information(self, "No Data", "There is no data to export."); return
-            path=self._export_path(f"{table_name}_report.xlsx","Download Excel Report","Excel Files (*.xlsx)")
-            if not path: return
-            wb=Workbook(); ws=wb.active; ws.title=table_name[:31]
-            if table_name == "observations":
-                preferred = ["S.No.", "Observation No.", "Observation Date", "Location", "Observation Type", "Category", "Observation Detail", "Action Taken", "Responsible", "Evidence", "Status"]
-                # Professional three-row report header.  The layout is fixed to A1:K3:
-                # A1:C3 = logo, D1:H3 = report heading, I1:K1 = report number,
-                # I2:K2 = document number, I3:K3 = project name.
-                ws.merge_cells("A1:C3")
-                ws.merge_cells("D1:H3")
-                ws.merge_cells("I1:K1")
-                ws.merge_cells("I2:K2")
-                ws.merge_cells("I3:K3")
-                ws["D1"] = f"HSE OBSERVATION REPORT\n{company_name()}"
-                report_no = f"{document_prefix()}-OBS-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                ws["I1"] = f"Report No.: {report_no}"
-                ws["I2"] = f"Document No.: {document_prefix()}-OBS"
-                ws["I3"] = f"Project: {db.setting('project_name', '')}"
-                ws.append(preferred)
-                obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
-                if record_ids:
-                    obs_rows = [r for r in obs_rows if r["id"] in record_ids]
-                for serial, r in enumerate(obs_rows, 1):
-                    vals=[serial, r["number"], r["obs_date"], r["location"], r["obs_type"], r["category"], r["observation"], format_corrective_actions_display(r), r["responsible"], "", r["status"]]
-                    ws.append([xml_safe(v) for v in vals])
-                    excel_row=ws.max_row
-                    evcell=ws.cell(excel_row,10)
-                    evcell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
-                    image_files=[]; other_files=[]
-                    for a in attachment_rows("observation_attachments", r["id"]):
-                        fp=Path(safe(a["file_path"]))
-                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp"}:
-                            image_files.append(fp)
-                        elif fp.exists():
-                            other_files.append(fp.name)
-                    # Show the first real image directly in the Evidence cell; all other evidence names remain visible.
-                    if image_files:
-                        try:
-                            img=XLImage(str(image_files[0]))
-                            max_w=145; max_h=62
-                            ratio=min(max_w/max(img.width,1), max_h/max(img.height,1), 1)
-                            img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio))
-                            img.anchor=f"J{excel_row}"
-                            ws.add_image(img)
-                            extra=[p.name for p in image_files[1:]] + other_files
-                            evcell.value="; ".join(extra) if extra else "Photo evidence"
-                        except Exception:
-                            logging.exception("Unable to embed observation image in Excel")
-                            evcell.value="; ".join([p.name for p in image_files] + other_files)
-                    elif other_files:
-                        evcell.value="; ".join(other_files)
-                    else:
-                        evcell.value="None"
-                    ws.row_dimensions[excel_row].height=70
-                # Professional register heading. The logo is fixed inside the merged A1:C3 area.
-                logo_path=db.setting("company_logo", "")
-                if logo_path and Path(logo_path).exists():
-                    try:
-                        logo=XLImage(logo_path)
-                        logo.width=125; logo.height=62
-                        logo.anchor="A1"
-                        ws.add_image(logo)
-                    except Exception:
-                        logging.exception("Unable to embed company logo in Excel heading")
-                # Header area is deliberately fixed to three rows; the register header begins on row 4.
-                for r in range(1,4):
-                    ws.row_dimensions[r].height = 24
-                ws.row_dimensions[4].height = 30
-                header_fill=PatternFill("solid", fgColor="D9E2F3")
-                for cell_ref in ["A1","D1","I1","I2","I3"]:
-                    c=ws[cell_ref]
-                    c.font=copy(c.font); c.font=c.font.copy(bold=True, size=13 if cell_ref=="D1" else 10)
-                    c.fill=header_fill
-                    c.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
-                    c.border=Border(left=Side(style="thin", color="808080"), right=Side(style="thin", color="808080"), top=Side(style="thin", color="808080"), bottom=Side(style="thin", color="808080"))
-                # Give every cell in the merged header areas a border so the visual box surrounds the logo/title.
-                thin=Side(style="thin", color="808080")
-                for row in ws.iter_rows(min_row=1,max_row=3,min_col=1,max_col=11):
-                    for c in row:
-                        c.border=Border(left=thin,right=thin,top=thin,bottom=thin)
-                for cell in ws[4]:
-                    cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True, color="FFFFFF")
-                    cell.fill=PatternFill("solid", fgColor="17365D")
-                    cell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
-                # All data cells are centered/middle and wrapped; long narrative fields get extra width.
-                for row in ws.iter_rows(min_row=5, max_row=ws.max_row, min_col=1, max_col=len(preferred)):
-                    for cell in row:
-                        cell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
-                widths=[8,20,20,20,20,20,50,50,20,20,20]
-                for i,w in enumerate(widths,1):
-                    ws.column_dimensions[chr(64+i)].width=w
-                ws.freeze_panes="A5"
-                ws.auto_filter.ref=f"A4:K{ws.max_row}"
-                # Real Excel table for the register rows.
-                from openpyxl.worksheet.table import Table, TableStyleInfo
-                if ws.max_row >= 4:
-                    tab=Table(displayName="HSEObservationRegister", ref=f"A4:K{ws.max_row}")
-                    style=TableStyleInfo(name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
-                    tab.tableStyleInfo=style
-                    ws.add_table(tab)
-                target=Path(path); temp=target.with_name(target.name + ".tmp.xlsx")
-                try:
-                    wb.save(temp)
-                    with zipfile.ZipFile(temp,"r") as z:
-                        bad=z.testzip()
-                        if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
-                    os.replace(temp,target)
-                finally: temp.unlink(missing_ok=True)
-                self.show_export_success(path); return
-            wb=Workbook(); ws=wb.active; ws.title=table_name[:31]; ws.append(columns)
-            for row in data: ws.append([xml_safe(v) for v in row])
-            # Use the company logo selected in Settings without inserting rows or changing
-            # the report's column structure. The image is placed at the far-right header area.
-            logo_path=report_logo_path()
-            if logo_path and Path(logo_path).exists():
-                try:
-                    logo=XLImage(str(logo_path))
-                    scale=min(90/max(logo.width,1), 42/max(logo.height,1), 1)
-                    logo.width=max(1,int(logo.width*scale)); logo.height=max(1,int(logo.height*scale))
-                    logo.anchor=f"{ws.cell(1, max(1,len(columns)+1)).column_letter}1"
-                    ws.add_image(logo)
-                    ws.row_dimensions[1].height=max(ws.row_dimensions[1].height or 15, 34)
-                except Exception:
-                    logging.exception("Unable to embed company logo in Excel report")
-            for cell in ws[1]:
-                cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True)
-            ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
-            if "Attachments" in columns:
-                col=columns.index("Attachments")+1
-                for r in range(2, ws.max_row+1):
-                    ws.cell(r,col).alignment=Alignment(wrap_text=True, vertical="top")
-                    # Make the attachment cell readable; the dedicated Attachments sheet below contains file-level hyperlinks.
-                    ws.cell(r,col).hyperlink = f"#'Attachments'!A1"
-            for column_cells in ws.columns:
-                letter=column_cells[0].column_letter
-                max_len=min(55,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
-                ws.column_dimensions[letter].width=max(12,max_len)
+        track_table.cellDoubleClicked.connect(on_track_cell)
+        track_refresh.clicked.connect(load_tracker)
+        track_search.textChanged.connect(load_tracker)
+        track_export_xlsx.clicked.connect(export_tracker_excel)
+        track_export_docx.clicked.connect(export_tracker_word)
+        load_tracker()
+        tabs.addTab(track_page, "3. Training Tracking Register")
 
-            # Include a dedicated attachment register in the Excel report so evidence is
-            # not lost when the main register has many columns.
-            attach_table=attachment_export_map(table_name)
-            if attach_table:
-                ids=[r["id"] for r in db.fetchall(f"SELECT id FROM {table_name} ORDER BY id DESC") if not record_ids or r["id"] in record_ids]
-                aws=wb.create_sheet("Attachments")
-                aws.append(["Record ID","Record Number","File Name","Attachment Type","Stored File Path","Embedded Preview"])
-                for rid in ids:
-                    rec=db.fetchone(f"SELECT number FROM {table_name} WHERE id=?",(rid,))
-                    for a in attachment_rows(attach_table,rid):
-                        fpath=safe(a["file_path"])
-                        aws.append([rid, safe(rec["number"]) if rec else "", Path(fpath).name, xml_safe(a["attachment_type"]), fpath, ""])
-                        current_row=aws.max_row
-                        cell=aws.cell(current_row,5)
-                        if fpath and Path(fpath).exists():
-                            cell.hyperlink=Path(fpath).as_uri()
-                            cell.style="Hyperlink"
-                            fp=Path(fpath)
-                            if fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif"}:
-                                try:
-                                    embedded=XLImage(str(fp))
-                                    scale=min(100/max(embedded.width,1), 65/max(embedded.height,1), 1)
-                                    embedded.width=max(1,int(embedded.width*scale)); embedded.height=max(1,int(embedded.height*scale))
-                                    embedded.anchor=f"F{current_row}"
-                                    aws.add_image(embedded)
-                                    aws.row_dimensions[current_row].height=52
-                                except Exception:
-                                    logging.exception("Unable to embed attachment preview in Excel report")
-                aws.freeze_panes="A2"; aws.auto_filter.ref=aws.dimensions
-                for column_cells in aws.columns:
-                    letter=column_cells[0].column_letter
-                    max_len=min(80,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
-                    aws.column_dimensions[letter].width=max(12,max_len)
-                aws.column_dimensions["F"].width=18
-            target=Path(path)
-            temp=target.with_name(target.name + ".tmp.xlsx")
-            try:
-                wb.save(temp)
-                with zipfile.ZipFile(temp, "r") as z:
-                    bad=z.testzip()
-                    if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
-                os.replace(temp,target)
-            finally:
-                temp.unlink(missing_ok=True)
-            self.show_export_success(path)
-        except Exception as e:
-            logging.exception("Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
-
-    def export_pdf(self, table_name, record_ids=None):
-        try:
-            columns,data=self.table_data(table_name, record_ids)
-            if not columns:
-                QMessageBox.information(self,"No Data","There is no data to export."); return
-            path=self._export_path(f"{table_name}_report.pdf","Download PDF Report","PDF Files (*.pdf)")
-            if not path:return
-            styles=getSampleStyleSheet()
-            project=db.setting("project_name","")
-            if table_name == "observations":
-                # Observation PDF header mirrors the fixed Excel report header.
-                def draw_page_border(canvas, doc):
-                    canvas.saveState()
-                    canvas.setStrokeColor(colors.HexColor("#808080"))
-                    canvas.setLineWidth(0.8)
-                    page_w,page_h=landscape(A4)
-                    canvas.rect(12,12,page_w-24,page_h-24,stroke=1,fill=0)
-                    canvas.restoreState()
-                doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=22,leftMargin=22,topMargin=92,bottomMargin=24,
-                                      onFirstPage=draw_page_border,onLaterPages=draw_page_border)
-                story=[]
-                report_no=f"{document_prefix()}-OBS-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                logo_path=report_logo_path()
-                logo_flow=Paragraph(xml_safe(company_name()),styles["Normal"])
-                if logo_path and Path(logo_path).exists():
-                    try:
-                        logo_flow=RLImage(str(logo_path),width=85,height=55,preserveAspectRatio=True)
-                    except Exception:
-                        logging.exception("Unable to embed company logo in observation PDF header")
-                title_style=styles["Title"]
-                title_style.fontSize=15; title_style.leading=17; title_style.alignment=1
-                meta_style=styles["Normal"]
-                meta_style.fontSize=7.5; meta_style.leading=9
-                header_right=Table([
-                    [Paragraph(f"<b>Report No.:</b> {xml_safe(report_no)}",meta_style)],
-                    [Paragraph(f"<b>Document No.:</b> {xml_safe(document_prefix())}-OBS",meta_style)],
-                    [Paragraph(f"<b>Project:</b> {xml_safe(project)}",meta_style)],
-                ], colWidths=[185], rowHeights=[20,20,20])
-                header_right.setStyle(TableStyle([
-                    ("BOX",(0,0),(-1,-1),0.5,colors.HexColor("#808080")),
-                    ("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#BFBFBF")),
-                    ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                    ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
-                ]))
-                header=Table([[logo_flow,Paragraph(f"<b>HSE OBSERVATION REPORT</b><br/>{xml_safe(company_name())}",title_style),header_right]],
-                             colWidths=[130,455,185], rowHeights=[60])
-                header.setStyle(TableStyle([
-                    ("BOX",(0,0),(-1,-1),0.7,colors.HexColor("#808080")),
-                    ("INNERGRID",(0,0),(-1,-1),0.4,colors.HexColor("#BFBFBF")),
-                    ("VALIGN",(0,0),(-1,-1),"MIDDLE"),
-                    ("ALIGN",(0,0),(-1,-1),"CENTER"),
-                    ("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5),
-                ]))
-                story.append(header)
-                story.append(Spacer(1,8))
-            else:
-                def draw_page_border(canvas, doc):
-                    canvas.saveState(); canvas.setStrokeColor(colors.HexColor("#808080")); canvas.setLineWidth(0.8); canvas.rect(12,12,landscape(A4)[0]-24,landscape(A4)[1]-24,stroke=1,fill=0); canvas.restoreState()
-                doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=22,leftMargin=22,topMargin=90,bottomMargin=24,onFirstPage=draw_page_border,onLaterPages=draw_page_border)
-                story=[]
-                report_no=f"{document_prefix()}-{table_name[:3].upper()}-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                logo_path=report_logo_path()
-                logo_flow=Paragraph(xml_safe(company_name()),styles["Normal"])
-                if logo_path and Path(logo_path).exists():
-                    try: logo_flow=RLImage(str(logo_path),width=85,height=55,preserveAspectRatio=True)
-                    except Exception: pass
-                ms=styles["Normal"]; ms.fontSize=7.5; ms.leading=9
-                meta=Table([[Paragraph(f"<b>Report No.:</b> {xml_safe(report_no)}",ms)],[Paragraph(f"<b>Document No.:</b> {xml_safe(document_prefix())}-{table_name[:3].upper()}",ms)],[Paragraph(f"<b>Project:</b> {xml_safe(project)}",ms)]],colWidths=[185],rowHeights=[20,20,20])
-                meta.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.5,colors.HexColor("#808080")),("INNERGRID",(0,0),(-1,-1),0.3,colors.HexColor("#BFBFBF")),("VALIGN",(0,0),(-1,-1),"MIDDLE")]))
-                head=Table([[logo_flow,Paragraph(f"<b>{xml_safe(table_name.title())} REPORT</b><br/>{xml_safe(company_name())}",styles["Title"]),meta]],colWidths=[130,455,185],rowHeights=[60])
-                head.setStyle(TableStyle([("BOX",(0,0),(-1,-1),0.7,colors.HexColor("#808080")),("INNERGRID",(0,0),(-1,-1),0.4,colors.HexColor("#BFBFBF")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(-1,-1),"CENTER")]))
-                story += [head,Spacer(1,8)]
-            if table_name == "observations":
-                preferred = ["S.No.", "Observation Date", "Location", "Observation Type", "Category", "Observation Detail", "Action Taken", "Responsible", "Evidence", "Status"]
-                # Build a visible evidence cell using real images, not hyperlinks.
-                obs_rows=db.fetchall("SELECT * FROM observations ORDER BY id DESC")
-                if record_ids:
-                    obs_rows=[r for r in obs_rows if r["id"] in record_ids]
-                pdf_data=[preferred]
-                for serial,r in enumerate(obs_rows,1):
-                    ps=styles["Normal"]
-                    ps.fontSize=5.2; ps.leading=6
-                    evidence=[]
-                    for a in attachment_rows("observation_attachments",r["id"]):
-                        fp=Path(safe(a["file_path"]))
-                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp"}:
-                            try:
-                                im=RLImage(str(fp),width=38,height=30,preserveAspectRatio=True)
-                                evidence.append(im)
-                            except Exception:
-                                logging.exception("Unable to embed observation image in PDF")
-                        elif fp.exists():
-                            evidence.append(Paragraph(xml_safe(fp.name), ps))
-                    if not evidence:
-                        evidence=[Paragraph("None",ps)]
-                    wrap=lambda v: Paragraph(xml_safe(v).replace("\n","<br/>"), ps)
-                    pdf_data.append([wrap(serial),wrap(r["obs_date"]),wrap(r["location"]),wrap(r["obs_type"]),wrap(r["category"]),wrap(r["observation"]),wrap(format_corrective_actions_display(r)),wrap(r["responsible"]),evidence,wrap(r["status"])])
-                header_style=styles["Normal"]
-                header_style.fontSize=5.5; header_style.leading=6
-                pdf_data[0]=[Paragraph(x,header_style) for x in preferred]
-                col_widths=[0.32*72,0.66*72,0.88*72,0.78*72,0.78*72,1.55*72,1.35*72,0.78*72,1.62*72,0.58*72]
-                t=Table(pdf_data,repeatRows=1,colWidths=col_widths)
-            else:
-                if table_name == "incidents" and "Attachments" in columns:
-                    display_indices=list(range(9))+[columns.index("Attachments")]
-                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]
-                    incident_rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC")
-                    if record_ids:
-                        wanted=set(record_ids); incident_rows=[r for r in incident_rows if r["id"] in wanted]
-                    cell_style=styles["Normal"]; cell_style.fontSize=5.5; cell_style.leading=6
-                    for r in incident_rows[:500]:
-                        vals=[xml_safe(r[columns[i]] if columns[i] in r.keys() else "") for i in display_indices[:-1]]
-                        evidence=[]
-                        for a in attachment_rows("incident_attachments",r["id"]):
-                            fp=Path(safe(a["file_path"]))
-                            remark=safe(a["remark"]) if "remark" in a.keys() else ""
-                            if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                                try:
-                                    evidence.append(RLImage(str(fp),width=144,height=144,preserveAspectRatio=True))
-                                    evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
-                                except Exception:
-                                    evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
-                            else:
-                                evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
-                        if not evidence: evidence=[Paragraph("No attachment",cell_style)]
-                        pdf_data.append([Paragraph(v.replace("\n","<br/>"),cell_style) for v in vals]+[evidence])
-                    t=Table(pdf_data,repeatRows=1,colWidths=[55,55,65,65,65,90,75,65,75,125])
-                elif len(columns) > 10 and "Attachments" in columns:
-                    display_indices=list(range(9))+[columns.index("Attachments")]
-                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
-                    t=Table(pdf_data,repeatRows=1)
-                else:
-                    display_indices=list(range(min(len(columns),10)))
-                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
-                    t=Table(pdf_data,repeatRows=1)
-            t.setStyle(TableStyle([
-                ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
-                ("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP"),
-                ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
-                ("TOPPADDING",(0,0),(-1,-1),1.5),("BOTTOMPADDING",(0,0),(-1,-1),1.5)]))
-            story.append(t)
-            footer=db.setting("report_footer","")
-            if footer: story.extend([Spacer(1,10),Paragraph(xml_safe(footer),styles["Normal"])])
-            doc.build(story); self.show_export_success(path)
-        except Exception as e:
-            logging.exception("PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
-
-    def export_docx(self, table_name, record_ids=None):
-        try:
-            columns,data=self.table_data(table_name, record_ids)
-            if not columns:
-                QMessageBox.information(self,"No Data","There is no data to export."); return
-            path=self._export_path(f"{table_name}_report.docx","Download Word Report","Word Documents (*.docx)")
-            if not path:return
-            generate_table_docx(table_name,path,record_ids=record_ids)
-            with zipfile.ZipFile(path,"r") as z: z.testzip()
-            self.show_export_success(path)
-        except Exception as e:
-            logging.exception("Word report failed"); QMessageBox.critical(self,"Export Error",str(e))
-
-    def export_table(self, table, filename):
-        self._export_table_widget_csv(table, filename)
-
-    def _export_table_widget_csv(self, table, filename):
-        path,_=QFileDialog.getSaveFileName(self,"Export CSV",f"{filename}.csv","CSV (*.csv)")
-        if not path:return
-        with open(path,"w",newline="",encoding="utf-8-sig") as f:
-            writer=csv.writer(f)
-            writer.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())])
-            for r in range(table.rowCount()):
-                writer.writerow([table.item(r,c).text() if table.item(r,c) else "" for c in range(table.columnCount())])
-        self.show_export_success(path)
-
-    # ========================================================
-    # MASTER DATA
-    # ========================================================
-
-
-    def master_data(self):
-        w,layout=self.page("Master Data")
-        layout.addWidget(QLabel("Manage employees, companies, projects, categories and company profile."))
-        profile=QPushButton("Company Profile / Logo / Document Number")
-        profile.clicked.connect(lambda:self.settings_page())
-        layout.addWidget(profile)
-        for title,table_name in [
-            ("Employees","employees"),("Companies","companies"),
-            ("Projects / Locations","projects"),("Observation Categories","categories")
-        ]:
-            button=QPushButton(title)
-            button.clicked.connect(lambda checked=False,t=table_name,n=title:self.master_editor(t,n))
-            layout.addWidget(button)
-
-
-    def master_editor(
-        self,
-        table_name,
-        title
-    ):
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        dialog.resize(650, 550)
-
-        layout = QVBoxLayout(dialog)
-
-        table = QTableWidget()
-
-        layout.addWidget(table)
-
-        form = QFormLayout()
-
-        if table_name == "employees":
-
-            fields = [
-                ("Employee ID", "employee_id"),
-                ("Name", "name"),
-                ("Designation", "designation"),
-                ("Company", "company"),
-                ("Department", "department"),
-                ("Contact", "contact")
-            ]
-
-        elif table_name == "companies":
-
-            fields = [
-                ("Company Name", "name"),
-                ("Company Type", "company_type"),
-                ("Contact Person", "contact_person"),
-                ("Contact Number", "contact_number")
-            ]
-
-        elif table_name == "projects":
-
-            fields = [
-                ("Project", "project"),
-                ("Area", "area"),
-                ("Location", "location"),
-                ("Description", "description")
-            ]
-
-        else:
-
-            fields = [
-                ("Category", "category"),
-                ("Subcategory", "subcategory")
-            ]
-
-        inputs = {}
-
-        for label, key in fields:
-
-            e = QLineEdit()
-
-            inputs[key] = e
-
-            form.addRow(
-                label,
-                e
-            )
-
-        layout.addLayout(form)
-
-        add = QPushButton("Add")
-        layout.addWidget(add)
-
-        close = QPushButton("Close")
-        layout.addWidget(close)
-
-        close.clicked.connect(
-            dialog.accept
-        )
-
-        def load():
-
-            rows = db.fetchall(
-                f"SELECT * FROM {table_name}"
-            )
-
-            if not rows:
-                table.setRowCount(0)
-                return
-
-            columns = list(rows[0].keys())
-
-            table.setColumnCount(
-                len(columns)
-            )
-
-            table.setHorizontalHeaderLabels(
-                columns
-            )
-
-            table.setRowCount(
-                len(rows)
-            )
-
-            for r, row in enumerate(rows):
-
-                for c, col in enumerate(columns):
-
-                    table.setItem(
-                        r,
-                        c,
-                        QTableWidgetItem(
-                            safe(row[col])
-                        )
-                    )
-
-            table.horizontalHeader().setSectionResizeMode(
-                QHeaderView.Stretch
-            )
-
-        def save():
-
-            values = [
-                inputs[key].text()
-                for _, key in fields
-            ]
-
-            if not values[0].strip():
-                return
-
-            placeholders = ",".join(
-                ["?"] * len(values)
-            )
-
-            columns = ",".join(
-                [key for _, key in fields]
-            )
-
-            db.execute(
-                f"""
-                INSERT INTO {table_name}
-                ({columns})
-                VALUES ({placeholders})
-                """,
-                values
-            )
-
-            for e in inputs.values():
-                e.clear()
-
-            load()
-
-        add.clicked.connect(save)
-
-        load()
-
-        dialog.exec()
-
-    # ========================================================
-    # SETTINGS
-    # ========================================================
-
+        # Keep tab widgets within typical desktop height
+        tabs.setMinimumHeight(520)
 
     def settings_page(self):
         w,layout=self.page("Settings")
