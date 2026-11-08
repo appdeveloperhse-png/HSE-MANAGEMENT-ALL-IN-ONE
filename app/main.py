@@ -7273,6 +7273,10 @@ class MainWindow(QMainWindow):
             ("Stop Work Authority", "Mandatory"),
             ("Manual Handling", "Mandatory"),
             ("Hand and Power Tools Safety", "Mandatory"),
+            ("Incident Reporting and Investigation", "Mandatory"),
+            ("Job Safety Analysis (JSA / JHA)", "Mandatory"),
+            ("Manual Handling", "Mandatory"),
+            ("Hand and Power Tools Safety", "Mandatory"),
             ("Hazard Identification and Risk Assessment", "Mandatory"),
             ("Job Safety Analysis (JSA / JHA)", "Mandatory"),
             ("Heat Stress Awareness", "Mandatory"),
@@ -7286,12 +7290,18 @@ class MainWindow(QMainWindow):
             "Rigger": [("Lifting Operations Safety", "Mandatory"), ("Rigging and Slinging", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
             "Banksman / Signaler": [("Lifting Operations Safety", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Rigging and Slinging", "Before Job")],
             "Lifting Supervisor": [("Lifting Operations Safety", "Mandatory"), ("Rigging and Slinging", "Mandatory"), ("Banksman / Signaler", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory")],
-            "Crane Operator": [("Lifting Operations Safety", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
-            "Electrician": [("Electrical Safety", "Mandatory"), ("Lockout / Tagout (LOTO)", "Mandatory"), ("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Before Job")],
+            "Crane Operator": [("Lifting Operations Safety", "Mandatory"), ("Crane Operator Certification", "Mandatory"), ("Permit to Work (PTW)", "Mandatory"), ("Banksman / Signaler", "Mandatory")],
+            "Electrician": [("Electrical Safety", "Mandatory"), ("Lockout / Tagout (LOTO) / Energy Isolation", "Mandatory"), ("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Before Job"), ("Hot Work Safety", "Before Job")],
             "Heavy Equipment Operator": [("Excavation & Trenching Safety", "Before Job"), ("Permit to Work (PTW)", "Mandatory"), ("Defensive Driving", "Before Job")],
             "Excavator Operator": [("Excavation & Trenching Safety", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
             "Painter / Blaster": [("Abrasive Blasting / Painting Safety", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Chemical / HAZCOM / SDS", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
-            "HSE Officer": [("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Mandatory"), ("First Aid / CPR", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"), ("IOSH Managing Safely", "Optional")],
+            "HSE Officer": [
+                ("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"),
+                ("Confined Space Entry", "Mandatory"), ("H2S Awareness", "Mandatory"),
+                ("First Aid / CPR", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"),
+                ("Authorized Gas Tester (AGT)", "Optional"), ("IOSH Managing Safely", "Optional"),
+                ("NEBOSH International General Certificate (IGC)", "Optional"),
+            ],
             "HSE Supervisor": [("Permit to Work (PTW)", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory"), ("Confined Space Entry", "Mandatory"), ("First Aid / CPR", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory")],
             "HSE Manager": [("HSE for Managers", "Mandatory"), ("IOSH Managing Safely", "Mandatory"), ("Internal HSE Auditor", "Mandatory"), ("Permit to Work (PTW)", "Mandatory")],
             "Supervisor": [("Permit to Work (PTW)", "Mandatory"), ("Supervisor HSE Leadership", "Mandatory"), ("Work at Height / Fall Protection", "Mandatory")],
@@ -7396,11 +7406,24 @@ class MainWindow(QMainWindow):
                     grid_state["hours"][cname] = hrs
                 if desig:
                     grid_state["cells"][(cname, desig)] = safe(row["requirement"]) or "Not Applicable"
-            for cname, months, *rest in [(x[0], x[1], *(list(x[2:]) if len(x)>2 else [0])) for x in READY_COURSES]:
+            # Always merge any READY_COURSES missing from an existing installation
+            # so upgraded matrices pick up QatarEnergy / QCS / O&G courses.
+            added_new = False
+            for item in READY_COURSES:
+                cname, months = item[0], item[1]
+                hours = float(item[2]) if len(item) > 2 else 0.0
                 grid_state["validity"].setdefault(cname, months)
-            if not grid_state["courses"]:
-                seed_ready_matrix(force=True)
-            grid_state["dirty"] = False
+                grid_state["hours"].setdefault(cname, hours)
+                if cname not in grid_state["courses"]:
+                    grid_state["courses"].append(cname)
+                    grid_state["types"].setdefault(cname, "I")
+                    added_new = True
+            if not grid_state["courses"] or added_new:
+                seed_ready_matrix(force=bool(not any(grid_state["cells"])))
+                if added_new:
+                    grid_state["dirty"] = True
+            else:
+                grid_state["dirty"] = False
 
         def seed_ready_matrix(force=False):
             for item in READY_COURSES:
@@ -8136,11 +8159,35 @@ class MainWindow(QMainWindow):
                 pass
 
         def do_load_ready():
-            if QMessageBox.question(self, "Load Matrix", "Load ready-to-use matrix into empty cells?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.Yes) != QMessageBox.StandardButton.Yes:
+            msg = (
+                "Add all ready-to-use HSE courses (QatarEnergy / QCS / construction and oil-gas) "
+                "and fill empty matrix cells with recommended M / O / B requirements.\n\n"
+                "Existing cell values are kept."
+            )
+            ans = QMessageBox.question(
+                self, "Load Ready Courses and Matrix", msg,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+            )
+            if ans != QMessageBox.StandardButton.Yes:
                 return
+            for item in READY_COURSES:
+                cname, months = item[0], item[1]
+                hours = float(item[2]) if len(item) > 2 else 0.0
+                if cname not in grid_state["courses"]:
+                    grid_state["courses"].append(cname)
+                grid_state["validity"][cname] = months
+                grid_state["hours"][cname] = hours
+                grid_state["types"].setdefault(cname, "I")
             seed_ready_matrix(force=False)
             apply_external_course_types()
+            grid_state["dirty"] = True
             render_matrix_grid()
+            QMessageBox.information(
+                self, "Courses Loaded",
+                str(len(grid_state["courses"])) + " courses are now on the Training Matrix Grid.\n\n"
+                "Click Save Matrix Grid to store them permanently in the database."
+            )
 
         def do_save_grid():
             save_grid_state()
@@ -8163,7 +8210,16 @@ class MainWindow(QMainWindow):
         btn_rename_course.clicked.connect(rename_selected_course)
         btn_delete_course.clicked.connect(delete_selected_course)
         load_grid_state()
+        # Mark known external/certified courses and keep new ready courses visible
+        apply_external_course_types()
         render_matrix_grid()
+        # Persist newly merged ready courses so they appear after restart without another Load click
+        if grid_state.get("dirty"):
+            try:
+                save_grid_state()
+                grid_state["dirty"] = False
+            except Exception:
+                logging.exception("Auto-save of merged ready courses failed")
         tabs.addTab(grid_page, "3. Training Matrix Grid")
 
         # =====================================================================
