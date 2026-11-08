@@ -8040,8 +8040,43 @@ class MainWindow(QMainWindow):
         matrix_container_layout.addWidget(frozen_training_names)
         matrix_container_layout.addWidget(matrix_grid, 1)
         grid_layout.addWidget(matrix_container, 1)
-        matrix_grid.verticalScrollBar().valueChanged.connect(frozen_training_names.verticalScrollBar().setValue)
-        frozen_training_names.verticalScrollBar().valueChanged.connect(matrix_grid.verticalScrollBar().setValue)
+        # Keep training-name rows locked to the same vertical position as validity/hours/trade cells
+        frozen_training_names.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen_training_names.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen_training_names.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        matrix_grid.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        # Match header heights so rows line up
+        frozen_training_names.horizontalHeader().setFixedHeight(matrix_grid.horizontalHeader().height() or 30)
+        matrix_grid.horizontalHeader().sectionResized.connect(
+            lambda *_: frozen_training_names.horizontalHeader().setFixedHeight(matrix_grid.horizontalHeader().height())
+        )
+        _syncing_matrix_scroll = {"v": False}
+
+        def _matrix_scroll_from_main(value):
+            if _syncing_matrix_scroll["v"]:
+                return
+            _syncing_matrix_scroll["v"] = True
+            try:
+                frozen_training_names.verticalScrollBar().setValue(value)
+            finally:
+                _syncing_matrix_scroll["v"] = False
+
+        def _matrix_scroll_from_frozen(value):
+            if _syncing_matrix_scroll["v"]:
+                return
+            _syncing_matrix_scroll["v"] = True
+            try:
+                matrix_grid.verticalScrollBar().setValue(value)
+            finally:
+                _syncing_matrix_scroll["v"] = False
+
+        matrix_grid.verticalScrollBar().valueChanged.connect(_matrix_scroll_from_main)
+        frozen_training_names.verticalScrollBar().valueChanged.connect(_matrix_scroll_from_frozen)
+        # Wheel on frozen names drives the main grid (which has the scrollbar)
+        def _frozen_wheel(event):
+            matrix_grid.wheelEvent(event)
+        frozen_training_names.wheelEvent = _frozen_wheel
 
         def render_matrix_grid():
             designations = list(MATRIX_DESIGNATIONS)
@@ -8091,9 +8126,13 @@ class MainWindow(QMainWindow):
                 matrix_grid.setColumnWidth(1, 110)
                 matrix_grid.setColumnWidth(2, 70)
                 frozen_training_names.setColumnWidth(0, 260)
+                hdr_h = max(30, matrix_grid.horizontalHeader().height())
+                frozen_training_names.horizontalHeader().setFixedHeight(hdr_h)
                 for rr in range(len(courses)):
                     matrix_grid.setRowHeight(rr, 30)
                     frozen_training_names.setRowHeight(rr, 30)
+                # Re-align vertical scroll after rebuild
+                frozen_training_names.verticalScrollBar().setValue(matrix_grid.verticalScrollBar().value())
                 for col in range(3, matrix_grid.columnCount()):
                     matrix_grid.setColumnWidth(col, 90)
                 course_needle = matrix_course_filter.text().strip().casefold()
@@ -8278,12 +8317,11 @@ class MainWindow(QMainWindow):
         btn_reload_grid.clicked.connect(lambda: (load_grid_state(), render_matrix_grid()))
         btn_rename_course.clicked.connect(rename_selected_course)
         btn_delete_course.clicked.connect(delete_selected_course)
-        load_grid_state()
+        # Load matrix state into memory only (no heavy table paint yet)
         try:
-            apply_external_course_types()
+            load_grid_state()
         except Exception:
-            logging.exception("apply_external_course_types failed")
-        render_matrix_grid()
+            logging.exception("light load_grid_state failed")
         tabs.addTab(grid_page, "3. Training Matrix Grid")
 
         # =====================================================================
@@ -8459,7 +8497,7 @@ class MainWindow(QMainWindow):
         track_state = {"employees": [], "courses": []}
 
         def load_tracker():
-            load_grid_state()
+            # Avoid reloading full matrix from DB every refresh (use in-memory grid_state)
             employees = db.fetchall(
                 "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
             )
@@ -8467,81 +8505,94 @@ class MainWindow(QMainWindow):
             if needle:
                 employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
             course_needle = track_course_filter.text().strip().lower()
-            # Show ALL matrix courses (priority ordered) so tracking is complete
             course_set = prioritized_courses(grid_state["courses"])
             if course_needle:
                 course_set = [c for c in course_set if course_needle in c.lower()]
             track_state["employees"] = employees
             track_state["courses"] = course_set
-            headers = ["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"] + course_set
-            track_table.clear()
-            track_table.setColumnCount(len(headers))
-            track_table.setHorizontalHeaderLabels(headers)
-            track_table.setRowCount(len(employees))
-            for r, emp in enumerate(employees):
-                reqs = requirements_for_trade(emp["designation"])
-                mand = [x for x in reqs if x[1] == "Mandatory"]
-                done = 0
-                for cname, req, validity in mand:
-                    st, _, _ = status_of(latest_record(emp["id"], cname), validity)
-                    if st in ("Valid", "Expiring Soon"):
-                        done += 1
-                pct = int(round(100 * done / len(mand))) if mand else None
-                pct_text = "N/A" if pct is None else f"{pct}% ({done}/{len(mand)})"
-                base = [str(r + 1), safe(emp["employee_id"]), safe(emp["name"]), safe(emp["designation"]), safe(emp["company"]), pct_text]
-                for c, val in enumerate(base):
-                    it = QTableWidgetItem(val)
-                    if c < 5:
+
+            track_frozen.setUpdatesEnabled(False)
+            track_table.setUpdatesEnabled(False)
+            try:
+                track_frozen.clear()
+                track_frozen.setColumnCount(6)
+                track_frozen.setHorizontalHeaderLabels(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"])
+                track_frozen.setRowCount(len(employees))
+                track_table.clear()
+                track_table.setColumnCount(len(course_set))
+                track_table.setHorizontalHeaderLabels(course_set)
+                track_table.setRowCount(len(employees))
+                hdr_h = max(30, track_table.horizontalHeader().height())
+                track_frozen.horizontalHeader().setFixedHeight(hdr_h)
+                for r, emp in enumerate(employees):
+                    reqs = requirements_for_trade(emp["designation"])
+                    mand = [x for x in reqs if x[1] == "Mandatory"]
+                    done = 0
+                    for cname, req, validity in mand:
+                        st, _, _ = status_of(latest_record(emp["id"], cname), validity)
+                        if st in ("Valid", "Expiring Soon"):
+                            done += 1
+                    pct = int(round(100 * done / len(mand))) if mand else None
+                    pct_text = "N/A" if pct is None else f"{pct}% ({done}/{len(mand)})"
+                    base = [str(r + 1), safe(emp["employee_id"]), safe(emp["name"]), safe(emp["designation"]), safe(emp["company"]), pct_text]
+                    for c, val in enumerate(base):
+                        it = QTableWidgetItem(val)
                         it.setBackground(QBrush(QColor("#EEF4FB")))
-                    if c == 2:
-                        f = it.font(); f.setBold(True); it.setFont(f)
-                    if c == 5 and pct is not None:
-                        bg, fg = color_status("Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed"))
-                        it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
-                        f = it.font(); f.setBold(True); it.setFont(f)
-                    if c == 1:
-                        it.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
-                    track_table.setItem(r, c, it)
-                req_map = {x[0]: x for x in reqs}
-                for offset, cname in enumerate(course_set):
-                    col = 6 + offset
-                    if cname not in req_map:
-                        it = QTableWidgetItem("—")
+                        if c == 2:
+                            f = it.font(); f.setBold(True); it.setFont(f)
+                        if c == 5 and pct is not None:
+                            bg, fg = color_status("Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed"))
+                            it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                            f = it.font(); f.setBold(True); it.setFont(f)
+                        if c == 1:
+                            it.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
+                        track_frozen.setItem(r, c, it)
+                    req_map = {x[0]: x for x in reqs}
+                    for offset, cname in enumerate(course_set):
+                        if cname not in req_map:
+                            it = QTableWidgetItem("—")
+                            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            bg, fg = color_status("")
+                            it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                            track_table.setItem(r, offset, it)
+                            continue
+                        req, validity = req_map[cname][1], req_map[cname][2]
+                        rec = latest_record(emp["id"], cname)
+                        st, train, expiry = status_of(rec, validity)
+                        days = None
+                        if expiry:
+                            try:
+                                days = (date.fromisoformat(expiry) - date.today()).days
+                            except Exception:
+                                days = None
+                        days_txt = "" if days is None else (f"{days}d left" if days >= 0 else f"{abs(days)}d overdue")
+                        short = {"Mandatory": "M", "Optional": "O", "Before Job": "B"}.get(req, "")
+                        lines = [f"{short} · {st}"]
+                        if train:
+                            lines.append(train)
+                        if expiry:
+                            lines.append("Exp " + expiry)
+                        if days_txt:
+                            lines.append(days_txt)
+                        it = QTableWidgetItem("\n".join(lines))
                         it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        bg, fg = color_status("")
+                        it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req, "record_id": int(rec["id"]) if rec else None})
+                        bg, fg = color_status(st)
                         it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
-                        track_table.setItem(r, col, it)
-                        continue
-                    req, validity = req_map[cname][1], req_map[cname][2]
-                    rec = latest_record(emp["id"], cname)
-                    st, train, expiry = status_of(rec, validity)
-                    days = None
-                    if expiry:
-                        try:
-                            days = (date.fromisoformat(expiry) - date.today()).days
-                        except Exception:
-                            days = None
-                    days_txt = "" if days is None else (f"{days}d left" if days >= 0 else f"{abs(days)}d overdue")
-                    short = {"Mandatory": "M", "Optional": "O", "Before Job": "B"}.get(req, "")
-                    lines = [f"{short} · {st}"]
-                    if train:
-                        lines.append(train)
-                    if expiry:
-                        lines.append("Exp " + expiry)
-                    if days_txt:
-                        lines.append(days_txt)
-                    it = QTableWidgetItem("\\n".join(lines))
-                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                    it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req, "record_id": int(rec["id"]) if rec else None})
-                    bg, fg = color_status(st)
-                    it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
-                    track_table.setItem(r, col, it)
-            track_table.setColumnWidth(0, 48)
-            track_table.setColumnWidth(1, 90)
-            track_table.setColumnWidth(2, 140)
-            track_table.setColumnWidth(3, 120)
-            track_table.setColumnWidth(4, 120)
-            track_table.setColumnWidth(5, 110)
+                        track_table.setItem(r, offset, it)
+                    track_frozen.setRowHeight(r, 52)
+                    track_table.setRowHeight(r, 52)
+                track_frozen.setColumnWidth(0, 48)
+                track_frozen.setColumnWidth(1, 80)
+                track_frozen.setColumnWidth(2, 130)
+                track_frozen.setColumnWidth(3, 110)
+                track_frozen.setColumnWidth(4, 90)
+                track_frozen.setColumnWidth(5, 90)
+                track_frozen.verticalScrollBar().setValue(track_table.verticalScrollBar().value())
+            finally:
+                track_frozen.setUpdatesEnabled(True)
+                track_table.setUpdatesEnabled(True)
+
 
         def refresh_compliance_dashboard():
             employees = db.fetchall(
@@ -8765,8 +8816,8 @@ class MainWindow(QMainWindow):
         def clear_selected_cell():
             row = track_table.currentRow()
             column = track_table.currentColumn()
-            if row < 0 or column < 6:
-                return QMessageBox.information(self, "Clear", "Select a training cell first.")
+            if row < 0 or column < 0:
+                return QMessageBox.information(self, "Clear", "Select a training course cell on the right side first.")
             item = track_table.item(row, column)
             if not item:
                 return
@@ -8816,11 +8867,14 @@ class MainWindow(QMainWindow):
                 path += ".xlsx"
             load_tracker()
             wb = Workbook(); ws = wb.active; ws.title = "Tracking Register"
-            headers = [track_table.horizontalHeaderItem(c).text() for c in range(track_table.columnCount())]
+            left_headers = [track_frozen.horizontalHeaderItem(c).text() if track_frozen.horizontalHeaderItem(c) else "" for c in range(track_frozen.columnCount())]
+            right_headers = [track_table.horizontalHeaderItem(c).text() if track_table.horizontalHeaderItem(c) else "" for c in range(track_table.columnCount())]
+            headers = left_headers + right_headers
             ws.append(headers)
-            for r in range(track_table.rowCount()):
-                vals = [(track_table.item(r, c).text() if track_table.item(r, c) else "") for c in range(track_table.columnCount())]
-                ws.append(vals)
+            for r in range(track_frozen.rowCount()):
+                left = [(track_frozen.item(r, c).text() if track_frozen.item(r, c) else "") for c in range(track_frozen.columnCount())]
+                right = [(track_table.item(r, c).text() if track_table.item(r, c) else "") for c in range(track_table.columnCount())]
+                ws.append(left + right)
             style_training_excel_workbook(wb, ws, "HSE TRAINING TRACKING REGISTER")
             for cell in ws[5]:
                 if cell.value is not None:
@@ -8860,10 +8914,10 @@ class MainWindow(QMainWindow):
             table = doc.add_table(rows=1, cols=6)
             for i, h in enumerate(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"]):
                 table.rows[0].cells[i].text = h
-            for r in range(track_table.rowCount()):
+            for r in range(track_frozen.rowCount()):
                 cells = table.add_row().cells
                 for c in range(6):
-                    it = track_table.item(r, c)
+                    it = track_frozen.item(r, c)
                     cells[c].text = xml_safe(it.text() if it else "")
             style_docx_table(table, header=True, font_size=8)
             doc.add_paragraph("Full course-level status is available in the Excel export and on-screen register.")
@@ -9355,35 +9409,66 @@ class MainWindow(QMainWindow):
         # (tabs 1-4 already added earlier)
         track_table.cellDoubleClicked.connect(log_or_edit_cell)
         track_refresh.clicked.connect(load_tracker)
-        track_search.textChanged.connect(load_tracker)
-        track_course_filter.textChanged.connect(load_tracker)
+        track_search.returnPressed.connect(load_tracker)
+        track_course_filter.returnPressed.connect(load_tracker)
         track_edit.clicked.connect(lambda: log_or_edit_cell())
         track_delete.clicked.connect(clear_selected_cell)
         track_export_xlsx.clicked.connect(export_tracker_excel)
         track_export_docx.clicked.connect(export_tracker_word)
-        load_tracker()
+        # Tracking data loads when the tab is first opened (see _on_training_tab_changed)
         tabs.addTab(track_page, "5. Tracking Register")
         tabs.addTab(master_page, "6. Master Training Register")
         tabs.addTab(category_pages["I"], "7. Internal Training Register")
         tabs.addTab(category_pages["E"], "8. External Training Register")
         # Compliance dashboard kept at the end (optional overview)
         tabs.addTab(compliance_page, "Compliance Dashboard")
+        # Lazy load: heavy refreshes only when the related tab is first selected (fast first open)
+        _training_tab_loaded = {"grid": False, "track": False, "master": False, "compliance": False, "registers": False}
+
+        def _on_training_tab_changed(index):
+            try:
+                label = tabs.tabText(index)
+            except Exception:
+                return
+            if "Matrix" in label and not _training_tab_loaded["grid"]:
+                _training_tab_loaded["grid"] = True
+                try:
+                    load_grid_state()
+                    apply_external_course_types()
+                    render_matrix_grid()
+                except Exception:
+                    logging.exception("lazy matrix load failed")
+            elif "Tracking" in label and not _training_tab_loaded["track"]:
+                _training_tab_loaded["track"] = True
+                try:
+                    load_tracker()
+                except Exception:
+                    logging.exception("lazy tracker load failed")
+            elif "Master" in label and not _training_tab_loaded["master"]:
+                _training_tab_loaded["master"] = True
+                try:
+                    refresh_master_training_register()
+                except Exception:
+                    logging.exception("lazy master load failed")
+            elif "Compliance" in label and not _training_tab_loaded["compliance"]:
+                _training_tab_loaded["compliance"] = True
+                try:
+                    refresh_compliance_dashboard()
+                except Exception:
+                    logging.exception("lazy compliance load failed")
+            elif ("Internal" in label or "External" in label) and not _training_tab_loaded["registers"]:
+                _training_tab_loaded["registers"] = True
+                try:
+                    refresh_category_registers()
+                except Exception:
+                    logging.exception("lazy register load failed")
+
+        tabs.currentChanged.connect(_on_training_tab_changed)
+        # Open first tab quickly without building matrix/tracker
         try:
-            sync_all_training_assignments()
+            tabs.setCurrentIndex(0)
         except Exception:
-            logging.exception("sync_all_training_assignments failed")
-        try:
-            refresh_category_registers()
-        except Exception:
-            logging.exception("refresh_category_registers failed")
-        try:
-            refresh_master_training_register()
-        except Exception:
-            logging.exception("refresh_master_training_register failed")
-        try:
-            refresh_compliance_dashboard()
-        except Exception:
-            logging.exception("refresh_compliance_dashboard failed")
+            pass
 
 
     def reports(self):
