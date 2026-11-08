@@ -7331,6 +7331,25 @@ class MainWindow(QMainWindow):
         }
         grid_state = {"courses": [], "validity": {}, "cells": {}, "types": {}, "hours": {}, "dirty": False}
 
+        def prioritized_courses(course_list=None):
+            """Order courses by importance: Before Job → Mandatory → Optional → other, then READY order."""
+            src = list(course_list if course_list is not None else grid_state["courses"])
+            ready_rank = {item[0]: i for i, item in enumerate(READY_COURSES)}
+            # highest requirement level seen across trades
+            level = {}
+            rank_map = {"Before Job": 0, "Mandatory": 1, "Optional": 2}
+            for cname in src:
+                best = 9
+                for desig in MATRIX_DESIGNATIONS:
+                    req = grid_state["cells"].get((cname, desig), "Not Applicable")
+                    if req in rank_map:
+                        best = min(best, rank_map[req])
+                level[cname] = best
+            src.sort(key=lambda c: (level.get(c, 9), ready_rank.get(c, 9999), c.lower()))
+            return src
+
+
+
         EXTERNAL_CERT_COURSES = {
             "OSHA 10 Construction (or equivalent)", "OSHA 30 Construction (or equivalent)",
             "IOSH Working Safely", "IOSH Managing Safely", "NEBOSH International General Certificate (IGC)",
@@ -7451,7 +7470,7 @@ class MainWindow(QMainWindow):
             grid_state["dirty"] = True
 
         def save_grid_state():
-            # Preserve the previous matrix configuration before applying edits.
+            """Fast matrix save: batch insert only meaningful cells; avoid UI freeze."""
             try:
                 db.execute("""INSERT INTO training_matrix_history
                     (course_name, designation, requirement, validity_months, notes, updated_at, archive_reason)
@@ -7459,35 +7478,63 @@ class MainWindow(QMainWindow):
                     FROM training_matrix_cells""")
             except Exception:
                 logging.exception("Training matrix history snapshot failed")
-                raise
             db.execute("DELETE FROM training_matrix_cells")
+            today_s = today()
+            cell_rows = []
+            course_updates = []
+            course_inserts = []
+            existing_map = {}
+            for row in db.fetchall("SELECT id, course_name FROM training_courses WHERE active=1"):
+                existing_map[safe(row["course_name"]).casefold()] = int(row["id"])
             for cname in grid_state["courses"]:
                 months = int(grid_state["validity"].get(cname, 0) or 0)
+                hours = float(grid_state["hours"].get(cname, 0) or 0)
+                ctype = grid_state["types"].get(cname, "I")
+                mand, opt = [], []
                 for desig in MATRIX_DESIGNATIONS:
                     req = grid_state["cells"].get((cname, desig), "Not Applicable")
-                    hours = float(grid_state["hours"].get(cname, 0) or 0)
-                    db.execute(
-                        "INSERT INTO training_matrix_cells (course_name, designation, requirement, validity_months, notes, updated_at, training_type, training_hours) VALUES (?,?,?,?,?,?,?,?)",
-                        (cname, desig, req, months, "", today(), grid_state["types"].get(cname, "I"), hours)
-                    )
-                mand = [d for d in MATRIX_DESIGNATIONS if grid_state["cells"].get((cname, d)) in ("Mandatory", "Before Job")]
-                opt = [d for d in MATRIX_DESIGNATIONS if grid_state["cells"].get((cname, d)) == "Optional"]
+                    if req and req != "Not Applicable":
+                        cell_rows.append((cname, desig, req, months, "", today_s, ctype, hours))
+                        if req in ("Mandatory", "Before Job"):
+                            mand.append(desig)
+                        elif req == "Optional":
+                            opt.append(desig)
                 trade_csv = ", ".join(mand + opt)
-                existing = db.fetchone("SELECT id FROM training_courses WHERE lower(course_name)=lower(?) AND active=1 LIMIT 1", (cname,))
-                if existing:
-                    hours = float(grid_state["hours"].get(cname, 0) or 0)
-                    db.execute(
-                        "UPDATE training_courses SET designation=?, validity_months=?, mandatory=?, requirement_source=?, training_type=?, provider_type=?, training_hours=? WHERE id=?",
-                        (trade_csv, months, 1 if mand else 0, "Matrix Grid", grid_state["types"].get(cname, "I"), "Internal" if grid_state["types"].get(cname, "I") == "I" else "External", hours, existing["id"])
-                    )
+                provider = "Internal" if ctype == "I" else "External"
+                cid = existing_map.get(cname.casefold())
+                if cid:
+                    course_updates.append((trade_csv, months, 1 if mand else 0, "Matrix Grid", ctype, provider, hours, cid))
                 else:
-                    hours = float(grid_state["hours"].get(cname, 0) or 0)
-                    db.execute(
-                        "INSERT INTO training_courses (course_name, designation, department, mandatory, provider_type, validity_months, requirement_source, active, training_type, training_hours) VALUES (?,?,?,?,?,?,?,1,?,?)",
-                        (cname, trade_csv, "", 1 if mand else 0, "Internal" if grid_state["types"].get(cname, "I") == "I" else "External", months, "Matrix Grid", grid_state["types"].get(cname, "I"), hours)
-                    )
+                    course_inserts.append((cname, trade_csv, "", 1 if mand else 0, provider, months, "Matrix Grid", ctype, hours))
+            if cell_rows:
+                db.conn.executemany(
+                    "INSERT INTO training_matrix_cells (course_name, designation, requirement, validity_months, notes, updated_at, training_type, training_hours) VALUES (?,?,?,?,?,?,?,?)",
+                    cell_rows
+                )
+            if course_updates:
+                db.conn.executemany(
+                    "UPDATE training_courses SET designation=?, validity_months=?, mandatory=?, requirement_source=?, training_type=?, provider_type=?, training_hours=? WHERE id=?",
+                    course_updates
+                )
+            if course_inserts:
+                db.conn.executemany(
+                    "INSERT INTO training_courses (course_name, designation, department, mandatory, provider_type, validity_months, requirement_source, active, training_type, training_hours) VALUES (?,?,?,?,?,?,?,1,?,?)",
+                    course_inserts
+                )
+            db.conn.commit()
             grid_state["dirty"] = False
-            sync_all_training_assignments()
+            # Light assignment sync only (do not block UI on huge workforce)
+            try:
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                sync_all_training_assignments()
+            except Exception:
+                logging.exception("sync after matrix save failed")
+            finally:
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
+
 
         def requirements_for_trade(trade):
             trade = safe(trade).strip()
@@ -7986,6 +8033,10 @@ class MainWindow(QMainWindow):
         matrix_grid.horizontalHeader().setDefaultSectionSize(88)
         matrix_grid.verticalHeader().setDefaultSectionSize(28)
         matrix_grid.verticalHeader().setVisible(False)
+        matrix_grid.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        matrix_grid.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        matrix_grid.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         matrix_container_layout.addWidget(frozen_training_names)
         matrix_container_layout.addWidget(matrix_grid, 1)
         grid_layout.addWidget(matrix_container, 1)
@@ -7995,61 +8046,69 @@ class MainWindow(QMainWindow):
         def render_matrix_grid():
             designations = list(MATRIX_DESIGNATIONS)
             courses = list(grid_state["courses"])
-            matrix_grid.clear()
-            matrix_grid.setRowCount(len(courses))
-            matrix_grid.setColumnCount(3 + len(designations))
-            matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)", "Hours"] + designations)
-            frozen_training_names.setRowCount(len(courses))
-            frozen_training_names.setHorizontalHeaderLabels(["Training Name"])
-            for r, cname in enumerate(courses):
-                name_item = QTableWidgetItem(cname)
-                name_item.setBackground(QBrush(QColor("#EEF4FB")))
-                f = name_item.font(); f.setBold(True); name_item.setFont(f)
-                name_item.setToolTip("Double-click to rename this training course")
-                matrix_grid.setItem(r, 0, name_item)
-                frozen_item = QTableWidgetItem(cname)
-                frozen_item.setBackground(QBrush(QColor("#EEF4FB")))
-                frozen_item.setFont(name_item.font())
-                frozen_item.setToolTip("Double-click to rename this training course")
-                frozen_training_names.setItem(r, 0, frozen_item)
-                months = int(grid_state["validity"].get(cname, 0) or 0)
-                val_item = QTableWidgetItem(str(months))
-                val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                val_item.setBackground(QBrush(QColor("#F7FAFC")))
-                val_item.setToolTip("Double-click to change validity (months)")
-                matrix_grid.setItem(r, 1, val_item)
-                hours = float(grid_state["hours"].get(cname, 0) or 0)
-                hrs_item = QTableWidgetItem(str(int(hours) if hours == int(hours) else hours))
-                hrs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                hrs_item.setBackground(QBrush(QColor("#EEF9F0")))
-                hrs_item.setToolTip("Double-click to set training hours for man-hour calculations")
-                matrix_grid.setItem(r, 2, hrs_item)
-                for c, desig in enumerate(designations):
-                    req = grid_state["cells"].get((cname, desig), "Not Applicable")
-                    it = QTableWidgetItem()
-                    _style_req(it, req)
-                    marker = grid_state["types"].get(cname, "I")
-                    if req != "Not Applicable":
-                        it.setText(f"{marker}-{MATRIX_REQ_SHORT.get(req, '—')}")
-                    matrix_grid.setItem(r, c + 3, it)
-            matrix_grid.setColumnHidden(0, True)
-            matrix_grid.setColumnWidth(0, 260)
-            matrix_grid.setColumnWidth(1, 110)
-            matrix_grid.setColumnWidth(2, 70)
-            frozen_training_names.setColumnWidth(0, 260)
-            for rr in range(len(courses)):
-                matrix_grid.setRowHeight(rr, 30)
-                frozen_training_names.setRowHeight(rr, 30)
-            for col in range(3, matrix_grid.columnCount()):
-                matrix_grid.setColumnWidth(col, 90)
-            course_needle = matrix_course_filter.text().strip().casefold()
-            selected_trade = matrix_trade_filter.currentData() or "__ALL__"
-            for rr, course_name in enumerate(courses):
-                matrix_grid.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
-                frozen_training_names.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
-            for cc, designation in enumerate(designations, start=3):
-                matrix_grid.setColumnHidden(cc, bool(selected_trade != "__ALL__" and designation != selected_trade))
-            grid_status.setText(f"{len(courses)} courses × {len(designations)} trades" + (" · Unsaved" if grid_state["dirty"] else ""))
+            matrix_grid.setUpdatesEnabled(False)
+            frozen_training_names.setUpdatesEnabled(False)
+            try:
+                matrix_grid.clear()
+                matrix_grid.setRowCount(len(courses))
+                matrix_grid.setColumnCount(3 + len(designations))
+                matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)", "Hours"] + designations)
+                frozen_training_names.setRowCount(len(courses))
+                frozen_training_names.setHorizontalHeaderLabels(["Training Name"])
+                for r, cname in enumerate(courses):
+                    name_item = QTableWidgetItem(cname)
+                    name_item.setBackground(QBrush(QColor("#EEF4FB")))
+                    f = name_item.font(); f.setBold(True); name_item.setFont(f)
+                    name_item.setToolTip("Double-click to rename this training course")
+                    matrix_grid.setItem(r, 0, name_item)
+                    frozen_item = QTableWidgetItem(cname)
+                    frozen_item.setBackground(QBrush(QColor("#EEF4FB")))
+                    frozen_item.setFont(name_item.font())
+                    frozen_item.setToolTip("Double-click to rename this training course")
+                    frozen_training_names.setItem(r, 0, frozen_item)
+                    months = int(grid_state["validity"].get(cname, 0) or 0)
+                    val_item = QTableWidgetItem(str(months))
+                    val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    val_item.setBackground(QBrush(QColor("#F7FAFC")))
+                    val_item.setToolTip("Double-click to change validity (months)")
+                    matrix_grid.setItem(r, 1, val_item)
+                    hours = float(grid_state["hours"].get(cname, 0) or 0)
+                    hrs_item = QTableWidgetItem(str(int(hours) if hours == int(hours) else hours))
+                    hrs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    hrs_item.setBackground(QBrush(QColor("#EEF9F0")))
+                    hrs_item.setToolTip("Double-click to set training hours for man-hour calculations")
+                    matrix_grid.setItem(r, 2, hrs_item)
+                    for c, desig in enumerate(designations):
+                        req = grid_state["cells"].get((cname, desig), "Not Applicable")
+                        it = QTableWidgetItem()
+                        _style_req(it, req)
+                        marker = grid_state["types"].get(cname, "I")
+                        if req != "Not Applicable":
+                            it.setText(f"{marker}-{MATRIX_REQ_SHORT.get(req, '—')}")
+                        matrix_grid.setItem(r, c + 3, it)
+                matrix_grid.setColumnHidden(0, True)
+                matrix_grid.setColumnWidth(0, 260)
+                matrix_grid.setColumnWidth(1, 110)
+                matrix_grid.setColumnWidth(2, 70)
+                frozen_training_names.setColumnWidth(0, 260)
+                for rr in range(len(courses)):
+                    matrix_grid.setRowHeight(rr, 30)
+                    frozen_training_names.setRowHeight(rr, 30)
+                for col in range(3, matrix_grid.columnCount()):
+                    matrix_grid.setColumnWidth(col, 90)
+                course_needle = matrix_course_filter.text().strip().casefold()
+                selected_trade = matrix_trade_filter.currentData() or "__ALL__"
+                for rr, course_name in enumerate(courses):
+                    matrix_grid.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
+                    frozen_training_names.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
+                for cc, designation in enumerate(designations, start=3):
+                    matrix_grid.setColumnHidden(cc, bool(selected_trade != "__ALL__" and designation != selected_trade))
+                grid_status.setText(f"{len(courses)} courses × {len(designations)} trades" + (" · Unsaved" if grid_state["dirty"] else ""))
+            except Exception:
+                logging.exception("render_matrix_grid failed")
+            finally:
+                matrix_grid.setUpdatesEnabled(True)
+                frozen_training_names.setUpdatesEnabled(True)
 
         def on_grid_dbl(row, column):
             if row < 0 or row >= len(grid_state["courses"]):
@@ -8189,14 +8248,25 @@ class MainWindow(QMainWindow):
             )
 
         def do_save_grid():
-            save_grid_state()
-            render_matrix_grid()
-            load_tracker()
             try:
-                refresh_category_registers()
-                refresh_master_training_register()
-            except Exception:
-                pass
+                QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                QApplication.processEvents()
+                save_grid_state()
+                render_matrix_grid()
+                try:
+                    load_tracker()
+                except Exception:
+                    logging.exception("load_tracker after save failed")
+                try:
+                    refresh_category_registers()
+                    refresh_master_training_register()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    QApplication.restoreOverrideCursor()
+                except Exception:
+                    pass
             QMessageBox.information(self, "Matrix Grid", "Matrix saved. Internal/External registers updated for training type changes.")
 
         matrix_grid.cellDoubleClicked.connect(on_grid_dbl)
@@ -8231,21 +8301,31 @@ class MainWindow(QMainWindow):
         add_hours = QDoubleSpinBox(); add_hours.setRange(0, 500); add_hours.setDecimals(1); add_hours.setValue(8); add_hours.setSuffix(" hours")
         add_default_req = QComboBox(); add_default_req.addItems(["Not Applicable", "Mandatory", "Optional", "Before Job"])
         add_default_req.setCurrentText("Mandatory")
-        add_apply_trade = QListWidget(); add_apply_trade.setMaximumHeight(180)
-        add_apply_trade.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        trade_hint = QLabel("Select one or more trades below (check boxes). Use 'All field trades' for site workforce.")
+        trade_hint = QLabel("Open the trades dropdown and tick one or more trades (or All field trades).")
         trade_hint.setWordWrap(True)
-        all_trade_item = QListWidgetItem("All field trades (recommended)")
-        all_trade_item.setFlags(all_trade_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        all_trade_item.setCheckState(Qt.CheckState.Unchecked)
-        all_trade_item.setData(Qt.ItemDataRole.UserRole, "__ALL_FIELD__")
-        add_apply_trade.addItem(all_trade_item)
+        add_apply_trade = QComboBox()
+        add_apply_trade.setEditable(True)
+        add_apply_trade.lineEdit().setReadOnly(True)
+        add_apply_trade.lineEdit().setPlaceholderText("Select trade(s)…")
+        add_trade_model = QStandardItemModel(add_apply_trade)
+        def _add_trade_check(label, data):
+            item = QStandardItem(label)
+            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setData(data, Qt.ItemDataRole.UserRole)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            add_trade_model.appendRow(item)
+        _add_trade_check("All field trades (recommended)", "__ALL_FIELD__")
         for t in MATRIX_DESIGNATIONS:
-            trade_item = QListWidgetItem(t)
-            trade_item.setFlags(trade_item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            trade_item.setCheckState(Qt.CheckState.Unchecked)
-            trade_item.setData(Qt.ItemDataRole.UserRole, t)
-            add_apply_trade.addItem(trade_item)
+            _add_trade_check(t, t)
+        add_apply_trade.setModel(add_trade_model)
+        def _update_trade_combo_text():
+            selected = []
+            for i in range(add_trade_model.rowCount()):
+                it = add_trade_model.item(i)
+                if it and it.checkState() == Qt.CheckState.Checked:
+                    selected.append(it.text())
+            add_apply_trade.lineEdit().setText(", ".join(selected) if selected else "")
+        add_trade_model.itemChanged.connect(lambda *_: _update_trade_combo_text())
         add_training_type = QComboBox(); add_training_type.addItem("Internal (I)", "I"); add_training_type.addItem("External / Third-party (E)", "E"); add_training_type.addItem("Client-specific (C)", "C")
         add_btn = QPushButton("Add to Matrix Grid")
         add_btn.setMinimumHeight(38)
@@ -8277,7 +8357,11 @@ class MainWindow(QMainWindow):
             grid_state["validity"][cname] = int(add_valid.value())
             grid_state["hours"][cname] = float(add_hours.value())
             req = add_default_req.currentText()
-            selected_trades = [add_apply_trade.item(i).data(Qt.ItemDataRole.UserRole) for i in range(add_apply_trade.count()) if add_apply_trade.item(i).checkState() == Qt.CheckState.Checked]
+            selected_trades = []
+            for i in range(add_trade_model.rowCount()):
+                it = add_trade_model.item(i)
+                if it and it.checkState() == Qt.CheckState.Checked:
+                    selected_trades.append(it.data(Qt.ItemDataRole.UserRole))
             office = {"Managing Director / MD", "CEO", "General Manager", "Admin / Office Staff", "Document Controller", "Visitor"}
             grid_state["types"][cname] = add_training_type.currentData() or "I"
             for desig in MATRIX_DESIGNATIONS:
@@ -8383,18 +8467,10 @@ class MainWindow(QMainWindow):
             if needle:
                 employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
             course_needle = track_course_filter.text().strip().lower()
-            course_set = []
-            for e in employees:
-                for cname, req, validity in requirements_for_trade(e["designation"]):
-                    if course_needle and course_needle not in cname.lower():
-                        continue
-                    if cname not in course_set:
-                        course_set.append(cname)
-            if not course_set:
-                base = list(grid_state["courses"])
-                if course_needle:
-                    base = [c for c in base if course_needle in c.lower()]
-                course_set = base[:40]
+            # Show ALL matrix courses (priority ordered) so tracking is complete
+            course_set = prioritized_courses(grid_state["courses"])
+            if course_needle:
+                course_set = [c for c in course_set if course_needle in c.lower()]
             track_state["employees"] = employees
             track_state["courses"] = course_set
             headers = ["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"] + course_set
@@ -9040,7 +9116,7 @@ class MainWindow(QMainWindow):
         master_tools = QHBoxLayout(); master_search = QLineEdit(); master_search.setPlaceholderText("Search ID, name, designation or company…"); master_search.setClearButtonEnabled(True)
         master_refresh = QPushButton("Refresh"); master_export = QPushButton("Export Register (Excel)")
         master_tools.addWidget(master_search,1); master_tools.addWidget(master_refresh); master_tools.addWidget(master_export); master_layout.addLayout(master_tools)
-        master_table = QTableWidget(0,10); master_table.setHorizontalHeaderLabels(["S.No.","ID","Name","Designation","Company","No. of External Training","No. of Internal Training","Mandatory Training Completed %","Due in 1 Month","Due in 2 Months"]); master_table.setAlternatingRowColors(True); master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); master_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); master_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); master_table.horizontalHeader().setStretchLastSection(True); master_layout.addWidget(master_table,1)
+        master_table = QTableWidget(0,10); master_table.setHorizontalHeaderLabels(["S.No.","ID","Name","Designation","Company","External Attended / Required","Internal Attended / Required","Mandatory Training Completed %","Due in 1 Month","Due in 2 Months"]); master_table.setAlternatingRowColors(True); master_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); master_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); master_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection); master_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); master_table.horizontalHeader().setStretchLastSection(True); master_layout.addWidget(master_table,1)
 
         master_employees = []
         def refresh_master_training_register(*_):
@@ -9053,8 +9129,19 @@ class MainWindow(QMainWindow):
             today_date = date.today()
             for ri, emp in enumerate(employees):
                 reqs = requirements_for_trade(emp["designation"])
-                ext_count = sum(1 for cname, req, val in reqs if grid_state["types"].get(cname,"I")=="E")
-                int_count = sum(1 for cname, req, val in reqs if grid_state["types"].get(cname,"I")=="I")
+                ext_req = [(cname,req,val) for cname,req,val in reqs if grid_state["types"].get(cname,"I")=="E"]
+                int_req = [(cname,req,val) for cname,req,val in reqs if grid_state["types"].get(cname,"I")!="E"]
+                def _attended(items):
+                    att = 0
+                    for cname, req, validity in items:
+                        st, _, _ = status_of(latest_record(emp["id"], cname), validity)
+                        if st in ("Valid", "Expiring Soon"):
+                            att += 1
+                    return att
+                ext_att = _attended(ext_req)
+                int_att = _attended(int_req)
+                ext_txt = f"{ext_att}/{len(ext_req)}"
+                int_txt = f"{int_att}/{len(int_req)}"
                 mandatory = [(cname,req,val) for cname,req,val in reqs if req in ("Mandatory","Before Job")]
                 done = 0; due30 = 0; due60 = 0
                 for cname, req, validity in mandatory:
@@ -9067,7 +9154,7 @@ class MainWindow(QMainWindow):
                             elif 31 <= days <= 60: due60 += 1
                         except Exception: pass
                 pct = "N/A" if not mandatory else f"{int(round(done*100/len(mandatory)))}%"
-                vals = [ri+1,safe(emp["employee_id"]),safe(emp["name"]),safe(emp["designation"]),safe(emp["company"]),ext_count,int_count,pct,due30,due60]
+                vals = [ri+1,safe(emp["employee_id"]),safe(emp["name"]),safe(emp["designation"]),safe(emp["company"]),ext_txt,int_txt,pct,due30,due60]
                 for ci,val in enumerate(vals):
                     it=QTableWidgetItem(str(val)); master_table.setItem(ri,ci,it)
                 master_table.item(ri,1).setData(Qt.ItemDataRole.UserRole,int(emp["id"]))
@@ -9081,11 +9168,28 @@ class MainWindow(QMainWindow):
             dlg.resize(1180, 720)
             dl = QVBoxLayout(dlg)
 
-            # ---- Employee profile form (Name, ID, Company, Designation, Photo) ----
+            # ---- Compact profile: row1 ID/Name/Trade/Company | row2 Contact/Join/Induction | photo right ----
             profile_box = QGroupBox("Employee Profile")
-            profile_row = QHBoxLayout(profile_box)
+            profile_outer = QHBoxLayout(profile_box)
+            form_w = QWidget()
+            form = QGridLayout(form_w)
+            form.setHorizontalSpacing(10)
+            form.setVerticalSpacing(6)
+            def _ro(val):
+                le = QLineEdit(safe(val)); le.setReadOnly(True); le.setMinimumWidth(120); return le
+            join_date = safe(emp_full["date_joining"]) if "date_joining" in emp_full.keys() else ""
+            induction = safe(emp_full["safety_induction_date"]) if "safety_induction_date" in emp_full.keys() else ""
+            contact = safe(emp_full["contact"]) if "contact" in emp_full.keys() else ""
+            form.addWidget(QLabel("ID"), 0, 0); form.addWidget(_ro(emp_full["employee_id"]), 0, 1)
+            form.addWidget(QLabel("Name"), 0, 2); form.addWidget(_ro(emp_full["name"]), 0, 3)
+            form.addWidget(QLabel("Designation"), 0, 4); form.addWidget(_ro(emp_full["designation"]), 0, 5)
+            form.addWidget(QLabel("Company"), 0, 6); form.addWidget(_ro(emp_full["company"]), 0, 7)
+            form.addWidget(QLabel("Contact"), 1, 0); form.addWidget(_ro(contact), 1, 1)
+            form.addWidget(QLabel("Date of Joining"), 1, 2); form.addWidget(_ro(join_date), 1, 3)
+            form.addWidget(QLabel("Induction Date"), 1, 4); form.addWidget(_ro(induction), 1, 5)
+            profile_outer.addWidget(form_w, 1)
             photo_label = QLabel()
-            photo_label.setFixedSize(120, 140)
+            photo_label.setFixedSize(100, 120)
             photo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             photo_label.setStyleSheet("border:1px solid #C8D5E3; background:#F7FAFC;")
             photo_path = ""
@@ -9096,27 +9200,12 @@ class MainWindow(QMainWindow):
             if photo_path and Path(photo_path).exists():
                 try:
                     pix = QPixmap(photo_path)
-                    photo_label.setPixmap(pix.scaled(116, 136, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                    photo_label.setPixmap(pix.scaled(96, 116, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
                 except Exception:
                     photo_label.setText("No photo")
             else:
                 photo_label.setText("No photo")
-            profile_row.addWidget(photo_label)
-            form_w = QWidget(); form = QFormLayout(form_w)
-            form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-            def _ro(text):
-                le = QLineEdit(safe(text)); le.setReadOnly(True); return le
-            form.addRow("Employee ID / Badge No.", _ro(emp_full["employee_id"]))
-            form.addRow("Full Name", _ro(emp_full["name"]))
-            form.addRow("Designation / Trade", _ro(emp_full["designation"]))
-            form.addRow("Company", _ro(emp_full["company"]))
-            form.addRow("Department", _ro(emp_full["department"] if "department" in emp_full.keys() else ""))
-            form.addRow("Contact", _ro(emp_full["contact"] if "contact" in emp_full.keys() else ""))
-            join_date = safe(emp_full["date_joining"]) if "date_joining" in emp_full.keys() else ""
-            induction = safe(emp_full["safety_induction_date"]) if "safety_induction_date" in emp_full.keys() else ""
-            form.addRow("Date of Joining", _ro(join_date))
-            form.addRow("Safety Induction Date", _ro(induction))
-            profile_row.addWidget(form_w, 1)
+            profile_outer.addWidget(photo_label, 0, Qt.AlignmentFlag.AlignTop)
             dl.addWidget(profile_box)
 
             # ---- Personal training register (Internal + External combined) ----
@@ -9191,17 +9280,50 @@ class MainWindow(QMainWindow):
                 if not out.lower().endswith(".xlsx"):
                     out += ".xlsx"
                 wb = Workbook(); ws = wb.active; ws.title = "Personal Training"
-                ws.append(["Employee ID", "Name", "Designation", "Company"])
-                ws.append([safe(emp_full["employee_id"]), safe(emp_full["name"]), safe(emp_full["designation"]), safe(emp_full["company"])])
+                report_no = f"{document_prefix()}-TRN-PR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                form_no = f"{document_prefix()}-TRN-F02"
+                # Header block
+                ws.merge_cells("A1:H1")
+                ws["A1"] = "PERSONAL TRAINING REGISTER"
+                ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
+                ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+                ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+                ws.row_dimensions[1].height = 28
+                ws.merge_cells("A2:D2"); ws["A2"] = f"Company: {company_name()}"
+                ws.merge_cells("E2:H2"); ws["E2"] = f"Document No.: {report_no}"
+                ws["E2"].alignment = Alignment(horizontal="right")
+                ws.merge_cells("A3:D3"); ws["A3"] = f"Project: {db.setting('project_name','')}"
+                ws.merge_cells("E3:H3"); ws["E3"] = f"Form No.: {form_no}    Date: {datetime.now().strftime('%Y-%m-%d')}"
+                ws["E3"].alignment = Alignment(horizontal="right")
+                for r in (2, 3):
+                    for c in range(1, 9):
+                        ws.cell(r, c).font = Font(name="Arial", size=9, bold=True, color="17365D")
+                logo = report_logo_path()
+                if logo and Path(logo).exists():
+                    try:
+                        img = XLImage(str(logo)); img.width = 90; img.height = 45
+                        ws.add_image(img, "A1")
+                    except Exception:
+                        pass
                 ws.append([])
+                ws.append(["Employee ID", safe(emp_full["employee_id"]), "Name", safe(emp_full["name"]), "Designation", safe(emp_full["designation"]), "Company", safe(emp_full["company"])])
+                for cell in ws[ws.max_row]:
+                    cell.font = Font(bold=True)
                 headers = [detail.horizontalHeaderItem(c).text() for c in range(detail.columnCount())]
                 ws.append(headers)
+                hdr_row = ws.max_row
+                for cell in ws[hdr_row]:
+                    cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
+                    cell.alignment = Alignment(wrap_text=True, horizontal="center")
                 for r in range(detail.rowCount()):
                     ws.append([detail.item(r, c).text() if detail.item(r, c) else "" for c in range(detail.columnCount())])
-                for cell in ws[4]:
-                    cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
+                from openpyxl.utils import get_column_letter
+                for col in ws.columns:
+                    letter = get_column_letter(col[0].column)
+                    ws.column_dimensions[letter].width = min(max(12, max(len(str(c.value or "")) for c in col) + 2), 28)
                 wb.save(out)
                 QMessageBox.information(dlg, "Export", f"Personal training register exported:\n{out}")
+
             export_btn.clicked.connect(export_personal)
             close_btn.clicked.connect(dlg.accept)
             btn_row.addWidget(export_btn); btn_row.addStretch(); btn_row.addWidget(close_btn)
