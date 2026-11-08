@@ -3490,8 +3490,7 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------
 
     def navigation_changed(self, row):
-        # Cache each module page so switching (especially away from Training) is instant
-        # and does not rebuild heavy UI or accumulate stack widgets.
+        # Cache each module page so switching is instant and stack widgets do not pile up.
         if not hasattr(self, "_module_cache"):
             self._module_cache = {}
         cached = self._module_cache.get(row)
@@ -3502,29 +3501,35 @@ class MainWindow(QMainWindow):
             except Exception:
                 self._module_cache.pop(row, None)
 
-        if row == 0:
-            self.dashboard()
-        elif row == 1:
-            self.observations()
-        elif row == 2:
-            self.incidents()
-        elif row == 3:
-            self.audits()
-        elif row == 4:
-            self.capa()
-        elif row == 5:
-            w, layout = self.page("Permit to Work Management")
-            layout.addWidget(PTWModule(self, db), 1)
-        elif row == 6:
-            self.training()
-        elif row == 7:
-            self.reports()
-        elif row == 8:
-            self.master_data()
-        elif row == 9:
-            self.settings_page()
-
-        self._module_cache[row] = self.stack.currentWidget()
+        try:
+            if row == 0:
+                self.dashboard()
+            elif row == 1:
+                self.observations()
+            elif row == 2:
+                self.incidents()
+            elif row == 3:
+                self.audits()
+            elif row == 4:
+                self.capa()
+            elif row == 5:
+                w, layout = self.page("Permit to Work Management")
+                layout.addWidget(PTWModule(self, db), 1)
+            elif row == 6:
+                self.training()
+            elif row == 7:
+                self.reports()
+            elif row == 8:
+                self.master_data()
+            elif row == 9:
+                self.settings_page()
+            self._module_cache[row] = self.stack.currentWidget()
+        except Exception as exc:
+            logging.exception("Navigation failed for row %s", row)
+            try:
+                QMessageBox.critical(self, "Module Error", f"Unable to open this module.\n\n{exc}")
+            except Exception:
+                pass
 
     # --------------------------------------------------------
 
@@ -7406,9 +7411,7 @@ class MainWindow(QMainWindow):
                     grid_state["hours"][cname] = hrs
                 if desig:
                     grid_state["cells"][(cname, desig)] = safe(row["requirement"]) or "Not Applicable"
-            # Always merge any READY_COURSES missing from an existing installation
-            # so upgraded matrices pick up QatarEnergy / QCS / O&G courses.
-            added_new = False
+            # Merge missing READY_COURSES names only (fast). Full M/O/B seed is on "Load Ready".
             for item in READY_COURSES:
                 cname, months = item[0], item[1]
                 hours = float(item[2]) if len(item) > 2 else 0.0
@@ -7417,13 +7420,9 @@ class MainWindow(QMainWindow):
                 if cname not in grid_state["courses"]:
                     grid_state["courses"].append(cname)
                     grid_state["types"].setdefault(cname, "I")
-                    added_new = True
-            if not grid_state["courses"] or added_new:
-                seed_ready_matrix(force=bool(not any(grid_state["cells"])))
-                if added_new:
-                    grid_state["dirty"] = True
-            else:
-                grid_state["dirty"] = False
+            if not grid_state["courses"]:
+                seed_ready_matrix(force=True)
+            grid_state["dirty"] = False
 
         def seed_ready_matrix(force=False):
             for item in READY_COURSES:
@@ -8210,16 +8209,11 @@ class MainWindow(QMainWindow):
         btn_rename_course.clicked.connect(rename_selected_course)
         btn_delete_course.clicked.connect(delete_selected_course)
         load_grid_state()
-        # Mark known external/certified courses and keep new ready courses visible
-        apply_external_course_types()
+        try:
+            apply_external_course_types()
+        except Exception:
+            logging.exception("apply_external_course_types failed")
         render_matrix_grid()
-        # Persist newly merged ready courses so they appear after restart without another Load click
-        if grid_state.get("dirty"):
-            try:
-                save_grid_state()
-                grid_state["dirty"] = False
-            except Exception:
-                logging.exception("Auto-save of merged ready courses failed")
         tabs.addTab(grid_page, "3. Training Matrix Grid")
 
         # =====================================================================
@@ -9041,7 +9035,7 @@ class MainWindow(QMainWindow):
         del_e.clicked.connect(lambda: delete_category_record(table_e))
         exp_e.clicked.connect(lambda: export_category_register("E", table_e, "External Training Register"))
 
-                # Master Training Register: one employee per row; click a row for the full record.
+        # Master Training Register: one employee per row; click a row for the full record.
         master_page = QWidget(); master_layout = QVBoxLayout(master_page)
         master_tools = QHBoxLayout(); master_search = QLineEdit(); master_search.setPlaceholderText("Search ID, name, designation or company…"); master_search.setClearButtonEnabled(True)
         master_refresh = QPushButton("Refresh"); master_export = QPushButton("Export Register (Excel)")
@@ -9252,10 +9246,351 @@ class MainWindow(QMainWindow):
         tabs.addTab(category_pages["E"], "8. External Training Register")
         # Compliance dashboard kept at the end (optional overview)
         tabs.addTab(compliance_page, "Compliance Dashboard")
-        sync_all_training_assignments()
-        refresh_category_registers()
-        refresh_master_training_register()
-        refresh_compliance_dashboard()
+        try:
+            sync_all_training_assignments()
+        except Exception:
+            logging.exception("sync_all_training_assignments failed")
+        try:
+            refresh_category_registers()
+        except Exception:
+            logging.exception("refresh_category_registers failed")
+        try:
+            refresh_master_training_register()
+        except Exception:
+            logging.exception("refresh_master_training_register failed")
+        try:
+            refresh_compliance_dashboard()
+        except Exception:
+            logging.exception("refresh_compliance_dashboard failed")
+
+
+    def reports(self):
+        """Central export hub for HSE registers."""
+        w, layout = self.page("Reports")
+        intro = QLabel(
+            "Export professional registers for the main HSE modules. "
+            "Open a module and use its own Export buttons for filtered or selected records."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#17365D;padding:8px;background:#E8F1FB;border-radius:4px;")
+        layout.addWidget(intro)
+
+        box = QGroupBox("Quick exports")
+        grid = QGridLayout(box)
+
+        def export_table(table_name, title):
+            path, _ = QFileDialog.getSaveFileName(self, f"Export {title}", f"{table_name}.xlsx", "Excel Workbook (*.xlsx)")
+            if not path:
+                return
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
+            try:
+                if table_name == "observations":
+                    columns, data, _rows = observation_export_rows()
+                else:
+                    allowed = {
+                        "incidents": ("number", "incident_date", "incident_type", "project", "company", "location", "status", "description"),
+                        "audits": ("number", "audit_date", "audit_type", "project", "location", "auditor", "status"),
+                        "capa": ("number", "source", "reference_number", "finding", "responsible", "priority", "target_date", "status"),
+                    }
+                    fields = allowed.get(table_name)
+                    if not fields:
+                        raise ValueError(f"Unsupported table: {table_name}")
+                    columns = [f.replace("_", " ").title() for f in fields]
+                    rows = db.fetchall(f"SELECT * FROM {table_name} ORDER BY id DESC LIMIT 5000")
+                    data = [[safe(r[f] if f in r.keys() else "") for f in fields] for r in rows]
+                wb = Workbook()
+                ws = wb.active
+                ws.title = title[:31]
+                ws.append([title])
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(columns)))
+                ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+                ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+                ws.append([f"Company: {company_name()}  |  Project: {db.setting('project_name','')}  |  Report No.: {document_prefix()}-RPT-{datetime.now().strftime('%Y%m%d%H%M%S')}"])
+                ws.append(columns)
+                for row in data[:5000]:
+                    ws.append(list(row))
+                for cell in ws[3]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="17365D")
+                logo = report_logo_path()
+                if logo and Path(logo).exists():
+                    try:
+                        img = XLImage(str(logo))
+                        img.width = 90
+                        img.height = 45
+                        ws.add_image(img, "E1")
+                    except Exception:
+                        pass
+                wb.save(path)
+                QMessageBox.information(self, "Export", f"Saved:\n{path}")
+            except Exception as exc:
+                logging.exception("Reports export failed")
+                QMessageBox.critical(self, "Export Failed", str(exc))
+
+        buttons = [
+            ("Observation Register (Excel)", lambda: export_table("observations", "Observation Register")),
+            ("Incident Register (Excel)", lambda: export_table("incidents", "Incident Register")),
+            ("Audit Register (Excel)", lambda: export_table("audits", "Audit Register")),
+            ("CAPA Register (Excel)", lambda: export_table("capa", "CAPA Register")),
+            ("Open Training Module Exports", lambda: self.nav.setCurrentRow(6)),
+            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(9)),
+        ]
+        for i, (label, fn) in enumerate(buttons):
+            b = QPushButton(label)
+            b.setMinimumHeight(40)
+            b.clicked.connect(fn)
+            grid.addWidget(b, i // 2, i % 2)
+        layout.addWidget(box)
+        layout.addStretch(1)
+
+    def master_data(self):
+        """Companies, projects, employees and observation categories."""
+        w, layout = self.page("Master Data")
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        # ---- Companies ----
+        comp_page = QWidget()
+        cl = QVBoxLayout(comp_page)
+        comp_table = QTableWidget(0, 6)
+        comp_table.setHorizontalHeaderLabels(["ID", "Name", "Type", "Contact Person", "Contact Number", "Status"])
+        comp_table.setAlternatingRowColors(True)
+        comp_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        comp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        cl.addWidget(comp_table, 1)
+        cform = QHBoxLayout()
+        c_name = QLineEdit(); c_name.setPlaceholderText("Company name *")
+        c_type = QLineEdit(); c_type.setPlaceholderText("Type (Client / Contractor / …)")
+        c_person = QLineEdit(); c_person.setPlaceholderText("Contact person")
+        c_number = QLineEdit(); c_number.setPlaceholderText("Contact number")
+        c_status = QComboBox(); c_status.addItems(["Active", "Inactive"])
+        for x in (c_name, c_type, c_person, c_number, c_status):
+            cform.addWidget(x)
+        cl.addLayout(cform)
+        cbtns = QHBoxLayout()
+        c_add = QPushButton("Add / Update Company")
+        c_del = QPushButton("Delete Selected")
+        c_ref = QPushButton("Refresh")
+        cbtns.addWidget(c_add); cbtns.addWidget(c_del); cbtns.addWidget(c_ref); cbtns.addStretch()
+        cl.addLayout(cbtns)
+
+        def refresh_companies():
+            rows = db.fetchall("SELECT * FROM companies ORDER BY name COLLATE NOCASE")
+            comp_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                vals = [r["id"], r["name"], r["company_type"], r["contact_person"], r["contact_number"], r["status"]]
+                for j, v in enumerate(vals):
+                    it = QTableWidgetItem(safe(v))
+                    if j == 0:
+                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    comp_table.setItem(i, j, it)
+
+        def save_company():
+            name = c_name.text().strip()
+            if not name:
+                return QMessageBox.warning(self, "Required", "Company name is required.")
+            row = comp_table.currentRow()
+            if row >= 0 and comp_table.item(row, 0):
+                cid = comp_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                db.execute(
+                    "UPDATE companies SET name=?, company_type=?, contact_person=?, contact_number=?, status=? WHERE id=?",
+                    (name, c_type.text().strip(), c_person.text().strip(), c_number.text().strip(), c_status.currentText(), cid)
+                )
+            else:
+                db.execute(
+                    "INSERT INTO companies (name, company_type, contact_person, contact_number, status) VALUES (?,?,?,?,?)",
+                    (name, c_type.text().strip(), c_person.text().strip(), c_number.text().strip(), c_status.currentText())
+                )
+            c_name.clear(); c_type.clear(); c_person.clear(); c_number.clear()
+            refresh_companies()
+
+        def delete_company():
+            row = comp_table.currentRow()
+            if row < 0 or not comp_table.item(row, 0):
+                return QMessageBox.information(self, "Select", "Select a company row first.")
+            cid = comp_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if QMessageBox.question(self, "Delete", "Delete this company?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            db.execute("DELETE FROM companies WHERE id=?", (cid,))
+            refresh_companies()
+
+        def load_company(row, _col=0):
+            if row < 0:
+                return
+            c_name.setText(comp_table.item(row, 1).text() if comp_table.item(row, 1) else "")
+            c_type.setText(comp_table.item(row, 2).text() if comp_table.item(row, 2) else "")
+            c_person.setText(comp_table.item(row, 3).text() if comp_table.item(row, 3) else "")
+            c_number.setText(comp_table.item(row, 4).text() if comp_table.item(row, 4) else "")
+            st = comp_table.item(row, 5).text() if comp_table.item(row, 5) else "Active"
+            ix = c_status.findText(st)
+            c_status.setCurrentIndex(ix if ix >= 0 else 0)
+
+        c_add.clicked.connect(save_company)
+        c_del.clicked.connect(delete_company)
+        c_ref.clicked.connect(refresh_companies)
+        comp_table.cellClicked.connect(load_company)
+        refresh_companies()
+        tabs.addTab(comp_page, "Companies")
+
+        # ---- Projects ----
+        proj_page = QWidget()
+        pl = QVBoxLayout(proj_page)
+        proj_table = QTableWidget(0, 5)
+        proj_table.setHorizontalHeaderLabels(["ID", "Project", "Area", "Location", "Active"])
+        proj_table.setAlternatingRowColors(True)
+        proj_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        proj_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        pl.addWidget(proj_table, 1)
+        pform = QHBoxLayout()
+        p_name = QLineEdit(); p_name.setPlaceholderText("Project name *")
+        p_area = QLineEdit(); p_area.setPlaceholderText("Area")
+        p_loc = QLineEdit(); p_loc.setPlaceholderText("Location")
+        p_active = QComboBox(); p_active.addItems(["1", "0"])
+        for x in (p_name, p_area, p_loc, p_active):
+            pform.addWidget(x)
+        pl.addLayout(pform)
+        pbtns = QHBoxLayout()
+        p_add = QPushButton("Add / Update Project")
+        p_del = QPushButton("Delete Selected")
+        p_ref = QPushButton("Refresh")
+        pbtns.addWidget(p_add); pbtns.addWidget(p_del); pbtns.addWidget(p_ref); pbtns.addStretch()
+        pl.addLayout(pbtns)
+
+        def refresh_projects():
+            rows = db.fetchall("SELECT * FROM projects ORDER BY project COLLATE NOCASE")
+            proj_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                vals = [r["id"], r["project"], r["area"], r["location"], r["active"]]
+                for j, v in enumerate(vals):
+                    it = QTableWidgetItem(safe(v))
+                    if j == 0:
+                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    proj_table.setItem(i, j, it)
+
+        def save_project():
+            name = p_name.text().strip()
+            if not name:
+                return QMessageBox.warning(self, "Required", "Project name is required.")
+            row = proj_table.currentRow()
+            if row >= 0 and proj_table.item(row, 0):
+                pid = proj_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+                db.execute(
+                    "UPDATE projects SET project=?, area=?, location=?, active=? WHERE id=?",
+                    (name, p_area.text().strip(), p_loc.text().strip(), int(p_active.currentText()), pid)
+                )
+            else:
+                db.execute(
+                    "INSERT INTO projects (project, area, location, active) VALUES (?,?,?,?)",
+                    (name, p_area.text().strip(), p_loc.text().strip(), int(p_active.currentText()))
+                )
+            p_name.clear(); p_area.clear(); p_loc.clear()
+            refresh_projects()
+
+        def delete_project():
+            row = proj_table.currentRow()
+            if row < 0 or not proj_table.item(row, 0):
+                return QMessageBox.information(self, "Select", "Select a project row first.")
+            pid = proj_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            if QMessageBox.question(self, "Delete", "Delete this project?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+            db.execute("DELETE FROM projects WHERE id=?", (pid,))
+            refresh_projects()
+
+        def load_project(row, _col=0):
+            if row < 0:
+                return
+            p_name.setText(proj_table.item(row, 1).text() if proj_table.item(row, 1) else "")
+            p_area.setText(proj_table.item(row, 2).text() if proj_table.item(row, 2) else "")
+            p_loc.setText(proj_table.item(row, 3).text() if proj_table.item(row, 3) else "")
+            act = proj_table.item(row, 4).text() if proj_table.item(row, 4) else "1"
+            ix = p_active.findText(act)
+            p_active.setCurrentIndex(ix if ix >= 0 else 0)
+
+        p_add.clicked.connect(save_project)
+        p_del.clicked.connect(delete_project)
+        p_ref.clicked.connect(refresh_projects)
+        proj_table.cellClicked.connect(load_project)
+        refresh_projects()
+        tabs.addTab(proj_page, "Projects")
+
+        # ---- Employees (summary; full enrol is in Training) ----
+        emp_page = QWidget()
+        el = QVBoxLayout(emp_page)
+        el.addWidget(QLabel("Active employees (manage enrolment photos and training in the Training module)."))
+        emp_table = QTableWidget(0, 6)
+        emp_table.setHorizontalHeaderLabels(["ID", "Employee ID", "Name", "Designation", "Company", "Active"])
+        emp_table.setAlternatingRowColors(True)
+        emp_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        el.addWidget(emp_table, 1)
+        emp_ref = QPushButton("Refresh")
+        el.addWidget(emp_ref, 0, Qt.AlignmentFlag.AlignLeft)
+
+        def refresh_employees():
+            rows = db.fetchall("SELECT id, employee_id, name, designation, company, active FROM employees ORDER BY name COLLATE NOCASE")
+            emp_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                for j, key in enumerate(("id", "employee_id", "name", "designation", "company", "active")):
+                    emp_table.setItem(i, j, QTableWidgetItem(safe(r[key])))
+
+        emp_ref.clicked.connect(refresh_employees)
+        refresh_employees()
+        tabs.addTab(emp_page, "Employees")
+
+        # ---- Categories ----
+        cat_page = QWidget()
+        catl = QVBoxLayout(cat_page)
+        cat_table = QTableWidget(0, 3)
+        cat_table.setHorizontalHeaderLabels(["ID", "Category", "Subcategory"])
+        cat_table.setAlternatingRowColors(True)
+        cat_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        catl.addWidget(cat_table, 1)
+        cat_form = QHBoxLayout()
+        cat_name = QLineEdit(); cat_name.setPlaceholderText("Category")
+        cat_sub = QLineEdit(); cat_sub.setPlaceholderText("Subcategory")
+        cat_form.addWidget(cat_name); cat_form.addWidget(cat_sub)
+        catl.addLayout(cat_form)
+        cat_btns = QHBoxLayout()
+        cat_add = QPushButton("Add Category")
+        cat_del = QPushButton("Delete Selected")
+        cat_ref = QPushButton("Refresh")
+        cat_btns.addWidget(cat_add); cat_btns.addWidget(cat_del); cat_btns.addWidget(cat_ref); cat_btns.addStretch()
+        catl.addLayout(cat_btns)
+
+        def refresh_categories():
+            rows = db.fetchall("SELECT * FROM categories WHERE COALESCE(active,1)=1 ORDER BY category COLLATE NOCASE, subcategory COLLATE NOCASE")
+            cat_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                for j, key in enumerate(("id", "category", "subcategory")):
+                    it = QTableWidgetItem(safe(r[key]))
+                    if j == 0:
+                        it.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    cat_table.setItem(i, j, it)
+
+        def add_category():
+            if not cat_name.text().strip():
+                return QMessageBox.warning(self, "Required", "Category is required.")
+            db.execute(
+                "INSERT INTO categories (category, subcategory, active) VALUES (?,?,1)",
+                (cat_name.text().strip(), cat_sub.text().strip())
+            )
+            cat_name.clear(); cat_sub.clear()
+            refresh_categories()
+
+        def delete_category():
+            row = cat_table.currentRow()
+            if row < 0 or not cat_table.item(row, 0):
+                return QMessageBox.information(self, "Select", "Select a category row first.")
+            cid = cat_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            db.execute("UPDATE categories SET active=0 WHERE id=?", (cid,))
+            refresh_categories()
+
+        cat_add.clicked.connect(add_category)
+        cat_del.clicked.connect(delete_category)
+        cat_ref.clicked.connect(refresh_categories)
+        refresh_categories()
+        tabs.addTab(cat_page, "Observation Categories")
+
 
     def settings_page(self):
         w,layout=self.page("Settings")
