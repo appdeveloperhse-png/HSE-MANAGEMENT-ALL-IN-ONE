@@ -9626,6 +9626,8 @@ class MainWindow(QMainWindow):
         track_table.cellActivated.connect(log_or_edit_cell)
         # Single click selects; Edit button / double-click opens the form
         track_refresh.clicked.connect(load_tracker)
+        track_search.textChanged.connect(load_tracker)
+        track_course_filter.textChanged.connect(load_tracker)
         track_search.returnPressed.connect(load_tracker)
         track_course_filter.returnPressed.connect(load_tracker)
         track_edit.clicked.connect(lambda: log_or_edit_cell())
@@ -10534,6 +10536,34 @@ class PTWModule(QWidget):
         self.renewal_tab = QWidget(); self.tabs.addTab(self.renewal_tab, "Renewal / Extension"); self._build_renewals()
         self.suspension_tab = QWidget(); self.tabs.addTab(self.suspension_tab, "Suspension / Restart"); self._build_suspension()
         self.closure_tab = QWidget(); self.tabs.addTab(self.closure_tab, "Permit Closure"); self._build_closure()
+        self.tabs.currentChanged.connect(self._on_ptw_tab_changed)
+
+    def _on_ptw_tab_changed(self, index):
+        # Refresh only the active PTW workspace so pending permits appear when opening Review / Issue.
+        try:
+            w = self.tabs.widget(index)
+        except Exception:
+            return
+        if w is getattr(self, "review_tab", None) or w is getattr(self, "issue_tab", None) or w is getattr(self, "register_tab", None):
+            self._refresh_authority_workflows()
+            if w is getattr(self, "register_tab", None):
+                self.refresh_register()
+
+    def _select_review_permit_from_table(self):
+        if not hasattr(self, "review_table") or not hasattr(self, "review_permit"):
+            return
+        row = self.review_table.currentRow()
+        if row < 0 or not self.review_table.item(row, 0):
+            return
+        pid = self.review_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if pid is None:
+            return
+        idx = self.review_permit.findData(pid)
+        if idx < 0:
+            self._refresh_authority_workflows()
+            idx = self.review_permit.findData(pid)
+        if idx >= 0:
+            self.review_permit.setCurrentIndex(idx)
 
     def _table(self, headers, parent_layout):
         t = QTableWidget(); t.setColumnCount(len(headers)); t.setHorizontalHeaderLabels(headers)
@@ -10674,6 +10704,8 @@ class PTWModule(QWidget):
         approve.clicked.connect(lambda _checked=False:self._review_decision(True)); return_btn.clicked.connect(lambda _checked=False:self._review_decision(False))
         row.addWidget(approve); row.addWidget(return_btn); row.addStretch(); lay.addLayout(row)
         self.review_table=self._table(["Permit","Company","Permit Type","Location","Applicant","Submitted","Status"],lay)
+        self.review_table.itemSelectionChanged.connect(self._select_review_permit_from_table)
+        self.review_table.cellClicked.connect(lambda *_: self._select_review_permit_from_table())
         lay.addWidget(QLabel("Submitted Safety Documents / Attachments"))
         self.review_documents_table=self._table(["Document Type","Filename","Description","Uploaded By","Uploaded At"],lay)
         lay.addWidget(QLabel("Supporting Certificates"))
@@ -11341,12 +11373,13 @@ class PTWModule(QWidget):
     def refresh_register(self):
         if not hasattr(self,"permit_table"): return
         rows=self.db.fetchall("SELECT * FROM ptw_permits ORDER BY id DESC")
-        needle=self.reg_search.text().strip().lower(); status=self.reg_status.currentText(); typ=self.reg_type.currentText()
+        needle=self.reg_search.text().strip().lower(); status=self.reg_status.currentText().strip(); typ=self.reg_type.currentText().strip()
         filtered=[]
         for r in rows:
-            if status!="All Statuses" and r["status"]!=status: continue
-            if typ!="All Types" and r["permit_type"]!=typ: continue
-            searchable=[_s(r[k]).lower() for k in ["permit_number","performing_company","client_authority","subcontractor","project_number","location","permit_holder","work_scope","permit_type"]]
+            row_status=_s(r["status"]).strip(); row_type=_s(r["permit_type"]).strip()
+            if status and status!="All Statuses" and row_status!=status: continue
+            if typ and typ!="All Types" and row_type!=typ: continue
+            searchable=[_s(r[k]).lower() for k in ["permit_number","performing_company","client_authority","subcontractor","project_number","location","permit_holder","work_scope","permit_type","status"]]
             if needle and needle not in " ".join(searchable): continue
             filtered.append(r)
         data=[]
@@ -11549,10 +11582,11 @@ class PTWModule(QWidget):
     def _refresh_authority_workflows(self):
         if hasattr(self,"review_permit"):
             current=self.review_permit.currentData(); self.review_permit.blockSignals(True); self.review_permit.clear(); self.review_permit.addItem("Select submitted permit",None)
-            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status IN ('Submitted','Under Review') ORDER BY id DESC")
+            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC")
             for r in rows:self.review_permit.addItem(f"{r['permit_number']} — {r['permit_type']} ({r['status']})",r["id"])
             idx=self.review_permit.findData(current); self.review_permit.setCurrentIndex(idx if idx>=0 else 0); self.review_permit.blockSignals(False); self._refresh_review_summary()
-            self._fill_table(self.review_table,self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,applicant_name,created_at,status,id FROM ptw_permits WHERE status IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC"),["permit_number","performing_company","permit_type","location","applicant_name","created_at","status"])
+            pending=self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,applicant_name,created_at,status,id FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC")
+            self._fill_table(self.review_table,pending,["permit_number","performing_company","permit_type","location","applicant_name","created_at","status"])
         self._refresh_issue_authority()
         if hasattr(self,"issue_table"):
             self._fill_table(self.issue_table,self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,permit_holder,approved_by,approval_date,status,id FROM ptw_permits WHERE status IN ('Approved','Issued / Active') ORDER BY id DESC"),["permit_number","performing_company","permit_type","location","permit_holder","approved_by","approval_date","status"])
