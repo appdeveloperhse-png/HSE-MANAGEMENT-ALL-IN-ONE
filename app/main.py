@@ -10803,54 +10803,140 @@ class PTWModule(QWidget):
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
 
     def _build_certificates(self):
-        lay=QVBoxLayout(self.cert_tab); lay.setSpacing(8)
-        intro=QLabel("Required supporting documents come from the Application form. Select a permit, click a listed item, fill details, attach the file, then save. Submit for Review only when every listed document is attached.")
-        intro.setWordWrap(True); lay.addWidget(intro)
-        f=QFormLayout(); lay.addLayout(f)
-        self.cert_permit=QComboBox(); self.cert_permit.setMinimumHeight(32)
+        outer = QVBoxLayout(self.cert_tab)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        outer.addWidget(scroll, 1)
+        body = QWidget()
+        scroll.setWidget(body)
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(6, 6, 6, 12)
+        lay.setSpacing(14)
+
+        intro = QLabel(
+            "Required supporting documents come from the Application form.\n"
+            "1) Select a permit  2) Click a listed document  3) Fill details and attach the file  4) Save\n"
+            "Submit for Review becomes available only when every listed document has an attachment."
+        )
+        intro.setWordWrap(True)
+        intro.setMinimumHeight(56)
+        lay.addWidget(intro)
+
+        top = QFormLayout()
+        top.setHorizontalSpacing(16)
+        top.setVerticalSpacing(10)
+        self.cert_permit = QComboBox()
+        self.cert_permit.setMinimumHeight(36)
         self.cert_permit.currentIndexChanged.connect(self._refresh_certificates_for_selected_permit)
-        self.cert_required_summary=QLabel("Select a permit to see required documents from the application.")
+        top.addRow("Permit", self.cert_permit)
+        lay.addLayout(top)
+
+        self.cert_required_summary = QLabel("Select a permit to see required documents from the application.")
         self.cert_required_summary.setWordWrap(True)
-        self.cert_required_summary.setStyleSheet("padding:8px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
-        f.addRow("Permit",self.cert_permit)
+        self.cert_required_summary.setMinimumHeight(64)
+        self.cert_required_summary.setStyleSheet(
+            "padding:12px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;"
+        )
         lay.addWidget(self.cert_required_summary)
+
         lay.addWidget(QLabel("Required documents listed on the application (click a row to fill and attach)"))
-        self.cert_table=self._table(["Reference","Document / Certificate","Reference No.","Responsible","Valid Until","Attached?","File","Status"],lay)
-        self.cert_table.setMinimumHeight(180)
+        self.cert_table = self._table(
+            ["Reference", "Document / Certificate", "Reference No.", "Responsible", "Valid Until", "Attached?", "File", "Status"],
+            lay,
+        )
+        self.cert_table.setMinimumHeight(200)
         self.cert_table.cellClicked.connect(lambda *_: self._load_certificate_for_edit())
-        detail=QGroupBox("Selected document — fill details and attach file")
-        df=QFormLayout(detail)
-        self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_type.setMinimumHeight(30)
-        self.cert_responsible=QLineEdit(); self.cert_responsible.setMinimumHeight(30)
-        self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm"); self.cert_valid_until.setMinimumHeight(30)
-        self.cert_status=QComboBox(); self.cert_status.addItems(["Draft","Submitted","Approved","Valid","Expired","Suspended","Closed","Rejected"])
-        self.cert_verification=QComboBox(); self.cert_verification.addItems(["Pending","Verified","Rejected"])
-        self.cert_comments=QLineEdit(); self.cert_comments.setPlaceholderText("Document number / reference from application")
-        self.cert_file_path=QLineEdit(); self.cert_file_path.setReadOnly(True)
-        browse_cert=QPushButton("Browse File"); browse_cert.clicked.connect(lambda:self._choose_into(self.cert_file_path))
-        file_row=QHBoxLayout(); file_row.addWidget(self.cert_file_path,1); file_row.addWidget(browse_cert)
-        df.addRow("Document Type",self.cert_type)
-        df.addRow("Responsible Person",self.cert_responsible)
-        df.addRow("Valid Until",self.cert_valid_until)
-        df.addRow("Status",self.cert_status)
-        df.addRow("Verification",self.cert_verification)
-        df.addRow("Reference / Comments",self.cert_comments)
-        df.addRow("Attachment File",file_row)
+
+        detail = QGroupBox("Selected document — fill details and attach file")
+        df = QFormLayout(detail)
+        df.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        df.setFormAlignment(Qt.AlignmentFlag.AlignTop)
+        df.setHorizontalSpacing(18)
+        df.setVerticalSpacing(12)
+        df.setContentsMargins(12, 16, 12, 16)
+        df.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.cert_type = QComboBox()
+        self.cert_type.addItems(CERT_TYPES)
+        self.cert_type.setMinimumHeight(34)
+        self.cert_responsible = QLineEdit()
+        self.cert_responsible.setMinimumHeight(34)
+        self.cert_valid_until = QDateTimeEdit(QDateTime.currentDateTime())
+        self.cert_valid_until.setCalendarPopup(True)
+        self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm")
+        self.cert_valid_until.setMinimumHeight(34)
+        self.cert_status = QComboBox()
+        self.cert_status.addItems(["Draft", "Submitted", "Approved", "Valid", "Expired", "Suspended", "Closed", "Rejected"])
+        self.cert_status.setMinimumHeight(34)
+        self.cert_verification = QComboBox()
+        self.cert_verification.addItems(["Pending", "Verified", "Rejected"])
+        self.cert_verification.setMinimumHeight(34)
+        self.cert_comments = QLineEdit()
+        self.cert_comments.setMinimumHeight(34)
+        self.cert_comments.setPlaceholderText("Document number / reference from application")
+        self.cert_file_path = QLineEdit()
+        self.cert_file_path.setReadOnly(True)
+        self.cert_file_path.setMinimumHeight(34)
+        browse_cert = QPushButton("Browse File")
+        browse_cert.setMinimumHeight(34)
+        browse_cert.setMinimumWidth(120)
+        browse_cert.clicked.connect(lambda: self._choose_into(self.cert_file_path))
+        file_row_w = QWidget()
+        file_row = QHBoxLayout(file_row_w)
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.setSpacing(10)
+        file_row.addWidget(self.cert_file_path, 1)
+        file_row.addWidget(browse_cert)
+
+        df.addRow("Document Type", self.cert_type)
+        df.addRow("Responsible Person", self.cert_responsible)
+        df.addRow("Valid Until", self.cert_valid_until)
+        df.addRow("Status", self.cert_status)
+        df.addRow("Verification", self.cert_verification)
+        df.addRow("Reference / Comments", self.cert_comments)
+        df.addRow("Attachment File", file_row_w)
         lay.addWidget(detail)
-        btn=QHBoxLayout()
-        save_sel=QPushButton("Save Selected Document Details"); save_sel.setMinimumHeight(34); save_sel.clicked.connect(self._update_certificate)
-        attach=QPushButton("Save & Attach File"); attach.setMinimumHeight(34); attach.clicked.connect(self._save_and_attach_certificate)
-        add=QPushButton("Add Extra Certificate"); add.clicked.connect(self._add_certificate)
-        delete=QPushButton("Delete Selected"); delete.clicked.connect(self._delete_certificate)
-        self.submit_certs_btn=QPushButton("Submit Permit for Review")
-        self.submit_certs_btn.setMinimumHeight(38)
-        self.submit_certs_btn.setStyleSheet("font-weight:bold;")
-        self.submit_certs_btn.clicked.connect(self._submit_from_certificates_tab)
-        btn.addWidget(save_sel); btn.addWidget(attach); btn.addWidget(add); btn.addWidget(delete); btn.addWidget(self.submit_certs_btn); btn.addStretch()
-        lay.addLayout(btn)
-        self.cert_attach_status=QLabel("")
+
+        action_row1 = QHBoxLayout()
+        action_row1.setSpacing(10)
+        save_sel = QPushButton("Save Selected Document Details")
+        save_sel.setMinimumHeight(38)
+        save_sel.clicked.connect(self._update_certificate)
+        attach = QPushButton("Save & Attach File")
+        attach.setMinimumHeight(38)
+        attach.clicked.connect(self._save_and_attach_certificate)
+        add = QPushButton("Add Extra Certificate")
+        add.setMinimumHeight(38)
+        add.clicked.connect(self._add_certificate)
+        delete = QPushButton("Delete Selected")
+        delete.setMinimumHeight(38)
+        delete.clicked.connect(self._delete_certificate)
+        action_row1.addWidget(save_sel)
+        action_row1.addWidget(attach)
+        action_row1.addWidget(add)
+        action_row1.addWidget(delete)
+        action_row1.addStretch()
+        lay.addLayout(action_row1)
+
+        self.cert_attach_status = QLabel("")
         self.cert_attach_status.setWordWrap(True)
+        self.cert_attach_status.setMinimumHeight(40)
+        self.cert_attach_status.setStyleSheet("padding:8px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;")
         lay.addWidget(self.cert_attach_status)
+
+        action_row2 = QHBoxLayout()
+        self.submit_certs_btn = QPushButton("Submit Permit for Review")
+        self.submit_certs_btn.setMinimumHeight(44)
+        self.submit_certs_btn.setMinimumWidth(260)
+        self.submit_certs_btn.setStyleSheet("font-weight:bold;font-size:14px;")
+        self.submit_certs_btn.clicked.connect(self._submit_from_certificates_tab)
+        action_row2.addWidget(self.submit_certs_btn)
+        action_row2.addStretch()
+        lay.addLayout(action_row2)
+        lay.addStretch(1)
 
     def _build_renewals(self):
         lay=QVBoxLayout(self.renewal_tab); form=QFormLayout(); lay.addLayout(form)
@@ -11958,7 +12044,16 @@ class PTWModule(QWidget):
         self._resubmit_permit_for_review(pid, "Attachments / Safety Documents")
 
     def _submit_from_certificates_tab(self):
-        pid = self.cert_permit.currentData() if hasattr(self, "cert_permit") else None
+        if not hasattr(self, "cert_permit"):
+            return QMessageBox.warning(self, "Certificates", "Supporting Certificates tab is not ready.")
+        pid = self.cert_permit.currentData()
+        if not pid:
+            return QMessageBox.warning(self, "Permit Required", "Select a permit in Supporting Certificates first.")
+        # Refresh checklist so attachment counts are current before gating submit
+        try:
+            self._refresh_certificates_for_selected_permit()
+        except Exception:
+            logging.exception("Certificate checklist refresh before submit failed")
         self._resubmit_permit_for_review(pid, "Supporting Certificates")
 
     def _load_selected(self):
@@ -12070,12 +12165,32 @@ class PTWModule(QWidget):
 
     def _update_certificate(self):
         row=self.cert_table.currentRow()
-        if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
+        if row<0:
+            return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
         cid=self.editing_certificate_id or self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
         cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
-        if not cert:return
-        self.db.execute("UPDATE ptw_certificates SET permit_id=?,certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",(self.cert_permit.currentData(),self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),self.cert_comments.text().strip(),_now(),cid))
-        self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"]); self.editing_certificate_id=None; self.refresh_all()
+        if not cert:
+            return
+        self.db.execute(
+            "UPDATE ptw_certificates SET permit_id=?,certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",
+            (
+                self.cert_permit.currentData() or cert["permit_id"],
+                self.cert_type.currentText(),
+                self.cert_status.currentText(),
+                self.cert_responsible.text().strip(),
+                self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),
+                self.cert_verification.currentText(),
+                self.cert_comments.text().strip(),
+                _now(),
+                cid,
+            ),
+        )
+        self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"])
+        self.editing_certificate_id=None
+        self.db.conn.commit()
+        self._refresh_certificates_for_selected_permit()
+        QMessageBox.information(self,"Saved","Document details were saved.")
+
 
     def _load_certificate_for_edit(self):
         if not hasattr(self, "cert_table"):
