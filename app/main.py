@@ -10544,6 +10544,8 @@ class PTWModule(QWidget):
             w = self.tabs.widget(index)
         except Exception:
             return
+        if w is getattr(self, "application_tab", None):
+            self._refresh_application_returned_list()
         if w is getattr(self, "review_tab", None) or w is getattr(self, "issue_tab", None) or w is getattr(self, "register_tab", None):
             self._refresh_authority_workflows()
             if w is getattr(self, "register_tab", None):
@@ -10585,6 +10587,27 @@ class PTWModule(QWidget):
 
     def _build_application(self):
         outer = QVBoxLayout(self.application_tab)
+        returned_box = QGroupBox("Returned for Correction / Drafts to Complete")
+        returned_lay = QVBoxLayout(returned_box)
+        returned_hint = QLabel("Select a returned or draft permit to load it into the form, update details, attach safety documents/certificates, then Submit for Review again.")
+        returned_hint.setWordWrap(True)
+        returned_lay.addWidget(returned_hint)
+        returned_row = QHBoxLayout()
+        self.app_returned_permit = QComboBox()
+        self.app_returned_permit.setMinimumWidth(360)
+        load_returned_btn = QPushButton("Load Selected Returned / Draft Permit")
+        load_returned_btn.setMinimumHeight(34)
+        load_returned_btn.clicked.connect(self._load_returned_or_draft_permit)
+        refresh_returned_btn = QPushButton("Refresh List")
+        refresh_returned_btn.clicked.connect(self._refresh_application_returned_list)
+        returned_row.addWidget(self.app_returned_permit, 2)
+        returned_row.addWidget(load_returned_btn)
+        returned_row.addWidget(refresh_returned_btn)
+        returned_lay.addLayout(returned_row)
+        self.app_returned_table = self._table(["Permit","Type","Company","Location","Status","Updated"], returned_lay)
+        self.app_returned_table.setMaximumHeight(160)
+        self.app_returned_table.cellDoubleClicked.connect(lambda *_: self._load_returned_or_draft_permit())
+        outer.addWidget(returned_box)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); outer.addWidget(scroll, 1)
         body = QWidget(); scroll.setWidget(body); root = QVBoxLayout(body)
         company_box = QGroupBox("1. Permit Details")
@@ -10751,7 +10774,11 @@ class PTWModule(QWidget):
         self.cert_status=QComboBox(); self.cert_status.addItems(["Draft","Submitted","Approved","Valid","Expired","Suspended","Closed","Rejected"])
         self.cert_verification=QComboBox(); self.cert_verification.addItems(["Pending","Verified","Rejected"])
         self.cert_comments=QLineEdit(); f.addRow("Parent Permit",self.cert_permit); f.addRow("Certificate Type",self.cert_type); f.addRow("Responsible Person",self.cert_responsible); f.addRow("Valid Until",self.cert_valid_until); f.addRow("Status",self.cert_status); f.addRow("Verification",self.cert_verification); f.addRow("Comments",self.cert_comments)
-        btn=QHBoxLayout(); add=QPushButton("Add Certificate"); edit=QPushButton("Update Selected"); delete=QPushButton("Delete Selected"); attach=QPushButton("Attach Certificate File"); add.clicked.connect(self._add_certificate); edit.clicked.connect(self._update_certificate); delete.clicked.connect(self._delete_certificate); attach.clicked.connect(self._attach_certificate); load=QPushButton("Load Selected for Edit"); load.clicked.connect(self._load_certificate_for_edit); btn.addWidget(add); btn.addWidget(load); btn.addWidget(edit); btn.addWidget(delete); btn.addWidget(attach); btn.addStretch(); lay.addLayout(btn)
+        btn=QHBoxLayout(); add=QPushButton("Add Certificate"); edit=QPushButton("Update Selected"); delete=QPushButton("Delete Selected"); attach=QPushButton("Attach Certificate File"); add.clicked.connect(self._add_certificate); edit.clicked.connect(self._update_certificate); delete.clicked.connect(self._delete_certificate); attach.clicked.connect(self._attach_certificate); load=QPushButton("Load Selected for Edit"); load.clicked.connect(self._load_certificate_for_edit); btn.addWidget(add); btn.addWidget(load); btn.addWidget(edit); btn.addWidget(delete); btn.addWidget(attach)
+        submit_certs=QPushButton("Submit Permit for Review"); submit_certs.setMinimumHeight(34); submit_certs.setStyleSheet("font-weight:bold;"); submit_certs.clicked.connect(self._submit_from_certificates_tab)
+        btn.addWidget(submit_certs); btn.addStretch(); lay.addLayout(btn)
+        cert_note=QLabel("Add/attach supporting certificates for a Draft or Returned permit, then click Submit Permit for Review so it appears in Permit Review & Approval.")
+        cert_note.setWordWrap(True); lay.addWidget(cert_note)
         self.cert_table=self._table(["Reference","Permit","Certificate Type","Responsible Person","Valid Until","Status","Verification","File","Comments"],lay)
 
     def _build_renewals(self):
@@ -10804,7 +10831,15 @@ class PTWModule(QWidget):
     def _build_documents(self):
         lay=QVBoxLayout(self.documents_tab); form=QFormLayout(); lay.addLayout(form)
         self.doc_permit=QComboBox(); self.doc_permit.currentIndexChanged.connect(self._refresh_documents_for_selected_permit); self.doc_type=QComboBox(); self.doc_type.addItems(["JSA / JHA","Method Statement","Drawing","Risk Assessment","Gas Test Record","Isolation / LOTO","Lifting Plan","Rescue Plan","Toolbox Talk","Other"]); self.doc_desc=QLineEdit(); self.doc_path=QLineEdit(); browse=QPushButton("Choose File"); browse.clicked.connect(lambda:self._choose_into(self.doc_path)); form.addRow("Permit",self.doc_permit); form.addRow("Document Type",self.doc_type); form.addRow("Description",self.doc_desc); row=QHBoxLayout(); row.addWidget(self.doc_path); row.addWidget(browse); form.addRow("File",row)
-        btn=QPushButton("Attach Document"); btn.clicked.connect(self._add_document); lay.addWidget(btn)
+        btn_row=QHBoxLayout()
+        btn=QPushButton("Attach Document"); btn.clicked.connect(self._add_document)
+        submit_docs=QPushButton("Submit Permit for Review")
+        submit_docs.setMinimumHeight(36)
+        submit_docs.setStyleSheet("font-weight:bold;")
+        submit_docs.clicked.connect(self._submit_from_documents_tab)
+        btn_row.addWidget(btn); btn_row.addWidget(submit_docs); btn_row.addStretch(); lay.addLayout(btn_row)
+        docs_note=QLabel("Attach required safety documents for a Draft or Returned permit, then click Submit Permit for Review so it appears in Permit Review & Approval.")
+        docs_note.setWordWrap(True); lay.addWidget(docs_note)
         self.doc_table=self._table(["Permit","Document Type","Filename","Description","Uploaded By","Uploaded At","Path"],lay)
         openrow=QHBoxLayout(); openb=QPushButton("Open Selected Document"); load_doc=QPushButton("Load Selected for Edit"); update_doc=QPushButton("Update Selected Document"); deldoc=QPushButton("Delete Selected Document"); openb.clicked.connect(self._open_document); load_doc.clicked.connect(self._load_selected_document); update_doc.clicked.connect(self._update_selected_document); deldoc.clicked.connect(self._delete_document); openrow.addWidget(openb); openrow.addWidget(load_doc); openrow.addWidget(update_doc); openrow.addWidget(deldoc); lay.addLayout(openrow)
 
@@ -10975,7 +11010,15 @@ class PTWModule(QWidget):
         self.db.execute("INSERT INTO ptw_approvals(permit_id,stage,user_name,role_name,decision,comments,document_revision,created_at) VALUES(?,?,?,?,?,?,?,?)",(pid,"Application Review",reviewer,"Permit Reviewer / Approver",decision,comments,int(r["revision"] or 1),_now()))
         self._event(pid,"Permit application review",r["status"],new_status,f"{decision} by {reviewer}. {comments}")
         self.db.conn.commit(); self.refresh_all()
-        QMessageBox.information(self,"Review Recorded",f"Permit {r['permit_number']} is now {new_status}.")
+        if new_status == "Returned for Correction":
+            QMessageBox.information(
+                self, "Returned for Correction",
+                f"Permit {r['permit_number']} was returned for correction.\n\n"
+                "Open New Permit Application to load it from the Returned list, update details, "
+                "attach documents/certificates, then Submit for Review again."
+            )
+        else:
+            QMessageBox.information(self,"Review Recorded",f"Permit {r['permit_number']} is now {new_status}.")
 
     def _refresh_issue_authority(self):
         if not hasattr(self,"issue_permit"):
@@ -11430,6 +11473,7 @@ class PTWModule(QWidget):
         if hasattr(self, "dashboard_table"):
             self._fill_table(self.dashboard_table,drows,["permit_number","permit_type","performing_company","location","planned_end","status","action"])
         self._refresh_combo_lists(); self._refresh_other_tables(); self._refresh_authority_workflows()
+        self._refresh_application_returned_list()
         if hasattr(self,"reval_permit"): self._load_revalidation_days()
 
     def _open_revalidation_selected(self):
@@ -11582,10 +11626,10 @@ class PTWModule(QWidget):
     def _refresh_authority_workflows(self):
         if hasattr(self,"review_permit"):
             current=self.review_permit.currentData(); self.review_permit.blockSignals(True); self.review_permit.clear(); self.review_permit.addItem("Select submitted permit",None)
-            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC")
+            rows=self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review') ORDER BY id DESC")
             for r in rows:self.review_permit.addItem(f"{r['permit_number']} — {r['permit_type']} ({r['status']})",r["id"])
             idx=self.review_permit.findData(current); self.review_permit.setCurrentIndex(idx if idx>=0 else 0); self.review_permit.blockSignals(False); self._refresh_review_summary()
-            pending=self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,applicant_name,created_at,status,id FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review','Returned for Correction') ORDER BY id DESC")
+            pending=self.db.fetchall("SELECT permit_number,performing_company,permit_type,location,applicant_name,created_at,status,id FROM ptw_permits WHERE trim(COALESCE(status,'')) IN ('Submitted','Under Review') ORDER BY id DESC")
             self._fill_table(self.review_table,pending,["permit_number","performing_company","permit_type","location","applicant_name","created_at","status"])
         self._refresh_issue_authority()
         if hasattr(self,"issue_table"):
@@ -11604,6 +11648,116 @@ class PTWModule(QWidget):
             self._refresh_documents_for_selected_permit()
     def _setting(self,key,default=""):
         r=self.db.fetchone("SELECT value FROM ptw_settings WHERE key=?",(key,)); return r["value"] if r else default
+
+    def _refresh_application_returned_list(self):
+        if not hasattr(self, "app_returned_permit"):
+            return
+        current = self.app_returned_permit.currentData()
+        self.app_returned_permit.blockSignals(True)
+        self.app_returned_permit.clear()
+        self.app_returned_permit.addItem("Select returned or draft permit", None)
+        rows = self.db.fetchall(
+            "SELECT id,permit_number,permit_type,performing_company,location,status,updated_at FROM ptw_permits "
+            "WHERE trim(COALESCE(status,'')) IN ('Draft','Returned for Correction') ORDER BY id DESC"
+        )
+        for r in rows:
+            self.app_returned_permit.addItem(
+                f"{r['permit_number']} — {r['permit_type']} ({r['status']})", r["id"]
+            )
+        idx = self.app_returned_permit.findData(current)
+        self.app_returned_permit.setCurrentIndex(idx if idx >= 0 else 0)
+        self.app_returned_permit.blockSignals(False)
+        if hasattr(self, "app_returned_table"):
+            self._fill_table(
+                self.app_returned_table, rows,
+                ["permit_number","permit_type","performing_company","location","status","updated_at"]
+            )
+
+    def _load_returned_or_draft_permit(self):
+        pid = None
+        if hasattr(self, "app_returned_table") and self.app_returned_table.currentRow() >= 0:
+            item = self.app_returned_table.item(self.app_returned_table.currentRow(), 0)
+            if item is not None:
+                pid = item.data(Qt.ItemDataRole.UserRole)
+        if pid is None and hasattr(self, "app_returned_permit"):
+            pid = self.app_returned_permit.currentData()
+        r = self._permit_row(pid)
+        if not r:
+            return QMessageBox.information(self, "Select Permit", "Select a returned or draft permit from the list.")
+        if _s(r["status"]).strip() not in ("Draft", "Returned for Correction"):
+            return QMessageBox.warning(self, "Not Editable Here", "Only Draft or Returned for Correction permits can be loaded for correction.")
+        # Reuse register load path by temporarily selecting via selected_permit_id
+        self.selected_permit_id = pid
+        # Populate form fields the same way as _load_selected
+        holder_id_widget = self.form_fields.get("permit_holder_employee_id")
+        if holder_id_widget is not None:
+            holder_id_widget.blockSignals(True)
+        for k, w in self.form_fields.items():
+            val = r[k] if k in r.keys() else ""
+            if isinstance(w, QLineEdit):
+                w.setText(_s(val))
+            elif isinstance(w, QTextEdit):
+                w.setPlainText(_s(val))
+            elif isinstance(w, QComboBox):
+                if k == "permit_holder_employee_id":
+                    i = w.findData(_s(val)); w.setCurrentIndex(i if i >= 0 else 0)
+                else:
+                    i = w.findText(_s(val)); w.setCurrentIndex(i if i >= 0 else 0)
+            elif isinstance(w, QSpinBox):
+                w.setValue(int(val or 0))
+            elif isinstance(w, QDateTimeEdit):
+                dt = QDateTime.fromString(_s(val), "yyyy-MM-dd HH:mm")
+                if dt.isValid():
+                    w.setDateTime(dt)
+        if holder_id_widget is not None:
+            holder_id_widget.blockSignals(False)
+        self._set_dynamic_values("supporting_document_types", r["supporting_document_types"], r["supporting_document_reference"])
+        self._set_dynamic_values("loto_equipment", r["loto_equipment"], r["loto_number"])
+        linked_id = r["renewal_of_permit_id"] if "renewal_of_permit_id" in r.keys() else None
+        if hasattr(self, "renewal_check"):
+            self.renewal_check.setChecked(bool(linked_id))
+            idx = self.renewal_previous.findData(linked_id)
+            self.renewal_previous.setCurrentIndex(idx if idx >= 0 else 0)
+        if hasattr(self, "save_draft_btn"):
+            self.save_draft_btn.setText("Update Permit")
+        self._update_application_permit_summary()
+        QMessageBox.information(
+            self, "Permit Loaded",
+            f"Permit {r['permit_number']} ({r['status']}) is loaded.\n"
+            "Update the application as needed, attach documents/certificates, then click Submit for Review."
+        )
+
+    def _resubmit_permit_for_review(self, pid, source_label="Application"):
+        r = self._permit_row(pid)
+        if not r:
+            return QMessageBox.warning(self, "Permit Required", "Select a permit first.")
+        status = _s(r["status"]).strip()
+        if status not in ("Draft", "Returned for Correction"):
+            return QMessageBox.warning(
+                self, "Cannot Submit",
+                f"Only Draft or Returned for Correction permits can be submitted for review.\nCurrent status: {status}"
+            )
+        if not _s(r["performing_company"]).strip() or not _s(r["location"]).strip() or not _s(r["work_scope"]).strip():
+            return QMessageBox.warning(self, "Incomplete Application", "Company, location and work scope are required before submit.")
+        if not _s(r["permit_holder_employee_id"]).strip():
+            return QMessageBox.warning(self, "Permit Holder Required", "A PTW-trained permit holder ID is required before submit.")
+        old = status
+        self.db.execute("UPDATE ptw_permits SET status='Submitted', updated_at=? WHERE id=?", (_now(), pid))
+        self._event(pid, f"Resubmitted from {source_label}", old, "Submitted", f"Permit resubmitted for review from {source_label}.")
+        self.db.conn.commit()
+        self.refresh_all()
+        QMessageBox.information(
+            self, "Submitted for Review",
+            f"Permit {r['permit_number']} is now Submitted and will appear in Permit Review & Approval."
+        )
+
+    def _submit_from_documents_tab(self):
+        pid = self.doc_permit.currentData() if hasattr(self, "doc_permit") else None
+        self._resubmit_permit_for_review(pid, "Attachments / Safety Documents")
+
+    def _submit_from_certificates_tab(self):
+        pid = self.cert_permit.currentData() if hasattr(self, "cert_permit") else None
+        self._resubmit_permit_for_review(pid, "Supporting Certificates")
 
     def _load_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
