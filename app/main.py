@@ -5225,6 +5225,7 @@ class MainWindow(QMainWindow):
         location_edit = QLineEdit()
         auditor_edit = QLineEdit()
         auditor_combo = QComboBox()
+        auditor_combo.setEditable(False)
         auditor_combo.setMinimumWidth(240)
         auditor_combo.addItem("Select trained auditor (Internal Audit)", "")
         title_edit = QLineEdit()
@@ -5492,6 +5493,7 @@ class MainWindow(QMainWindow):
         auditee_edit = QLineEdit()
         auditee_edit.setPlaceholderText("Enter the Auditee")
         auditee_combo = QComboBox()
+        auditee_combo.setEditable(False)
         auditee_combo.setMinimumWidth(260)
         auditee_combo.addItem("Select trained auditee (Internal Audit)", "")
         type_combo = QComboBox()
@@ -5679,8 +5681,11 @@ class MainWindow(QMainWindow):
             if selected_name:
                 ix = auditee_combo.findData(selected_name)
                 if ix < 0:
-                    auditee_combo.addItem(selected_name + " (manual / not in training register)", selected_name)
-                    ix = auditee_combo.findData(selected_name)
+                    # Do not offer free-text options — name must exist in Training Register
+                    for i in range(1, auditee_combo.count()):
+                        if selected_name.casefold() in auditee_combo.itemText(i).casefold():
+                            ix = i
+                            break
                 auditee_combo.setCurrentIndex(ix if ix >= 0 else 0)
             auditee_combo.blockSignals(False)
 
@@ -8364,9 +8369,8 @@ class MainWindow(QMainWindow):
         compliance_title.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:6px 4px;")
         compliance_layout.addWidget(compliance_title)
         # Filters
-        compliance_filter_row = QHBoxLayout()
-        compliance_filter_company = QComboBox(); compliance_filter_company.setMinimumWidth(140)
-        compliance_filter_trade = QComboBox(); compliance_filter_trade.setMinimumWidth(140)
+        compliance_filter_company = QComboBox(); compliance_filter_company.setMinimumWidth(180)
+        compliance_filter_trade = QComboBox(); compliance_filter_trade.setMinimumWidth(180)
         compliance_filter_search = QLineEdit(); compliance_filter_search.setPlaceholderText("Search ID or name…"); compliance_filter_search.setClearButtonEnabled(True)
         compliance_date_from = QDateEdit(); compliance_date_from.setCalendarPopup(True); compliance_date_from.setDisplayFormat("yyyy-MM-dd")
         compliance_date_from.setDate(QDate.currentDate().addYears(-1))
@@ -8379,19 +8383,28 @@ class MainWindow(QMainWindow):
         compliance_filter_mode.addItem("Non-compliant only", "noncompliant")
         compliance_refresh = QPushButton("Apply / Refresh")
         compliance_refresh.setMinimumHeight(36)
-        compliance_filter_row.addWidget(QLabel("Company:"))
-        compliance_filter_row.addWidget(compliance_filter_company)
-        compliance_filter_row.addWidget(QLabel("Trade:"))
-        compliance_filter_row.addWidget(compliance_filter_trade)
-        compliance_filter_row.addWidget(compliance_filter_search, 1)
-        compliance_filter_row.addWidget(compliance_use_dates)
-        compliance_filter_row.addWidget(QLabel("From:"))
-        compliance_filter_row.addWidget(compliance_date_from)
-        compliance_filter_row.addWidget(QLabel("To:"))
-        compliance_filter_row.addWidget(compliance_date_to)
-        compliance_filter_row.addWidget(compliance_filter_mode)
-        compliance_filter_row.addWidget(compliance_refresh)
-        compliance_layout.addLayout(compliance_filter_row)
+        compliance_filter_row1 = QHBoxLayout()
+        compliance_filter_row1.setSpacing(12)
+        compliance_filter_row1.addWidget(QLabel("Company:"))
+        compliance_filter_row1.addWidget(compliance_filter_company, 1)
+        compliance_filter_row1.addSpacing(16)
+        compliance_filter_row1.addWidget(QLabel("Trade / Designation:"))
+        compliance_filter_row1.addWidget(compliance_filter_trade, 1)
+        compliance_filter_row1.addSpacing(16)
+        compliance_filter_row1.addWidget(compliance_filter_search, 1)
+        compliance_layout.addLayout(compliance_filter_row1)
+        compliance_filter_row2 = QHBoxLayout()
+        compliance_filter_row2.setSpacing(12)
+        compliance_filter_row2.addWidget(compliance_use_dates)
+        compliance_filter_row2.addWidget(QLabel("From:"))
+        compliance_filter_row2.addWidget(compliance_date_from)
+        compliance_filter_row2.addWidget(QLabel("To:"))
+        compliance_filter_row2.addWidget(compliance_date_to)
+        compliance_filter_row2.addSpacing(16)
+        compliance_filter_row2.addWidget(QLabel("View:"))
+        compliance_filter_row2.addWidget(compliance_filter_mode, 1)
+        compliance_filter_row2.addWidget(compliance_refresh)
+        compliance_layout.addLayout(compliance_filter_row2)
         compliance_kpis = QGridLayout()
         compliance_kpis.setHorizontalSpacing(12)
         compliance_kpis.setVerticalSpacing(12)
@@ -8475,8 +8488,8 @@ class MainWindow(QMainWindow):
         track_frozen.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         track_frozen.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         track_frozen.verticalHeader().setVisible(False)
-        track_frozen.setMinimumWidth(480)
-        track_frozen.setMaximumWidth(560)
+        track_frozen.setMinimumWidth(620)
+        track_frozen.setMaximumWidth(760)
         track_frozen.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         track_frozen.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         track_frozen.horizontalHeader().setStretchLastSection(True)
@@ -8617,8 +8630,16 @@ class MainWindow(QMainWindow):
                     req_map = {x[0]: x for x in reqs}
                     for offset, cname in enumerate(course_set):
                         if cname not in req_map:
-                            it = QTableWidgetItem("—")
+                            it = QTableWidgetItem("— / Click to add")
                             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                            it.setToolTip("Not required for this trade — double-click or use Edit to log training anyway")
+                            it.setData(Qt.ItemDataRole.UserRole, {
+                                "emp_id": int(emp["id"]),
+                                "course": cname,
+                                "validity": int(grid_state.get("validity", {}).get(cname, 0) or 0),
+                                "req": "Optional",
+                                "record_id": None,
+                            })
                             track_table.setItem(r, offset, it)
                             continue
                         req, validity = req_map[cname][1], req_map[cname][2]
@@ -8655,12 +8676,16 @@ class MainWindow(QMainWindow):
                     track_frozen.setRowHeight(r, 52)
                     track_table.setRowHeight(r, 52)
 
-                track_frozen.setColumnWidth(0, 48)
-                track_frozen.setColumnWidth(1, 80)
-                track_frozen.setColumnWidth(2, 130)
-                track_frozen.setColumnWidth(3, 110)
-                track_frozen.setColumnWidth(4, 90)
-                track_frozen.setColumnWidth(5, 90)
+                track_frozen.setColumnWidth(0, 50)
+                track_frozen.setColumnWidth(1, 90)
+                track_frozen.setColumnWidth(2, 150)
+                track_frozen.setColumnWidth(3, 120)
+                track_frozen.setColumnWidth(4, 100)
+                track_frozen.setColumnWidth(5, 150)  # Mandatory % fully visible e.g. 100% (3/3)
+                try:
+                    track_frozen.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+                except Exception:
+                    pass
                 try:
                     track_frozen.verticalScrollBar().setValue(track_table.verticalScrollBar().value())
                 except Exception:
@@ -8822,28 +8847,62 @@ class MainWindow(QMainWindow):
         compliance_refresh.clicked.connect(refresh_compliance_dashboard)
 
         def log_or_edit_cell(row=None, column=None):
+            """Edit any training cell (mandatory or not). Log date, expiry, provider, certificate."""
             if row is None:
                 row = track_table.currentRow()
             if column is None:
                 column = track_table.currentColumn()
-            if row < 0 or column is None or column < 6:
-                return QMessageBox.information(self, "Tracking", "Select a training cell (not identity columns).")
+            if row is None or row < 0:
+                row = track_frozen.currentRow()
+            if row is None or row < 0:
+                return QMessageBox.information(
+                    self, "Tracking",
+                    "Select an employee row, then a training cell on the RIGHT side.\n"
+                    "Double-click the cell or click Edit Selected Cell."
+                )
+            if column is None or column < 0:
+                # If only frozen row selected, still allow pick via first visible course if only one? Prefer message.
+                return QMessageBox.information(
+                    self, "Tracking",
+                    "Click a training course cell on the RIGHT (status columns), then Edit or double-click.\n"
+                    "Non-mandatory cells show '— / Click to add' and can still be logged."
+                )
+
+            # Resolve employee from frozen left table
+            if row >= len(track_state.get("employees") or []):
+                return QMessageBox.information(self, "Tracking", "Invalid employee row.")
+            emp = track_state["employees"][row]
+            emp_id = int(emp["id"])
+
+            # Resolve course name
             item = track_table.item(row, column)
-            if not item:
-                return
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if not isinstance(data, dict):
-                return
-            emp_id = data["emp_id"]
-            cname = data["course"]
-            validity = int(data.get("validity") or 0)
-            req = data.get("req", "")
+            data = item.data(Qt.ItemDataRole.UserRole) if item else None
+            if isinstance(data, dict) and data.get("course"):
+                cname = data["course"]
+                validity = int(data.get("validity") or 0)
+                req = data.get("req") or "Optional"
+            else:
+                courses = track_state.get("courses") or []
+                if column >= len(courses):
+                    return QMessageBox.information(self, "Tracking", "Select a valid training course column.")
+                cname = courses[column]
+                validity = int(grid_state.get("validity", {}).get(cname, 0) or 0)
+                req = "Optional"
+                try:
+                    for cn, r, v in requirements_for_trade(emp["designation"]):
+                        if cn == cname:
+                            req, validity = r, int(v or 0)
+                            break
+                except Exception:
+                    pass
+
             rec = latest_record(emp_id, cname)
             dlg = QDialog(self)
             dlg.setWindowTitle(f"Log Training — {cname}")
-            dlg.setMinimumWidth(360)
+            dlg.setMinimumWidth(420)
             form = QFormLayout(dlg)
-            form.addRow(QLabel(f"Requirement: {req} · Validity: {validity} months"))
+            form.addRow(QLabel(f"Employee: {safe(emp['employee_id'])} · {safe(emp['name'])}"))
+            form.addRow(QLabel(f"Requirement: {req or 'Optional'} · Validity: {validity} months"))
             d_train = QDateEdit(QDate.currentDate()); d_train.setCalendarPopup(True); d_train.setDisplayFormat("yyyy-MM-dd")
             if rec and safe(rec["training_date"]):
                 td = QDate.fromString(safe(rec["training_date"]), "yyyy-MM-dd")
@@ -8854,6 +8913,7 @@ class MainWindow(QMainWindow):
             no_expiry.setChecked(bool(not validity and not (rec and safe(rec["expiry_date"]))))
             d_exp.setEnabled(not no_expiry.isChecked())
             no_expiry.toggled.connect(d_exp.setDisabled)
+
             def auto_exp(*_):
                 if validity and not no_expiry.isChecked():
                     try:
@@ -8863,104 +8923,110 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
             d_train.dateChanged.connect(auto_exp)
-            auto_exp()
-            if rec and safe(rec["expiry_date"]):
+            if validity and not (rec and safe(rec["expiry_date"])):
+                auto_exp()
+            elif rec and safe(rec["expiry_date"]):
                 ed = QDate.fromString(safe(rec["expiry_date"]), "yyyy-MM-dd")
                 if ed.isValid():
                     d_exp.setDate(ed)
-                    no_expiry.setChecked(False)
-            trainer = QLineEdit(safe(rec["provider"]) if rec else "")
-            cert_no = QLineEdit(safe(rec["certificate_no"]) if rec else "")
-            notes = QLineEdit(safe(rec["notes"]) if rec else "")
-            attachment_path = QLineEdit(safe(rec["attachment_path"]) if rec else "")
-            attachment_path.setReadOnly(True)
-            attachment_btn = QPushButton("Browse…")
-            attachment_row = QHBoxLayout()
-            attachment_row.addWidget(attachment_path, 1)
-            attachment_row.addWidget(attachment_btn)
-            def choose_training_attachment():
-                selected, _ = QFileDialog.getOpenFileName(
-                    dlg, "Select Training Certificate / Evidence", "",
-                    "Evidence Files (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*)"
-                )
-                if not selected:
+
+            due_lbl = QLabel("—")
+            def update_due(*_):
+                if no_expiry.isChecked():
+                    due_lbl.setText("No expiry")
                     return
                 try:
-                    source = Path(selected)
-                    evidence_dir = ATTACH_DIR / "training"
-                    evidence_dir.mkdir(parents=True, exist_ok=True)
-                    destination = evidence_dir / f"training_{emp_id}_{re.sub(r'[^A-Za-z0-9_-]+', '_', cname)[:45]}_{datetime.now().strftime('%Y%m%d%H%M%S')}{source.suffix.lower()}"
-                    shutil.copy2(source, destination)
-                    attachment_path.setText(str(destination))
-                except Exception as exc:
-                    QMessageBox.critical(dlg, "Attachment Error", f"Unable to copy evidence file.\n\n{exc}")
-            attachment_btn.clicked.connect(choose_training_attachment)
-            verification = QComboBox()
-            verification.addItems(["Verified", "Pending Verification"])
-            current_verification = safe(rec["verification_status"]) if rec and "verification_status" in rec.keys() else "Verified"
-            verification.setCurrentText(current_verification if current_verification in ("Verified", "Pending Verification") else "Verified")
-            assessment = QComboBox()
-            assessment.addItems(["Not Required", "Pending", "Pass", "Fail"])
-            current_assessment = safe(rec["assessment_result"]) if rec and "assessment_result" in rec.keys() else "Not Required"
-            assessment.setCurrentText(current_assessment if current_assessment in ("Not Required", "Pending", "Pass", "Fail") else "Not Required")
-            form.addRow("Date of Training *", d_train)
-            form.addRow("Expiry Date", d_exp)
-            form.addRow("Expiry Policy", no_expiry)
-            form.addRow("Trainer / Provider", trainer)
-            form.addRow("Certificate Number", cert_no)
-            form.addRow("Certificate / Evidence", attachment_row)
-            form.addRow("Verification Status", verification)
-            form.addRow("Assessment Result", assessment)
+                    exp_d = date(d_exp.date().year(), d_exp.date().month(), d_exp.date().day())
+                    days = (exp_d - date.today()).days
+                    if days > 0:
+                        due_lbl.setText(f"{days} day(s) remaining")
+                    elif days == 0:
+                        due_lbl.setText("Expires today")
+                    else:
+                        due_lbl.setText(f"{abs(days)} day(s) overdue")
+                except Exception:
+                    due_lbl.setText("—")
+            d_exp.dateChanged.connect(update_due)
+            no_expiry.toggled.connect(update_due)
+            update_due()
+
+            provider = QLineEdit(safe(rec["provider"]) if rec else "")
+            cert_no = QLineEdit(safe(rec["certificate_no"]) if rec else "")
+            notes = QLineEdit(safe(rec["notes"]) if rec and "notes" in rec.keys() else "")
+            verify_status = QComboBox()
+            for vs in ("Pending Verification", "Verified", "Rejected"):
+                verify_status.addItem(vs)
+            if rec and safe(rec["verification_status"]):
+                ix = verify_status.findText(safe(rec["verification_status"]))
+                if ix >= 0:
+                    verify_status.setCurrentIndex(ix)
+            assess = QLineEdit(safe(rec["assessment_result"]) if rec and "assessment_result" in rec.keys() else "")
+            form.addRow("Training date *", d_train)
+            form.addRow("Expiry date", d_exp)
+            form.addRow("", no_expiry)
+            form.addRow("Due / remaining", due_lbl)
+            form.addRow("Provider / Trainer", provider)
+            form.addRow("Certificate No.", cert_no)
+            form.addRow("Assessment result", assess)
+            form.addRow("Verification", verify_status)
             form.addRow("Notes", notes)
-            dlg.resize(620, 480)
-            dlg.setMinimumSize(540, 400)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             form.addRow(buttons)
-            buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
-            if dlg.exec() != QDialog.DialogCode.Accepted:
-                return
-            course_id = ensure_course(cname, validity)
-            tdate = d_train.date().toString("yyyy-MM-dd")
-            edate = "" if no_expiry.isChecked() else d_exp.date().toString("yyyy-MM-dd")
-            verify_status = verification.currentText()
-            assess_result = assessment.currentText()
-            if verify_status == "Verified":
-                verified_by = "Local User"
-                verified_at = datetime.now().isoformat(timespec="seconds")
-            else:
+
+            def save_log():
+                tdate = d_train.date().toString("yyyy-MM-dd")
+                edate = "" if no_expiry.isChecked() else d_exp.date().toString("yyyy-MM-dd")
+                course_id = ensure_course(cname, validity)
+                verify_s = verify_status.currentText()
                 verified_by = ""
                 verified_at = ""
-            if rec:
-                db.execute(
-                    """UPDATE training_records SET training_date=?, expiry_date=?, provider=?,
-                       certificate_no=?, attachment_path=?, notes=?, verification_status=?,
-                       verified_by=?, verified_at=?, assessment_result=? WHERE id=?""",
-                    (tdate, edate, trainer.text().strip(), cert_no.text().strip(), attachment_path.text().strip(),
-                     notes.text().strip(), verify_status, verified_by, verified_at, assess_result, rec["id"])
-                )
-                record_id = int(rec["id"])
-                action = "Updated"
-            else:
-                cur = db.execute(
-                    """INSERT INTO training_records
-                       (employee_db_id, course_id, training_date, expiry_date, provider,
-                        certificate_no, attachment_path, notes, verification_status,
-                        verified_by, verified_at, assessment_result)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (emp_id, course_id, tdate, edate, trainer.text().strip(), cert_no.text().strip(),
-                     attachment_path.text().strip(), notes.text().strip(), verify_status,
-                     verified_by, verified_at, assess_result)
-                )
-                record_id = int(cur.lastrowid)
-                action = "Created"
-            db.execute(
-                "INSERT INTO training_audit_log (entity_type, entity_id, action, details) VALUES (?,?,?,?)",
-                ("training_record", record_id, action,
-                 f"Employee DB ID={emp_id}; course={cname}; training_date={tdate}; verification={verify_status}; assessment={assess_result}")
-            )
-            load_tracker()
-            refresh_category_registers()
-            refresh_master_training_register()
+                if verify_s == "Verified":
+                    verified_by = db.setting("default_observer", "") or "System"
+                    verified_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                if rec:
+                    db.execute(
+                        """UPDATE training_records SET training_date=?, expiry_date=?, provider=?,
+                           certificate_no=?, notes=?, verification_status=?, verified_by=?, verified_at=?,
+                           assessment_result=? WHERE id=?""",
+                        (tdate, edate, provider.text().strip(), cert_no.text().strip(), notes.text().strip(),
+                         verify_s, verified_by, verified_at, assess.text().strip(), rec["id"])
+                    )
+                    record_id = int(rec["id"])
+                    action = "Updated"
+                else:
+                    cur = db.execute(
+                        """INSERT INTO training_records
+                           (employee_db_id, course_id, training_date, expiry_date, provider,
+                            certificate_no, notes, verification_status, verified_by, verified_at, assessment_result)
+                           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (emp_id, course_id, tdate, edate, provider.text().strip(), cert_no.text().strip(),
+                         notes.text().strip(), verify_s, verified_by, verified_at, assess.text().strip())
+                    )
+                    record_id = int(cur.lastrowid)
+                    action = "Created"
+                try:
+                    db.execute(
+                        "INSERT INTO training_audit_log (entity_type, entity_id, action, details) VALUES (?,?,?,?)",
+                        ("training_record", record_id, action,
+                         f"Employee DB ID={emp_id}; course={cname}; training_date={tdate}; verification={verify_s}")
+                    )
+                except Exception:
+                    pass
+                dlg.accept()
+                load_tracker()
+                try:
+                    refresh_category_registers()
+                except Exception:
+                    pass
+                try:
+                    refresh_master_training_register()
+                except Exception:
+                    pass
+
+            buttons.accepted.connect(save_log)
+            buttons.rejected.connect(dlg.reject)
+            dlg.exec()
+
 
         def clear_selected_cell():
             row = track_table.currentRow()
@@ -9557,6 +9623,8 @@ class MainWindow(QMainWindow):
         # 6 Master Training · 7 Internal Register · 8 External Register
         # (tabs 1-4 already added earlier)
         track_table.cellDoubleClicked.connect(log_or_edit_cell)
+        track_table.cellActivated.connect(log_or_edit_cell)
+        # Single click selects; Edit button / double-click opens the form
         track_refresh.clicked.connect(load_tracker)
         track_search.returnPressed.connect(load_tracker)
         track_course_filter.returnPressed.connect(load_tracker)
