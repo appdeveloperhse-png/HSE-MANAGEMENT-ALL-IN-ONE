@@ -10587,29 +10587,39 @@ class PTWModule(QWidget):
 
     def _build_application(self):
         outer = QVBoxLayout(self.application_tab)
-        returned_box = QGroupBox("Returned for Correction / Drafts to Complete")
-        returned_lay = QVBoxLayout(returned_box)
-        returned_hint = QLabel("Select a returned or draft permit to load it into the form, update details, attach safety documents/certificates, then Submit for Review again.")
-        returned_hint.setWordWrap(True)
-        returned_lay.addWidget(returned_hint)
-        returned_row = QHBoxLayout()
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+        # Compact correction selector — does not steal form space
+        returned_box = QGroupBox("Correction / Resubmit (only if a permit was returned or saved as draft)")
+        returned_lay = QHBoxLayout(returned_box)
+        returned_lay.setContentsMargins(8, 6, 8, 6)
         self.app_returned_permit = QComboBox()
-        self.app_returned_permit.setMinimumWidth(360)
-        load_returned_btn = QPushButton("Load Selected Returned / Draft Permit")
+        self.app_returned_permit.setMinimumWidth(320)
+        self.app_returned_permit.setMinimumHeight(32)
+        self.app_returned_permit.setSizePolicy(self.app_returned_permit.sizePolicy().horizontalPolicy(), self.app_returned_permit.sizePolicy().verticalPolicy())
+        load_returned_btn = QPushButton("Load for Correction")
         load_returned_btn.setMinimumHeight(34)
         load_returned_btn.clicked.connect(self._load_returned_or_draft_permit)
-        refresh_returned_btn = QPushButton("Refresh List")
+        refresh_returned_btn = QPushButton("Refresh")
+        refresh_returned_btn.setMinimumHeight(34)
         refresh_returned_btn.clicked.connect(self._refresh_application_returned_list)
-        returned_row.addWidget(self.app_returned_permit, 2)
-        returned_row.addWidget(load_returned_btn)
-        returned_row.addWidget(refresh_returned_btn)
-        returned_lay.addLayout(returned_row)
-        self.app_returned_table = self._table(["Permit","Type","Company","Location","Status","Updated"], returned_lay)
-        self.app_returned_table.setMaximumHeight(160)
-        self.app_returned_table.cellDoubleClicked.connect(lambda *_: self._load_returned_or_draft_permit())
-        outer.addWidget(returned_box)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); outer.addWidget(scroll, 1)
+        new_clear_btn = QPushButton("New Blank Application")
+        new_clear_btn.setMinimumHeight(34)
+        new_clear_btn.clicked.connect(self._clear_form)
+        returned_lay.addWidget(QLabel("Select:"), 0)
+        returned_lay.addWidget(self.app_returned_permit, 1)
+        returned_lay.addWidget(load_returned_btn)
+        returned_lay.addWidget(refresh_returned_btn)
+        returned_lay.addWidget(new_clear_btn)
+        outer.addWidget(returned_box, 0)
+        # Full form area gets remaining space
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+        scroll.setMinimumHeight(420)
+        outer.addWidget(scroll, 1)
         body = QWidget(); scroll.setWidget(body); root = QVBoxLayout(body)
+        root.setContentsMargins(4, 4, 4, 12)
+        root.setSpacing(12)
         company_box = QGroupBox("1. Permit Details")
         form = QFormLayout(company_box); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         def line(key, label, required=False):
@@ -10662,7 +10672,7 @@ class PTWModule(QWidget):
 
         work_box=QGroupBox("4. Work Details and Permit Holder")
         work=QFormLayout(work_box); work.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        self.form_fields["work_scope"]=QTextEdit(); self.form_fields["work_scope"].setMaximumHeight(90); self.form_fields["work_scope"].setPlaceholderText("Describe the work activity and scope clearly")
+        self.form_fields["work_scope"]=QTextEdit(); self.form_fields["work_scope"].setMinimumHeight(110); self.form_fields["work_scope"].setPlaceholderText("Describe the work activity and scope clearly")
         work.addRow("Work Details / Scope *",self.form_fields["work_scope"])
         self.form_fields["permit_holder"]=QLineEdit(); self.form_fields["permit_holder"].setReadOnly(True); work.addRow("Permit Holder Name *",self.form_fields["permit_holder"])
         self.form_fields["permit_holder_designation"]=QLineEdit(); self.form_fields["permit_holder_designation"].setReadOnly(True); work.addRow("Permit Holder Position",self.form_fields["permit_holder_designation"])
@@ -10673,7 +10683,7 @@ class PTWModule(QWidget):
         self._populate_ptw_holder_ids()
         self.form_fields["permit_holder_employee_id"].currentIndexChanged.connect(self._on_ptw_holder_id_selected)
         work.addRow("Permit Holder ID *",self.form_fields["permit_holder_employee_id"])
-        self.form_fields["work_description"]=QTextEdit(); self.form_fields["work_description"].setMaximumHeight(70); self.form_fields["work_description"].setPlaceholderText("Additional work description / precautions")
+        self.form_fields["work_description"]=QTextEdit(); self.form_fields["work_description"].setMinimumHeight(90); self.form_fields["work_description"].setPlaceholderText("Additional work description / precautions")
         work.addRow("Additional Work Description",self.form_fields["work_description"])
         root.addWidget(work_box)
 
@@ -10713,43 +10723,67 @@ class PTWModule(QWidget):
         self.reval_summary=QLabel("Days issued: 0 | Days worked: 0"); lay.addWidget(self.reval_summary)
 
     def _build_review_approval(self):
-        lay=QVBoxLayout(self.review_tab)
+        outer=QVBoxLayout(self.review_tab); outer.setContentsMargins(6,6,6,6)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(scroll.Shape.NoFrame)
+        outer.addWidget(scroll, 1)
+        body=QWidget(); scroll.setWidget(body)
+        lay=QVBoxLayout(body); lay.setSpacing(10)
         intro=QLabel("Independent reviewer / approver workspace. Only submitted applications awaiting review are listed here.")
         intro.setWordWrap(True); lay.addWidget(intro)
         form=QFormLayout(); lay.addLayout(form)
-        self.review_permit=QComboBox(); self.review_permit.currentIndexChanged.connect(self._refresh_review_summary)
+        self.review_permit=QComboBox(); self.review_permit.setMinimumHeight(32); self.review_permit.currentIndexChanged.connect(self._refresh_review_summary)
         self.review_summary=QLabel("Select a submitted permit to review its details."); self.review_summary.setWordWrap(True)
-        self.review_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
-        self.reviewed_by=QLineEdit(); self.review_comments=QTextEdit(); self.review_comments.setMaximumHeight(75)
+        self.review_summary.setMinimumHeight(90)
+        self.review_summary.setStyleSheet("padding:12px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        self.reviewed_by=QLineEdit(); self.reviewed_by.setMinimumHeight(30)
+        self.review_comments=QTextEdit(); self.review_comments.setMinimumHeight(90)
         form.addRow("Submitted Permit",self.review_permit); lay.addWidget(self.review_summary)
         form.addRow("Reviewed / Approved By",self.reviewed_by); form.addRow("Review Comments",self.review_comments)
         row=QHBoxLayout(); approve=QPushButton("Approve Application"); return_btn=QPushButton("Return for Correction")
+        approve.setMinimumHeight(38); return_btn.setMinimumHeight(38)
         approve.clicked.connect(lambda _checked=False:self._review_decision(True)); return_btn.clicked.connect(lambda _checked=False:self._review_decision(False))
         row.addWidget(approve); row.addWidget(return_btn); row.addStretch(); lay.addLayout(row)
         self.review_table=self._table(["Permit","Company","Permit Type","Location","Applicant","Submitted","Status"],lay)
+        self.review_table.setMinimumHeight(180)
         self.review_table.itemSelectionChanged.connect(self._select_review_permit_from_table)
         self.review_table.cellClicked.connect(lambda *_: self._select_review_permit_from_table())
         lay.addWidget(QLabel("Submitted Safety Documents / Attachments"))
         self.review_documents_table=self._table(["Document Type","Filename","Description","Uploaded By","Uploaded At"],lay)
+        self.review_documents_table.setMinimumHeight(160)
         lay.addWidget(QLabel("Supporting Certificates"))
         self.review_certificates_table=self._table(["Certificate Ref","Certificate Type","Responsible Person","Valid Until","Status","Verification","Attachment"],lay)
+        self.review_certificates_table.setMinimumHeight(160)
 
     def _build_issue_authority(self):
-        lay=QVBoxLayout(self.issue_tab)
-        intro=QLabel("Permit issuing authority workspace. Only approved permits are listed. Review the permit summary before issuing authorization to work.")
+        outer=QVBoxLayout(self.issue_tab); outer.setContentsMargins(6,6,6,6)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(scroll.Shape.NoFrame)
+        outer.addWidget(scroll, 1)
+        body=QWidget(); scroll.setWidget(body)
+        lay=QVBoxLayout(body); lay.setSpacing(10)
+        intro=QLabel("Permit issuing authority workspace. Approved permits can be issued, or returned for correction if something is incomplete.")
         intro.setWordWrap(True); lay.addWidget(intro)
         form=QFormLayout(); lay.addLayout(form)
-        self.issue_permit=QComboBox(); self.issue_permit.currentIndexChanged.connect(self._refresh_issue_summary)
+        self.issue_permit=QComboBox(); self.issue_permit.setMinimumHeight(32); self.issue_permit.currentIndexChanged.connect(self._refresh_issue_summary)
         self.issue_summary=QLabel("Select an approved permit to review its details."); self.issue_summary.setWordWrap(True)
-        self.issue_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
-        self.issued_by=QLineEdit(); self.issued_by.setPlaceholderText("Authorized permit issuer name")
-        form.addRow("Approved Permit",self.issue_permit); lay.addWidget(self.issue_summary); form.addRow("Issued By / Permit Authority",self.issued_by)
-        issue=QPushButton("Issue Permit / Authorize Work"); issue.setMinimumHeight(40); issue.clicked.connect(lambda _checked=False:self._issue_from_authority_tab()); lay.addWidget(issue)
+        self.issue_summary.setMinimumHeight(90)
+        self.issue_summary.setStyleSheet("padding:12px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        self.issued_by=QLineEdit(); self.issued_by.setPlaceholderText("Authorized permit issuer name"); self.issued_by.setMinimumHeight(30)
+        self.issue_return_comments=QTextEdit(); self.issue_return_comments.setMinimumHeight(80); self.issue_return_comments.setPlaceholderText("Reason for return (required when returning for correction)")
+        form.addRow("Approved Permit",self.issue_permit); lay.addWidget(self.issue_summary)
+        form.addRow("Issued By / Permit Authority",self.issued_by)
+        form.addRow("Return Comments",self.issue_return_comments)
+        row=QHBoxLayout()
+        issue=QPushButton("Issue Permit / Authorize Work"); issue.setMinimumHeight(40); issue.clicked.connect(lambda _checked=False:self._issue_from_authority_tab())
+        return_btn=QPushButton("Return for Correction"); return_btn.setMinimumHeight(40); return_btn.clicked.connect(self._return_from_issue_authority)
+        row.addWidget(issue); row.addWidget(return_btn); row.addStretch(); lay.addLayout(row)
         self.issue_table=self._table(["Permit","Company","Permit Type","Location","Permit Holder","Approved By","Approval Date","Status"],lay)
+        self.issue_table.setMinimumHeight(180)
         lay.addWidget(QLabel("Safety Documents / Attachments for Selected Permit"))
         self.issue_documents_table=self._table(["Document Type","Filename","Description","Uploaded By","Uploaded At"],lay)
+        self.issue_documents_table.setMinimumHeight(160)
         lay.addWidget(QLabel("Supporting Certificates for Selected Permit"))
         self.issue_certificates_table=self._table(["Certificate Ref","Certificate Type","Responsible Person","Valid Until","Status","Verification","Attachment"],lay)
+        self.issue_certificates_table.setMinimumHeight(160)
 
     def _build_register(self):
         lay=QVBoxLayout(self.register_tab); filters=QHBoxLayout()
@@ -11036,6 +11070,36 @@ class PTWModule(QWidget):
             return QMessageBox.warning(self,"Issuer Required","Enter the authorized permit issuer / authority name.")
         self._issue_permit_id(pid,issuer)
         self.refresh_all()
+
+    def _return_from_issue_authority(self):
+        pid = self.issue_permit.currentData()
+        r = self._permit_row(pid)
+        if not r:
+            return QMessageBox.warning(self, "Permit Required", "Select an approved permit.")
+        if _s(r["status"]).strip() not in ("Approved", "Issued / Active"):
+            return QMessageBox.warning(self, "Return Not Available", "Only Approved (or Issued) permits can be returned for correction from this tab.")
+        comments = ""
+        if hasattr(self, "issue_return_comments"):
+            comments = self.issue_return_comments.toPlainText().strip()
+        if not comments:
+            return QMessageBox.warning(self, "Reason Required", "Enter the reason for return in Return Comments.")
+        issuer = self.issued_by.text().strip() or self._actor()
+        old = _s(r["status"]).strip()
+        self.db.execute("UPDATE ptw_permits SET status='Returned for Correction', updated_at=? WHERE id=?", (_now(), pid))
+        self.db.execute(
+            "INSERT INTO ptw_approvals(permit_id,stage,user_name,role_name,decision,comments,document_revision,created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (pid, "Permit Issue Authority", issuer, "Permit Issuing Authority", "Returned for Correction", comments, int(r["revision"] or 1), _now())
+        )
+        self._event(pid, "Returned for correction by issue authority", old, "Returned for Correction", f"Returned by {issuer}. {comments}")
+        self.db.conn.commit()
+        if hasattr(self, "issue_return_comments"):
+            self.issue_return_comments.clear()
+        self.refresh_all()
+        QMessageBox.information(
+            self, "Returned for Correction",
+            f"Permit {r['permit_number']} was returned for correction.\n\n"
+            "The applicant can load it from New Permit Application, correct it, attach documents/certificates, and Submit for Review again."
+        )
 
     def _issue_selected_from_register(self):
         pid=self._selected_id()
@@ -11667,19 +11731,10 @@ class PTWModule(QWidget):
         idx = self.app_returned_permit.findData(current)
         self.app_returned_permit.setCurrentIndex(idx if idx >= 0 else 0)
         self.app_returned_permit.blockSignals(False)
-        if hasattr(self, "app_returned_table"):
-            self._fill_table(
-                self.app_returned_table, rows,
-                ["permit_number","permit_type","performing_company","location","status","updated_at"]
-            )
 
     def _load_returned_or_draft_permit(self):
         pid = None
-        if hasattr(self, "app_returned_table") and self.app_returned_table.currentRow() >= 0:
-            item = self.app_returned_table.item(self.app_returned_table.currentRow(), 0)
-            if item is not None:
-                pid = item.data(Qt.ItemDataRole.UserRole)
-        if pid is None and hasattr(self, "app_returned_permit"):
+        if hasattr(self, "app_returned_permit"):
             pid = self.app_returned_permit.currentData()
         r = self._permit_row(pid)
         if not r:
