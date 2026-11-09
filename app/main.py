@@ -8015,92 +8015,37 @@ class MainWindow(QMainWindow):
         grid_tools.addStretch()
         grid_tools.addWidget(grid_status)
         grid_layout.addLayout(grid_tools)
-        matrix_container = QWidget()
-        matrix_container_layout = QHBoxLayout(matrix_container)
-        matrix_container_layout.setContentsMargins(0, 0, 0, 0)
-        frozen_training_names = QTableWidget()
-        frozen_training_names.setColumnCount(1)
-        frozen_training_names.setHorizontalHeaderLabels(["Training Name"])
-        frozen_training_names.setFixedWidth(270)
-        frozen_training_names.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        frozen_training_names.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        frozen_training_names.verticalHeader().setVisible(False)
-        frozen_training_names.horizontalHeader().setStretchLastSection(True)
         matrix_grid = QTableWidget()
         matrix_grid.setAlternatingRowColors(True)
         matrix_grid.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         matrix_grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         matrix_grid.horizontalHeader().setDefaultSectionSize(88)
-        matrix_grid.verticalHeader().setDefaultSectionSize(28)
+        matrix_grid.verticalHeader().setDefaultSectionSize(30)
         matrix_grid.verticalHeader().setVisible(False)
         matrix_grid.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         matrix_grid.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         matrix_grid.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        matrix_container_layout.addWidget(frozen_training_names)
-        matrix_container_layout.addWidget(matrix_grid, 1)
-        grid_layout.addWidget(matrix_container, 1)
-        # Keep training-name rows locked to the same vertical position as validity/hours/trade cells
-        frozen_training_names.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        frozen_training_names.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        frozen_training_names.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        matrix_grid.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # Match header heights so rows line up
-        frozen_training_names.horizontalHeader().setFixedHeight(matrix_grid.horizontalHeader().height() or 30)
-        matrix_grid.horizontalHeader().sectionResized.connect(
-            lambda *_: frozen_training_names.horizontalHeader().setFixedHeight(matrix_grid.horizontalHeader().height())
-        )
-        _syncing_matrix_scroll = {"v": False}
-
-        def _matrix_scroll_from_main(value):
-            if _syncing_matrix_scroll["v"]:
-                return
-            _syncing_matrix_scroll["v"] = True
-            try:
-                frozen_training_names.verticalScrollBar().setValue(value)
-            finally:
-                _syncing_matrix_scroll["v"] = False
-
-        def _matrix_scroll_from_frozen(value):
-            if _syncing_matrix_scroll["v"]:
-                return
-            _syncing_matrix_scroll["v"] = True
-            try:
-                matrix_grid.verticalScrollBar().setValue(value)
-            finally:
-                _syncing_matrix_scroll["v"] = False
-
-        matrix_grid.verticalScrollBar().valueChanged.connect(_matrix_scroll_from_main)
-        frozen_training_names.verticalScrollBar().valueChanged.connect(_matrix_scroll_from_frozen)
-        # Wheel on frozen names drives the main grid (which has the scrollbar)
-        def _frozen_wheel(event):
-            matrix_grid.wheelEvent(event)
-        frozen_training_names.wheelEvent = _frozen_wheel
+        # Single table: Training Name + Validity + Hours + trades stay on the SAME rows when scrolling
+        grid_layout.addWidget(matrix_grid, 1)
+        # Dummy alias so any leftover frozen_* references do not crash
+        frozen_training_names = matrix_grid
 
         def render_matrix_grid():
             designations = list(MATRIX_DESIGNATIONS)
             courses = list(grid_state["courses"])
             matrix_grid.setUpdatesEnabled(False)
-            frozen_training_names.setUpdatesEnabled(False)
             try:
                 matrix_grid.clear()
                 matrix_grid.setRowCount(len(courses))
                 matrix_grid.setColumnCount(3 + len(designations))
                 matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)", "Hours"] + designations)
-                frozen_training_names.setRowCount(len(courses))
-                frozen_training_names.setHorizontalHeaderLabels(["Training Name"])
                 for r, cname in enumerate(courses):
                     name_item = QTableWidgetItem(cname)
                     name_item.setBackground(QBrush(QColor("#EEF4FB")))
                     f = name_item.font(); f.setBold(True); name_item.setFont(f)
                     name_item.setToolTip("Double-click to rename this training course")
                     matrix_grid.setItem(r, 0, name_item)
-                    frozen_item = QTableWidgetItem(cname)
-                    frozen_item.setBackground(QBrush(QColor("#EEF4FB")))
-                    frozen_item.setFont(name_item.font())
-                    frozen_item.setToolTip("Double-click to rename this training course")
-                    frozen_training_names.setItem(r, 0, frozen_item)
                     months = int(grid_state["validity"].get(cname, 0) or 0)
                     val_item = QTableWidgetItem(str(months))
                     val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -8121,25 +8066,16 @@ class MainWindow(QMainWindow):
                         if req != "Not Applicable":
                             it.setText(f"{marker}-{MATRIX_REQ_SHORT.get(req, '—')}")
                         matrix_grid.setItem(r, c + 3, it)
-                matrix_grid.setColumnHidden(0, True)
+                    matrix_grid.setRowHeight(r, 30)
                 matrix_grid.setColumnWidth(0, 260)
                 matrix_grid.setColumnWidth(1, 110)
                 matrix_grid.setColumnWidth(2, 70)
-                frozen_training_names.setColumnWidth(0, 260)
-                hdr_h = max(30, matrix_grid.horizontalHeader().height())
-                frozen_training_names.horizontalHeader().setFixedHeight(hdr_h)
-                for rr in range(len(courses)):
-                    matrix_grid.setRowHeight(rr, 30)
-                    frozen_training_names.setRowHeight(rr, 30)
-                # Re-align vertical scroll after rebuild
-                frozen_training_names.verticalScrollBar().setValue(matrix_grid.verticalScrollBar().value())
                 for col in range(3, matrix_grid.columnCount()):
                     matrix_grid.setColumnWidth(col, 90)
                 course_needle = matrix_course_filter.text().strip().casefold()
                 selected_trade = matrix_trade_filter.currentData() or "__ALL__"
                 for rr, course_name in enumerate(courses):
                     matrix_grid.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
-                    frozen_training_names.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
                 for cc, designation in enumerate(designations, start=3):
                     matrix_grid.setColumnHidden(cc, bool(selected_trade != "__ALL__" and designation != selected_trade))
                 grid_status.setText(f"{len(courses)} courses × {len(designations)} trades" + (" · Unsaved" if grid_state["dirty"] else ""))
@@ -8147,7 +8083,6 @@ class MainWindow(QMainWindow):
                 logging.exception("render_matrix_grid failed")
             finally:
                 matrix_grid.setUpdatesEnabled(True)
-                frozen_training_names.setUpdatesEnabled(True)
 
         def on_grid_dbl(row, column):
             if row < 0 or row >= len(grid_state["courses"]):
@@ -8423,12 +8358,33 @@ class MainWindow(QMainWindow):
         # =====================================================================
         compliance_page = QWidget()
         compliance_layout = QVBoxLayout(compliance_page)
-        compliance_layout.setContentsMargins(10, 10, 10, 10)
-        compliance_layout.setSpacing(8)
+        compliance_layout.setContentsMargins(12, 12, 12, 12)
+        compliance_layout.setSpacing(10)
         compliance_title = QLabel("COMPANY TRAINING COMPLIANCE OVERVIEW")
-        compliance_title.setStyleSheet("font-size:16px;font-weight:700;color:#17365D;padding:5px;")
+        compliance_title.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:6px 4px;")
         compliance_layout.addWidget(compliance_title)
+        # Filters
+        compliance_filter_row = QHBoxLayout()
+        compliance_filter_company = QComboBox(); compliance_filter_company.setMinimumWidth(160)
+        compliance_filter_trade = QComboBox(); compliance_filter_trade.setMinimumWidth(160)
+        compliance_filter_search = QLineEdit(); compliance_filter_search.setPlaceholderText("Search ID or name…"); compliance_filter_search.setClearButtonEnabled(True)
+        compliance_filter_mode = QComboBox()
+        compliance_filter_mode.addItem("Overall (all active employees)", "overall")
+        compliance_filter_mode.addItem("Filtered selection only", "filtered")
+        compliance_filter_mode.addItem("Non-compliant only", "noncompliant")
+        compliance_refresh = QPushButton("Apply / Refresh")
+        compliance_refresh.setMinimumHeight(36)
+        compliance_filter_row.addWidget(QLabel("Company:"))
+        compliance_filter_row.addWidget(compliance_filter_company)
+        compliance_filter_row.addWidget(QLabel("Trade:"))
+        compliance_filter_row.addWidget(compliance_filter_trade)
+        compliance_filter_row.addWidget(compliance_filter_search, 1)
+        compliance_filter_row.addWidget(compliance_filter_mode)
+        compliance_filter_row.addWidget(compliance_refresh)
+        compliance_layout.addLayout(compliance_filter_row)
         compliance_kpis = QGridLayout()
+        compliance_kpis.setHorizontalSpacing(12)
+        compliance_kpis.setVerticalSpacing(12)
         compliance_values = {}
         for idx, (key, caption) in enumerate([
             ("employees", "Active Employees"), ("compliance", "Mandatory Compliance"),
@@ -8437,28 +8393,38 @@ class MainWindow(QMainWindow):
             ("man_hours", "Training Man-Hours Delivered"), ("required_hours", "Mandatory Hours Required"),
         ]):
             card = QGroupBox(caption)
+            card.setMinimumHeight(110)
+            card.setMinimumWidth(180)
+            card.setStyleSheet(
+                "QGroupBox { font-size:12px; font-weight:600; color:#344054; border:1px solid #D0D5DD; "
+                "border-radius:8px; margin-top:10px; background:#FFFFFF; }"
+                "QGroupBox::title { subcontrol-origin: margin; left:12px; padding:0 6px; }"
+            )
             card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(12, 18, 12, 12)
             value_label = QLabel("—")
             value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            value_label.setStyleSheet("font-size:22px;font-weight:700;color:#17365D;padding:7px;")
+            value_label.setMinimumHeight(48)
+            value_label.setStyleSheet("font-size:28px;font-weight:800;color:#17365D;padding:8px;")
             card_layout.addWidget(value_label)
             compliance_values[key] = value_label
-            compliance_kpis.addWidget(card, idx // 3, idx % 3)
+            compliance_kpis.addWidget(card, idx // 4, idx % 4)
         compliance_layout.addLayout(compliance_kpis)
-        compliance_hint = QLabel("Compliance is calculated from applicable Mandatory requirements. Before Job requirements are tracked separately in the employee register.")
+        compliance_hint = QLabel(
+            "Use filters above, then Apply / Refresh. Mode “Overall” uses all active employees; "
+            "“Filtered selection only” recalculates KPIs for the filtered set; "
+            "“Non-compliant only” lists employees with open gaps."
+        )
         compliance_hint.setWordWrap(True)
-        compliance_hint.setStyleSheet("color:#475467;padding:5px;background:#F2F4F7;border-radius:4px;")
+        compliance_hint.setStyleSheet("color:#475467;padding:8px;background:#F2F4F7;border-radius:6px;")
         compliance_layout.addWidget(compliance_hint)
-        compliance_refresh = QPushButton("Refresh Compliance")
-        compliance_refresh.setMinimumHeight(34)
-        compliance_layout.addWidget(compliance_refresh, 0, Qt.AlignmentFlag.AlignLeft)
         compliance_table = QTableWidget()
         compliance_table.setColumnCount(6)
         compliance_table.setHorizontalHeaderLabels(["Employee ID", "Name", "Company", "Trade", "Non-compliant", "Expired"])
         compliance_table.setAlternatingRowColors(True)
         compliance_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         compliance_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        compliance_table.setMinimumHeight(180)
+        compliance_table.setMinimumHeight(200)
         compliance_layout.addWidget(compliance_table, 1)
 
         # =====================================================================
@@ -8497,15 +8463,29 @@ class MainWindow(QMainWindow):
         track_state = {"employees": [], "courses": []}
 
         def load_tracker():
-            # Avoid reloading full matrix from DB every refresh (use in-memory grid_state)
-            employees = db.fetchall(
-                "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
-            )
+            """Always reload matrix state then show every active employee + priority courses."""
+            try:
+                load_grid_state()
+            except Exception:
+                logging.exception("load_grid_state in tracker failed")
+            try:
+                employees = db.fetchall(
+                    "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
+                )
+            except Exception:
+                logging.exception("employee query failed")
+                employees = []
             needle = track_search.text().strip().lower()
             if needle:
                 employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
             course_needle = track_course_filter.text().strip().lower()
-            course_set = prioritized_courses(grid_state["courses"])
+            try:
+                course_set = prioritized_courses(list(grid_state.get("courses") or []))
+            except Exception:
+                course_set = list(grid_state.get("courses") or [])
+            if not course_set:
+                # Fall back to READY_COURSES so the register is never blank of columns
+                course_set = [x[0] for x in READY_COURSES]
             if course_needle:
                 course_set = [c for c in course_set if course_needle in c.lower()]
             track_state["employees"] = employees
@@ -8514,18 +8494,23 @@ class MainWindow(QMainWindow):
             track_frozen.setUpdatesEnabled(False)
             track_table.setUpdatesEnabled(False)
             try:
-                track_frozen.clear()
+                track_frozen.clearContents()
+                track_frozen.setRowCount(0)
                 track_frozen.setColumnCount(6)
                 track_frozen.setHorizontalHeaderLabels(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"])
                 track_frozen.setRowCount(len(employees))
-                track_table.clear()
-                track_table.setColumnCount(len(course_set))
-                track_table.setHorizontalHeaderLabels(course_set)
+                track_table.clearContents()
+                track_table.setRowCount(0)
+                track_table.setColumnCount(max(1, len(course_set)))
+                track_table.setHorizontalHeaderLabels(course_set if course_set else ["(No courses — open Matrix and Save)"])
                 track_table.setRowCount(len(employees))
                 hdr_h = max(30, track_table.horizontalHeader().height())
                 track_frozen.horizontalHeader().setFixedHeight(hdr_h)
                 for r, emp in enumerate(employees):
-                    reqs = requirements_for_trade(emp["designation"])
+                    try:
+                        reqs = requirements_for_trade(emp["designation"])
+                    except Exception:
+                        reqs = []
                     mand = [x for x in reqs if x[1] == "Mandatory"]
                     done = 0
                     for cname, req, validity in mand:
@@ -8543,7 +8528,6 @@ class MainWindow(QMainWindow):
                         if c == 5 and pct is not None:
                             bg, fg = color_status("Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed"))
                             it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
-                            f = it.font(); f.setBold(True); it.setFont(f)
                         if c == 1:
                             it.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
                         track_frozen.setItem(r, c, it)
@@ -8552,8 +8536,6 @@ class MainWindow(QMainWindow):
                         if cname not in req_map:
                             it = QTableWidgetItem("—")
                             it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                            bg, fg = color_status("")
-                            it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
                             track_table.setItem(r, offset, it)
                             continue
                         req, validity = req_map[cname][1], req_map[cname][2]
@@ -8569,14 +8551,17 @@ class MainWindow(QMainWindow):
                         short = {"Mandatory": "M", "Optional": "O", "Before Job": "B"}.get(req, "")
                         lines = [f"{short} · {st}"]
                         if train:
-                            lines.append(train)
+                            lines.append(str(train))
                         if expiry:
-                            lines.append("Exp " + expiry)
+                            lines.append("Exp " + str(expiry))
                         if days_txt:
                             lines.append(days_txt)
                         it = QTableWidgetItem("\n".join(lines))
                         it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        it.setData(Qt.ItemDataRole.UserRole, {"emp_id": int(emp["id"]), "course": cname, "validity": validity, "req": req, "record_id": int(rec["id"]) if rec else None})
+                        it.setData(Qt.ItemDataRole.UserRole, {
+                            "emp_id": int(emp["id"]), "course": cname, "validity": validity,
+                            "req": req, "record_id": int(rec["id"]) if rec else None
+                        })
                         bg, fg = color_status(st)
                         it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
                         track_table.setItem(r, offset, it)
@@ -8589,15 +8574,67 @@ class MainWindow(QMainWindow):
                 track_frozen.setColumnWidth(4, 90)
                 track_frozen.setColumnWidth(5, 90)
                 track_frozen.verticalScrollBar().setValue(track_table.verticalScrollBar().value())
+            except Exception:
+                logging.exception("load_tracker failed")
             finally:
                 track_frozen.setUpdatesEnabled(True)
                 track_table.setUpdatesEnabled(True)
 
 
+        def _populate_compliance_filters():
+            companies = sorted({safe(r["company"]) for r in db.fetchall("SELECT DISTINCT company FROM employees WHERE COALESCE(active,1)=1") if safe(r["company"])})
+            trades = sorted({safe(r["designation"]) for r in db.fetchall("SELECT DISTINCT designation FROM employees WHERE COALESCE(active,1)=1") if safe(r["designation"])})
+            cur_c = compliance_filter_company.currentText()
+            cur_t = compliance_filter_trade.currentText()
+            compliance_filter_company.blockSignals(True)
+            compliance_filter_trade.blockSignals(True)
+            compliance_filter_company.clear(); compliance_filter_company.addItem("All companies")
+            for c in companies:
+                compliance_filter_company.addItem(c)
+            compliance_filter_trade.clear(); compliance_filter_trade.addItem("All trades")
+            for t in trades:
+                compliance_filter_trade.addItem(t)
+            if cur_c:
+                ix = compliance_filter_company.findText(cur_c)
+                if ix >= 0:
+                    compliance_filter_company.setCurrentIndex(ix)
+            if cur_t:
+                ix = compliance_filter_trade.findText(cur_t)
+                if ix >= 0:
+                    compliance_filter_trade.setCurrentIndex(ix)
+            compliance_filter_company.blockSignals(False)
+            compliance_filter_trade.blockSignals(False)
+
         def refresh_compliance_dashboard():
-            employees = db.fetchall(
+            try:
+                load_grid_state()
+            except Exception:
+                logging.exception("compliance load_grid_state failed")
+            _populate_compliance_filters()
+            all_employees = db.fetchall(
                 "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
             )
+            company_f = compliance_filter_company.currentText().strip()
+            trade_f = compliance_filter_trade.currentText().strip()
+            search_f = compliance_filter_search.text().strip().lower()
+            mode = compliance_filter_mode.currentData() or "overall"
+
+            def _match(emp):
+                if company_f and company_f != "All companies" and safe(emp["company"]) != company_f:
+                    return False
+                if trade_f and trade_f != "All trades" and safe(emp["designation"]) != trade_f:
+                    return False
+                if search_f and search_f not in " ".join(safe(emp[k]).lower() for k in ("employee_id", "name")):
+                    return False
+                return True
+
+            filtered = [e for e in all_employees if _match(e)]
+            # KPI population set
+            if mode == "overall":
+                kpi_employees = all_employees
+            else:
+                kpi_employees = filtered
+
             total_required = 0
             compliant_required = 0
             expired_count = 0
@@ -8605,7 +8642,7 @@ class MainWindow(QMainWindow):
             missing_count = 0
             pending_count = 0
             exceptions = []
-            for emp in employees:
+            for emp in kpi_employees:
                 reqs = requirements_for_trade(emp["designation"])
                 non_compliant = 0
                 emp_expired = 0
@@ -8631,7 +8668,6 @@ class MainWindow(QMainWindow):
                 if non_compliant:
                     exceptions.append((emp, non_compliant, emp_expired))
             compliance_pct = (100.0 * compliant_required / total_required) if total_required else 100.0
-            # Training man-hours: sum of course training_hours for completed records
             delivered = db.fetchone(
                 """SELECT COALESCE(SUM(COALESCE(c.training_hours,0)),0) AS h
                    FROM training_records tr
@@ -8641,36 +8677,39 @@ class MainWindow(QMainWindow):
             )
             man_hours = float(delivered["h"] if delivered else 0)
             required_hours = 0.0
-            for emp in employees:
+            for emp in kpi_employees:
                 for cname, req, validity in requirements_for_trade(emp["designation"]):
                     if req != "Mandatory":
                         continue
-                    hrs = float(grid_state["hours"].get(cname, 0) or 0)
-                    if not hrs:
-                        crow = db.fetchone("SELECT training_hours FROM training_courses WHERE lower(course_name)=lower(?) ORDER BY active DESC,id DESC LIMIT 1", (cname,))
-                        try:
-                            hrs = float(crow["training_hours"] if crow and crow["training_hours"] is not None else 0)
-                        except Exception:
-                            hrs = 0
-                    required_hours += hrs
-            compliance_values["employees"].setText(str(len(employees)))
-            compliance_values["compliance"].setText(f"{compliance_pct:.1f}%")
+                    required_hours += float(grid_state["hours"].get(cname, 0) or 0)
+            compliance_values["employees"].setText(str(len(kpi_employees)))
+            compliance_values["compliance"].setText(f"{compliance_pct:.0f}%")
             compliance_values["expired"].setText(str(expired_count))
             compliance_values["expiring"].setText(str(expiring_count))
             compliance_values["missing"].setText(str(missing_count))
             compliance_values["pending"].setText(str(pending_count))
-            if "man_hours" in compliance_values:
-                compliance_values["man_hours"].setText(f"{man_hours:.0f}")
-            if "required_hours" in compliance_values:
-                compliance_values["required_hours"].setText(f"{required_hours:.0f}")
-            compliance_table.setRowCount(len(exceptions))
-            for row_idx, (emp, non_compliant, emp_expired) in enumerate(exceptions):
-                values = [safe(emp["employee_id"]), safe(emp["name"]), safe(emp["company"]), safe(emp["designation"]), str(non_compliant), str(emp_expired)]
+            compliance_values["man_hours"].setText(f"{man_hours:.0f}")
+            compliance_values["required_hours"].setText(f"{required_hours:.0f}")
+
+            # Table rows: filtered set; optional non-compliant only
+            table_emps = filtered
+            if mode == "noncompliant":
+                non_ids = {int(e[0]["id"]) for e in exceptions}
+                table_emps = [e for e in filtered if int(e["id"]) in non_ids]
+            # Build exception map for table numbers
+            exc_map = {int(e[0]["id"]): (e[1], e[2]) for e in exceptions}
+            compliance_table.setRowCount(len(table_emps))
+            for row_idx, emp in enumerate(table_emps):
+                nc, ex = exc_map.get(int(emp["id"]), (0, 0))
+                values = [
+                    safe(emp["employee_id"]), safe(emp["name"]), safe(emp["company"]),
+                    safe(emp["designation"]), str(nc), str(ex)
+                ]
                 for col_idx, value in enumerate(values):
                     compliance_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
             compliance_table.sortItems(4, Qt.SortOrder.DescendingOrder)
 
-        compliance_refresh.clicked.connect(lambda: (load_grid_state(), refresh_compliance_dashboard()))
+        compliance_refresh.clicked.connect(refresh_compliance_dashboard)
 
         def log_or_edit_cell(row=None, column=None):
             if row is None:
@@ -9430,20 +9469,40 @@ class MainWindow(QMainWindow):
                 label = tabs.tabText(index)
             except Exception:
                 return
-            if "Matrix" in label and not _training_tab_loaded["grid"]:
-                _training_tab_loaded["grid"] = True
+            if "Matrix" in label:
                 try:
-                    load_grid_state()
-                    apply_external_course_types()
-                    render_matrix_grid()
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    QApplication.processEvents()
+                    if not _training_tab_loaded["grid"]:
+                        load_grid_state()
+                        try:
+                            apply_external_course_types()
+                        except Exception:
+                            pass
+                        render_matrix_grid()
+                        _training_tab_loaded["grid"] = True
+                    elif matrix_grid.rowCount() == 0:
+                        render_matrix_grid()
                 except Exception:
                     logging.exception("lazy matrix load failed")
-            elif "Tracking" in label and not _training_tab_loaded["track"]:
-                _training_tab_loaded["track"] = True
+                finally:
+                    try:
+                        QApplication.restoreOverrideCursor()
+                    except Exception:
+                        pass
+            elif "Tracking" in label:
                 try:
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                    QApplication.processEvents()
                     load_tracker()
+                    _training_tab_loaded["track"] = True
                 except Exception:
                     logging.exception("lazy tracker load failed")
+                finally:
+                    try:
+                        QApplication.restoreOverrideCursor()
+                    except Exception:
+                        pass
             elif "Master" in label and not _training_tab_loaded["master"]:
                 _training_tab_loaded["master"] = True
                 try:
