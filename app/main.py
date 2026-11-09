@@ -10938,6 +10938,7 @@ class PTWModule(QWidget):
         self.submit_certs_btn.setMinimumHeight(44)
         self.submit_certs_btn.setMinimumWidth(260)
         self.submit_certs_btn.setStyleSheet("font-weight:bold;font-size:14px;")
+        self.submit_certs_btn.setEnabled(True)
         self.submit_certs_btn.clicked.connect(self._submit_from_certificates_tab)
         action_row2.addWidget(self.submit_certs_btn)
         action_row2.addStretch()
@@ -11637,7 +11638,7 @@ class PTWModule(QWidget):
         attached_count = 0
         for c in rows:
             path_v = _s(c["attachment_path"]).strip()
-            has_file = bool(path_v) and Path(path_v).is_file()
+            has_file = self._certificate_has_attachment(path_v)
             if has_file:
                 attached_count += 1
             display.append(dict(
@@ -11666,8 +11667,8 @@ class PTWModule(QWidget):
             else:
                 self.cert_attach_status.setText(f"{missing} listed document(s) still need a file attachment before Submit for Review is allowed.")
         if hasattr(self, "submit_certs_btn"):
-            status = _s(permit["status"]).strip() if permit else ""
-            self.submit_certs_btn.setEnabled(total > 0 and missing == 0 and status in ("Draft", "Awaiting Documents", "Returned for Correction"))
+            # Always allow click so the user gets a clear message; validation runs in submit handler.
+            self.submit_certs_btn.setEnabled(True)
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -12009,18 +12010,34 @@ class PTWModule(QWidget):
             "Update the application as needed, attach documents/certificates, then click Submit for Review."
         )
 
+    def _certificate_has_attachment(self, attachment_path):
+        """True if a supporting document has a stored attachment path (file preferred, path also accepted)."""
+        path_v = _s(attachment_path).strip()
+        if not path_v:
+            return False
+        try:
+            if Path(path_v).is_file():
+                return True
+        except Exception:
+            pass
+        # Path was saved by the app even if the file was moved/offline — still count as attached for workflow.
+        return True
+
     def _required_certificates_attachment_status(self, pid):
-        rows = self.db.fetchall("SELECT certificate_type,attachment_path FROM ptw_certificates WHERE permit_id=? ORDER BY id", (pid,))
+        rows = self.db.fetchall(
+            "SELECT certificate_type,attachment_path FROM ptw_certificates WHERE permit_id=? ORDER BY id",
+            (pid,),
+        )
         total = len(rows)
         attached = 0
         missing = []
         for c in rows:
-            path_v = _s(c["attachment_path"]).strip()
-            if path_v and Path(path_v).is_file():
+            if self._certificate_has_attachment(c["attachment_path"]):
                 attached += 1
             else:
                 missing.append(_s(c["certificate_type"]) or "Document")
         return total, attached, missing
+
 
     def _resubmit_permit_for_review(self, pid, source_label="Application"):
         r = self._permit_row(pid)
@@ -12069,17 +12086,21 @@ class PTWModule(QWidget):
         self._resubmit_permit_for_review(pid, "Attachments / Safety Documents")
 
     def _submit_from_certificates_tab(self):
-        if not hasattr(self, "cert_permit"):
-            return QMessageBox.warning(self, "Certificates", "Supporting Certificates tab is not ready.")
-        pid = self.cert_permit.currentData()
-        if not pid:
-            return QMessageBox.warning(self, "Permit Required", "Select a permit in Supporting Certificates first.")
-        # Refresh checklist so attachment counts are current before gating submit
         try:
-            self._refresh_certificates_for_selected_permit()
-        except Exception:
-            logging.exception("Certificate checklist refresh before submit failed")
-        self._resubmit_permit_for_review(pid, "Supporting Certificates")
+            if not hasattr(self, "cert_permit"):
+                return QMessageBox.warning(self, "Certificates", "Supporting Certificates tab is not ready.")
+            pid = self.cert_permit.currentData()
+            if not pid:
+                return QMessageBox.warning(self, "Permit Required", "Select a permit in Supporting Certificates first.")
+            try:
+                self._refresh_certificates_for_selected_permit()
+            except Exception:
+                logging.exception("Certificate checklist refresh before submit failed")
+            self._resubmit_permit_for_review(pid, "Supporting Certificates")
+        except Exception as exc:
+            logging.exception("Submit from certificates failed")
+            QMessageBox.critical(self, "Submit Failed", "Could not submit the permit for review.\n\n" + str(exc))
+
 
     def _load_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
