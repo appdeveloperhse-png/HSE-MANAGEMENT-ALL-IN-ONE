@@ -10343,7 +10343,7 @@ PERMIT_TYPES = [
 ]
 WORKFLOWS = ["PTW", "CPW", "e-PTW / EPTW"]
 PTW_STATUSES = ["Draft", "Awaiting Documents", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
-CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
+CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry", "Confined Space Entry Certificate", "Electrical / Isolation Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
 
 
 def _s(value):
@@ -10849,6 +10849,12 @@ class PTWModule(QWidget):
         )
         self.cert_table.setMinimumHeight(200)
         self.cert_table.cellClicked.connect(lambda *_: self._load_certificate_for_edit())
+        self.cert_table.itemSelectionChanged.connect(self._load_certificate_for_edit)
+
+        self.cert_selected_label = QLabel("Selected: (click a required document in the list above)")
+        self.cert_selected_label.setWordWrap(True)
+        self.cert_selected_label.setStyleSheet("padding:8px;background:#EAF6EA;border:1px solid #B7D7B0;border-radius:4px;font-weight:bold;")
+        lay.addWidget(self.cert_selected_label)
 
         detail = QGroupBox("Selected document — fill details and attach file")
         df = QFormLayout(detail)
@@ -11368,18 +11374,37 @@ class PTWModule(QWidget):
         self._update_application_permit_summary()
 
     def _sync_application_supporting_certificates(self, permit_id, types_text, refs_text):
-        names=[x.strip() for x in _s(types_text).split(";") if x.strip()]
-        refs=[x.strip() for x in _s(refs_text).split(";")]
-        permit=self._permit_row(permit_id)
-        if not permit:return
-        now=_now()
-        for i,name in enumerate(names):
-            ref_text=refs[i] if i<len(refs) else ""
-            exists=self.db.fetchone("SELECT id FROM ptw_certificates WHERE permit_id=? AND certificate_type=? AND comments=? LIMIT 1",(permit_id,name,ref_text))
-            if exists:continue
-            n=self.db.fetchone("SELECT COUNT(*) AS n FROM ptw_certificates WHERE permit_id=?",(permit_id,))["n"]+1
-            cert_ref=f"{permit['permit_number']}-CERT-{n:02d}"
-            self.db.execute("INSERT OR IGNORE INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,'Draft','','','Pending',?,?,?)",(cert_ref,permit_id,name,ref_text,now,now))
+        """Create certificate rows for each supporting document listed on the application.
+        Existing rows are matched by certificate_type so listed names stay in sync.
+        """
+        names = [x.strip() for x in _s(types_text).split(";") if x.strip()]
+        refs = [x.strip() for x in _s(refs_text).split(";")]
+        permit = self._permit_row(permit_id)
+        if not permit:
+            return
+        now = _now()
+        for i, name in enumerate(names):
+            ref_text = refs[i] if i < len(refs) else ""
+            exists = self.db.fetchone(
+                "SELECT id FROM ptw_certificates WHERE permit_id=? AND certificate_type=? LIMIT 1",
+                (permit_id, name),
+            )
+            if exists:
+                # Keep reference comment updated from application list
+                if ref_text:
+                    self.db.execute(
+                        "UPDATE ptw_certificates SET comments=?, updated_at=? WHERE id=? AND (comments IS NULL OR trim(comments)='')",
+                        (ref_text, now, exists["id"]),
+                    )
+                continue
+            n = self.db.fetchone("SELECT COUNT(*) AS n FROM ptw_certificates WHERE permit_id=?", (permit_id,))["n"] + 1
+            cert_ref = f"{permit['permit_number']}-CERT-{n:02d}"
+            self.db.execute(
+                "INSERT INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) "
+                "VALUES(?,?,?,'Draft','','','Pending',?,?,?)",
+                (cert_ref, permit_id, name, ref_text, now, now),
+            )
+
 
     def _populate_ptw_holder_ids(self):
         combo = self.form_fields.get("permit_holder_employee_id")
@@ -12164,18 +12189,21 @@ class PTWModule(QWidget):
         self._event(pid,"Supporting certificate added",details=f"{ref}: {self.cert_type.currentText()}"); self.refresh_all()
 
     def _update_certificate(self):
-        row=self.cert_table.currentRow()
-        if row<0:
-            return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
-        cid=self.editing_certificate_id or self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
-        cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        cid = self.editing_certificate_id
+        if not cid:
+            row = self.cert_table.currentRow()
+            if row < 0 or not self.cert_table.item(row, 0):
+                return QMessageBox.information(self, "Select Certificate", "Select a certificate row first.")
+            cid = self.cert_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        cert = self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?", (cid,))
         if not cert:
             return
+        chosen_type = self.cert_type.currentText().strip() or _s(cert["certificate_type"])
         self.db.execute(
             "UPDATE ptw_certificates SET permit_id=?,certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",
             (
                 self.cert_permit.currentData() or cert["permit_id"],
-                self.cert_type.currentText(),
+                chosen_type,
                 self.cert_status.currentText(),
                 self.cert_responsible.text().strip(),
                 self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),
@@ -12185,41 +12213,69 @@ class PTWModule(QWidget):
                 cid,
             ),
         )
-        self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"])
-        self.editing_certificate_id=None
+        self._event(cert["permit_id"], "Supporting certificate updated", details=_s(cert["certificate_ref"]))
         self.db.conn.commit()
+        self.editing_certificate_id = int(cid)
         self._refresh_certificates_for_selected_permit()
-        QMessageBox.information(self,"Saved","Document details were saved.")
+        for r in range(self.cert_table.rowCount()):
+            it = self.cert_table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == cid:
+                self.cert_table.selectRow(r)
+                break
+        self._load_certificate_for_edit()
+        QMessageBox.information(self, "Saved", f"{chosen_type} details were saved.")
 
 
     def _load_certificate_for_edit(self):
+        """Load the clicked/selected required document into the fill form (exact type from list)."""
         if not hasattr(self, "cert_table"):
             return
-        row=self.cert_table.currentRow()
-        if row<0:
+        row = self.cert_table.currentRow()
+        if row < 0:
             return
-        item=self.cert_table.item(row,0)
+        item = self.cert_table.item(row, 0)
         if not item:
             return
-        cid=item.data(Qt.ItemDataRole.UserRole)
-        c=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        cid = item.data(Qt.ItemDataRole.UserRole)
+        if cid is None:
+            return
+        c = self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?", (cid,))
         if not c:
             return
-        self.editing_certificate_id=cid
+        self.editing_certificate_id = int(cid)
+        # Keep parent permit selection on the same permit
         if self.cert_permit.currentData() != c["permit_id"]:
-            ix=self.cert_permit.findData(c["permit_id"])
-            if ix>=0:
-                self.cert_permit.blockSignals(True); self.cert_permit.setCurrentIndex(ix); self.cert_permit.blockSignals(False)
-        ix=self.cert_type.findText(c["certificate_type"]); self.cert_type.setCurrentIndex(ix if ix>=0 else 0)
+            ix = self.cert_permit.findData(c["permit_id"])
+            if ix >= 0:
+                self.cert_permit.blockSignals(True)
+                self.cert_permit.setCurrentIndex(ix)
+                self.cert_permit.blockSignals(False)
+        # Exact document type from the certificate row (from application list)
+        doc_type = _s(c["certificate_type"]).strip()
+        if doc_type:
+            ix = self.cert_type.findText(doc_type)
+            if ix < 0:
+                self.cert_type.addItem(doc_type)
+                ix = self.cert_type.findText(doc_type)
+            self.cert_type.setCurrentIndex(ix if ix >= 0 else 0)
         self.cert_responsible.setText(_s(c["responsible_person"]))
-        dt=QDateTime.fromString(_s(c["valid_until"]),"yyyy-MM-dd HH:mm")
+        dt = QDateTime.fromString(_s(c["valid_until"]), "yyyy-MM-dd HH:mm")
         if dt.isValid():
             self.cert_valid_until.setDateTime(dt)
-        for w,key in [(self.cert_status,"status"),(self.cert_verification,"verification_status")]:
-            ix=w.findText(_s(c[key])); w.setCurrentIndex(ix if ix>=0 else 0)
+        else:
+            self.cert_valid_until.setDateTime(QDateTime.currentDateTime())
+        for w, key in [(self.cert_status, "status"), (self.cert_verification, "verification_status")]:
+            ix = w.findText(_s(c[key]))
+            w.setCurrentIndex(ix if ix >= 0 else 0)
         self.cert_comments.setText(_s(c["comments"]))
         if hasattr(self, "cert_file_path"):
             self.cert_file_path.setText(_s(c["attachment_path"]))
+        if hasattr(self, "cert_selected_label"):
+            attached = _s(c["attachment_path"]).strip()
+            att_txt = Path(attached).name if attached else "Not attached yet"
+            self.cert_selected_label.setText(
+                f"Selected: {doc_type}  |  Ref: {_s(c['certificate_ref'])}  |  File: {att_txt}"
+            )
 
 
     def _attach_certificate(self):
@@ -12238,31 +12294,51 @@ class PTWModule(QWidget):
         self._refresh_certificates_for_selected_permit()
 
     def _save_and_attach_certificate(self):
-        row=self.cert_table.currentRow()
-        if row<0:
-            return QMessageBox.information(self,"Select Document","Select a required document row first.")
-        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
-        cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        cid = self.editing_certificate_id
+        if not cid:
+            row = self.cert_table.currentRow()
+            if row < 0 or not self.cert_table.item(row, 0):
+                return QMessageBox.information(self, "Select Document", "Select a required document row first.")
+            cid = self.cert_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        cert = self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?", (cid,))
         if not cert:
             return
         path = self.cert_file_path.text().strip() if hasattr(self, "cert_file_path") else ""
         if not path:
-            path,_=QFileDialog.getOpenFileName(self,"Select Certificate / Document File")
+            path, _ = QFileDialog.getOpenFileName(self, "Select Certificate / Document File")
         if not path or not Path(path).is_file():
-            return QMessageBox.warning(self,"File Required","Choose an existing file to attach for this listed document.")
-        dest=self._copy_attachment(path,cert["permit_id"])
+            return QMessageBox.warning(self, "File Required", "Choose an existing file to attach for this listed document.")
+        dest = self._copy_attachment(path, cert["permit_id"])
+        # Keep listed application document type unless user explicitly changed the combo to a non-empty value
+        chosen_type = self.cert_type.currentText().strip() or _s(cert["certificate_type"])
         self.db.execute(
             "UPDATE ptw_certificates SET certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,attachment_path=?,updated_at=? WHERE id=?",
-            (self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),
-             self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),
-             self.cert_comments.text().strip(),str(dest),_now(),cid)
+            (
+                chosen_type,
+                self.cert_status.currentText(),
+                self.cert_responsible.text().strip(),
+                self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),
+                self.cert_verification.currentText(),
+                self.cert_comments.text().strip(),
+                str(dest),
+                _now(),
+                cid,
+            ),
         )
-        self._event(cert["permit_id"],"Supporting document saved with attachment",details=cert["certificate_ref"],attachment=str(dest))
+        self._event(cert["permit_id"], "Supporting document saved with attachment", details=_s(cert["certificate_ref"]), attachment=str(dest))
         self.db.conn.commit()
+        self.editing_certificate_id = int(cid)
         if hasattr(self, "cert_file_path"):
             self.cert_file_path.setText(str(dest))
         self._refresh_certificates_for_selected_permit()
-        QMessageBox.information(self,"Document Saved",f"{cert['certificate_ref']} details and attachment were saved.")
+        # Reselect same row after refresh
+        for r in range(self.cert_table.rowCount()):
+            it = self.cert_table.item(r, 0)
+            if it and it.data(Qt.ItemDataRole.UserRole) == cid:
+                self.cert_table.selectRow(r)
+                break
+        self._load_certificate_for_edit()
+        QMessageBox.information(self, "Document Saved", f"{chosen_type} details and attachment were saved.")
 
 
     def _add_renewal(self):
