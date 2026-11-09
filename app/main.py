@@ -8365,9 +8365,14 @@ class MainWindow(QMainWindow):
         compliance_layout.addWidget(compliance_title)
         # Filters
         compliance_filter_row = QHBoxLayout()
-        compliance_filter_company = QComboBox(); compliance_filter_company.setMinimumWidth(160)
-        compliance_filter_trade = QComboBox(); compliance_filter_trade.setMinimumWidth(160)
+        compliance_filter_company = QComboBox(); compliance_filter_company.setMinimumWidth(140)
+        compliance_filter_trade = QComboBox(); compliance_filter_trade.setMinimumWidth(140)
         compliance_filter_search = QLineEdit(); compliance_filter_search.setPlaceholderText("Search ID or name…"); compliance_filter_search.setClearButtonEnabled(True)
+        compliance_date_from = QDateEdit(); compliance_date_from.setCalendarPopup(True); compliance_date_from.setDisplayFormat("yyyy-MM-dd")
+        compliance_date_from.setDate(QDate.currentDate().addYears(-1))
+        compliance_date_to = QDateEdit(); compliance_date_to.setCalendarPopup(True); compliance_date_to.setDisplayFormat("yyyy-MM-dd")
+        compliance_date_to.setDate(QDate.currentDate())
+        compliance_use_dates = QCheckBox("Filter by training date")
         compliance_filter_mode = QComboBox()
         compliance_filter_mode.addItem("Overall (all active employees)", "overall")
         compliance_filter_mode.addItem("Filtered selection only", "filtered")
@@ -8379,6 +8384,11 @@ class MainWindow(QMainWindow):
         compliance_filter_row.addWidget(QLabel("Trade:"))
         compliance_filter_row.addWidget(compliance_filter_trade)
         compliance_filter_row.addWidget(compliance_filter_search, 1)
+        compliance_filter_row.addWidget(compliance_use_dates)
+        compliance_filter_row.addWidget(QLabel("From:"))
+        compliance_filter_row.addWidget(compliance_date_from)
+        compliance_filter_row.addWidget(QLabel("To:"))
+        compliance_filter_row.addWidget(compliance_date_to)
         compliance_filter_row.addWidget(compliance_filter_mode)
         compliance_filter_row.addWidget(compliance_refresh)
         compliance_layout.addLayout(compliance_filter_row)
@@ -8411,9 +8421,8 @@ class MainWindow(QMainWindow):
             compliance_kpis.addWidget(card, idx // 4, idx % 4)
         compliance_layout.addLayout(compliance_kpis)
         compliance_hint = QLabel(
-            "Use filters above, then Apply / Refresh. Mode “Overall” uses all active employees; "
-            "“Filtered selection only” recalculates KPIs for the filtered set; "
-            "“Non-compliant only” lists employees with open gaps."
+            "Use filters above, then Apply / Refresh. Optional training-date From/To limits man-hours delivered. "
+            "Mode Overall = all active employees; Filtered = KPIs for the filtered set; Non-compliant only = gaps list."
         )
         compliance_hint.setWordWrap(True)
         compliance_hint.setStyleSheet("color:#475467;padding:8px;background:#F2F4F7;border-radius:6px;")
@@ -8450,62 +8459,122 @@ class MainWindow(QMainWindow):
         track_tools.addWidget(track_export_xlsx); track_tools.addWidget(track_export_docx)
         track_layout.addLayout(track_tools)
 
+        track_status = QLabel("Open this tab or click Refresh to load employees and training status.")
+        track_status.setStyleSheet("color:#344054;padding:4px;")
+        track_layout.addWidget(track_status)
+        track_container = QWidget()
+        track_container_layout = QHBoxLayout(track_container)
+        track_container_layout.setContentsMargins(0, 0, 0, 0)
+        track_container_layout.setSpacing(0)
+        # Frozen identity columns
+        track_frozen = QTableWidget()
+        track_frozen.setColumnCount(6)
+        track_frozen.setHorizontalHeaderLabels(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"])
+        track_frozen.setAlternatingRowColors(True)
+        track_frozen.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        track_frozen.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        track_frozen.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        track_frozen.verticalHeader().setVisible(False)
+        track_frozen.setMinimumWidth(480)
+        track_frozen.setMaximumWidth(560)
+        track_frozen.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        track_frozen.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        track_frozen.horizontalHeader().setStretchLastSection(True)
+        track_frozen.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # Scrollable training status columns
         track_table = QTableWidget()
         track_table.setAlternatingRowColors(True)
         track_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         track_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        track_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        track_table.verticalHeader().setVisible(False)
         track_table.horizontalHeader().setDefaultSectionSize(130)
         track_table.verticalHeader().setDefaultSectionSize(52)
         track_table.setWordWrap(True)
         track_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         track_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        track_layout.addWidget(track_table, 1)
+        track_container_layout.addWidget(track_frozen)
+        track_container_layout.addWidget(track_table, 1)
+        track_layout.addWidget(track_container, 1)
+        _syncing_track_scroll = {"v": False}
+
+        def _track_scroll_main(value):
+            if _syncing_track_scroll["v"]:
+                return
+            _syncing_track_scroll["v"] = True
+            try:
+                track_frozen.verticalScrollBar().setValue(value)
+            finally:
+                _syncing_track_scroll["v"] = False
+
+        def _track_scroll_frozen(value):
+            if _syncing_track_scroll["v"]:
+                return
+            _syncing_track_scroll["v"] = True
+            try:
+                track_table.verticalScrollBar().setValue(value)
+            finally:
+                _syncing_track_scroll["v"] = False
+
+        track_table.verticalScrollBar().valueChanged.connect(_track_scroll_main)
+        track_frozen.verticalScrollBar().valueChanged.connect(_track_scroll_frozen)
+
+        def _track_frozen_wheel(event):
+            try:
+                track_table.wheelEvent(event)
+            except Exception:
+                pass
+        track_frozen.wheelEvent = _track_frozen_wheel
         track_state = {"employees": [], "courses": []}
 
         def load_tracker():
-            """Always reload matrix state then show every active employee + priority courses."""
+            """Show every active employee (frozen ID/Name/Trade) + course status columns."""
             try:
-                load_grid_state()
-            except Exception:
-                logging.exception("load_grid_state in tracker failed")
-            try:
+                try:
+                    load_grid_state()
+                except Exception:
+                    logging.exception("load_grid_state in tracker failed")
                 employees = db.fetchall(
                     "SELECT id, employee_id, name, designation, company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name COLLATE NOCASE"
-                )
-            except Exception:
-                logging.exception("employee query failed")
-                employees = []
-            needle = track_search.text().strip().lower()
-            if needle:
-                employees = [e for e in employees if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))]
-            course_needle = track_course_filter.text().strip().lower()
-            try:
-                course_set = prioritized_courses(list(grid_state.get("courses") or []))
-            except Exception:
+                ) or []
+                needle = track_search.text().strip().lower()
+                if needle:
+                    employees = [
+                        e for e in employees
+                        if needle in " ".join(safe(e[k]).lower() for k in ("employee_id", "name", "designation", "company"))
+                    ]
+                course_needle = track_course_filter.text().strip().lower()
                 course_set = list(grid_state.get("courses") or [])
-            if not course_set:
-                # Fall back to READY_COURSES so the register is never blank of columns
-                course_set = [x[0] for x in READY_COURSES]
-            if course_needle:
-                course_set = [c for c in course_set if course_needle in c.lower()]
-            track_state["employees"] = employees
-            track_state["courses"] = course_set
+                try:
+                    course_set = prioritized_courses(course_set)
+                except Exception:
+                    pass
+                if not course_set:
+                    try:
+                        course_set = [x[0] for x in READY_COURSES]
+                    except Exception:
+                        course_set = []
+                if course_needle:
+                    course_set = [c for c in course_set if course_needle in c.lower()]
+                track_state["employees"] = employees
+                track_state["courses"] = course_set
 
-            track_frozen.setUpdatesEnabled(False)
-            track_table.setUpdatesEnabled(False)
-            try:
-                track_frozen.clearContents()
+                track_frozen.setUpdatesEnabled(False)
+                track_table.setUpdatesEnabled(False)
                 track_frozen.setRowCount(0)
+                track_table.setRowCount(0)
                 track_frozen.setColumnCount(6)
                 track_frozen.setHorizontalHeaderLabels(["S.No.", "ID", "Name", "Trade", "Company", "Mandatory %"])
                 track_frozen.setRowCount(len(employees))
-                track_table.clearContents()
-                track_table.setRowCount(0)
                 track_table.setColumnCount(max(1, len(course_set)))
-                track_table.setHorizontalHeaderLabels(course_set if course_set else ["(No courses — open Matrix and Save)"])
+                track_table.setHorizontalHeaderLabels(course_set if course_set else ["(Save Matrix Grid to load courses)"])
                 track_table.setRowCount(len(employees))
-                hdr_h = max(30, track_table.horizontalHeader().height())
-                track_frozen.horizontalHeader().setFixedHeight(hdr_h)
+                try:
+                    hdr_h = max(30, track_table.horizontalHeader().height())
+                    track_frozen.horizontalHeader().setFixedHeight(hdr_h)
+                except Exception:
+                    pass
+
                 for r, emp in enumerate(employees):
                     try:
                         reqs = requirements_for_trade(emp["designation"])
@@ -8514,23 +8583,37 @@ class MainWindow(QMainWindow):
                     mand = [x for x in reqs if x[1] == "Mandatory"]
                     done = 0
                     for cname, req, validity in mand:
-                        st, _, _ = status_of(latest_record(emp["id"], cname), validity)
-                        if st in ("Valid", "Expiring Soon"):
-                            done += 1
+                        try:
+                            st, _, _ = status_of(latest_record(emp["id"], cname), validity)
+                            if st in ("Valid", "Expiring Soon"):
+                                done += 1
+                        except Exception:
+                            pass
                     pct = int(round(100 * done / len(mand))) if mand else None
                     pct_text = "N/A" if pct is None else f"{pct}% ({done}/{len(mand)})"
-                    base = [str(r + 1), safe(emp["employee_id"]), safe(emp["name"]), safe(emp["designation"]), safe(emp["company"]), pct_text]
+                    base = [
+                        str(r + 1),
+                        safe(emp["employee_id"]),
+                        safe(emp["name"]),
+                        safe(emp["designation"]),
+                        safe(emp["company"]),
+                        pct_text,
+                    ]
                     for c, val in enumerate(base):
                         it = QTableWidgetItem(val)
                         it.setBackground(QBrush(QColor("#EEF4FB")))
                         if c == 2:
                             f = it.font(); f.setBold(True); it.setFont(f)
                         if c == 5 and pct is not None:
-                            bg, fg = color_status("Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed"))
-                            it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                            bg, fg = color_status(
+                                "Valid" if pct >= 100 else ("Expiring Soon" if pct >= 50 else "Not Completed")
+                            )
+                            it.setBackground(QBrush(bg))
+                            it.setForeground(QBrush(fg))
                         if c == 1:
                             it.setData(Qt.ItemDataRole.UserRole, int(emp["id"]))
                         track_frozen.setItem(r, c, it)
+
                     req_map = {x[0]: x for x in reqs}
                     for offset, cname in enumerate(course_set):
                         if cname not in req_map:
@@ -8559,26 +8642,45 @@ class MainWindow(QMainWindow):
                         it = QTableWidgetItem("\n".join(lines))
                         it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         it.setData(Qt.ItemDataRole.UserRole, {
-                            "emp_id": int(emp["id"]), "course": cname, "validity": validity,
-                            "req": req, "record_id": int(rec["id"]) if rec else None
+                            "emp_id": int(emp["id"]),
+                            "course": cname,
+                            "validity": validity,
+                            "req": req,
+                            "record_id": int(rec["id"]) if rec else None,
                         })
                         bg, fg = color_status(st)
-                        it.setBackground(QBrush(bg)); it.setForeground(QBrush(fg))
+                        it.setBackground(QBrush(bg))
+                        it.setForeground(QBrush(fg))
                         track_table.setItem(r, offset, it)
                     track_frozen.setRowHeight(r, 52)
                     track_table.setRowHeight(r, 52)
+
                 track_frozen.setColumnWidth(0, 48)
                 track_frozen.setColumnWidth(1, 80)
                 track_frozen.setColumnWidth(2, 130)
                 track_frozen.setColumnWidth(3, 110)
                 track_frozen.setColumnWidth(4, 90)
                 track_frozen.setColumnWidth(5, 90)
-                track_frozen.verticalScrollBar().setValue(track_table.verticalScrollBar().value())
-            except Exception:
+                try:
+                    track_frozen.verticalScrollBar().setValue(track_table.verticalScrollBar().value())
+                except Exception:
+                    pass
+                track_status.setText(
+                    f"Showing {len(employees)} employee(s) · {len(course_set)} training column(s). "
+                    "Double-click a training cell to log / update training."
+                )
+            except Exception as exc:
                 logging.exception("load_tracker failed")
+                try:
+                    track_status.setText(f"Tracking load error: {exc}")
+                except Exception:
+                    pass
             finally:
-                track_frozen.setUpdatesEnabled(True)
-                track_table.setUpdatesEnabled(True)
+                try:
+                    track_frozen.setUpdatesEnabled(True)
+                    track_table.setUpdatesEnabled(True)
+                except Exception:
+                    pass
 
 
         def _populate_compliance_filters():
@@ -8668,12 +8770,20 @@ class MainWindow(QMainWindow):
                 if non_compliant:
                     exceptions.append((emp, non_compliant, emp_expired))
             compliance_pct = (100.0 * compliant_required / total_required) if total_required else 100.0
+            date_clause = ""
+            date_params = []
+            if compliance_use_dates.isChecked():
+                d0 = compliance_date_from.date().toString("yyyy-MM-dd")
+                d1 = compliance_date_to.date().toString("yyyy-MM-dd")
+                date_clause = " AND tr.training_date >= ? AND tr.training_date <= ?"
+                date_params = [d0, d1]
             delivered = db.fetchone(
-                """SELECT COALESCE(SUM(COALESCE(c.training_hours,0)),0) AS h
+                f"""SELECT COALESCE(SUM(COALESCE(c.training_hours,0)),0) AS h
                    FROM training_records tr
                    JOIN training_courses c ON c.id=tr.course_id
                    JOIN employees e ON e.id=tr.employee_db_id
-                   WHERE COALESCE(e.active,1)=1"""
+                   WHERE COALESCE(e.active,1)=1{date_clause}""",
+                tuple(date_params) if date_params else ()
             )
             man_hours = float(delivered["h"] if delivered else 0)
             required_hours = 0.0
@@ -9454,7 +9564,10 @@ class MainWindow(QMainWindow):
         track_delete.clicked.connect(clear_selected_cell)
         track_export_xlsx.clicked.connect(export_tracker_excel)
         track_export_docx.clicked.connect(export_tracker_word)
-        # Tracking data loads when the tab is first opened (see _on_training_tab_changed)
+        try:
+            load_tracker()
+        except Exception:
+            logging.exception("initial tracking load failed")
         tabs.addTab(track_page, "5. Tracking Register")
         tabs.addTab(master_page, "6. Master Training Register")
         tabs.addTab(category_pages["I"], "7. Internal Training Register")
