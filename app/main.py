@@ -10342,7 +10342,7 @@ PERMIT_TYPES = [
     "Blasting Permit", "Other"
 ]
 WORKFLOWS = ["PTW", "CPW", "e-PTW / EPTW"]
-PTW_STATUSES = ["Draft", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
+PTW_STATUSES = ["Draft", "Awaiting Documents", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
 CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
 
 
@@ -10803,17 +10803,54 @@ class PTWModule(QWidget):
         self.reg_search.textChanged.connect(self.refresh_register); self.reg_status.currentTextChanged.connect(self.refresh_register); self.reg_type.currentTextChanged.connect(self.refresh_register)
 
     def _build_certificates(self):
-        lay=QVBoxLayout(self.cert_tab); f=QFormLayout(); lay.addLayout(f)
-        self.cert_permit=QComboBox(); self.cert_permit.currentIndexChanged.connect(self._refresh_certificates_for_selected_permit); self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_responsible=QLineEdit(); self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm")
+        lay=QVBoxLayout(self.cert_tab); lay.setSpacing(8)
+        intro=QLabel("Required supporting documents come from the Application form. Select a permit, click a listed item, fill details, attach the file, then save. Submit for Review only when every listed document is attached.")
+        intro.setWordWrap(True); lay.addWidget(intro)
+        f=QFormLayout(); lay.addLayout(f)
+        self.cert_permit=QComboBox(); self.cert_permit.setMinimumHeight(32)
+        self.cert_permit.currentIndexChanged.connect(self._refresh_certificates_for_selected_permit)
+        self.cert_required_summary=QLabel("Select a permit to see required documents from the application.")
+        self.cert_required_summary.setWordWrap(True)
+        self.cert_required_summary.setStyleSheet("padding:8px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
+        f.addRow("Permit",self.cert_permit)
+        lay.addWidget(self.cert_required_summary)
+        lay.addWidget(QLabel("Required documents listed on the application (click a row to fill and attach)"))
+        self.cert_table=self._table(["Reference","Document / Certificate","Reference No.","Responsible","Valid Until","Attached?","File","Status"],lay)
+        self.cert_table.setMinimumHeight(180)
+        self.cert_table.cellClicked.connect(lambda *_: self._load_certificate_for_edit())
+        detail=QGroupBox("Selected document — fill details and attach file")
+        df=QFormLayout(detail)
+        self.cert_type=QComboBox(); self.cert_type.addItems(CERT_TYPES); self.cert_type.setMinimumHeight(30)
+        self.cert_responsible=QLineEdit(); self.cert_responsible.setMinimumHeight(30)
+        self.cert_valid_until=QDateTimeEdit(QDateTime.currentDateTime()); self.cert_valid_until.setCalendarPopup(True); self.cert_valid_until.setDisplayFormat("yyyy-MM-dd HH:mm"); self.cert_valid_until.setMinimumHeight(30)
         self.cert_status=QComboBox(); self.cert_status.addItems(["Draft","Submitted","Approved","Valid","Expired","Suspended","Closed","Rejected"])
         self.cert_verification=QComboBox(); self.cert_verification.addItems(["Pending","Verified","Rejected"])
-        self.cert_comments=QLineEdit(); f.addRow("Parent Permit",self.cert_permit); f.addRow("Certificate Type",self.cert_type); f.addRow("Responsible Person",self.cert_responsible); f.addRow("Valid Until",self.cert_valid_until); f.addRow("Status",self.cert_status); f.addRow("Verification",self.cert_verification); f.addRow("Comments",self.cert_comments)
-        btn=QHBoxLayout(); add=QPushButton("Add Certificate"); edit=QPushButton("Update Selected"); delete=QPushButton("Delete Selected"); attach=QPushButton("Attach Certificate File"); add.clicked.connect(self._add_certificate); edit.clicked.connect(self._update_certificate); delete.clicked.connect(self._delete_certificate); attach.clicked.connect(self._attach_certificate); load=QPushButton("Load Selected for Edit"); load.clicked.connect(self._load_certificate_for_edit); btn.addWidget(add); btn.addWidget(load); btn.addWidget(edit); btn.addWidget(delete); btn.addWidget(attach)
-        submit_certs=QPushButton("Submit Permit for Review"); submit_certs.setMinimumHeight(34); submit_certs.setStyleSheet("font-weight:bold;"); submit_certs.clicked.connect(self._submit_from_certificates_tab)
-        btn.addWidget(submit_certs); btn.addStretch(); lay.addLayout(btn)
-        cert_note=QLabel("Add/attach supporting certificates for a Draft or Returned permit, then click Submit Permit for Review so it appears in Permit Review & Approval.")
-        cert_note.setWordWrap(True); lay.addWidget(cert_note)
-        self.cert_table=self._table(["Reference","Permit","Certificate Type","Responsible Person","Valid Until","Status","Verification","File","Comments"],lay)
+        self.cert_comments=QLineEdit(); self.cert_comments.setPlaceholderText("Document number / reference from application")
+        self.cert_file_path=QLineEdit(); self.cert_file_path.setReadOnly(True)
+        browse_cert=QPushButton("Browse File"); browse_cert.clicked.connect(lambda:self._choose_into(self.cert_file_path))
+        file_row=QHBoxLayout(); file_row.addWidget(self.cert_file_path,1); file_row.addWidget(browse_cert)
+        df.addRow("Document Type",self.cert_type)
+        df.addRow("Responsible Person",self.cert_responsible)
+        df.addRow("Valid Until",self.cert_valid_until)
+        df.addRow("Status",self.cert_status)
+        df.addRow("Verification",self.cert_verification)
+        df.addRow("Reference / Comments",self.cert_comments)
+        df.addRow("Attachment File",file_row)
+        lay.addWidget(detail)
+        btn=QHBoxLayout()
+        save_sel=QPushButton("Save Selected Document Details"); save_sel.setMinimumHeight(34); save_sel.clicked.connect(self._update_certificate)
+        attach=QPushButton("Save & Attach File"); attach.setMinimumHeight(34); attach.clicked.connect(self._save_and_attach_certificate)
+        add=QPushButton("Add Extra Certificate"); add.clicked.connect(self._add_certificate)
+        delete=QPushButton("Delete Selected"); delete.clicked.connect(self._delete_certificate)
+        self.submit_certs_btn=QPushButton("Submit Permit for Review")
+        self.submit_certs_btn.setMinimumHeight(38)
+        self.submit_certs_btn.setStyleSheet("font-weight:bold;")
+        self.submit_certs_btn.clicked.connect(self._submit_from_certificates_tab)
+        btn.addWidget(save_sel); btn.addWidget(attach); btn.addWidget(add); btn.addWidget(delete); btn.addWidget(self.submit_certs_btn); btn.addStretch()
+        lay.addLayout(btn)
+        self.cert_attach_status=QLabel("")
+        self.cert_attach_status.setWordWrap(True)
+        lay.addWidget(self.cert_attach_status)
 
     def _build_renewals(self):
         lay=QVBoxLayout(self.renewal_tab); form=QFormLayout(); lay.addLayout(form)
@@ -11378,7 +11415,7 @@ class PTWModule(QWidget):
         if self.selected_permit_id:
             old=self.db.fetchone("SELECT status FROM ptw_permits WHERE id=?",(self.selected_permit_id,))
             if not old: self.selected_permit_id=None
-            elif old["status"] not in ("Draft","Returned for Correction"):
+            elif old["status"] not in ("Draft","Returned for Correction","Awaiting Documents"):
                 QMessageBox.warning(self,"Editing Restricted","Only draft or returned permits can be edited. Use the revision/reissue process configured by your site procedure."); return
         if self.selected_permit_id:
             cols=list(values.keys()); sql="UPDATE ptw_permits SET "+", ".join(f"{c}=?" for c in cols)+" WHERE id=?"
@@ -11391,12 +11428,36 @@ class PTWModule(QWidget):
             self.selected_permit_id=pid; self._event(pid,"Permit created","",status,"New permit application saved.")
         self._sync_application_supporting_certificates(pid, values.get("supporting_document_types", ""), values.get("supporting_document_reference", ""))
         self.db.conn.commit()
-        self.refresh_all(); self.tabs.setCurrentWidget(self.application_tab)
+        self.refresh_all()
         self._update_application_permit_summary()
-        QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. Work is not authorized until the permit is approved and issued.")
+        if status == "Awaiting Documents":
+            if hasattr(self, "cert_tab"):
+                self.tabs.setCurrentWidget(self.cert_tab)
+            if hasattr(self, "cert_permit"):
+                idx = self.cert_permit.findData(pid)
+                if idx < 0:
+                    self._refresh_combo_lists()
+                    idx = self.cert_permit.findData(pid)
+                if idx >= 0:
+                    self.cert_permit.setCurrentIndex(idx)
+                self._refresh_certificates_for_selected_permit()
+            QMessageBox.information(
+                self, "Application Saved — Attach Required Documents",
+                (
+                    f"Permit {number} work details and required document list are saved.\n\n"
+                    "Status: Awaiting Documents.\n"
+                    "On Supporting Certificates, complete each listed document (details + file),\n"
+                    "then Submit Permit for Review when every listed item has an attachment."
+                )
+            )
+        else:
+            self.tabs.setCurrentWidget(self.application_tab)
+            QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. Work is not authorized until the permit is approved and issued.")
 
     def _submit_permit(self):
-        self._save_permit("Submitted")
+        # Application form: work details + required document list only.
+        # Review only after all listed supporting certificates are attached.
+        self._save_permit("Awaiting Documents")
 
     def _selected_id(self, table=None):
         t=table or self.permit_table; row=t.currentRow()
@@ -11415,6 +11476,12 @@ class PTWModule(QWidget):
             rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits WHERE status='Issued / Active' ORDER BY id DESC")
         elif combo is getattr(self, "susp_permit", None):
             rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
+        elif combo is getattr(self, "cert_permit", None) or combo is getattr(self, "doc_permit", None):
+            rows = self.db.fetchall(
+                "SELECT id,permit_number,permit_type,status FROM ptw_permits "
+                "WHERE trim(COALESCE(status,'')) IN ('Draft','Awaiting Documents','Returned for Correction','Submitted','Under Review','Approved','Issued / Active') "
+                "ORDER BY CASE trim(COALESCE(status,'')) WHEN 'Awaiting Documents' THEN 0 WHEN 'Returned for Correction' THEN 1 WHEN 'Draft' THEN 2 ELSE 3 END, id DESC"
+            )
         else:
             rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
         combo.addItem("Select permit", None)
@@ -11435,12 +11502,61 @@ class PTWModule(QWidget):
         permit_id = self.cert_permit.currentData() if hasattr(self, "cert_permit") else None
         if not permit_id:
             self.cert_table.setRowCount(0)
+            if hasattr(self, "cert_required_summary"):
+                self.cert_required_summary.setText("Select a permit to see required documents from the application.")
+            if hasattr(self, "cert_attach_status"):
+                self.cert_attach_status.setText("")
+            if hasattr(self, "submit_certs_btn"):
+                self.submit_certs_btn.setEnabled(False)
             return
+        permit = self._permit_row(permit_id)
+        required_types = [x.strip() for x in _s(permit["supporting_document_types"] if permit else "").split(";") if x.strip()]
+        if permit and required_types:
+            self._sync_application_supporting_certificates(
+                permit_id,
+                permit["supporting_document_types"],
+                permit["supporting_document_reference"] if "supporting_document_reference" in permit.keys() else ""
+            )
+            self.db.conn.commit()
         rows = self.db.fetchall(
-            "SELECT c.*,p.permit_number FROM ptw_certificates c JOIN ptw_permits p ON p.id=c.permit_id WHERE c.permit_id=? ORDER BY c.id DESC",
+            "SELECT c.*,p.permit_number FROM ptw_certificates c JOIN ptw_permits p ON p.id=c.permit_id WHERE c.permit_id=? ORDER BY c.id ASC",
             (permit_id,)
         )
-        self._fill_table(self.cert_table, rows, ["certificate_ref","permit_number","certificate_type","responsible_person","valid_until","status","verification_status","attachment_path","comments"])
+        display = []
+        attached_count = 0
+        for c in rows:
+            path_v = _s(c["attachment_path"]).strip()
+            has_file = bool(path_v) and Path(path_v).is_file()
+            if has_file:
+                attached_count += 1
+            display.append(dict(
+                c,
+                attached_flag="Yes" if has_file else "No",
+                file_name=Path(path_v).name if path_v else "",
+            ))
+        self._fill_table(
+            self.cert_table, display,
+            ["certificate_ref","certificate_type","comments","responsible_person","valid_until","attached_flag","file_name","status"]
+        )
+        total = len(rows)
+        missing = total - attached_count
+        req_text = ", ".join(required_types) if required_types else "(none listed on application)"
+        if hasattr(self, "cert_required_summary"):
+            pno = permit["permit_number"] if permit else ""
+            pst = permit["status"] if permit else ""
+            self.cert_required_summary.setText(
+                f"Permit: {pno} | Status: {pst}\nRequired on application: {req_text}\nAttached: {attached_count} / {total}"
+            )
+        if hasattr(self, "cert_attach_status"):
+            if total == 0:
+                self.cert_attach_status.setText("No required documents listed on the application. List them on New Permit Application, then return here.")
+            elif missing == 0:
+                self.cert_attach_status.setText("All listed supporting documents have attachments. You can Submit Permit for Review.")
+            else:
+                self.cert_attach_status.setText(f"{missing} listed document(s) still need a file attachment before Submit for Review is allowed.")
+        if hasattr(self, "submit_certs_btn"):
+            status = _s(permit["status"]).strip() if permit else ""
+            self.submit_certs_btn.setEnabled(total > 0 and missing == 0 and status in ("Draft", "Awaiting Documents", "Returned for Correction"))
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -11722,7 +11838,7 @@ class PTWModule(QWidget):
         self.app_returned_permit.addItem("Select returned or draft permit", None)
         rows = self.db.fetchall(
             "SELECT id,permit_number,permit_type,performing_company,location,status,updated_at FROM ptw_permits "
-            "WHERE trim(COALESCE(status,'')) IN ('Draft','Returned for Correction') ORDER BY id DESC"
+            "WHERE trim(COALESCE(status,'')) IN ('Draft','Awaiting Documents','Returned for Correction') ORDER BY id DESC"
         )
         for r in rows:
             self.app_returned_permit.addItem(
@@ -11739,8 +11855,8 @@ class PTWModule(QWidget):
         r = self._permit_row(pid)
         if not r:
             return QMessageBox.information(self, "Select Permit", "Select a returned or draft permit from the list.")
-        if _s(r["status"]).strip() not in ("Draft", "Returned for Correction"):
-            return QMessageBox.warning(self, "Not Editable Here", "Only Draft or Returned for Correction permits can be loaded for correction.")
+        if _s(r["status"]).strip() not in ("Draft", "Awaiting Documents", "Returned for Correction"):
+            return QMessageBox.warning(self, "Not Editable Here", "Only Draft, Awaiting Documents or Returned for Correction permits can be loaded here.")
         # Reuse register load path by temporarily selecting via selected_permit_id
         self.selected_permit_id = pid
         # Populate form fields the same way as _load_selected
@@ -11782,29 +11898,60 @@ class PTWModule(QWidget):
             "Update the application as needed, attach documents/certificates, then click Submit for Review."
         )
 
+    def _required_certificates_attachment_status(self, pid):
+        rows = self.db.fetchall("SELECT certificate_type,attachment_path FROM ptw_certificates WHERE permit_id=? ORDER BY id", (pid,))
+        total = len(rows)
+        attached = 0
+        missing = []
+        for c in rows:
+            path_v = _s(c["attachment_path"]).strip()
+            if path_v and Path(path_v).is_file():
+                attached += 1
+            else:
+                missing.append(_s(c["certificate_type"]) or "Document")
+        return total, attached, missing
+
     def _resubmit_permit_for_review(self, pid, source_label="Application"):
         r = self._permit_row(pid)
         if not r:
             return QMessageBox.warning(self, "Permit Required", "Select a permit first.")
         status = _s(r["status"]).strip()
-        if status not in ("Draft", "Returned for Correction"):
+        if status not in ("Draft", "Awaiting Documents", "Returned for Correction"):
             return QMessageBox.warning(
                 self, "Cannot Submit",
-                f"Only Draft or Returned for Correction permits can be submitted for review.\nCurrent status: {status}"
+                f"Only Draft, Awaiting Documents, or Returned for Correction permits can be submitted for review.\nCurrent status: {status}"
             )
         if not _s(r["performing_company"]).strip() or not _s(r["location"]).strip() or not _s(r["work_scope"]).strip():
             return QMessageBox.warning(self, "Incomplete Application", "Company, location and work scope are required before submit.")
         if not _s(r["permit_holder_employee_id"]).strip():
             return QMessageBox.warning(self, "Permit Holder Required", "A PTW-trained permit holder ID is required before submit.")
+        self._sync_application_supporting_certificates(
+            pid,
+            r["supporting_document_types"] if "supporting_document_types" in r.keys() else "",
+            r["supporting_document_reference"] if "supporting_document_reference" in r.keys() else ""
+        )
+        self.db.conn.commit()
+        total, attached, missing = self._required_certificates_attachment_status(pid)
+        if total == 0:
+            return QMessageBox.warning(
+                self, "No Supporting Documents Listed",
+                "List the required supporting documents on the Application form first, then attach each file here."
+            )
+        if missing:
+            return QMessageBox.warning(
+                self, "Attachments Incomplete",
+                "Every document listed on the application must have a file attached before review.\n\nStill missing:\n- " + "\n- ".join(missing)
+            )
         old = status
         self.db.execute("UPDATE ptw_permits SET status='Submitted', updated_at=? WHERE id=?", (_now(), pid))
-        self._event(pid, f"Resubmitted from {source_label}", old, "Submitted", f"Permit resubmitted for review from {source_label}.")
+        self._event(pid, f"Submitted for review from {source_label}", old, "Submitted", f"All {total} listed supporting documents attached. Submitted from {source_label}.")
         self.db.conn.commit()
         self.refresh_all()
         QMessageBox.information(
             self, "Submitted for Review",
-            f"Permit {r['permit_number']} is now Submitted and will appear in Permit Review & Approval."
+            f"Permit {r['permit_number']} is now Submitted with all supporting documents attached.\nIt will appear in Permit Review & Approval."
         )
+
 
     def _submit_from_documents_tab(self):
         pid = self.doc_permit.currentData() if hasattr(self, "doc_permit") else None
@@ -11845,8 +11992,8 @@ class PTWModule(QWidget):
     def _edit_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
         if not r: return QMessageBox.information(self,"Select Permit","Select a permit row first.")
-        if r["status"] not in ("Draft","Returned for Correction"):
-            return QMessageBox.warning(self,"Editing Restricted","Only draft or returned permits can be edited. Issued history is retained.")
+        if r["status"] not in ("Draft","Returned for Correction","Awaiting Documents"):
+            return QMessageBox.warning(self,"Editing Restricted","Only draft, awaiting-documents or returned permits can be edited. Issued history is retained.")
         self._load_selected()
 
     def _submit_selected(self):
@@ -11931,26 +12078,77 @@ class PTWModule(QWidget):
         self._event(cert["permit_id"],"Supporting certificate updated",details=cert["certificate_ref"]); self.editing_certificate_id=None; self.refresh_all()
 
     def _load_certificate_for_edit(self):
+        if not hasattr(self, "cert_table"):
+            return
         row=self.cert_table.currentRow()
-        if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
-        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole); c=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
-        if not c:return
-        self.editing_certificate_id=cid; self.cert_permit.setCurrentIndex(self.cert_permit.findData(c["permit_id"]))
+        if row<0:
+            return
+        item=self.cert_table.item(row,0)
+        if not item:
+            return
+        cid=item.data(Qt.ItemDataRole.UserRole)
+        c=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        if not c:
+            return
+        self.editing_certificate_id=cid
+        if self.cert_permit.currentData() != c["permit_id"]:
+            ix=self.cert_permit.findData(c["permit_id"])
+            if ix>=0:
+                self.cert_permit.blockSignals(True); self.cert_permit.setCurrentIndex(ix); self.cert_permit.blockSignals(False)
         ix=self.cert_type.findText(c["certificate_type"]); self.cert_type.setCurrentIndex(ix if ix>=0 else 0)
         self.cert_responsible.setText(_s(c["responsible_person"]))
         dt=QDateTime.fromString(_s(c["valid_until"]),"yyyy-MM-dd HH:mm")
-        if dt.isValid():self.cert_valid_until.setDateTime(dt)
+        if dt.isValid():
+            self.cert_valid_until.setDateTime(dt)
         for w,key in [(self.cert_status,"status"),(self.cert_verification,"verification_status")]:
             ix=w.findText(_s(c[key])); w.setCurrentIndex(ix if ix>=0 else 0)
         self.cert_comments.setText(_s(c["comments"]))
+        if hasattr(self, "cert_file_path"):
+            self.cert_file_path.setText(_s(c["attachment_path"]))
+
 
     def _attach_certificate(self):
         row=self.cert_table.currentRow()
-        if row<0:return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
-        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole); path,_=QFileDialog.getOpenFileName(self,"Select Certificate File")
-        if not path:return
-        cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,)); dest=self._copy_attachment(path,cert["permit_id"])
-        self.db.execute("UPDATE ptw_certificates SET attachment_path=?,updated_at=? WHERE id=?",(str(dest),_now(),cid)); self._event(cert["permit_id"],"Certificate evidence attached",details=cert["certificate_ref"],attachment=str(dest)); self.refresh_all()
+        if row<0:
+            return QMessageBox.information(self,"Select Certificate","Select a certificate row first.")
+        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
+        path,_=QFileDialog.getOpenFileName(self,"Select Certificate File")
+        if not path:
+            return
+        cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        dest=self._copy_attachment(path,cert["permit_id"])
+        self.db.execute("UPDATE ptw_certificates SET attachment_path=?,updated_at=? WHERE id=?",(str(dest),_now(),cid))
+        self._event(cert["permit_id"],"Certificate evidence attached",details=cert["certificate_ref"],attachment=str(dest))
+        self.db.conn.commit()
+        self._refresh_certificates_for_selected_permit()
+
+    def _save_and_attach_certificate(self):
+        row=self.cert_table.currentRow()
+        if row<0:
+            return QMessageBox.information(self,"Select Document","Select a required document row first.")
+        cid=self.cert_table.item(row,0).data(Qt.ItemDataRole.UserRole)
+        cert=self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?",(cid,))
+        if not cert:
+            return
+        path = self.cert_file_path.text().strip() if hasattr(self, "cert_file_path") else ""
+        if not path:
+            path,_=QFileDialog.getOpenFileName(self,"Select Certificate / Document File")
+        if not path or not Path(path).is_file():
+            return QMessageBox.warning(self,"File Required","Choose an existing file to attach for this listed document.")
+        dest=self._copy_attachment(path,cert["permit_id"])
+        self.db.execute(
+            "UPDATE ptw_certificates SET certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,attachment_path=?,updated_at=? WHERE id=?",
+            (self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),
+             self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),
+             self.cert_comments.text().strip(),str(dest),_now(),cid)
+        )
+        self._event(cert["permit_id"],"Supporting document saved with attachment",details=cert["certificate_ref"],attachment=str(dest))
+        self.db.conn.commit()
+        if hasattr(self, "cert_file_path"):
+            self.cert_file_path.setText(str(dest))
+        self._refresh_certificates_for_selected_permit()
+        QMessageBox.information(self,"Document Saved",f"{cert['certificate_ref']} details and attachment were saved.")
+
 
     def _add_renewal(self):
         pid=self.renew_permit.currentData(); r=self._permit_row(pid)
