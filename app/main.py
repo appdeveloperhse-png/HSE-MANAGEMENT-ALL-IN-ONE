@@ -3491,8 +3491,32 @@ class MainWindow(QMainWindow):
 
     def navigation_changed(self, row):
         # Cache each module page so switching is instant and stack widgets do not pile up.
+        # Dashboard (row 0) is always rebuilt so KPIs and trends stay live after data changes.
         if not hasattr(self, "_module_cache"):
             self._module_cache = {}
+
+        if row == 0:
+            # Drop previous dashboard widget from stack to prevent overlap / stale zeros.
+            old = self._module_cache.pop(0, None)
+            if old is not None:
+                try:
+                    idx = self.stack.indexOf(old)
+                    if idx >= 0:
+                        self.stack.removeWidget(old)
+                    old.deleteLater()
+                except Exception:
+                    logging.exception("Unable to clear previous dashboard page")
+            try:
+                self.dashboard()
+                self._module_cache[0] = self.stack.currentWidget()
+            except Exception as exc:
+                logging.exception("Navigation failed for Dashboard")
+                try:
+                    QMessageBox.critical(self, "Module Error", f"Unable to open Dashboard.\n\n{exc}")
+                except Exception:
+                    pass
+            return
+
         cached = self._module_cache.get(row)
         if cached is not None:
             try:
@@ -3502,9 +3526,7 @@ class MainWindow(QMainWindow):
                 self._module_cache.pop(row, None)
 
         try:
-            if row == 0:
-                self.dashboard()
-            elif row == 1:
+            if row == 1:
                 self.observations()
             elif row == 2:
                 self.incidents()
@@ -3530,8 +3552,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Module Error", f"Unable to open this module.\n\n{exc}")
             except Exception:
                 pass
-
-    # --------------------------------------------------------
 
     def page(self, title):
 
@@ -3559,23 +3579,51 @@ class MainWindow(QMainWindow):
 
 
     def dashboard(self):
-        """Professional analytical HSE dashboard with trends, KPIs and proactive actions.
-        Only the Home Dashboard UI is rebuilt; no other modules are modified.
+        """Analytical HSE dashboard: live KPIs, month trends, predictive control measures.
+        Layout is scrollable to avoid overlap on smaller windows. Other modules unchanged.
         """
+        # If a previous dashboard still sits in the stack (e.g. Refresh), remove it.
+        if hasattr(self, "_module_cache") and 0 in self._module_cache:
+            old = self._module_cache.pop(0, None)
+            if old is not None:
+                try:
+                    idx = self.stack.indexOf(old)
+                    if idx >= 0:
+                        self.stack.removeWidget(old)
+                    old.deleteLater()
+                except Exception:
+                    pass
+
         w, layout = self.page("HSE Analytical Dashboard")
+        layout.setContentsMargins(8, 4, 8, 8)
+        layout.setSpacing(6)
+
+        # Outer scroll so half-window / compact screens never overlap content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body = QWidget()
+        root = QVBoxLayout(body)
+        root.setContentsMargins(4, 4, 4, 4)
+        root.setSpacing(10)
+        scroll.setWidget(body)
+        layout.addWidget(scroll, 1)
 
         header = QLabel(
             f"<b>Company:</b> {company_name()} &nbsp;&nbsp; "
             f"<b>Project:</b> {db.setting('project_name', '') or '—'} &nbsp;&nbsp; "
             f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         )
-        header.setStyleSheet("color:#17365D; padding:4px 2px 8px 2px;")
-        layout.addWidget(header)
+        header.setStyleSheet("color:#17365D; padding:2px 0 4px 0;")
+        header.setWordWrap(True)
+        root.addWidget(header)
 
         tabs = QTabWidget()
-        layout.addWidget(tabs, 1)
+        tabs.setDocumentMode(True)
+        root.addWidget(tabs, 1)
 
-        # ── shared date helpers ──────────────────────────────────────────────
         today_d = date.today()
         this_month_start = today_d.replace(day=1).isoformat()
         if today_d.month == 1:
@@ -3586,12 +3634,14 @@ class MainWindow(QMainWindow):
             last_day = calendar.monthrange(today_d.year, today_d.month - 1)[1]
             last_month_end = date(today_d.year, today_d.month - 1, last_day).isoformat()
         this_month_label = today_d.strftime("%b %Y")
-        last_month_label = (date.fromisoformat(last_month_start)).strftime("%b %Y")
+        last_month_label = date.fromisoformat(last_month_start).strftime("%b %Y")
 
         def _cnt(sql, params=()):
             try:
-                return int(db.fetchone(sql, params)["c"] or 0)
+                row = db.fetchone(sql, params)
+                return int(row["c"] or 0) if row else 0
             except Exception:
+                logging.exception("Dashboard count query failed")
                 return 0
 
         def _delta_text(cur, prev):
@@ -3607,27 +3657,192 @@ class MainWindow(QMainWindow):
         def _delta_color(cur, prev, invert=False):
             if cur == prev:
                 return "#555555"
-            better = (cur > prev) if invert else (cur < prev)
             if cur > prev:
                 return "#1B7A3D" if invert else "#C0392B"
             return "#C0392B" if invert else "#1B7A3D"
 
-        HIGH_RISK_CATEGORIES = {
-            "Slip Trip Fall": ("High", "Trips and falls are a leading cause of lost-time injuries."),
-            "Work at Height": ("Critical", "Falls from height frequently result in serious or fatal outcomes."),
-            "Excavation": ("High", "Collapse and struck-by hazards can escalate rapidly."),
-            "Electrical Safety": ("Critical", "Electrical incidents often involve high severity."),
-            "Lifting Operations": ("High", "Lifting failures can cause multiple casualties and property damage."),
-            "Scaffolding": ("High", "Scaffold failures and falls are high-severity events."),
-            "Confined Space": ("Critical", "Atmospheric and entrapment hazards are life-threatening."),
-            "Hot Work": ("High", "Fire and explosion potential requires strict control."),
-            "Permit to Work": ("High", "PTW breakdowns indicate system control failure."),
-            "Dropped Objects": ("High", "Dropped objects cause serious injuries and near-misses."),
-            "Chemical Safety": ("High", "Chemical exposure and spills escalate quickly."),
-            "Fire Safety": ("Critical", "Fire events threaten people, assets and continuity."),
-            "Traffic Management": ("High", "Vehicle-pedestrian interface incidents are often severe."),
-            "Plant and Machinery": ("High", "Mobile plant incidents carry high energy."),
+        # Predictive control library: training / communication / campaign / engineering-admin controls
+        CONTROL_LIBRARY = {
+            "Slip Trip Fall": {
+                "risk": "High",
+                "note": "Slips, trips and falls are a leading cause of lost-time injury.",
+                "training": "Housekeeping & slip/trip awareness; Spill response; Cable and hose management; Footwear standards.",
+                "communication": "Daily pre-start reminder on walkway clearance; Toolbox talk on wet floors and temporary obstacles; Posters at site entrances.",
+                "campaign": "Good Housekeeping Week; Walkway Clear Campaign; See It – Fix It reporting drive.",
+                "controls": "Immediate clean-up of spills; Cable ramps / overhead routing; Non-slip mats at entrances; Barricade uneven surfaces; Dedicated housekeeping crews; Lighting check on access routes.",
+            },
+            "Work at Height": {
+                "risk": "Critical",
+                "note": "Falls from height frequently result in serious or fatal outcomes.",
+                "training": "Working at Height competency; Harness inspection & fit; Anchor point selection; Rescue from height; MEWP / scaffold user briefings.",
+                "communication": "Permit-to-work brief before every height task; Rescue plan posted at work front; Stop-work authority reminder.",
+                "campaign": "Harness Check Day; 100% Tie-Off Campaign; Dropped Object / Height Safety Month.",
+                "controls": "Hierarchy of controls (eliminate work at height first); Certified scaffolds / MEWPs; Edge protection; Tool tethering; Exclusion zones below; Pre-use harness inspection records; Rescue kit staged.",
+            },
+            "Excavation": {
+                "risk": "High",
+                "note": "Collapse and struck-by hazards escalate rapidly in excavations.",
+                "training": "Excavation competent person; Shoring / sloping / benching; Underground service location; Atmosphere testing in deep excavations.",
+                "communication": "Daily excavation inspection sign-off board; Service drawing review in pre-task brief.",
+                "campaign": "Dig Safe Week; Service Strike Prevention Campaign.",
+                "controls": "Excavation permit; Service locate & mark-up; Protective systems; Safe access/egress; Spoil set-back; Barricades and warning lights; Daily competent-person inspection.",
+            },
+            "Electrical Safety": {
+                "risk": "Critical",
+                "note": "Electrical incidents often involve high severity and arc-flash potential.",
+                "training": "Electrical safety awareness for non-electricians; LOTO for authorized persons; Temporary power inspection; RCD/ELCB testing.",
+                "communication": "Live work prohibition notices; Isolation status boards; Toolbox talk on damaged cables and overloaded boards.",
+                "campaign": "LOTO Compliance Week; Temporary Power Safety Check.",
+                "controls": "Only competent electricians on live systems; LOTO before maintenance; RCD protection; Cable protection and routing; Locked distribution boards; Quarantine damaged equipment.",
+            },
+            "Lifting Operations": {
+                "risk": "High",
+                "note": "Lifting failures can cause multiple casualties and major property damage.",
+                "training": "Banksman / rigger competency; Lift planning; Crane signals; Exclusion zone control; Sling and shackle inspection.",
+                "communication": "Lift plan briefing for critical lifts; Tag-line and exclusion-zone rules in pre-task talk.",
+                "campaign": "Never Walk Under a Load; Certified Lifting Gear Only.",
+                "controls": "Approved lift plan for complex/critical lifts; Certified crane and gear; Load chart compliance; Tag lines; Exclusion zones; Weather limits; Pre-lift checks.",
+            },
+            "Scaffolding": {
+                "risk": "High",
+                "note": "Scaffold failures and falls from incomplete scaffolds are high-severity events.",
+                "training": "Scaffold user awareness; Scaff-tag system; Working platform rules; Competence for scaffolders.",
+                "communication": "Do not use untagged or red-tagged scaffolds; Report missing guardrails immediately.",
+                "campaign": "Scaff-Tag Compliance Drive; Complete Platform Campaign.",
+                "controls": "Erected by competent scaffolders; Design for complex scaffolds; Green tag before use; Full boards, guardrails, toe boards; Safe access; Inspection after alteration or weather event.",
+            },
+            "Confined Space": {
+                "risk": "Critical",
+                "note": "Atmospheric and entrapment hazards are life-threatening.",
+                "training": "Confined space entry; Gas testing sequence; Stand-by / attendant duties; Rescue without entry where possible.",
+                "communication": "Entry permit displayed at portal; Rescue plan and emergency contacts posted; No entry without attendant.",
+                "campaign": "Confined Space Permit Discipline; Gas Test Before Entry.",
+                "controls": "Classification of space; Entry permit; O2-LEL-H2S-CO testing; Continuous monitoring; LOTO of energies; Attendant at all times; Retrieval harness and rescue plan staged.",
+            },
+            "Hot Work": {
+                "risk": "High",
+                "note": "Fire and explosion potential requires strict control of ignition sources.",
+                "training": "Hot work permit system; Fire watch duties; Flashback arrestors; Gas cylinder handling.",
+                "communication": "Hot work area signage; Fire watch continues after completion; Combustible removal checklist in brief.",
+                "campaign": "Fire Watch Always; Clear the Area Before You Spark.",
+                "controls": "Hot work permit; Gas test; Remove/protect combustibles; Trained fire watch with extinguisher; Flashback arrestors; Ventilation; Post-work fire watch duration as per procedure.",
+            },
+            "Permit to Work": {
+                "risk": "High",
+                "note": "PTW breakdowns indicate system control failure and SIMOPS risk.",
+                "training": "PTW roles (applicant, issuer, holder); Isolation/LOTO interface; Daily revalidation; SIMOPS awareness.",
+                "communication": "Only work under a valid issued permit; Display permit at work location; Close permit when finished.",
+                "campaign": "No Permit – No Work; Daily Revalidation Discipline.",
+                "controls": "Correct permit type; JSA attached; Isolations complete; Gas test within validity; Authorized signatures; SIMOPS check; Permit display; Formal close-out.",
+            },
+            "Dropped Objects": {
+                "risk": "High",
+                "note": "Dropped objects cause serious injuries and high-potential near misses.",
+                "training": "DROPS awareness; Tool tethering; Secondary retention; Exclusion zones below height work.",
+                "communication": "Tool inventory before/after height work; Barricade and hard-hat rules under work fronts.",
+                "campaign": "Tether Your Tools; Nothing Leaves Your Hand Unsecured.",
+                "controls": "Tool lanyards; Toe boards and debris nets; Exclusion zones; Secure storage at height; Pre-task DROPS checks; Inspection of lifting baskets and containers.",
+            },
+            "Chemical Safety": {
+                "risk": "High",
+                "note": "Chemical exposure and spills escalate quickly without SDS-based controls.",
+                "training": "Hazard communication / SDS; Spill response; Correct PPE for chemicals; Storage segregation.",
+                "communication": "SDS available at point of use; Label all secondary containers; Spill kit locations marked.",
+                "campaign": "Know Your SDS; Label Every Container.",
+                "controls": "Up-to-date chemical register; SDS accessible; Secondary containment; Incompatible segregation; Spill kits; Eye wash / shower; Correct PPE; Controlled waste disposal.",
+            },
+            "Fire Safety": {
+                "risk": "Critical",
+                "note": "Fire events threaten people, assets and business continuity.",
+                "training": "Fire extinguisher use; Evacuation roles; Hot work interface; Alarm response.",
+                "communication": "Assembly point maps; Emergency contact list; Keep exits clear reminders.",
+                "campaign": "Clear Exit Routes; Extinguisher Check Week.",
+                "controls": "Inspected extinguishers; Functional detection/alarms; Clear escape routes; Controlled flammable storage; Hot work permits; Drill findings closed out.",
+            },
+            "Traffic Management": {
+                "risk": "High",
+                "note": "Vehicle–pedestrian interface incidents are often severe.",
+                "training": "Site traffic rules; Banksman for reversing; Pedestrian segregation; Speed limits.",
+                "communication": "One-way routes and speed signs; Hi-vis requirements; Delivery booking rules.",
+                "campaign": "Eyes Up – Phones Down; Pedestrians Have Priority.",
+                "controls": "Segregated walkways; Speed control; Banksman for reversing; Lighting at crossings; Delivery management; Vehicle inspection.",
+            },
+            "Plant and Machinery": {
+                "risk": "High",
+                "note": "Mobile plant and machinery incidents carry high energy.",
+                "training": "Operator competency; Pre-use inspection; Guarding; Isolation for maintenance.",
+                "communication": "Only authorized operators; Report defective plant immediately; Exclusion around operating plant.",
+                "campaign": "Pre-Use Check Every Shift; Guarding Never Removed.",
+                "controls": "Competent operators; Pre-use checks; Guards in place; LOTO for maintenance; Exclusion zones; Maintenance records current.",
+            },
+            "PPE": {
+                "risk": "Medium",
+                "note": "PPE is the last line of defence; incorrect or missing PPE increases injury severity.",
+                "training": "Task-based PPE selection; Fit testing where required; Care and limitation of PPE.",
+                "communication": "PPE matrix at site entry; Supervisor challenge on non-compliance.",
+                "campaign": "Wear It Right; Replace Damaged PPE Immediately.",
+                "controls": "PPE matched to hazard; Condition checks; Hygienic storage; Quarantine defective items; Issue records; Supervision of use.",
+            },
+            "Housekeeping": {
+                "risk": "Medium",
+                "note": "Poor housekeeping drives slips, trips, fire load and dropped-object risk.",
+                "training": "Housekeeping standards; Waste segregation; End-of-shift clear-up expectations.",
+                "communication": "5S / clear walkway messages; Photo examples of good vs poor areas.",
+                "campaign": "Clean as You Go; Walkway Clear at All Times.",
+                "controls": "Scheduled housekeeping; Waste segregation; Material storage plans; Cable management; Immediate spill response; Inspection findings closed.",
+            },
+            "Manual Handling": {
+                "risk": "Medium",
+                "note": "Manual handling injuries accumulate into lost time and restricted work.",
+                "training": "Safe lifting technique; Team lifts; Use of mechanical aids; Risk assessment for repetitive tasks.",
+                "communication": "Ask for help / use a trolley messages; Redesign prompts for heavy loads.",
+                "campaign": "Lift With Your Legs; Mechanical Aid First.",
+                "controls": "Eliminate unnecessary lifting; Mechanical aids; Team lift rules; Job rotation; Assess heavy/awkward loads before task.",
+            },
+            "Near Miss": {
+                "risk": "High",
+                "note": "Rising near misses are a leading indicator of a future recordable injury.",
+                "training": "Near-miss reporting culture; Stop-work authority; Basic investigation awareness.",
+                "communication": "Thank-you feedback for reports; Share one near-miss lesson weekly; No-blame messaging from supervision.",
+                "campaign": "Report It Before It Hurts; Stop Work – Speak Up.",
+                "controls": "Simple reporting channel; Prompt investigation; Corrective actions with owners/dates; Trend review in HSE meeting; Feed lessons into JSA/PTW.",
+            },
         }
+
+        def _controls_for(category):
+            key = category
+            if key not in CONTROL_LIBRARY:
+                # fuzzy match
+                low = (category or "").lower()
+                for k in CONTROL_LIBRARY:
+                    if k.lower() in low or low in k.lower():
+                        key = k
+                        break
+            return CONTROL_LIBRARY.get(key, {
+                "risk": "Medium",
+                "note": "Monitor trend and reinforce basic operational controls.",
+                "training": f"Task-specific awareness for {category}; Refresh related competency where due.",
+                "communication": f"Toolbox talk and supervisor brief on {category} hazards and expected behaviours.",
+                "campaign": f"Focused awareness drive on {category} for two weeks.",
+                "controls": "Verify hierarchy of controls; Close open actions; Increase targeted inspections; Update JSA/PTW where needed.",
+            })
+
+        HIGH_RISK = {k: (v["risk"], v["note"]) for k, v in CONTROL_LIBRARY.items()}
+
+        # Live totals (never cached outside this rebuild)
+        total_obs = _cnt("SELECT COUNT(*) c FROM observations")
+        open_obs = _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')")
+        overdue_obs = _cnt(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') "
+            "AND COALESCE(trim(target_date),'') <> '' AND target_date < date('now')"
+        )
+        total_inc = _cnt("SELECT COUNT(*) c FROM incidents")
+        open_inc = _cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')")
+        nm_obs = _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%'")
+        nm_inc = _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%'")
+        open_aud = _cnt("SELECT COUNT(*) c FROM audits WHERE status NOT IN ('Closed','Completed','Cancelled')")
+        open_capa = _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')")
+        open_findings = _cnt("SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')")
 
         # =====================================================================
         # TAB 1 — DYNAMIC OVERVIEW
@@ -3635,34 +3850,31 @@ class MainWindow(QMainWindow):
         overview = QWidget()
         ov = QVBoxLayout(overview)
         ov.setContentsMargins(6, 8, 6, 6)
-        ov.setSpacing(10)
+        ov.setSpacing(8)
 
         card_row = QHBoxLayout()
+        card_row.setSpacing(8)
         kpi_defs = [
-            ("Observations", _cnt("SELECT COUNT(*) c FROM observations"),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"), "Open"),
-            ("Overdue Obs.", _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
-             None, None),
-            ("Incidents", _cnt("SELECT COUNT(*) c FROM incidents"),
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')"), "Open"),
-            ("Near Misses", _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%'")
-                          + _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%'"),
-             None, None),
-            ("Open Audits", _cnt("SELECT COUNT(*) c FROM audits WHERE status NOT IN ('Closed','Completed','Cancelled')"),
-             None, None),
-            ("Open CAPA", _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"),
-             None, None),
+            ("Observations", total_obs, open_obs, "Open"),
+            ("Overdue Obs.", overdue_obs, None, None),
+            ("Incidents", total_inc, open_inc, "Open"),
+            ("Near Misses", nm_obs + nm_inc, None, None),
+            ("Open Audits", open_aud, None, None),
+            ("Open CAPA", open_capa, None, None),
         ]
         for title, total, sub, sub_label in kpi_defs:
             box = QGroupBox(title)
+            box.setMinimumWidth(110)
             box.setStyleSheet(
-                "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;background:#F7FBFF;}"
+                "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;"
+                "margin-top:10px;background:#F7FBFF;}"
                 "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#17365D;}"
             )
             bl = QVBoxLayout(box)
+            bl.setContentsMargins(6, 12, 6, 8)
             lab = QLabel(str(total))
             lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lab.setStyleSheet("font-size:30px;font-weight:bold;color:#17365D;")
+            lab.setStyleSheet("font-size:26px;font-weight:bold;color:#17365D;")
             bl.addWidget(lab)
             if sub is not None:
                 sub_lab = QLabel(f"{sub_label}: {sub}")
@@ -3672,6 +3884,18 @@ class MainWindow(QMainWindow):
             card_row.addWidget(box)
         ov.addLayout(card_row)
 
+        if total_obs == 0 and total_inc == 0:
+            empty = QLabel(
+                "<b>No observation or incident records found yet.</b><br>"
+                "Add records in <b>HSE Inspection Register</b> or <b>Incident Investigation</b>, "
+                "then return here or click <b>Refresh Dashboard</b> — counts update from the live database."
+            )
+            empty.setWordWrap(True)
+            empty.setStyleSheet(
+                "background:#FFF8E7;border:1px solid #E0C36A;border-radius:6px;padding:10px;color:#5A4A00;"
+            )
+            ov.addWidget(empty)
+
         trend_box = QGroupBox(f"Trend Snapshot — {this_month_label} vs {last_month_label}")
         trend_box.setStyleSheet(
             "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}"
@@ -3679,48 +3903,56 @@ class MainWindow(QMainWindow):
         )
         tl = QVBoxLayout(trend_box)
         trend_grid = QGridLayout()
+        trend_grid.setSpacing(8)
         trend_items = [
             ("New Observations",
              _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end))),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?",
+                  (last_month_start, last_month_end))),
             ("New Incidents",
              _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end))),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?",
+                  (last_month_start, last_month_end))),
             ("Near Miss Obs.",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end))),
-            ("Observations Closed",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date, '') >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date, '') >= ? AND COALESCE(closeout_date, '') <= ?", (last_month_start, last_month_end))),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?",
+                  (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?",
+                  (last_month_start, last_month_end))),
+            ("Obs. Closed",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ?",
+                  (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ? AND COALESCE(closeout_date,'') <= ?",
+                  (last_month_start, last_month_end))),
         ]
         for col, (name, cur, prev) in enumerate(trend_items):
+            cell_w = QWidget()
+            cell_w.setStyleSheet("background:#F8FBFF;border:1px solid #D6E4F0;border-radius:4px;")
+            cell = QVBoxLayout(cell_w)
+            cell.setContentsMargins(6, 6, 6, 6)
             name_l = QLabel(f"<b>{name}</b>")
             name_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cur_l = QLabel(f"{cur} this month")
             cur_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            cur_l.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;")
-            delta = _delta_text(cur, prev)
-            d_l = QLabel(f"vs last month: {delta}")
+            cur_l.setStyleSheet("font-size:15px;font-weight:bold;color:#17365D;")
+            d_l = QLabel(f"vs last: {_delta_text(cur, prev)}")
             d_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            invert = name == "Observations Closed"
-            d_l.setStyleSheet(f"font-size:12px;color:{_delta_color(cur, prev, invert=invert)};")
+            invert = name == "Obs. Closed"
+            d_l.setStyleSheet(f"font-size:11px;color:{_delta_color(cur, prev, invert=invert)};")
             prev_l = QLabel(f"Last month: {prev}")
             prev_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            prev_l.setStyleSheet("font-size:11px;color:#666;")
-            cell = QVBoxLayout()
+            prev_l.setStyleSheet("font-size:10px;color:#666;")
             cell.addWidget(name_l)
             cell.addWidget(cur_l)
             cell.addWidget(d_l)
             cell.addWidget(prev_l)
-            wrap = QWidget()
-            wrap.setLayout(cell)
-            wrap.setStyleSheet("background:#F8FBFF;border:1px solid #D6E4F0;border-radius:4px;padding:4px;")
-            trend_grid.addWidget(wrap, 0, col)
+            trend_grid.addWidget(cell_w, 0, col)
         tl.addLayout(trend_grid)
         ov.addWidget(trend_box)
 
         charts = QHBoxLayout()
+        charts.setSpacing(8)
         pie = PieChartWidget()
+        pie.setMinimumHeight(220)
         obs_types = db.fetchall(
             "SELECT obs_type, COUNT(*) c FROM observations GROUP BY obs_type ORDER BY c DESC"
         )
@@ -3731,6 +3963,7 @@ class MainWindow(QMainWindow):
         charts.addWidget(pie_box, 1)
 
         bar = BarChartWidget()
+        bar.setMinimumHeight(220)
         cat_counts = db.fetchall(
             "SELECT category, COUNT(*) c FROM observations GROUP BY category ORDER BY c DESC LIMIT 8"
         )
@@ -3741,25 +3974,27 @@ class MainWindow(QMainWindow):
         charts.addWidget(bar_box, 1)
         ov.addLayout(charts)
 
-        rise_box = QGroupBox("Category Momentum & Risk Outlook (this month vs last month)")
+        # Combined momentum from observations + audit findings + incidents
+        rise_box = QGroupBox("Category Momentum & Risk Outlook (observations + linked signals)")
         rise_box.setStyleSheet(
             "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}"
             "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#17365D;}"
         )
         rl = QVBoxLayout(rise_box)
         rise_table = QTableWidget()
-        rise_table.setColumnCount(7)
+        rise_table.setColumnCount(8)
         rise_table.setHorizontalHeaderLabels([
-            "Category", f"{last_month_label}", f"{this_month_label}", "Change",
-            "Open Now", "Risk Level", "Outlook / Probability Note"
+            "Category", f"Obs {last_month_label}", f"Obs {this_month_label}", "Obs Change",
+            "Open Obs", "Audit Findings (open)", "Incidents (all)", "Risk / Outlook"
         ])
-        rise_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        rise_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
-        for c in range(1, 6):
+        rise_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        rise_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        for c in range(1, 7):
             rise_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
         rise_table.setAlternatingRowColors(True)
         rise_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         rise_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        rise_table.setWordWrap(True)
 
         all_cats = sorted(set(CATEGORIES), key=lambda x: x.lower())
         momentum = []
@@ -3776,53 +4011,72 @@ class MainWindow(QMainWindow):
                 "SELECT COUNT(*) c FROM observations WHERE category=? AND status NOT IN ('Closed','Cancelled')",
                 (cat,)
             )
-            if cur == 0 and prev == 0 and open_n == 0:
+            # Audit findings mentioning category in observation/clause text
+            af = _cnt(
+                "SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled') "
+                "AND (lower(COALESCE(observation,'')) LIKE ? OR lower(COALESCE(requirement,'')) LIKE ? "
+                "OR lower(COALESCE(finding_detail,'')) LIKE ?)",
+                (f"%{cat.lower()}%", f"%{cat.lower()}%", f"%{cat.lower()}%")
+            )
+            # Incidents: type or description
+            inc_n = _cnt(
+                "SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE ? "
+                "OR lower(COALESCE(description,'')) LIKE ? OR lower(COALESCE(root_cause,'')) LIKE ?",
+                (f"%{cat.lower()}%", f"%{cat.lower()}%", f"%{cat.lower()}%")
+            )
+            if cur == 0 and prev == 0 and open_n == 0 and af == 0 and inc_n == 0:
                 continue
             change = cur - prev
-            risk_level, risk_note = HIGH_RISK_CATEGORIES.get(cat, ("Medium", "Monitor trend and close open actions."))
-            if change > 0 and cat in HIGH_RISK_CATEGORIES:
-                outlook = (
-                    f"Rising. {risk_note} Probability of a more severe event increases if controls are not reinforced."
-                )
+            lib = _controls_for(cat)
+            risk_level = lib["risk"]
+            if change > 0 and risk_level in ("High", "Critical"):
+                outlook = f"Rising. {lib['note']} Probability of a severe outcome increases without reinforced controls."
             elif change > 0:
-                outlook = "Rising. Increase awareness and verify controls before the trend becomes an incident pattern."
+                outlook = f"Rising. {lib['note']}"
             elif change < 0:
-                outlook = "Improving. Maintain current controls and verify sustainability."
+                outlook = "Improving. Maintain controls and verify sustainability."
+            elif open_n or af or inc_n:
+                outlook = f"Attention needed on open items. {lib['note']}"
             else:
-                outlook = "Stable. Continue routine monitoring and close open items."
-            momentum.append((cat, prev, cur, change, open_n, risk_level, outlook))
+                outlook = "Stable. Continue routine monitoring."
+            momentum.append((cat, prev, cur, change, open_n, af, inc_n, risk_level, outlook))
 
-        momentum.sort(key=lambda x: (-x[3], -x[4], x[0].lower()))
+        momentum.sort(key=lambda x: (-x[3], -(x[4] + x[5] + x[6]), x[0].lower()))
         rise_table.setRowCount(len(momentum))
-        for r, (cat, prev, cur, change, open_n, risk_level, outlook) in enumerate(momentum):
-            vals = [cat, str(prev), str(cur), _delta_text(cur, prev), str(open_n), risk_level, outlook]
+        for r, (cat, prev, cur, change, open_n, af, inc_n, risk_level, outlook) in enumerate(momentum):
+            vals = [cat, str(prev), str(cur), _delta_text(cur, prev), str(open_n), str(af), str(inc_n),
+                    f"[{risk_level}] {outlook}"]
             for c, v in enumerate(vals):
                 item = QTableWidgetItem(v)
                 item.setToolTip(v)
                 if c == 3:
                     item.setForeground(QColor(_delta_color(cur, prev)))
-                if c == 5:
-                    if risk_level == "Critical":
-                        item.setForeground(QColor("#8B0000"))
-                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                    elif risk_level == "High":
-                        item.setForeground(QColor("#C0392B"))
+                if c == 7 and risk_level == "Critical":
+                    item.setForeground(QColor("#8B0000"))
+                elif c == 7 and risk_level == "High":
+                    item.setForeground(QColor("#C0392B"))
                 rise_table.setItem(r, c, item)
+            rise_table.setRowHeight(r, 36)
+        rise_table.setMinimumHeight(min(280, max(120, len(momentum) * 36 + 36)))
 
         def open_rise_category(row, _col):
             item = rise_table.item(row, 0)
             if item:
                 self.observation_dashboard_filter = item.text()
-                self.observations()
+                # Invalidate observations cache so filter applies on a fresh page
+                if hasattr(self, "_module_cache"):
+                    self._module_cache.pop(1, None)
+                self.nav.setCurrentRow(1)
         rise_table.cellDoubleClicked.connect(open_rise_category)
-        rise_table.setMinimumHeight(min(320, max(160, len(momentum) * 28 + 40)))
         rl.addWidget(rise_table)
-        note = QLabel("Double-click a category to open the Observation register filtered to that category.")
+        note = QLabel("Double-click a category to open the Observation register for that category. Counts are live from the database.")
         note.setStyleSheet("color:#555;font-size:11px;")
+        note.setWordWrap(True)
         rl.addWidget(note)
-        ov.addWidget(rise_box, 1)
+        ov.addWidget(rise_box)
 
         recent_row = QHBoxLayout()
+        recent_row.setSpacing(8)
         recent_obs = QGroupBox("Recent Observations")
         rol = QVBoxLayout(recent_obs)
         ot = QTableWidget()
@@ -3838,6 +4092,7 @@ class MainWindow(QMainWindow):
                 ot.setItem(r, c, QTableWidgetItem(safe(row[key])))
         ot.setAlternatingRowColors(True)
         ot.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        ot.setMaximumHeight(220)
         rol.addWidget(ot)
         recent_row.addWidget(recent_obs, 1)
 
@@ -3856,26 +4111,28 @@ class MainWindow(QMainWindow):
                 it.setItem(r, c, QTableWidgetItem(safe(row[key])))
         it.setAlternatingRowColors(True)
         it.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        it.setMaximumHeight(220)
         ril.addWidget(it)
         recent_row.addWidget(recent_inc, 1)
         ov.addLayout(recent_row)
 
         nav = QHBoxLayout()
-        for label, fn in [
-            ("Open Observations Register", self.observations),
-            ("Open Incidents", self.incidents),
-            ("Refresh Dashboard", self.dashboard),
-        ]:
-            b = QPushButton(label)
-            b.clicked.connect(fn)
-            nav.addWidget(b)
+        btn_obs = QPushButton("Open Observations Register")
+        btn_obs.clicked.connect(lambda: self.nav.setCurrentRow(1))
+        btn_inc = QPushButton("Open Incidents")
+        btn_inc.clicked.connect(lambda: self.nav.setCurrentRow(2))
+        btn_ref = QPushButton("Refresh Dashboard")
+        btn_ref.clicked.connect(self.dashboard)
+        nav.addWidget(btn_obs)
+        nav.addWidget(btn_inc)
+        nav.addWidget(btn_ref)
         nav.addStretch()
         ov.addLayout(nav)
 
         tabs.addTab(overview, "Dynamic Dashboard")
 
         # =====================================================================
-        # TAB 2 — KPI DETAIL
+        # TAB 2 — KPI
         # =====================================================================
         kpi_page = QWidget()
         kl = QVBoxLayout(kpi_page)
@@ -3897,85 +4154,72 @@ class MainWindow(QMainWindow):
         kpi_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
 
         kpi_rows = [
-            ("Total Observations (all time)",
-             _cnt("SELECT COUNT(*) c FROM observations"),
+            ("Total Observations", total_obs,
              _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end)),
-             False),
-            ("Open Observations",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
-             None, None, False),
-            ("Overdue Observations",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
-             None, None, False),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?",
+                  (last_month_start, last_month_end)), False),
+            ("Open Observations", open_obs, None, None, False),
+            ("Overdue Observations", overdue_obs, None, None, False),
             ("Observations Closed (period)",
              _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed'"),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ? AND COALESCE(closeout_date,'') <= ?", (last_month_start, last_month_end)),
-             True),
-            ("Total Incidents (all time)",
-             _cnt("SELECT COUNT(*) c FROM incidents"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ?",
+                  (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ? AND COALESCE(closeout_date,'') <= ?",
+                  (last_month_start, last_month_end)), True),
+            ("Total Incidents", total_inc,
              _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end)),
-             False),
-            ("Open Incidents",
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')"),
-             None, None, False),
-            ("Near Miss Observations",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%'"),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end)),
-             False),
-            ("Near Miss Incidents",
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%'"),
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%' AND incident_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%' AND incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end)),
-             False),
-            ("Audits (all time)",
-             _cnt("SELECT COUNT(*) c FROM audits"),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?",
+                  (last_month_start, last_month_end)), False),
+            ("Open Incidents", open_inc, None, None, False),
+            ("Near Miss Observations", nm_obs,
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?",
+                  (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?",
+                  (last_month_start, last_month_end)), False),
+            ("Near Miss Incidents", nm_inc, None, None, False),
+            ("Audits (all time)", _cnt("SELECT COUNT(*) c FROM audits"),
              _cnt("SELECT COUNT(*) c FROM audits WHERE audit_date >= ?", (this_month_start,)),
-             _cnt("SELECT COUNT(*) c FROM audits WHERE audit_date >= ? AND audit_date <= ?", (last_month_start, last_month_end)),
-             False),
-            ("Open Audit Findings",
-             _cnt("SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')"),
-             None, None, False),
-            ("Open CAPA",
-             _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"),
-             None, None, False),
+             _cnt("SELECT COUNT(*) c FROM audits WHERE audit_date >= ? AND audit_date <= ?",
+                  (last_month_start, last_month_end)), False),
+            ("Open Audit Findings", open_findings, None, None, False),
+            ("Open CAPA", open_capa, None, None, False),
             ("Overdue CAPA",
-             _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
+             _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+                  "AND COALESCE(trim(target_date),'') <> '' AND target_date < date('now')"),
              None, None, False),
             ("High / Critical Priority Open Obs.",
-             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND priority IN ('High','Critical')"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') "
+                  "AND priority IN ('High','Critical')"),
              None, None, False),
         ]
         kpi_table.setRowCount(len(kpi_rows))
         for r, (name, current, this_m, last_m, invert) in enumerate(kpi_rows):
             kpi_table.setItem(r, 0, QTableWidgetItem(name))
             kpi_table.setItem(r, 1, QTableWidgetItem(str(current)))
-            kpi_table.setItem(r, 2, QTableWidgetItem("-" if this_m is None else str(this_m)))
-            kpi_table.setItem(r, 3, QTableWidgetItem("-" if last_m is None else str(last_m)))
+            kpi_table.setItem(r, 2, QTableWidgetItem("—" if this_m is None else str(this_m)))
+            kpi_table.setItem(r, 3, QTableWidgetItem("—" if last_m is None else str(last_m)))
             if this_m is not None and last_m is not None:
-                t = _delta_text(this_m, last_m)
-                item = QTableWidgetItem(t)
+                item = QTableWidgetItem(_delta_text(this_m, last_m))
                 item.setForeground(QColor(_delta_color(this_m, last_m, invert=invert)))
             else:
-                item = QTableWidgetItem("-")
+                item = QTableWidgetItem("—")
             kpi_table.setItem(r, 4, item)
         kl.addWidget(kpi_table)
 
-        status_box = QGroupBox("Observation Status Mix")
+        status_box = QGroupBox("Observation Status & Open Priority")
         sl = QHBoxLayout(status_box)
         status_pie = PieChartWidget()
+        status_pie.setMinimumHeight(200)
         st_rows = db.fetchall("SELECT status, COUNT(*) c FROM observations GROUP BY status")
         status_pie.set_values({safe(r["status"]) or "Unknown": r["c"] for r in st_rows})
         sl.addWidget(status_pie)
         priority_pie = PieChartWidget()
+        priority_pie.setMinimumHeight(200)
         pr_rows = db.fetchall(
             "SELECT priority, COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') GROUP BY priority"
         )
         priority_pie.set_values({safe(r["priority"]) or "Unspecified": r["c"] for r in pr_rows})
-        pr_box = QGroupBox("Open Observations by Priority")
+        pr_box = QGroupBox("Open by Priority")
         prl = QVBoxLayout(pr_box)
         prl.addWidget(priority_pie)
         sl.addWidget(pr_box)
@@ -3988,57 +4232,54 @@ class MainWindow(QMainWindow):
         kpi_note.setWordWrap(True)
         kpi_note.setStyleSheet("color:#444;padding:6px;")
         kl.addWidget(kpi_note)
-
         tabs.addTab(kpi_page, "KPI & Trends")
 
         # =====================================================================
-        # TAB 3 — PROACTIVE ACTION BOARD
+        # TAB 3 — PREDICTIVE CONTROL MEASURES
         # =====================================================================
         action_page = QWidget()
         al = QVBoxLayout(action_page)
         al.setContentsMargins(6, 8, 6, 6)
+        al.setSpacing(8)
 
         al.addWidget(QLabel(
-            "<b>Proactive Action Board</b> — recommended controls based on current trends, "
-            "open risks, near misses and audit/CAPA status."
+            "<b>Predictive Control Measures Board</b> — automated from observation trends, "
+            "audit findings and incident signals. Shows <b>why</b>, then <b>training</b>, "
+            "<b>communication</b>, <b>campaign</b> and <b>control measures</b>."
         ))
 
         actions = []
 
-        for cat, prev, cur, change, open_n, risk_level, outlook in momentum:
-            if change <= 0 and open_n == 0:
+        for cat, prev, cur, change, open_n, af, inc_n, risk_level, outlook in momentum:
+            score = (2 if change > 0 else 0) + (1 if open_n >= 2 else 0) + (1 if af else 0) + (2 if inc_n else 0)
+            if score == 0 and change <= 0 and open_n == 0:
                 continue
-            if change > 0 or (open_n >= 3 and cat in HIGH_RISK_CATEGORIES):
-                priority = "Critical" if risk_level == "Critical" and change > 0 else (
-                    "High" if change > 0 or risk_level in ("High", "Critical") else "Medium"
-                )
-                reactive = (
-                    f"Close the {open_n} open observation(s) in {cat}. "
-                    f"Verify corrective actions are effective and evidence is attached."
-                )
-                control = (
-                    f"Increase focused workplace inspections on {cat} for the next 2 weeks. "
-                    f"Confirm permits, PPE, barriers and task controls are in place."
-                )
-                proactive = (
-                    f"Deliver a Toolbox Talk (TBT) on {cat} to affected crews. "
-                    f"Refresh related training / competency where validity is near expiry. "
-                    f"Share near-miss lessons from this category at the next safety meeting."
-                )
-                if cat == "Slip Trip Fall":
-                    proactive += " Emphasise housekeeping, cable management, walkway clearance and spill response."
-                elif cat == "Work at Height":
-                    proactive += " Reinforce harness inspection, anchor points, edge protection and rescue plans."
-                elif cat == "Permit to Work":
-                    proactive += " Audit live permits, verify isolation/LOTO and daily revalidation discipline."
-                elif cat == "Hot Work":
-                    proactive += " Confirm gas testing, fire watch and post-work fire watch duration."
-                reason = (
-                    f"{cat}: {cur} this month vs {prev} last month ({_delta_text(cur, prev)}). "
-                    f"{open_n} still open. {outlook}"
-                )
-                actions.append((priority, cat, reason, reactive, control, proactive))
+            if change <= 0 and open_n < 2 and af == 0 and inc_n == 0:
+                continue
+            lib = _controls_for(cat)
+            if risk_level == "Critical" and (change > 0 or inc_n or open_n >= 2):
+                priority = "Critical"
+            elif change > 0 or inc_n or open_n >= 3 or af >= 2:
+                priority = "High"
+            elif open_n or af:
+                priority = "Medium"
+            else:
+                priority = "Medium"
+            why = (
+                f"{cat}: observations {prev} → {cur} ({_delta_text(cur, prev)}); "
+                f"open obs {open_n}; open audit signals {af}; linked incidents {inc_n}. {outlook}"
+            )
+            actions.append((
+                priority,
+                cat,
+                why,
+                lib["training"],
+                lib["communication"],
+                lib["campaign"],
+                lib["controls"],
+            ))
 
+        # Near miss systemic
         nm_this = _cnt(
             "SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?",
             (this_month_start,)
@@ -4048,26 +4289,23 @@ class MainWindow(QMainWindow):
             (last_month_start, last_month_end)
         )
         if nm_this > nm_last or nm_this >= 3:
+            lib = _controls_for("Near Miss")
             actions.append((
                 "High",
-                "Near Miss Reporting",
-                f"Near-miss observations: {nm_this} this month vs {nm_last} last month.",
-                "Investigate each near miss for root cause and close corrective actions promptly.",
-                "Ensure stop-work authority is understood and used without fear of blame.",
-                "Run a TBT on near-miss reporting culture. Review trends in the next HSE meeting and feed lessons into JSA/PTW reviews."
+                "Near Miss Trend",
+                f"Near-miss observations {nm_last} → {nm_this} ({_delta_text(nm_this, nm_last)}).",
+                lib["training"], lib["communication"], lib["campaign"], lib["controls"]
             ))
 
-        overdue_n = _cnt(
-            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"
-        )
-        if overdue_n > 0:
+        if overdue_obs > 0:
             actions.append((
-                "High" if overdue_n >= 5 else "Medium",
+                "High" if overdue_obs >= 5 else "Medium",
                 "Overdue Observations",
-                f"{overdue_n} observation(s) are past their target date and still open.",
-                "Escalate overdue items to responsible supervisors and set revised realistic close-out dates.",
-                "Block new high-risk work where the same hazard remains uncontrolled.",
-                "Add overdue action review to the weekly HSE meeting agenda until the backlog is cleared."
+                f"{overdue_obs} observation(s) past target date and still open.",
+                "Supervisor accountability brief; close-out quality and evidence standards.",
+                "Weekly overdue list issued to responsible persons and project HSE.",
+                "Close-the-Loop week until backlog is under control.",
+                "Escalate owners; revise unrealistic dates; block high-risk work where same hazard remains open; verify evidence before closure."
             ))
 
         hi_open = _cnt(
@@ -4076,26 +4314,27 @@ class MainWindow(QMainWindow):
         if hi_open > 0:
             actions.append((
                 "Critical" if hi_open >= 3 else "High",
-                "High / Critical Priority Observations",
+                "High / Critical Open Observations",
                 f"{hi_open} high or critical priority observation(s) remain open.",
-                "Treat as priority close-out: verify immediate controls, evidence and verification sign-off.",
-                "Increase supervision frequency on the affected areas until closed and verified.",
-                "Brief management; schedule targeted TBT and competency check for the crews involved."
+                "Targeted competency check for crews in affected areas.",
+                "Management brief; daily status until closed and verified.",
+                "Priority Close-Out focus for high/critical items.",
+                "Immediate controls at the work front; increased supervision; verification sign-off before status Closed."
             ))
 
-        open_capa = _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')")
         overdue_capa = _cnt(
-            "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"
+            "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+            "AND COALESCE(trim(target_date),'') <> '' AND target_date < date('now')"
         )
-        open_findings = _cnt("SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')")
         if open_capa or open_findings:
             actions.append((
                 "High" if overdue_capa or open_findings >= 5 else "Medium",
                 "CAPA & Audit Findings",
-                f"Open CAPA: {open_capa} (overdue: {overdue_capa}). Open audit findings: {open_findings}.",
-                "Chase responsible persons for evidence of completion; escalate overdue CAPA.",
-                "Link related observations/incidents to CAPA so systemic causes are addressed once.",
-                "Use recurring finding themes as TBT topics and update procedures / training matrix where needed."
+                f"Open CAPA: {open_capa} (overdue {overdue_capa}). Open audit findings: {open_findings}.",
+                "Where findings repeat, schedule formal training / re-assessment for the process owners.",
+                "Publish finding themes to supervision; track CAPA owners in HSE meeting.",
+                "Systemic CAPA completion drive for overdue items.",
+                "Evidence-based close-out; link related observations/incidents to one CAPA; update procedures and training matrix for recurring themes."
             ))
 
         inc_this = _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,))
@@ -4103,34 +4342,35 @@ class MainWindow(QMainWindow):
             actions.append((
                 "High",
                 "Incident Learning",
-                f"{inc_this} incident record(s) logged this month.",
-                "Complete investigation and implement corrective actions before similar work restarts.",
-                "Share immediate lessons with all affected crews; update JSA / method statements.",
-                "Schedule a focused TBT from investigation findings and verify training effectiveness."
+                f"{inc_this} incident record(s) this month — convert investigation findings into controls.",
+                "Deliver investigation lessons as structured awareness to affected disciplines.",
+                "Share immediate lessons before similar work restarts; update JSA / method statements.",
+                "Lessons Learned briefing cycle after each significant incident.",
+                "Complete investigation; implement corrective and preventive actions; verify effectiveness; feed into PTW/JSA and training needs."
             ))
 
         if not actions:
             actions.append((
                 "Low",
                 "Sustain Performance",
-                "No strong adverse trends detected from current observation / incident / CAPA data.",
-                "Continue closing open items on time and maintain inspection discipline.",
-                "Keep routine workplace inspections and permit checks on schedule.",
-                "Maintain regular TBTs on seasonal and task-specific risks; keep training matrix current."
+                "No strong adverse trend from current observations, audits or incidents.",
+                "Keep mandatory and role-based training current; refresh seasonal topics.",
+                "Maintain routine toolbox talks and pre-task briefs.",
+                "Ongoing Safe Behaviour recognition.",
+                "Continue planned inspections, timely close-out and permit discipline."
             ))
 
         prio_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
         actions.sort(key=lambda a: (prio_order.get(a[0], 9), a[1]))
 
         action_table = QTableWidget()
-        action_table.setColumnCount(6)
+        action_table.setColumnCount(7)
         action_table.setHorizontalHeaderLabels([
-            "Priority", "Focus Area", "Why (data signal)", "Reactive Action", "Control Action", "Proactive Action (TBT / Training / Awareness)"
+            "Priority", "Focus Area", "Why (trend / data)",
+            "Training Required", "Communication / Awareness", "Campaign", "Control Measures"
         ])
-        action_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        action_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
-        action_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        action_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        for c in (2, 3, 4, 5, 6):
+            action_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.Stretch)
         action_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         action_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         action_table.setAlternatingRowColors(True)
@@ -4138,35 +4378,33 @@ class MainWindow(QMainWindow):
         action_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         action_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         action_table.setRowCount(len(actions))
-        for r, (priority, focus, reason, reactive, control, proactive) in enumerate(actions):
-            vals = [priority, focus, reason, reactive, control, proactive]
-            for c, v in enumerate(vals):
+        for r, row_vals in enumerate(actions):
+            for c, v in enumerate(row_vals):
                 item = QTableWidgetItem(v)
                 item.setToolTip(v)
                 if c == 0:
-                    if priority == "Critical":
+                    if row_vals[0] == "Critical":
                         item.setForeground(QColor("#8B0000"))
                         item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                    elif priority == "High":
+                    elif row_vals[0] == "High":
                         item.setForeground(QColor("#C0392B"))
                         item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                    elif priority == "Medium":
+                    elif row_vals[0] == "Medium":
                         item.setForeground(QColor("#B9770E"))
                     else:
                         item.setForeground(QColor("#1B7A3D"))
                 action_table.setItem(r, c, item)
-            action_table.setRowHeight(r, 72)
+            action_table.setRowHeight(r, 88)
         al.addWidget(action_table, 1)
 
-        guide = QGroupBox("How to use this board")
+        guide = QGroupBox("How predictive control works")
         gl = QVBoxLayout(guide)
         gl.addWidget(QLabel(
-            "• Reactive — close what is already open and prevent immediate recurrence.\n"
-            "• Control — strengthen barriers at the workplace (inspections, permits, supervision).\n"
-            "• Proactive — reduce future probability via TBT, training, awareness and system improvements.\n"
-            "• Rising counts in high-severity categories (Work at Height, Electrical, Confined Space, Slip/Trip, etc.) "
-            "increase the probability of a serious outcome if left unaddressed.\n"
-            "• Revisit this tab after new observations, incidents, audits or CAPA updates — recommendations refresh from live data."
+            "• The board reads live observations (this month vs last month), open audit findings and incident text.\n"
+            "• Rising counts in categories such as Work at Height, Slip Trip Fall, Electrical, Confined Space, etc. "
+            "raise priority because severity × probability increases.\n"
+            "• For each focus area the system proposes Training, Communication/Awareness, Campaign and practical Control Measures.\n"
+            "• After you add or close observations, open Dashboard again or click Refresh — recommendations rebuild automatically."
         ))
         al.addWidget(guide)
 
@@ -4174,8 +4412,13 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self.dashboard)
         al.addWidget(refresh_btn)
 
-        tabs.addTab(action_page, "Proactive Action Board")
+        tabs.addTab(action_page, "Predictive Control Measures")
         tabs.setCurrentIndex(0)
+
+        # Keep module cache in sync when dashboard rebuilds itself (Refresh)
+        if not hasattr(self, "_module_cache"):
+            self._module_cache = {}
+        self._module_cache[0] = w
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
