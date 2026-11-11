@@ -8,12 +8,14 @@ import logging
 import json
 import re
 import calendar
+import html
+import threading
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from collections import defaultdict
 
-from PySide6.QtCore import Qt, QRectF, QDate, QDateTime, QUrl
+from PySide6.QtCore import Qt, QRectF, QDate, QDateTime, QUrl, QThread, Signal
 from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel, QTextDocument, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -47,7 +49,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.19"
+APP_VERSION = "1.4.20"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -55,8 +57,10 @@ ATTACH_DIR = APP_DIR / "attachments"
 REPORT_DIR = APP_DIR / "reports"
 BACKUP_DIR = APP_DIR / "backups"
 LOG_DIR = APP_DIR / "logs"
+HSE_AI_DIR = APP_DIR / "AI"
+HSE_AI_MODELS_DIR = HSE_AI_DIR / "models"
 
-for p in [APP_DIR, DB_DIR, ATTACH_DIR, REPORT_DIR, BACKUP_DIR, LOG_DIR]:
+for p in [APP_DIR, DB_DIR, ATTACH_DIR, REPORT_DIR, BACKUP_DIR, LOG_DIR, HSE_AI_DIR, HSE_AI_MODELS_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 DB_FILE = DB_DIR / "hse.db"
@@ -4128,6 +4132,69 @@ def dashboard_kpi_card_data():
     return cards, k
 
 
+# ============================================================
+# HSE AI - OPTIONAL LOCAL OFFLINE LANGUAGE MODEL
+# ============================================================
+
+_HSE_AI_MODEL_CACHE = {}
+_HSE_AI_MODEL_LOCK = threading.RLock()
+
+
+class HSEAIWorker(QThread):
+    """Runs local GGUF inference away from the GUI thread."""
+    response_ready = Signal(str)
+    error_ready = Signal(str)
+
+    def __init__(self, model_path, messages, parent=None):
+        super().__init__(parent)
+        self.model_path = str(model_path)
+        self.messages = list(messages)
+
+    def run(self):
+        try:
+            try:
+                from llama_cpp import Llama
+            except Exception as exc:
+                raise RuntimeError(
+                    "The local AI runtime is not installed. Install llama-cpp-python "
+                    "in this application's Python environment, then restart the app."
+                ) from exc
+
+            model_key = str(Path(self.model_path).resolve())
+            with _HSE_AI_MODEL_LOCK:
+                model = _HSE_AI_MODEL_CACHE.get(model_key)
+                if model is None:
+                    if not Path(model_key).is_file():
+                        raise RuntimeError("The selected GGUF model file cannot be found.")
+                    # Conservative CPU settings for an 8 GB RAM computer.
+                    model = Llama(
+                        model_path=model_key,
+                        n_ctx=2048,
+                        n_threads=max(2, min(4, (os.cpu_count() or 4) - 1)),
+                        n_batch=128,
+                        n_gpu_layers=0,
+                        use_mmap=True,
+                        use_mlock=False,
+                        verbose=False,
+                    )
+                    _HSE_AI_MODEL_CACHE[model_key] = model
+
+                result = model.create_chat_completion(
+                    messages=self.messages,
+                    temperature=0.25,
+                    top_p=0.9,
+                    max_tokens=600,
+                )
+            answer = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            answer = str(answer or "").strip()
+            if not answer:
+                answer = "I could not generate a response. Please try asking in a different way."
+            self.response_ready.emit(answer)
+        except Exception as exc:
+            logging.exception("HSE AI inference failed")
+            self.error_ready.emit(str(exc))
+
+
 class MainWindow(QMainWindow):
 
     def __init__(self):
@@ -4138,6 +4205,10 @@ class MainWindow(QMainWindow):
         )
 
         self.resize(1400, 850)
+        self._hse_ai_worker = None
+        self._hse_ai_history = []
+        self._hse_ai_history_path = HSE_AI_DIR / "chat_history.json"
+        self._load_hse_ai_history()
 
         self.setStyleSheet("""
         QMainWindow {
@@ -4227,7 +4298,9 @@ class MainWindow(QMainWindow):
             "Training",
             "Reports",
             "Master Data",
-            "Settings"
+            "Settings",
+            "TBT & Campaigns",
+            "HSE AI"
         ]
 
         self.nav.addItems(modules)
@@ -4236,7 +4309,23 @@ class MainWindow(QMainWindow):
             self.navigation_changed
         )
 
-        layout.addWidget(self.nav)
+        # Keep the original navigation list and add a persistent HSE AI launch button.
+        self.sidebar = QWidget()
+        self.sidebar.setFixedWidth(245)
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(0)
+        sidebar_layout.addWidget(self.nav, 1)
+        self.ai_launch_button = QPushButton("🤖  HSE AI Assistant")
+        self.ai_launch_button.setMinimumHeight(48)
+        self.ai_launch_button.setStyleSheet(
+            "QPushButton { background:#087E8B; color:white; font-weight:bold; "
+            "border-radius:0px; padding:12px; }"
+            "QPushButton:hover { background:#0A6670; }"
+        )
+        self.ai_launch_button.clicked.connect(self.open_hse_ai)
+        sidebar_layout.addWidget(self.ai_launch_button)
+        layout.addWidget(self.sidebar)
 
         self.stack = QStackedWidget()
         layout.addWidget(self.stack, 1)
@@ -4277,6 +4366,11 @@ class MainWindow(QMainWindow):
                 self.master_data()
             elif row == 9:
                 self.settings_page()
+            elif row == 10:
+                w, layout = self.page("TBT, Mass TBT & Campaigns")
+                layout.addWidget(TBTCampaignModule(self, db), 1)
+            elif row == 11:
+                self.hse_ai_page()
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -4286,6 +4380,391 @@ class MainWindow(QMainWindow):
                 pass
 
     # --------------------------------------------------------
+
+    # ========================================================
+    # HSE AI - INTEGRATED OFFLINE ASSISTANT
+    # ========================================================
+
+    def open_hse_ai(self):
+        """Open the integrated HSE AI page from the persistent sidebar button."""
+        self.nav.setCurrentRow(11)
+
+    def _load_hse_ai_history(self):
+        try:
+            if self._hse_ai_history_path.exists():
+                data = json.loads(self._hse_ai_history_path.read_text(encoding="utf-8"))
+                if isinstance(data, list):
+                    self._hse_ai_history = [
+                        x for x in data[-50:]
+                        if isinstance(x, dict) and x.get("role") in ("user", "assistant")
+                    ]
+        except Exception:
+            logging.exception("Unable to load HSE AI chat history")
+            self._hse_ai_history = []
+
+    def _save_hse_ai_history(self):
+        try:
+            self._hse_ai_history_path.parent.mkdir(parents=True, exist_ok=True)
+            self._hse_ai_history = self._hse_ai_history[-50:]
+            self._hse_ai_history_path.write_text(
+                json.dumps(self._hse_ai_history, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            logging.exception("Unable to save HSE AI chat history")
+
+    def _hse_ai_model_path(self):
+        try:
+            return safe(db.setting("hse_ai_model_path", "")).strip()
+        except Exception:
+            return ""
+
+    def _refresh_hse_ai_status(self):
+        model_path = self._hse_ai_model_path()
+        runtime_ok = True
+        try:
+            import llama_cpp  # noqa: F401
+        except Exception:
+            runtime_ok = False
+        if model_path and Path(model_path).is_file() and runtime_ok:
+            status = "Offline AI model configured — ready when you send a question."
+            self.ai_status_label.setStyleSheet("color:#16733B; font-weight:bold; padding:4px;")
+        elif model_path and not Path(model_path).is_file():
+            status = "Selected model file is missing. Please select the GGUF model again."
+            self.ai_status_label.setStyleSheet("color:#B00020; font-weight:bold; padding:4px;")
+        elif not runtime_ok:
+            status = "HSE AI interface is ready. Install llama-cpp-python and select a local GGUF model for full offline AI."
+            self.ai_status_label.setStyleSheet("color:#9A6700; font-weight:bold; padding:4px;")
+        else:
+            status = "HSE AI interface is ready. Select a local GGUF model to enable full offline AI."
+            self.ai_status_label.setStyleSheet("color:#9A6700; font-weight:bold; padding:4px;")
+        self.ai_status_label.setText(status)
+
+    def _choose_hse_ai_model(self):
+        start_dir = str(HSE_AI_MODELS_DIR if HSE_AI_MODELS_DIR.exists() else APP_DIR)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select an offline AI model (GGUF)",
+            start_dir,
+            "GGUF model files (*.gguf);;All files (*.*)",
+        )
+        if not path:
+            return
+        try:
+            db.set_setting("hse_ai_model_path", path)
+            self._refresh_hse_ai_status()
+            QMessageBox.information(
+                self,
+                "HSE AI Model Selected",
+                "The local model path has been saved. The model will load when you send your first message.\n\n"
+                "For an 8 GB RAM computer, start with a small 1.5B–3B instruction model in Q4 GGUF format.",
+            )
+        except Exception as exc:
+            logging.exception("Unable to save HSE AI model path")
+            QMessageBox.warning(self, "HSE AI Setup", str(exc))
+
+    def _hse_ai_database_context(self):
+        """Build a small, read-only summary from existing HSE tables; never changes records."""
+        parts = []
+        try:
+            existing = {
+                r["name"] for r in db.fetchall(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        except Exception:
+            return "Live HSE database summary is unavailable."
+
+        table_labels = [
+            ("observations", "HSE observations"),
+            ("incidents", "Incidents"),
+            ("audits", "Audits"),
+            ("audit_findings", "Audit findings"),
+            ("capa", "CAPA actions"),
+            ("training_courses", "Training courses"),
+            ("training_records", "Training records"),
+            ("ptw_permits", "PTW permits"),
+        ]
+        for table, label in table_labels:
+            if table not in existing:
+                continue
+            try:
+                count = db.fetchone(f"SELECT COUNT(*) AS n FROM {table}")["n"]
+                parts.append(f"{label}: {count} total records")
+            except Exception:
+                continue
+
+        # Aggregate only non-identifying fields; employee names/IDs are not sent to the model.
+        if "observations" in existing:
+            try:
+                cols = {r["name"] for r in db.fetchall("PRAGMA table_info(observations)")}
+                if "category" in cols:
+                    rows = db.fetchall(
+                        "SELECT COALESCE(NULLIF(category,''),'Uncategorised') AS item, COUNT(*) AS n "
+                        "FROM observations GROUP BY item ORDER BY n DESC LIMIT 8"
+                    )
+                    if rows:
+                        parts.append("Observation categories: " + "; ".join(f"{r['item']} ({r['n']})" for r in rows))
+                if "status" in cols:
+                    rows = db.fetchall(
+                        "SELECT COALESCE(NULLIF(status,''),'Unspecified') AS item, COUNT(*) AS n "
+                        "FROM observations GROUP BY item ORDER BY n DESC"
+                    )
+                    if rows:
+                        parts.append("Observation status: " + "; ".join(f"{r['item']} ({r['n']})" for r in rows))
+            except Exception:
+                logging.exception("HSE AI observation summary failed")
+
+        if "ptw_permits" in existing:
+            try:
+                cols = {r["name"] for r in db.fetchall("PRAGMA table_info(ptw_permits)")}
+                if "status" in cols:
+                    rows = db.fetchall(
+                        "SELECT COALESCE(NULLIF(status,''),'Unspecified') AS item, COUNT(*) AS n "
+                        "FROM ptw_permits GROUP BY item ORDER BY n DESC"
+                    )
+                    if rows:
+                        parts.append("PTW status: " + "; ".join(f"{r['item']} ({r['n']})" for r in rows))
+            except Exception:
+                logging.exception("HSE AI PTW summary failed")
+        return "\n".join(parts) if parts else "No HSE records are currently available in the connected tables."
+
+    def _hse_ai_system_prompt(self):
+        try:
+            active_module = self.nav.currentItem().text() if self.nav.currentItem() else "Dashboard"
+        except Exception:
+            active_module = "HSE AI"
+        app_guide = """
+You are HSE AI, the built-in assistant for this desktop HSE Management System.
+You run locally and must answer in clear, practical language. Support both normal conversation and HSE work.
+
+EXISTING APPLICATION NAVIGATION AND HELP:
+- Dashboard: HSE KPIs, summaries and action priorities.
+- HSE Inspection Register: observation/inspection entry, review, register and trends.
+- Incident Investigation: incident records, investigation details, causes and investigation reports.
+- Audit Register: audits and audit findings.
+- CAPA Tracking Register: corrective and preventive action records and close-out tracking.
+- Permit to Work (PTW): permit types, permit information, supporting certificates/documents, workflow and status.
+- Training: courses, employee training records, competency and validity tracking.
+- Reports: available reports and register exports.
+- Master Data: supporting company, project and employee data.
+- Settings: application configuration and backup/restore tools.
+- TBT & Campaigns: toolbox talks, mass TBT and campaign planning.
+- HSE AI: this assistant.
+
+RULES:
+1. If asked how to use the software, give step-by-step navigation using the exact module names above. Do not invent buttons or features you cannot verify.
+2. Use the supplied live database summary only as aggregated context. Do not invent record counts, names, dates or findings.
+3. For HSE advice, distinguish general guidance from site-specific requirements. Ask the user to check approved procedures, risk assessments and applicable client/legal requirements.
+4. Never approve a permit, close a CAPA, approve an audit, change employee records, or declare a workplace safe.
+5. Do not claim to have changed or saved anything in the application. You can draft and recommend; a human user must perform and approve changes.
+6. Be helpful with ordinary conversation, explanations, translations and professional writing too.
+7. If information is missing, say what is missing rather than guessing.
+""".strip()
+        return (
+            app_guide
+            + f"\n\nCurrent application section: {active_module}."
+            + "\n\nRead-only live HSE database summary:\n"
+            + self._hse_ai_database_context()
+        )
+
+    def _offline_hse_software_help(self, question):
+        q = question.lower()
+        routes = [
+            (("observation", "inspection"), "Open **HSE Inspection Register** from the left navigation. Use the available observation/inspection entry and register options to create or review records. The Dashboard provides the HSE overview and trends."),
+            (("incident", "accident", "investigation"), "Open **Incident Investigation** from the left navigation. Use the incident register to select or create a record and access its investigation details and report functions."),
+            (("audit", "finding"), "Open **Audit Register** from the left navigation. Use it to manage audit records and their findings. Findings and corrective actions should be reviewed by the responsible HSE/audit personnel."),
+            (("capa", "corrective action", "preventive action"), "Open **CAPA Tracking Register** from the left navigation. Review the action reference, responsible person, target date, evidence and verification before a competent person closes an action."),
+            (("permit", "ptw", "work permit", "certificate"), "Open **Permit to Work (PTW)** from the left navigation. Review the permit details, required supporting certificates/documents and workflow status. HSE AI can explain or check information, but it cannot approve or issue a permit."),
+            (("training", "competency", "competence", "course"), "Open **Training** from the left navigation to access course and employee training records, competency information and validity tracking."),
+            (("tbt", "toolbox", "mass tbt", "campaign"), "Open **TBT & Campaigns** from the left navigation to access toolbox talk and campaign planning features."),
+            (("report", "export", "excel", "pdf", "word"), "Open **Reports** from the left navigation. Available report and export options depend on the selected register and the records stored in the application."),
+            (("dashboard", "kpi", "trend"), "Open **Dashboard** from the left navigation to view the HSE overview, KPIs and action priorities."),
+            (("employee", "master data", "company", "project"), "Open **Master Data** from the left navigation to manage supporting company, project and employee information."),
+            (("setting", "backup", "restore"), "Open **Settings** from the left navigation to access application settings and available maintenance/backup tools."),
+        ]
+        for keywords, answer in routes:
+            if any(k in q for k in keywords):
+                return answer + "\n\nFor more detailed conversational and HSE assistance, configure the local GGUF model in HSE AI."
+        return (
+            "HSE AI is integrated into this application. I can guide you through the existing modules now. "
+            "To enable full offline conversational AI and broader HSE reasoning, select a local GGUF model "
+            "using **Choose AI Model** and install the optional `llama-cpp-python` runtime. "
+            "No internet connection is used by the assistant after the model and runtime are installed."
+        )
+
+    def _append_hse_ai_message(self, role, content, save=True):
+        if not hasattr(self, "ai_chat_view"):
+            return
+        safe_content = html.escape(str(content)).replace("\n", "<br>")
+        if role == "user":
+            self.ai_chat_view.append(
+                f'<div style="margin:8px 0;"><b style="color:#17365D;">You</b><br>{safe_content}</div>'
+            )
+        else:
+            self.ai_chat_view.append(
+                f'<div style="margin:8px 0;"><b style="color:#087E8B;">HSE AI</b><br>{safe_content}</div>'
+            )
+        if save:
+            self._hse_ai_history.append({"role": role, "content": str(content)})
+            self._save_hse_ai_history()
+
+    def _send_hse_ai_message(self):
+        question = self.ai_input.text().strip()
+        if not question:
+            return
+        if self._hse_ai_worker is not None and self._hse_ai_worker.isRunning():
+            return
+        self.ai_input.clear()
+        self._append_hse_ai_message("user", question)
+        self.ai_send_button.setEnabled(False)
+        self.ai_status_label.setText("HSE AI is preparing your response...")
+        self.ai_status_label.setStyleSheet("color:#245486; font-weight:bold; padding:4px;")
+
+        model_path = self._hse_ai_model_path()
+        if not model_path or not Path(model_path).is_file():
+            answer = self._offline_hse_software_help(question)
+            self._append_hse_ai_message("assistant", answer)
+            self.ai_send_button.setEnabled(True)
+            self._refresh_hse_ai_status()
+            return
+
+        try:
+            import llama_cpp  # noqa: F401
+        except Exception:
+            answer = (
+                self._offline_hse_software_help(question)
+                + "\n\nThe selected model is present, but `llama-cpp-python` is not installed in this Python environment."
+            )
+            self._append_hse_ai_message("assistant", answer)
+            self.ai_send_button.setEnabled(True)
+            self._refresh_hse_ai_status()
+            return
+
+        messages = [{"role": "system", "content": self._hse_ai_system_prompt()}]
+        messages.extend(self._hse_ai_history[-10:])
+        self._hse_ai_worker = HSEAIWorker(model_path, messages, self)
+        self._hse_ai_worker.response_ready.connect(self._on_hse_ai_response)
+        self._hse_ai_worker.error_ready.connect(self._on_hse_ai_error)
+        self._hse_ai_worker.start()
+
+    def _on_hse_ai_response(self, response):
+        self._append_hse_ai_message("assistant", response)
+        self.ai_send_button.setEnabled(True)
+        self._refresh_hse_ai_status()
+
+    def _on_hse_ai_error(self, error):
+        self._append_hse_ai_message(
+            "assistant",
+            "I could not run the local AI model. " + str(error)
+            + "\n\nYour existing HSE modules are unaffected. Check the selected GGUF model and local AI runtime installation.",
+        )
+        self.ai_send_button.setEnabled(True)
+        self._refresh_hse_ai_status()
+
+    def _clear_hse_ai_history(self):
+        reply = QMessageBox.question(
+            self, "Clear HSE AI Chat", "Clear the locally saved HSE AI conversation history?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._hse_ai_history = []
+        self._save_hse_ai_history()
+        self.ai_chat_view.clear()
+        self.ai_chat_view.append(
+            "<b>HSE AI</b><br>Hello! I can help you use this HSE Management System, explain HSE concepts, "
+            "draft safety documents and analyse available HSE information."
+        )
+
+    def hse_ai_page(self):
+        w, layout = self.page("HSE AI — Integrated Offline Assistant")
+        intro = QLabel(
+            "Your built-in assistant for using this HSE Management System, HSE guidance and everyday questions. "
+            "The local language model runs on this computer; no cloud API is used."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#526273; padding:2px 8px 8px 8px;")
+        layout.addWidget(intro)
+
+        status_row = QHBoxLayout()
+        self.ai_status_label = QLabel("Preparing HSE AI...")
+        self.ai_status_label.setWordWrap(True)
+        status_row.addWidget(self.ai_status_label, 1)
+        choose_model = QPushButton("Choose AI Model")
+        choose_model.clicked.connect(self._choose_hse_ai_model)
+        status_row.addWidget(choose_model)
+        clear_button = QPushButton("Clear Chat")
+        clear_button.clicked.connect(self._clear_hse_ai_history)
+        status_row.addWidget(clear_button)
+        layout.addLayout(status_row)
+
+        content_row = QHBoxLayout()
+        quick_panel = QGroupBox("Quick Help")
+        quick_layout = QVBoxLayout(quick_panel)
+        quick_prompts = [
+            "How do I create an HSE observation?",
+            "How do I register an incident and prepare its report?",
+            "How do I create an audit and manage findings?",
+            "How do I review and close a CAPA?",
+            "How do I check a PTW and its supporting documents?",
+            "How do I review employee training and competency?",
+            "Recommend a suitable toolbox talk topic.",
+            "Explain my HSE dashboard."
+        ]
+        for prompt in quick_prompts:
+            button = QPushButton(prompt)
+            button.setStyleSheet(
+                "QPushButton { background:#E8F0F7; color:#17365D; text-align:left; "
+                "padding:8px; border:1px solid #D2DCE6; }"
+                "QPushButton:hover { background:#D8E7F3; }"
+            )
+            button.setMinimumHeight(38)
+            button.clicked.connect(lambda checked=False, text=prompt: self._use_hse_ai_quick_prompt(text))
+            quick_layout.addWidget(button)
+        quick_layout.addStretch(1)
+        quick_panel.setMinimumWidth(255)
+        content_row.addWidget(quick_panel, 0)
+
+        chat_panel = QWidget()
+        chat_layout = QVBoxLayout(chat_panel)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        self.ai_chat_view = QTextEdit()
+        self.ai_chat_view.setReadOnly(True)
+        self.ai_chat_view.setMinimumHeight(300)
+        self.ai_chat_view.setStyleSheet(
+            "QTextEdit { background:white; border:1px solid #C8D2DC; padding:12px; "
+            "font-size:13px; }"
+        )
+        chat_layout.addWidget(self.ai_chat_view, 1)
+        input_row = QHBoxLayout()
+        self.ai_input = QLineEdit()
+        self.ai_input.setPlaceholderText("Ask HSE AI about this software, HSE work or anything else...")
+        self.ai_input.returnPressed.connect(self._send_hse_ai_message)
+        input_row.addWidget(self.ai_input, 1)
+        self.ai_send_button = QPushButton("Send")
+        self.ai_send_button.setMinimumWidth(90)
+        self.ai_send_button.clicked.connect(self._send_hse_ai_message)
+        input_row.addWidget(self.ai_send_button)
+        chat_layout.addLayout(input_row)
+        content_row.addWidget(chat_panel, 1)
+        layout.addLayout(content_row, 1)
+
+        if self._hse_ai_history:
+            for item in self._hse_ai_history:
+                self._append_hse_ai_message(item.get("role", "assistant"), item.get("content", ""), save=False)
+        else:
+            self.ai_chat_view.append(
+                "<b>HSE AI</b><br>Hello! Welcome to your HSE Management System. I can guide you through "
+                "the existing modules, help with HSE work, explain concepts and assist with professional writing. "
+                "Choose a quick-help topic or type your question below."
+            )
+        self._refresh_hse_ai_status()
+
+    def _use_hse_ai_quick_prompt(self, prompt):
+        self.ai_input.setText(prompt)
+        self._send_hse_ai_message()
 
     def page(self, title):
 
@@ -4583,6 +5062,9 @@ class MainWindow(QMainWindow):
         else:
             for line in tbt_topics[:8]:
                 tbt_l.addWidget(QLabel(xml_safe(line)))
+        btn_open_tbt = QPushButton("Open TBT & Campaigns Module  (full justification, plan and register)")
+        btn_open_tbt.clicked.connect(lambda: self.nav.setCurrentRow(10))
+        tbt_l.addWidget(btn_open_tbt)
         act.addWidget(tbt_box)
 
         btn_row = QHBoxLayout()
@@ -11940,6 +12422,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
 
+        # Let any active local inference finish before destroying its QThread object.
+        try:
+            if self._hse_ai_worker is not None and self._hse_ai_worker.isRunning():
+                self._hse_ai_worker.wait()
+        except Exception:
+            logging.exception("Error waiting for HSE AI worker during shutdown")
+
         try:
             db.conn.commit()
             db.conn.close()
@@ -14207,6 +14696,1542 @@ class PTWModule(QWidget):
         self.db.execute("INSERT INTO ptw_events(permit_id,event_type,details,actor,created_at) SELECT id,'PTW configuration updated',?,?,? FROM ptw_permits WHERE id=(SELECT MIN(id) FROM ptw_permits)",(f"Permit type/configuration changed: {name}",self._actor(),now)) if self.db.fetchone("SELECT id FROM ptw_permits LIMIT 1") else None
         self.refresh_all(); QMessageBox.information(self,"Configuration Saved","PTW-specific configuration saved. Validate against the governing procedure before use.")
 
+
+
+# ============================================================
+# TBT, MASS TBT & CAMPAIGNS MODULE  (additive, self-contained)
+# ------------------------------------------------------------
+# * Uses its own tables only: tbt_register, tbt_attendance, tbt_attachments,
+#   tbt_campaigns, tbt_decisions.
+# * Only READS observations, audits, PTW, incidents, training and master data.
+# * Reuses HSE_TBT_TOPIC_LIBRARY, HSE_ACTION_LIBRARY and _action_library_key().
+# * Menu row 10 ("TBT & Campaigns"). The Action Dashboard links to it.
+# ============================================================
+
+from xml.sax.saxutils import escape as _tbt_esc
+
+TBT_ENTRY_TYPES = ["Daily TBT", "Weekly TBT", "Mass TBT", "Campaign Activity"]
+TBT_REC_TYPES = ["Daily TBT", "Weekly TBT", "Mass TBT", "Monthly Campaign"]
+TBT_STATUSES = ["Accepted", "Planned", "Delivered", "Closed", "Rejected"]
+TBT_OPEN_STATUSES = ("Accepted", "Planned")
+TBT_CAMPAIGN_STATUSES = ["Planned", "Active", "Completed", "Cancelled"]
+TBT_LANGUAGES = ["English", "Arabic", "Hindi", "Urdu", "Malayalam", "Tamil", "Telugu",
+                 "Bengali", "Nepali", "Sinhala", "Tagalog", "Other"]
+TBT_SOURCE_WEIGHT = {"observation": 3, "audit": 3, "ptw": 3, "incident": 4, "training": 2}
+TBT_HIGH_RISK_PERMIT_WORDS = ("hot work", "confined", "lifting", "height", "excavation",
+                              "electrical", "loto", "isolation")
+TBT_STOPWORDS = {"safety", "and", "with", "the", "for", "prevention", "use", "work", "control",
+                 "controls", "awareness", "basic", "during", "after", "before"}
+TBT_RISK_COLORS = {"Critical": "#B71C1C", "High": "#E65100", "Medium": "#B8860B", "Low": "#2E7D32"}
+
+
+# ------------------------------------------------------------
+# Pure logic (no screen code) - easy to test
+# ------------------------------------------------------------
+
+def _tbt_table_exists(database, name):
+    try:
+        return database.fetchone("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)) is not None
+    except Exception:
+        return False
+
+
+def _tbt_columns(database, table):
+    try:
+        return {r["name"] for r in database.fetchall(f"PRAGMA table_info({table})")}
+    except Exception:
+        return set()
+
+
+def tbt_ensure_schema(database):
+    """Additive only. Never alters or drops existing application tables."""
+    database.conn.executescript("""
+    CREATE TABLE IF NOT EXISTS tbt_campaigns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE, title TEXT NOT NULL,
+        topic TEXT DEFAULT '', start_date TEXT DEFAULT '', end_date TEXT DEFAULT '',
+        status TEXT DEFAULT 'Planned', project TEXT DEFAULT '', target_area TEXT DEFAULT '',
+        contractor TEXT DEFAULT '', owner TEXT DEFAULT '', objectives TEXT DEFAULT '',
+        activities TEXT DEFAULT '', kpi_target TEXT DEFAULT '', result_summary TEXT DEFAULT '',
+        source TEXT DEFAULT 'Manual', trend_ref TEXT DEFAULT '', justification TEXT DEFAULT '',
+        created_by TEXT DEFAULT '', created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tbt_register (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, number TEXT UNIQUE, entry_type TEXT DEFAULT 'Daily TBT',
+        tbt_date TEXT DEFAULT '', tbt_time TEXT DEFAULT '', topic TEXT NOT NULL,
+        source TEXT DEFAULT 'Manual', trend_ref TEXT DEFAULT '', project TEXT DEFAULT '',
+        location TEXT DEFAULT '', contractor TEXT DEFAULT '', conducted_by TEXT DEFAULT '',
+        designation TEXT DEFAULT '', language TEXT DEFAULT 'English', attendee_count INTEGER DEFAULT 0,
+        duration_min INTEGER DEFAULT 0, key_points TEXT DEFAULT '', worker_feedback TEXT DEFAULT '',
+        materials TEXT DEFAULT '', status TEXT DEFAULT 'Accepted', capa_ref TEXT DEFAULT '',
+        training_ref TEXT DEFAULT '', campaign_id INTEGER, justification TEXT DEFAULT '',
+        notes TEXT DEFAULT '', created_by TEXT DEFAULT '', created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tbt_attendance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tbt_id INTEGER NOT NULL REFERENCES tbt_register(id) ON DELETE CASCADE,
+        employee_db_id INTEGER, employee_id TEXT DEFAULT '', name TEXT NOT NULL,
+        designation TEXT DEFAULT '', company TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tbt_attachments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tbt_id INTEGER NOT NULL REFERENCES tbt_register(id) ON DELETE CASCADE,
+        file_path TEXT NOT NULL, attachment_type TEXT DEFAULT 'Photo / Attendance Sheet',
+        description TEXT DEFAULT '', added_at TEXT DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS tbt_decisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, period_type TEXT, period_key TEXT, topic TEXT,
+        decision TEXT, reason TEXT DEFAULT '', decided_by TEXT DEFAULT '', decided_at TEXT DEFAULT ''
+    );
+    """)
+    database.conn.commit()
+
+
+def _tbt_topic_keywords(topic):
+    low = safe(topic).strip().casefold()
+    for title, kws in HSE_TBT_TOPIC_LIBRARY:
+        if title.casefold() == low:
+            return list(kws)
+    words = [w for w in re.findall(r"[a-z]{4,}", low) if w not in TBT_STOPWORDS]
+    return words[:6]
+
+
+def tbt_fetch_records(database, start, end, project="", contractor="", include_training=True):
+    """Read-only. Collects dated evidence from the existing modules."""
+    s, e = start.isoformat(), end.isoformat()
+    recs = []
+
+    def text_of(row, fields):
+        keys = row.keys()
+        return " ".join(safe(row[k]) for k in fields if k in keys and row[k] is not None).lower()
+
+    # Observations
+    try:
+        cl = ["date(obs_date) BETWEEN date(?) AND date(?)"]; pr = [s, e]
+        if project: cl.append("project=?"); pr.append(project)
+        if contractor: cl.append("company=?"); pr.append(contractor)
+        rows = database.fetchall(
+            "SELECT obs_date,project,company,location,category,subcategory,observation,immediate_action,"
+            "corrective_action,priority,status FROM observations WHERE " + " AND ".join(cl), tuple(pr))
+        for r in rows:
+            recs.append({"source": "observation", "date": safe(r["obs_date"])[:10],
+                         "text": text_of(r, ["category", "subcategory", "observation", "immediate_action",
+                                             "corrective_action", "location"]),
+                         "risk": safe(r["priority"]).lower(), "location": safe(r["location"]),
+                         "company": safe(r["company"]),
+                         "label": (safe(r["category"]) + " - " + safe(r["observation"]))[:110]})
+    except Exception:
+        logging.exception("TBT module: observation read failed")
+
+    # Audit findings
+    try:
+        if _tbt_table_exists(database, "aud_findings") and _tbt_table_exists(database, "audits"):
+            cl = ["date(a.audit_date) BETWEEN date(?) AND date(?)"]; pr = [s, e]
+            if project: cl.append("a.project=?"); pr.append(project)
+            rows = database.fetchall(
+                "SELECT a.audit_date,a.project,a.location,f.checklist_pts,f.evidence,f.corrective_action,"
+                "f.procedure,f.status FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE " + " AND ".join(cl),
+                tuple(pr))
+            for r in rows:
+                recs.append({"source": "audit", "date": safe(r["audit_date"])[:10],
+                             "text": text_of(r, ["checklist_pts", "evidence", "corrective_action", "procedure", "location"]),
+                             "risk": "medium", "location": safe(r["location"]), "company": "",
+                             "label": safe(r["checklist_pts"])[:110] or "Audit finding"})
+    except Exception:
+        logging.exception("TBT module: audit read failed")
+
+    # PTW permits (company columns differ between versions, so build the query safely)
+    try:
+        if _tbt_table_exists(database, "ptw_permits"):
+            cols = _tbt_columns(database, "ptw_permits")
+            comp_cols = [c for c in ("performing_company", "applicant_company", "subcontractor",
+                                     "permit_holder_company") if c in cols]
+            comp_expr = ("COALESCE(" + ",".join(f"NULLIF({c},'')" for c in comp_cols) + ",'')") if comp_cols else "''"
+            date_expr = "COALESCE(NULLIF(planned_start,''),NULLIF(created_at,''))"
+            wanted = [c for c in ("permit_type", "work_scope", "work_description", "hazards", "risk_controls",
+                                  "safety_checks", "location") if c in cols]
+            if wanted:
+                cl = [f"date({date_expr}) BETWEEN date(?) AND date(?)"]; pr = [s, e]
+                if project and "project" in cols: cl.append("project=?"); pr.append(project)
+                if contractor and comp_cols:
+                    cl.append("(" + " OR ".join(f"{c}=?" for c in comp_cols) + ")"); pr.extend([contractor] * len(comp_cols))
+                rows = database.fetchall(
+                    f"SELECT {','.join(wanted)},{comp_expr} AS comp,{date_expr} AS ev_date FROM ptw_permits WHERE "
+                    + " AND ".join(cl), tuple(pr))
+                for r in rows:
+                    ptype = safe(r["permit_type"]).lower() if "permit_type" in wanted else ""
+                    hi = any(w in ptype for w in TBT_HIGH_RISK_PERMIT_WORDS)
+                    recs.append({"source": "ptw", "date": safe(r["ev_date"])[:10], "text": text_of(r, wanted),
+                                 "risk": "high" if hi else "medium",
+                                 "location": safe(r["location"]) if "location" in wanted else "",
+                                 "company": safe(r["comp"]),
+                                 "label": (safe(r["permit_type"]) if "permit_type" in wanted else "Permit")[:110]})
+    except Exception:
+        logging.exception("TBT module: PTW read failed")
+
+    # Incidents
+    try:
+        cl = ["date(incident_date) BETWEEN date(?) AND date(?)"]; pr = [s, e]
+        if project: cl.append("project=?"); pr.append(project)
+        if contractor: cl.append("company=?"); pr.append(contractor)
+        rows = database.fetchall(
+            "SELECT incident_date,incident_type,description,location,company FROM incidents WHERE " + " AND ".join(cl),
+            tuple(pr))
+        for r in rows:
+            recs.append({"source": "incident", "date": safe(r["incident_date"])[:10],
+                         "text": text_of(r, ["incident_type", "description", "location"]),
+                         "risk": "high", "location": safe(r["location"]), "company": safe(r["company"]),
+                         "label": (safe(r["incident_type"]) + " - " + safe(r["description"]))[:110]})
+    except Exception:
+        logging.exception("TBT module: incident read failed")
+
+    # Training gaps (a current snapshot, not dated)
+    if include_training:
+        try:
+            if all(_tbt_table_exists(database, t) for t in ("training_assignments", "training_courses", "employees")):
+                rows = database.fetchall("""SELECT tc.course_name,e.designation,e.company AS emp_company,
+                    CASE WHEN EXISTS (SELECT 1 FROM training_records tr WHERE tr.employee_db_id=ta.employee_db_id
+                        AND tr.course_id=ta.course_id AND lower(COALESCE(tr.verification_status,'verified')) IN ('verified','approved')
+                        AND (COALESCE(trim(tr.expiry_date),'')='' OR date(tr.expiry_date)>=date('now'))) THEN 1 ELSE 0 END AS valid
+                    FROM training_assignments ta JOIN training_courses tc ON tc.id=ta.course_id
+                    JOIN employees e ON e.id=ta.employee_db_id
+                    WHERE COALESCE(tc.active,1)=1 AND lower(COALESCE(ta.requirement,'Mandatory')) LIKE '%mandatory%'""")
+                for r in rows:
+                    if r["valid"]:
+                        continue
+                    if contractor and safe(r["emp_company"]) != contractor:
+                        continue
+                    recs.append({"source": "training", "date": "",
+                                 "text": (safe(r["course_name"]) + " " + safe(r["designation"])).lower(),
+                                 "risk": "medium", "location": "", "company": safe(r["emp_company"]),
+                                 "label": safe(r["course_name"]) or "Training gap"})
+        except Exception:
+            logging.exception("TBT module: training gap read failed")
+    return recs
+
+
+def _tbt_window(records, start, end):
+    a, b = start.isoformat(), end.isoformat()
+    return [r for r in records if (not r.get("date")) or (a <= r["date"] <= b)]
+
+
+def tbt_score_topics(records):
+    result = {}
+    for title, kws in HSE_TBT_TOPIC_LIBRARY:
+        d = {"observation": 0, "audit": 0, "ptw": 0, "incident": 0, "training": 0, "score": 0, "high": 0,
+             "loc": defaultdict(int), "co": defaultdict(int), "samples": [], "kw": 0}
+        for rec in records:
+            hits = sum(1 for k in kws if k in rec["text"])
+            if not hits:
+                continue
+            d["kw"] += hits
+            src = rec["source"]
+            d[src] += 1
+            hi = rec.get("risk") in ("critical", "high")
+            d["score"] += TBT_SOURCE_WEIGHT.get(src, 1) + (3 if hi else 1 if rec.get("risk") == "medium" else 0)
+            if hi:
+                d["high"] += 1
+            if rec.get("location"):
+                d["loc"][rec["location"].strip()] += 1
+            if rec.get("company"):
+                d["co"][rec["company"].strip()] += 1
+            if src != "training":
+                d["samples"].append((0 if src == "incident" else 1 if hi else 2, rec.get("date", ""), src, rec.get("label", "")))
+        if d["score"]:
+            d["samples"].sort(key=lambda x: x[1], reverse=True)
+            d["samples"].sort(key=lambda x: x[0])
+            result[title] = d
+    return result
+
+
+def tbt_rank(scored):
+    return sorted(scored.items(), key=lambda x: (x[1]["score"], x[1]["high"], x[1]["incident"], x[1].get("kw", 0)), reverse=True)
+
+
+def tbt_risk_level(d):
+    if d["incident"] >= 2 or d["high"] >= 6:
+        return "Critical"
+    if d["incident"] >= 1 or d["high"] >= 3 or d["score"] >= 25:
+        return "High"
+    if d["score"] >= 10:
+        return "Medium"
+    return "Low"
+
+
+def tbt_trend_text(cur, prev):
+    if prev <= 0:
+        return "New this period" if cur > 0 else "No activity"
+    ch = (cur - prev) / prev * 100
+    if ch >= 10:
+        return f"Rising (+{ch:.0f}%)"
+    if ch <= -10:
+        return f"Falling ({ch:.0f}%)"
+    return "Stable"
+
+
+def _tbt_top(mapping, n=3):
+    items = sorted(mapping.items(), key=lambda x: (-x[1], x[0]))[:n]
+    return ", ".join(f"{k} ({v})" for k, v in items)
+
+
+def _tbt_empty_detail():
+    return {"observation": 0, "audit": 0, "ptw": 0, "incident": 0, "training": 0, "score": 0, "high": 0,
+            "loc": defaultdict(int), "co": defaultdict(int), "samples": [], "kw": 0}
+
+
+def tbt_talking_points(topic, d):
+    pts = []
+    total = d["observation"] + d["audit"] + d["ptw"] + d["incident"]
+    locs = _tbt_top(d["loc"], 2)
+    if total:
+        pts.append(f"Open with the facts: {total} recent record(s) point to this hazard" + (f", mostly at {locs}." if locs else "."))
+    pts += ["Ask the crew: where have you seen this hazard in your own work area?",
+            "Cover the main hazards and the controls required for the task (use the procedure, JSA and permit).",
+            "Remind everyone of Stop Work Authority and how to report a near miss.",
+            "Close with 2-3 questions to check understanding, then record attendance."]
+    return pts
+
+
+def tbt_make_rec(rtype, period_key, period_text, prev_text, topic, scored, prev_scored,
+                 trigger="", note="", ref_iso=""):
+    ranking = tbt_rank(scored)
+    rank_no = next((i + 1 for i, (t, _d) in enumerate(ranking) if t == topic), 0)
+    d = scored.get(topic)
+    manual = d is None
+    if manual:
+        d = _tbt_empty_detail()
+    prev = prev_scored.get(topic, {}).get("score", 0)
+    risk = "Low" if manual else tbt_risk_level(d)
+    lines = []
+    if manual:
+        lines.append("Topic chosen manually. No matching records were found in the analysed period.")
+    else:
+        lines.append(f"Ranked #{rank_no} of {len(ranking)} topics with evidence in the period (risk score {d['score']}).")
+    lines.append(f"Period analysed: {period_text}. Compared with: {prev_text}.")
+    lines.append(f"Evidence: Observations {d['observation']} | Audit findings {d['audit']} | PTWs {d['ptw']} | "
+                 f"Incidents {d['incident']} | Training gaps {d['training']}.")
+    lines.append(f"High-risk records: {d['high']}. Score now {d['score']} vs {prev} before: {tbt_trend_text(d['score'], prev)}.")
+    if d["loc"]:
+        lines.append(f"Top locations: {_tbt_top(d['loc'])}.")
+    if d["co"]:
+        lines.append(f"Top contractors: {_tbt_top(d['co'])}.")
+    if trigger:
+        lines.append(f"Trigger: {trigger}")
+    if note:
+        lines.append(note)
+    if d["samples"]:
+        lines.append("Examples from the records:")
+        for _rk, dt, src, label in d["samples"][:3]:
+            lines.append(f"  - {dt or 'n/a'} [{src}] {label}")
+    key = _action_library_key(topic)
+    actions = []
+    if key:
+        lib = HSE_ACTION_LIBRARY.get(key, {})
+        actions = list(lib.get("reactive", []))[:2] + list(lib.get("proactive", []))[:2]
+    return {"type": rtype, "period_key": period_key, "period_text": period_text, "prev_text": prev_text,
+            "topic": topic, "risk": risk, "score": d["score"], "prev_score": prev, "detail": d, "lines": lines,
+            "points": tbt_talking_points(topic, d), "actions": actions, "trigger": trigger, "note": note,
+            "alternatives": [(t, dd["score"]) for t, dd in ranking[:15]], "scored": scored, "prev_scored": prev_scored,
+            "ref": ref_iso, "manual": manual, "campaign_baseline": d["observation"] + d["audit"] + d["ptw"] + d["incident"]}
+
+
+def tbt_build_recommendations(database, ref_date, project="", contractor="", repeat_days=14, overrides=None):
+    """Returns 4 recommendation dicts: Daily TBT, Weekly TBT, Mass TBT, Monthly Campaign."""
+    overrides = overrides or {}
+    day = timedelta(days=1)
+    records = tbt_fetch_records(database, ref_date - timedelta(days=89), ref_date, project, contractor)
+
+    def win(a_back, b_back):
+        return _tbt_window(records, ref_date - timedelta(days=a_back), ref_date - timedelta(days=b_back))
+
+    s_day, s_day_p = tbt_score_topics(win(2, 0)), tbt_score_topics(win(5, 3))
+    s_wk, s_wk_p = tbt_score_topics(win(6, 0)), tbt_score_topics(win(13, 7))
+    s_m0, s_m1, s_m2 = tbt_score_topics(win(29, 0)), tbt_score_topics(win(59, 30)), tbt_score_topics(win(89, 60))
+
+    monday = ref_date - timedelta(days=ref_date.weekday())
+    keys = {"Daily TBT": ref_date.isoformat(), "Weekly TBT": monday.isoformat(),
+            "Mass TBT": monday.isoformat(), "Monthly Campaign": ref_date.strftime("%Y-%m")}
+    ptxt = {"Daily TBT": f"last 3 days ({(ref_date - 2 * day).isoformat()} to {ref_date.isoformat()})",
+            "Weekly TBT": f"last 7 days ({(ref_date - 6 * day).isoformat()} to {ref_date.isoformat()})",
+            "Mass TBT": f"last 7 days ({(ref_date - 6 * day).isoformat()} to {ref_date.isoformat()})",
+            "Monthly Campaign": f"last 30 days ({(ref_date - 29 * day).isoformat()} to {ref_date.isoformat()})"}
+    prev_txt = {"Daily TBT": "the 3 days before", "Weekly TBT": "the previous 7 days",
+                "Mass TBT": "the previous 7 days", "Monthly Campaign": "the previous 30 days"}
+
+    decided = {}
+    for rt in TBT_REC_TYPES:
+        try:
+            rows = database.fetchall("SELECT topic FROM tbt_decisions WHERE period_type=? AND period_key=?", (rt, keys[rt]))
+            decided[rt] = {safe(r["topic"]).casefold() for r in rows}
+        except Exception:
+            decided[rt] = set()
+    recent = {}
+    try:
+        cutoff = (ref_date - timedelta(days=int(repeat_days))).isoformat()
+        for r in database.fetchall("SELECT topic FROM tbt_register WHERE status IN ('Accepted','Planned','Delivered','Closed') "
+                                   "AND date(tbt_date)>=date(?)", (cutoff,)):
+            recent[safe(r["topic"]).casefold()] = True
+    except Exception:
+        pass
+    active_campaign = set()
+    try:
+        for r in database.fetchall("SELECT topic FROM tbt_campaigns WHERE status IN ('Planned','Active')"):
+            active_campaign.add(safe(r["topic"]).casefold())
+    except Exception:
+        pass
+
+    def pick(rtype, ranking, prev_scored, allow_repeat_rule=True):
+        for title, d in ranking:
+            low = title.casefold()
+            if low in decided[rtype]:
+                continue
+            if rtype == "Monthly Campaign" and low in active_campaign:
+                continue
+            if allow_repeat_rule and low in recent:
+                prev = prev_scored.get(title, {}).get("score", 0)
+                if prev > 0 and d["score"] > prev * 1.2:
+                    return title, f"Repeat allowed: this topic was used in the last {repeat_days} days, but the trend is still rising."
+                continue
+            return title, ""
+        return None, ""
+
+    def empty(rtype, reason, scored, prev_scored):
+        return {"type": rtype, "period_key": keys[rtype], "period_text": ptxt[rtype], "prev_text": prev_txt[rtype],
+                "topic": None, "empty_reason": reason, "alternatives": [(t, dd["score"]) for t, dd in tbt_rank(scored)[:15]],
+                "scored": scored, "prev_scored": prev_scored, "ref": ref_date.isoformat(), "trigger": "", "note": ""}
+
+    out = []
+    # Daily
+    t, note = pick("Daily TBT", tbt_rank(s_day), s_day_p)
+    out.append(tbt_make_rec("Daily TBT", keys["Daily TBT"], ptxt["Daily TBT"], prev_txt["Daily TBT"], t, s_day, s_day_p,
+                            "Highest risk score in the last 3 days.", note, ref_date.isoformat())
+               if t else empty("Daily TBT", "No matching records in the last 3 days. Choose a topic manually if needed.", s_day, s_day_p))
+    # Weekly
+    t, note = pick("Weekly TBT", tbt_rank(s_wk), s_wk_p)
+    out.append(tbt_make_rec("Weekly TBT", keys["Weekly TBT"], ptxt["Weekly TBT"], prev_txt["Weekly TBT"], t, s_wk, s_wk_p,
+                            "Highest risk score in the last 7 days.", note, ref_date.isoformat())
+               if t else empty("Weekly TBT", "No matching records in the last 7 days.", s_wk, s_wk_p))
+    # Mass TBT (only when there is a trigger)
+    mass_rank = [(tt, dd) for tt, dd in tbt_rank(s_wk) if dd["incident"] >= 1 or dd["high"] >= 3]
+    t, note = pick("Mass TBT", mass_rank, s_wk_p, allow_repeat_rule=False)
+    if t:
+        d = s_wk[t]
+        out.append(tbt_make_rec("Mass TBT", keys["Mass TBT"], ptxt["Mass TBT"], prev_txt["Mass TBT"], t, s_wk, s_wk_p,
+                                f"{d['incident']} incident(s) and {d['high']} high-risk record(s) in 7 days. "
+                                "Gather all contractors for one site-wide talk.", "", ref_date.isoformat()))
+    else:
+        out.append(empty("Mass TBT", "No Mass TBT trigger now (needs an incident or 3+ high-risk records on one topic in 7 days).",
+                         s_wk, s_wk_p))
+    # Campaign: rising for two periods in a row
+    rising = [(tt, dd) for tt, dd in tbt_rank(s_m0)
+              if dd["score"] >= 6 and dd["score"] > s_m1.get(tt, {}).get("score", 0) > s_m2.get(tt, {}).get("score", 0)]
+    t, note = pick("Monthly Campaign", rising, s_m1, allow_repeat_rule=False)
+    if t:
+        trig = (f"Score rose 3 periods in a row ({s_m2.get(t, {}).get('score', 0)} -> {s_m1.get(t, {}).get('score', 0)} "
+                f"-> {s_m0[t]['score']}).")
+    else:
+        t, note = pick("Monthly Campaign", tbt_rank(s_m0), s_m1, allow_repeat_rule=False)
+        trig = "No 2-month rising trend found. Highest current-risk theme shown as an OPTIONAL campaign." if t else ""
+    out.append(tbt_make_rec("Monthly Campaign", keys["Monthly Campaign"], ptxt["Monthly Campaign"],
+                            prev_txt["Monthly Campaign"], t, s_m0, s_m1, trig, note, ref_date.isoformat())
+               if t else empty("Monthly Campaign", "No matching records in the last 30 days.", s_m0, s_m1))
+
+    # Apply topic changes chosen by the user
+    final = []
+    for rec in out:
+        ov = overrides.get(rec["type"])
+        if ov:
+            rec = tbt_make_rec(rec["type"], rec["period_key"], rec["period_text"], rec["prev_text"], ov,
+                               rec["scored"], rec["prev_scored"], "Topic changed by the user.", "", rec["ref"])
+        final.append(rec)
+    return final
+
+
+def tbt_decision_add(database, rtype, key, topic, decision, reason, actor):
+    database.execute("INSERT INTO tbt_decisions(period_type,period_key,topic,decision,reason,decided_by,decided_at) "
+                     "VALUES(?,?,?,?,?,?,?)", (rtype, key, topic, decision, reason, actor, _now()))
+
+
+def tbt_accept_recommendation(database, rec, project, contractor, actor, topic_changed=False):
+    """Creates the register row (or the campaign) and records the decision. Returns (kind, id)."""
+    now = _now()
+    just = "\n".join(rec["lines"])
+    source = "Trend-suggested (topic changed)" if topic_changed else "Trend-suggested"
+    trend_ref = f"{rec['type']} | {rec['period_key']}"
+    top_loc = ""
+    if rec["detail"]["loc"]:
+        top_loc = sorted(rec["detail"]["loc"].items(), key=lambda x: (-x[1], x[0]))[0][0]
+    if rec["type"] == "Monthly Campaign":
+        ref = date.fromisoformat(rec["ref"])
+        number = next_number("CMP", "tbt_campaigns")
+        base = rec["campaign_baseline"]
+        cur = database.execute(
+            "INSERT INTO tbt_campaigns(number,title,topic,start_date,end_date,status,project,target_area,contractor,owner,"
+            "objectives,activities,kpi_target,source,trend_ref,justification,created_by,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (number, f"{rec['topic']} Campaign", rec["topic"], ref.isoformat(), (ref + timedelta(days=27)).isoformat(),
+             "Planned", project, _tbt_top(rec["detail"]["loc"], 3), contractor, actor,
+             f"Reduce repeat {rec['topic']} observations, findings and incidents on site.",
+             "Week 1: Mass TBT kick-off | Week 2: Focused area inspections | Week 3: Posters and supervisor briefings | "
+             "Week 4: Review results with contractors",
+             f"Reduce matching records by 25% against the 30 days before the campaign (baseline at acceptance: {base}).",
+             source, trend_ref, just, actor, now, now))
+        tbt_decision_add(database, rec["type"], rec["period_key"], rec["topic"], "Accepted", "", actor)
+        return "campaign", cur.lastrowid
+    number = next_number("TBT", "tbt_register")
+    entry_type = rec["type"]
+    points = "\n".join(f"- {p}" for p in rec["points"])
+    cur = database.execute(
+        "INSERT INTO tbt_register(number,entry_type,tbt_date,tbt_time,topic,source,trend_ref,project,location,contractor,"
+        "status,justification,key_points,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (number, entry_type, rec["ref"], now_time(), rec["topic"], source, trend_ref, project, top_loc, contractor,
+         "Accepted", just, points, actor, now, now))
+    tbt_decision_add(database, rec["type"], rec["period_key"], rec["topic"], "Accepted", "", actor)
+    return "register", cur.lastrowid
+
+
+def _tbt_count_matches(records, kws, a, b):
+    a_s, b_s = a.isoformat(), b.isoformat()
+    return sum(1 for r in records if r["source"] in ("observation", "incident", "audit")
+               and a_s <= (r.get("date") or "") <= b_s and any(k in r["text"] for k in kws))
+
+
+def tbt_effect_between(database, topic, start_before, split_date, end_after, project=""):
+    """Counts matching records before and after a date. Returns a plain dict."""
+    today_ = date.today()
+    if split_date >= today_:
+        return {"before": 0, "after": 0, "text": "Not measurable yet: the date has not passed."}
+    after_end = min(end_after, today_)
+    recs = tbt_fetch_records(database, start_before, after_end, project, "", include_training=False)
+    kws = _tbt_topic_keywords(topic)
+    nb = _tbt_count_matches(recs, kws, start_before, split_date - timedelta(days=1))
+    na = _tbt_count_matches(recs, kws, split_date + timedelta(days=1), after_end)
+    total_days = (end_after - split_date).days
+    done_days = (after_end - split_date).days
+    status = "final" if after_end >= end_after else f"still running - {done_days} of {total_days} days"
+    if nb == 0 and na == 0:
+        change = "no matching records before or after"
+    elif nb == 0:
+        change = f"{na} new record(s) after (none before)"
+    else:
+        change = f"change {((na - nb) / nb * 100):+.0f}%"
+    return {"before": nb, "after": na, "text": f"Before: {nb} | After: {na} | {change} ({status})"}
+
+
+def tbt_effectiveness(database, topic, tbt_date_iso, project=""):
+    try:
+        d0 = date.fromisoformat(safe(tbt_date_iso)[:10])
+    except Exception:
+        return {"before": 0, "after": 0, "text": "No valid talk date."}
+    return tbt_effect_between(database, topic, d0 - timedelta(days=30), d0, d0 + timedelta(days=30), project)
+
+
+def tbt_campaign_result(database, topic, start_iso, end_iso, project=""):
+    try:
+        s = date.fromisoformat(safe(start_iso)[:10]); e = date.fromisoformat(safe(end_iso)[:10])
+    except Exception:
+        return {"before": 0, "after": 0, "text": "Set valid start and end dates."}
+    return tbt_effect_between(database, topic, s - timedelta(days=30), s, e, project)
+
+
+# ------------------------------------------------------------
+# Screen
+# ------------------------------------------------------------
+
+class TBTCampaignModule(QWidget):
+    """Recommendations, plan, TBT register and campaign register in one workspace."""
+
+    def __init__(self, parent_window, database):
+        super().__init__(parent_window)
+        self.host = parent_window
+        self.db = database
+        self.current_tbt_id = None
+        self.current_cmp_id = None
+        self._overrides = {}
+        self._loading = False
+        self._skip_first_show = True
+        tbt_ensure_schema(self.db)
+        self._build_ui()
+        self.refresh_all()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._skip_first_show:
+            self._skip_first_show = False
+            return
+        try:
+            self.refresh_all()
+        except Exception:
+            logging.exception("TBT module refresh on show failed")
+
+    # ---------- small helpers ----------
+    def _actor(self):
+        return _s(self.db.setting("current_user", "") or self.db.setting("username", "") or "Application User")
+
+    def _projects(self):
+        try:
+            return [safe(r["project"]) for r in self.db.fetchall("SELECT project FROM projects WHERE COALESCE(active,1)=1 ORDER BY project") if safe(r["project"])]
+        except Exception:
+            return []
+
+    def _companies(self):
+        try:
+            return [safe(r["name"]) for r in self.db.fetchall("SELECT name FROM companies ORDER BY name") if safe(r["name"])]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _qdate_iso(widget):
+        return widget.date().toString("yyyy-MM-dd")
+
+    @staticmethod
+    def _set_qdate(widget, iso):
+        d = QDate.fromString(safe(iso)[:10], "yyyy-MM-dd")
+        widget.setDate(d if d.isValid() else QDate.currentDate())
+
+    @staticmethod
+    def _set_combo(combo, text):
+        idx = combo.findText(safe(text))
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        elif combo.isEditable():
+            combo.setCurrentText(safe(text))
+        else:
+            combo.setCurrentIndex(0)
+
+    def _make_table(self, headers):
+        t = QTableWidget(0, len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        t.setAlternatingRowColors(True)
+        t.verticalHeader().setVisible(False)
+        t.horizontalHeader().setStretchLastSection(True)
+        return t
+
+    def _fill_table(self, table, rows, status_col=None):
+        table.setRowCount(0)
+        today_s = date.today().isoformat()
+        for row in rows:
+            r = table.rowCount()
+            table.insertRow(r)
+            for c, val in enumerate(row[1:]):
+                item = QTableWidgetItem(safe(val))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row[0])
+                table.setItem(r, c, item)
+            if status_col is not None:
+                st = safe(row[1 + status_col])
+                it = table.item(r, status_col)
+                if st in ("Delivered", "Closed", "Completed"):
+                    it.setForeground(QColor("#2E7D32"))
+                elif st in ("Rejected", "Cancelled"):
+                    it.setForeground(QColor("#B71C1C"))
+        table.resizeColumnsToContents()
+
+    @staticmethod
+    def _row_id(table):
+        sel = table.selectedItems()
+        if not sel:
+            return None
+        item = table.item(sel[0].row(), 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
+
+    def _select_row_by_id(self, table, rec_id):
+        for r in range(table.rowCount()):
+            it = table.item(r, 0)
+            if it is not None and it.data(Qt.ItemDataRole.UserRole) == rec_id:
+                table.selectRow(r)
+                return True
+        return False
+
+    # ---------- build ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        note = QLabel("Topics are suggested from observations, audit findings, PTW, incidents and training gaps. "
+                      "The supervisor must confirm the topic suits the job before delivery. Suggestions never change other modules.")
+        note.setWordWrap(True)
+        note.setStyleSheet("padding:8px;background:#FFF4D6;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
+        root.addWidget(note)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self.rec_tab = QWidget(); self.plan_tab = QWidget(); self.register_tab = QWidget(); self.campaign_tab = QWidget()
+        self.tabs.addTab(self.rec_tab, "1. Recommendations")
+        self.tabs.addTab(self.plan_tab, "2. Plan")
+        self.tabs.addTab(self.register_tab, "3. TBT Register")
+        self.tabs.addTab(self.campaign_tab, "4. Campaign Register")
+        self._build_recommendations()
+        self._build_plan()
+        self._build_register()
+        self._build_campaigns()
+
+    # ===== Tab 1: Recommendations =====
+    def _build_recommendations(self):
+        lay = QVBoxLayout(self.rec_tab)
+        bar = QHBoxLayout()
+        self.rec_date = QDateEdit(QDate.currentDate()); self.rec_date.setCalendarPopup(True); self.rec_date.setDisplayFormat("yyyy-MM-dd")
+        self.rec_project = QComboBox(); self.rec_project.addItem("All Projects"); self.rec_project.addItems(self._projects())
+        self.rec_company = QComboBox(); self.rec_company.addItem("All Contractors"); self.rec_company.addItems(self._companies())
+        self.rec_repeat = QSpinBox(); self.rec_repeat.setRange(0, 120)
+        try:
+            self.rec_repeat.setValue(int(self.db.setting("tbt_repeat_days", "14") or 14))
+        except Exception:
+            self.rec_repeat.setValue(14)
+        btn = QPushButton("Refresh Recommendations")
+        btn.clicked.connect(lambda: self.refresh_recommendations(reset_overrides=True))
+        for w in (QLabel("Reference date"), self.rec_date, QLabel("Project"), self.rec_project,
+                  QLabel("Contractor"), self.rec_company, QLabel("No-repeat days"), self.rec_repeat):
+            bar.addWidget(w)
+        bar.addWidget(btn); bar.addStretch()
+        lay.addLayout(bar)
+        split = QSplitter(Qt.Orientation.Vertical)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        body = QWidget(); self.cards_layout = QVBoxLayout(body)
+        scroll.setWidget(body)
+        split.addWidget(scroll)
+        hist_box = QGroupBox("Recent decisions (accepted and rejected suggestions)")
+        hl = QVBoxLayout(hist_box)
+        self.decision_table = self._make_table(["When", "Type", "Period", "Topic", "Decision", "Reason", "By"])
+        hl.addWidget(self.decision_table)
+        split.addWidget(hist_box)
+        split.setStretchFactor(0, 4); split.setStretchFactor(1, 1)
+        lay.addWidget(split, 1)
+
+    def _clear_cards(self):
+        while self.cards_layout.count():
+            item = self.cards_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _filters(self):
+        proj = "" if self.rec_project.currentText() == "All Projects" else self.rec_project.currentText()
+        comp = "" if self.rec_company.currentText() == "All Contractors" else self.rec_company.currentText()
+        return proj, comp
+
+    def refresh_recommendations(self, reset_overrides=False):
+        if reset_overrides:
+            self._overrides = {}
+        try:
+            ref = date.fromisoformat(self._qdate_iso(self.rec_date))
+            proj, comp = self._filters()
+            repeat = self.rec_repeat.value()
+            self.db.set_setting("tbt_repeat_days", str(repeat))
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                self._recs = tbt_build_recommendations(self.db, ref, proj, comp, repeat, self._overrides)
+            finally:
+                QApplication.restoreOverrideCursor()
+        except Exception as exc:
+            logging.exception("TBT recommendations failed")
+            QMessageBox.critical(self, "Recommendations Failed", f"Could not build recommendations.\n\n{exc}")
+            return
+        self._clear_cards()
+        for rec in self._recs:
+            self.cards_layout.addWidget(self._make_card(rec))
+        self.cards_layout.addStretch()
+        self._refresh_decisions()
+
+    def _html_list(self, lines):
+        return "<br>".join(_tbt_esc(x) if not x.startswith("  - ") else "&nbsp;&nbsp;&bull; " + _tbt_esc(x[4:]) for x in lines)
+
+    def _make_card(self, rec):
+        box = QGroupBox(f"{rec['type']}  -  {rec['period_text']}")
+        lay = QVBoxLayout(box)
+        if not rec.get("topic"):
+            lbl = QLabel("<b>No topic suggested</b><br>" + _tbt_esc(rec.get("empty_reason", "")))
+            lbl.setWordWrap(True); lbl.setTextFormat(Qt.TextFormat.RichText)
+            lay.addWidget(lbl)
+            row = QHBoxLayout()
+            b1 = QPushButton("Choose Topic Manually"); b1.clicked.connect(lambda _=False, r=rec: self._change_topic(r))
+            row.addWidget(b1); row.addStretch(); lay.addLayout(row)
+            return box
+        color = TBT_RISK_COLORS.get(rec["risk"], "#555")
+        head = QLabel(f'<span style="font-size:15px;color:#17365D;"><b>{_tbt_esc(rec["topic"])}</b></span> &nbsp; '
+                      f'<span style="background:{color};color:white;"> &nbsp;{rec["risk"].upper()}&nbsp; </span>')
+        head.setTextFormat(Qt.TextFormat.RichText); head.setWordWrap(True)
+        lay.addWidget(head)
+        if rec.get("trigger"):
+            trg = QLabel(_tbt_esc(rec["trigger"])); trg.setWordWrap(True); trg.setStyleSheet("color:#555;")
+            lay.addWidget(trg)
+        tabs = QTabWidget()
+        for title, lines in (("Why this topic", rec["lines"]),
+                             ("Talking points", ["- " + p for p in rec["points"]]),
+                             ("Linked management actions", ["- " + a for a in rec["actions"]] or ["No linked action template for this topic."])):
+            page = QLabel(self._html_list(lines)); page.setTextFormat(Qt.TextFormat.RichText)
+            page.setWordWrap(True); page.setMargin(8)
+            page.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            tabs.addTab(page, title)
+        lay.addWidget(tabs)
+        row = QHBoxLayout()
+        accept_text = "Accept and Create Campaign" if rec["type"] == "Monthly Campaign" else "Accept and Open TBT Register"
+        b_acc = QPushButton(accept_text)
+        b_acc.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:6px 12px;")
+        b_acc.clicked.connect(lambda _=False, r=rec: self._accept(r))
+        b_chg = QPushButton("Change Topic"); b_chg.clicked.connect(lambda _=False, r=rec: self._change_topic(r))
+        b_rej = QPushButton("Reject"); b_rej.clicked.connect(lambda _=False, r=rec: self._reject(r))
+        for b in (b_acc, b_chg, b_rej):
+            row.addWidget(b)
+        row.addStretch()
+        lay.addLayout(row)
+        return box
+
+    def _refresh_decisions(self):
+        rows = self.db.fetchall("SELECT id,decided_at,period_type,period_key,topic,decision,reason,decided_by FROM tbt_decisions ORDER BY id DESC LIMIT 40")
+        self._fill_table(self.decision_table, [[r["id"], r["decided_at"], r["period_type"], r["period_key"], r["topic"],
+                                                 r["decision"], r["reason"], r["decided_by"]] for r in rows])
+
+    def _accept(self, rec):
+        try:
+            proj, comp = self._filters()
+            kind, new_id = tbt_accept_recommendation(self.db, rec, proj, comp, self._actor(),
+                                                     topic_changed=rec["type"] in self._overrides)
+        except Exception as exc:
+            logging.exception("TBT accept failed")
+            QMessageBox.critical(self, "Accept Failed", f"Could not save.\n\n{exc}")
+            return
+        self._overrides.pop(rec["type"], None)
+        self.refresh_all()
+        if kind == "campaign":
+            self.tabs.setCurrentWidget(self.campaign_tab)
+            self.refresh_campaigns(select_id=new_id)
+        else:
+            self.tabs.setCurrentWidget(self.register_tab)
+            self.refresh_register(select_id=new_id)
+
+    def _reject(self, rec):
+        reason, ok = QInputDialog.getText(self, "Reject Suggestion", f"Why reject '{rec['topic']}'? (saved in decision history)")
+        if not ok:
+            return
+        tbt_decision_add(self.db, rec["type"], rec["period_key"], rec["topic"], "Rejected", reason.strip(), self._actor())
+        self._overrides.pop(rec["type"], None)
+        self.refresh_recommendations()
+
+    def _change_topic(self, rec):
+        dlg = QDialog(self); dlg.setWindowTitle("Change Topic"); dlg.resize(580, 520)
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Ranked topics for this period (highest risk first):"))
+        lst = QListWidget()
+        for title, score in rec.get("alternatives", []):
+            it = QListWidgetItem(f"{title}   (score {score})"); it.setData(Qt.ItemDataRole.UserRole, title); lst.addItem(it)
+        lay.addWidget(lst, 1)
+        lay.addWidget(QLabel("Or choose / type any topic (a typed topic is used instead of the list):"))
+        combo = QComboBox(); combo.setEditable(True); combo.addItem("")
+        combo.addItems([t for t, _k in HSE_TBT_TOPIC_LIBRARY])
+        lay.addWidget(combo)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        topic = combo.currentText().strip()
+        if not topic and lst.currentItem() is not None:
+            topic = lst.currentItem().data(Qt.ItemDataRole.UserRole)
+        if not topic:
+            return
+        self._overrides[rec["type"]] = topic
+        self.refresh_recommendations()
+
+    # ===== Tab 2: Plan =====
+    def _build_plan(self):
+        lay = QVBoxLayout(self.plan_tab)
+        box = QGroupBox("Open talks (Accepted or Planned) - overdue ones are marked")
+        bl = QVBoxLayout(box)
+        self.plan_table = self._make_table(["TBT No.", "Date", "Type", "Topic", "Project", "Location", "Status", "Due"])
+        bl.addWidget(self.plan_table)
+        row = QHBoxLayout()
+        for text, fn in (("Open in Register", self._plan_open), ("Mark Planned", lambda: self._plan_status("Planned")),
+                         ("Mark Delivered", lambda: self._plan_status("Delivered"))):
+            b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
+        row.addStretch(); bl.addLayout(row)
+        lay.addWidget(box, 1)
+        box2 = QGroupBox("Campaigns (Planned or Active)")
+        b2 = QVBoxLayout(box2)
+        self.plan_cmp_table = self._make_table(["Campaign No.", "Title", "Start", "End", "Status", "Linked talks"])
+        b2.addWidget(self.plan_cmp_table)
+        b = QPushButton("Open in Campaign Register"); b.clicked.connect(self._plan_open_campaign)
+        rr = QHBoxLayout(); rr.addWidget(b); rr.addStretch(); b2.addLayout(rr)
+        lay.addWidget(box2, 1)
+
+    def refresh_plan(self):
+        today_s = date.today().isoformat()
+        rows = self.db.fetchall("SELECT id,number,tbt_date,entry_type,topic,project,location,status FROM tbt_register "
+                                "WHERE status IN ('Accepted','Planned') ORDER BY tbt_date, id")
+        data = []
+        for r in rows:
+            due = "OVERDUE" if safe(r["tbt_date"])[:10] < today_s else "Today" if safe(r["tbt_date"])[:10] == today_s else "Upcoming"
+            data.append([r["id"], r["number"], r["tbt_date"], r["entry_type"], r["topic"], r["project"], r["location"], r["status"], due])
+        self._fill_table(self.plan_table, data)
+        for rr in range(self.plan_table.rowCount()):
+            if self.plan_table.item(rr, 7).text() == "OVERDUE":
+                self.plan_table.item(rr, 7).setForeground(QColor("#B71C1C"))
+        crows = self.db.fetchall("SELECT c.id,c.number,c.title,c.start_date,c.end_date,c.status,"
+                                 "(SELECT COUNT(*) FROM tbt_register t WHERE t.campaign_id=c.id) AS n FROM tbt_campaigns c "
+                                 "WHERE c.status IN ('Planned','Active') ORDER BY c.start_date")
+        self._fill_table(self.plan_cmp_table, [[r["id"], r["number"], r["title"], r["start_date"], r["end_date"], r["status"], r["n"]] for r in crows])
+
+    def _plan_open(self):
+        tid = self._row_id(self.plan_table)
+        if not tid:
+            return QMessageBox.information(self, "Select Talk", "Select a row first.")
+        self.tabs.setCurrentWidget(self.register_tab)
+        self.refresh_register(select_id=tid)
+
+    def _plan_status(self, status):
+        tid = self._row_id(self.plan_table)
+        if not tid:
+            return QMessageBox.information(self, "Select Talk", "Select a row first.")
+        self.db.execute("UPDATE tbt_register SET status=?,updated_at=? WHERE id=?", (status, _now(), tid))
+        self.refresh_plan(); self.refresh_register()
+
+    def _plan_open_campaign(self):
+        cid = self._row_id(self.plan_cmp_table)
+        if not cid:
+            return QMessageBox.information(self, "Select Campaign", "Select a row first.")
+        self.tabs.setCurrentWidget(self.campaign_tab)
+        self.refresh_campaigns(select_id=cid)
+
+    # ===== Tab 3: TBT Register =====
+    def _build_register(self):
+        lay = QVBoxLayout(self.register_tab)
+        split = QSplitter(Qt.Orientation.Vertical)
+        lay.addWidget(split, 1)
+
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        form_host = QWidget(); grid = QGridLayout(form_host)
+        self.f = {}
+        f = self.f
+        f["number"] = QLineEdit(); f["number"].setReadOnly(True); f["number"].setPlaceholderText("(new)")
+        f["date"] = QDateEdit(QDate.currentDate()); f["date"].setCalendarPopup(True); f["date"].setDisplayFormat("yyyy-MM-dd")
+        f["time"] = QLineEdit(); f["time"].setPlaceholderText("HH:MM")
+        f["type"] = QComboBox(); f["type"].addItems(TBT_ENTRY_TYPES)
+        f["topic"] = QComboBox(); f["topic"].setEditable(True); f["topic"].addItems([t for t, _k in HSE_TBT_TOPIC_LIBRARY]); f["topic"].setCurrentText("")
+        f["source"] = QLineEdit(); f["source"].setReadOnly(True)
+        f["trend"] = QLineEdit(); f["trend"].setReadOnly(True)
+        f["project"] = QComboBox(); f["project"].setEditable(True); f["project"].addItem(""); f["project"].addItems(self._projects())
+        f["location"] = QLineEdit()
+        f["contractor"] = QComboBox(); f["contractor"].setEditable(True); f["contractor"].addItem(""); f["contractor"].addItems(self._companies())
+        f["by"] = QLineEdit(); f["desig"] = QLineEdit()
+        f["lang"] = QComboBox(); f["lang"].setEditable(True); f["lang"].addItems(TBT_LANGUAGES)
+        f["count"] = QSpinBox(); f["count"].setRange(0, 100000)
+        f["dur"] = QSpinBox(); f["dur"].setRange(0, 600); f["dur"].setSuffix(" min")
+        f["materials"] = QLineEdit(); f["materials"].setPlaceholderText("Poster, video, demonstration, handout...")
+        f["status"] = QComboBox(); f["status"].addItems(TBT_STATUSES)
+        f["campaign"] = QComboBox()
+        f["capa"] = QLineEdit(); f["training"] = QLineEdit()
+        f["key_points"] = QTextEdit(); f["key_points"].setMaximumHeight(80)
+        f["feedback"] = QTextEdit(); f["feedback"].setMaximumHeight(70)
+        f["notes"] = QTextEdit(); f["notes"].setMaximumHeight(55)
+        self.reg_why = QTextEdit(); self.reg_why.setReadOnly(True); self.reg_why.setMaximumHeight(110)
+        self.reg_effect = QLabel("Effectiveness: save and select a talk to measure."); self.reg_effect.setWordWrap(True)
+        self.reg_effect.setStyleSheet("padding:6px;background:#EAF3FB;border:1px solid #B7C9D6;border-radius:4px;")
+
+        layout_rows = [
+            [("TBT No.", "number"), ("Date", "date"), ("Time", "time"), ("Type", "type")],
+            [("Topic", "topic", 3), ("Status", "status")],
+            [("Source", "source"), ("Trend reference", "trend", 3)],
+            [("Project", "project"), ("Location", "location"), ("Contractor", "contractor"), ("Language", "lang")],
+            [("Conducted by", "by"), ("Designation", "desig"), ("Attendees", "count"), ("Duration", "dur")],
+            [("Materials used", "materials", 3), ("Campaign", "campaign")],
+            [("CAPA link", "capa"), ("Training link", "training")],
+        ]
+        r = 0
+        for rowdef in layout_rows:
+            c = 0
+            for item in rowdef:
+                label, key = item[0], item[1]
+                span = item[2] if len(item) > 2 else 1
+                grid.addWidget(QLabel(label), r * 2, c, 1, span)
+                grid.addWidget(f[key], r * 2 + 1, c, 1, span)
+                c += span
+            r += 1
+        for label, widget in (("Key points covered", f["key_points"]), ("Worker questions and feedback", f["feedback"]),
+                              ("Notes", f["notes"]), ("Why this topic was selected (saved at acceptance)", self.reg_why)):
+            grid.addWidget(QLabel(label), r * 2, 0, 1, 4)
+            grid.addWidget(widget, r * 2 + 1, 0, 1, 4)
+            r += 1
+        grid.addWidget(self.reg_effect, r * 2, 0, 1, 4)
+        btns = QHBoxLayout()
+        for text, fn in (("Save", self._register_save), ("New Manual Entry", self._register_new),
+                         ("Attendance...", self._attendance_dialog), ("Attachments...", self._attachments_dialog),
+                         ("Print Attendance Sheet (PDF)", self._print_attendance), ("Delete", self._register_delete)):
+            b = QPushButton(text); b.clicked.connect(fn); btns.addWidget(b)
+        btns.addStretch()
+        grid.addLayout(btns, r * 2 + 1, 0, 1, 4)
+        scroll.setWidget(form_host)
+        split.addWidget(scroll)
+
+        low = QWidget(); ll = QVBoxLayout(low)
+        fr = QHBoxLayout()
+        self.reg_all_dates = QCheckBox("All dates"); self.reg_all_dates.setChecked(True)
+        self.reg_from = QDateEdit(QDate.currentDate().addDays(-90)); self.reg_from.setCalendarPopup(True); self.reg_from.setDisplayFormat("yyyy-MM-dd")
+        self.reg_to = QDateEdit(QDate.currentDate().addDays(30)); self.reg_to.setCalendarPopup(True); self.reg_to.setDisplayFormat("yyyy-MM-dd")
+        self.reg_type = QComboBox(); self.reg_type.addItem("All Types"); self.reg_type.addItems(TBT_ENTRY_TYPES)
+        self.reg_status = QComboBox(); self.reg_status.addItem("All Statuses"); self.reg_status.addItems(TBT_STATUSES)
+        self.reg_search = QLineEdit(); self.reg_search.setPlaceholderText("Search topic, location, contractor...")
+        for w in (self.reg_all_dates, QLabel("From"), self.reg_from, QLabel("To"), self.reg_to, self.reg_type, self.reg_status):
+            fr.addWidget(w)
+        fr.addWidget(self.reg_search, 1)
+        b = QPushButton("Export Register (Excel)"); b.clicked.connect(self._export_register_excel); fr.addWidget(b)
+        ll.addLayout(fr)
+        self.reg_table = self._make_table(["TBT No.", "Date", "Type", "Topic", "Project", "Location", "Contractor", "Attendees", "Status", "Source"])
+        ll.addWidget(self.reg_table, 1)
+        split.addWidget(low)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
+
+        for w in (self.reg_all_dates, self.reg_type, self.reg_status):
+            sig = w.stateChanged if isinstance(w, QCheckBox) else w.currentIndexChanged
+            sig.connect(lambda *_: self.refresh_register())
+        for w in (self.reg_from, self.reg_to):
+            w.dateChanged.connect(lambda *_: self.refresh_register())
+        self.reg_search.textChanged.connect(lambda *_: self.refresh_register())
+        self.reg_table.itemSelectionChanged.connect(self._on_register_select)
+
+    def _reload_campaign_combo(self):
+        cb = self.f["campaign"]
+        keep = cb.currentData()
+        cb.blockSignals(True)
+        cb.clear(); cb.addItem("(none)", None)
+        for r in self.db.fetchall("SELECT id,number,title FROM tbt_campaigns ORDER BY id DESC"):
+            cb.addItem(f"{r['number']} - {r['title']}", r["id"])
+        idx = cb.findData(keep)
+        cb.setCurrentIndex(idx if idx >= 0 else 0)
+        cb.blockSignals(False)
+
+    def refresh_register(self, select_id=None):
+        self._loading = True
+        try:
+            where, params = [], []
+            if not self.reg_all_dates.isChecked():
+                where.append("date(tbt_date) BETWEEN date(?) AND date(?)")
+                params += [self._qdate_iso(self.reg_from), self._qdate_iso(self.reg_to)]
+            if self.reg_type.currentIndex() > 0:
+                where.append("entry_type=?"); params.append(self.reg_type.currentText())
+            if self.reg_status.currentIndex() > 0:
+                where.append("status=?"); params.append(self.reg_status.currentText())
+            q = self.reg_search.text().strip()
+            if q:
+                where.append("(topic LIKE ? OR location LIKE ? OR contractor LIKE ? OR number LIKE ? OR project LIKE ?)")
+                params += [f"%{q}%"] * 5
+            sql = ("SELECT id,number,tbt_date,entry_type,topic,project,location,contractor,attendee_count,status,source FROM tbt_register"
+                   + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY tbt_date DESC, id DESC")
+            rows = self.db.fetchall(sql, tuple(params))
+            self._fill_table(self.reg_table, [[r["id"], r["number"], r["tbt_date"], r["entry_type"], r["topic"], r["project"],
+                                                r["location"], r["contractor"], r["attendee_count"], r["status"], r["source"]] for r in rows], status_col=8)
+        finally:
+            self._loading = False
+        target = select_id or self.current_tbt_id
+        if target:
+            if not self._select_row_by_id(self.reg_table, target):
+                self._register_load(target)
+        self._reload_campaign_combo()
+
+    def _on_register_select(self):
+        if self._loading:
+            return
+        tid = self._row_id(self.reg_table)
+        if tid:
+            self._register_load(tid)
+
+    def _register_new(self, entry_type="Daily TBT"):
+        self.current_tbt_id = None
+        f = self.f
+        f["number"].clear(); self._set_qdate(f["date"], date.today().isoformat()); f["time"].setText(now_time())
+        self._set_combo(f["type"], entry_type); f["topic"].setCurrentText(""); f["source"].setText("Manual"); f["trend"].clear()
+        f["project"].setCurrentText(""); f["location"].clear(); f["contractor"].setCurrentText("")
+        f["by"].clear(); f["desig"].clear(); f["lang"].setCurrentText("English"); f["count"].setValue(0); f["dur"].setValue(0)
+        f["materials"].clear(); self._set_combo(f["status"], "Planned"); f["campaign"].setCurrentIndex(0)
+        f["capa"].clear(); f["training"].clear(); f["key_points"].clear(); f["feedback"].clear(); f["notes"].clear()
+        self.reg_why.clear(); self.reg_effect.setText("Effectiveness: save and select a talk to measure.")
+        self.reg_table.clearSelection()
+
+    def _register_load(self, tid):
+        r = self.db.fetchone("SELECT * FROM tbt_register WHERE id=?", (tid,))
+        if not r:
+            return
+        self.current_tbt_id = tid
+        f = self.f
+        self._reload_campaign_combo()
+        f["number"].setText(safe(r["number"])); self._set_qdate(f["date"], r["tbt_date"]); f["time"].setText(safe(r["tbt_time"]))
+        self._set_combo(f["type"], r["entry_type"]); f["topic"].setCurrentText(safe(r["topic"]))
+        f["source"].setText(safe(r["source"])); f["trend"].setText(safe(r["trend_ref"]))
+        f["project"].setCurrentText(safe(r["project"])); f["location"].setText(safe(r["location"]))
+        f["contractor"].setCurrentText(safe(r["contractor"])); f["by"].setText(safe(r["conducted_by"]))
+        f["desig"].setText(safe(r["designation"])); f["lang"].setCurrentText(safe(r["language"]) or "English")
+        f["count"].setValue(int(r["attendee_count"] or 0)); f["dur"].setValue(int(r["duration_min"] or 0))
+        f["materials"].setText(safe(r["materials"])); self._set_combo(f["status"], r["status"])
+        idx = f["campaign"].findData(r["campaign_id"]); f["campaign"].setCurrentIndex(idx if idx >= 0 else 0)
+        f["capa"].setText(safe(r["capa_ref"])); f["training"].setText(safe(r["training_ref"]))
+        f["key_points"].setPlainText(safe(r["key_points"])); f["feedback"].setPlainText(safe(r["worker_feedback"]))
+        f["notes"].setPlainText(safe(r["notes"])); self.reg_why.setPlainText(safe(r["justification"]) or "Manual entry - no trend justification.")
+        try:
+            eff = tbt_effectiveness(self.db, r["topic"], r["tbt_date"], safe(r["project"]))
+            self.reg_effect.setText("Effectiveness (30 days before vs after): " + eff["text"])
+        except Exception:
+            logging.exception("TBT effectiveness failed")
+            self.reg_effect.setText("Effectiveness: could not be calculated.")
+
+    def _register_save(self):
+        f = self.f
+        topic = f["topic"].currentText().strip()
+        if not topic:
+            return QMessageBox.warning(self, "Topic Required", "Enter or choose a topic.")
+        status = f["status"].currentText()
+        if status in ("Delivered", "Closed") and f["count"].value() == 0:
+            if QMessageBox.question(self, "No Attendance", "No attendee count is recorded for a delivered talk. Save anyway?",
+                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                    QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+                return
+        cid = f["campaign"].currentData()
+        now = _now()
+        vals = (f["type"].currentText(), self._qdate_iso(f["date"]), f["time"].text().strip(), topic,
+                f["project"].currentText().strip(), f["location"].text().strip(), f["contractor"].currentText().strip(),
+                f["by"].text().strip(), f["desig"].text().strip(), f["lang"].currentText().strip(), f["count"].value(),
+                f["dur"].value(), f["key_points"].toPlainText().strip(), f["feedback"].toPlainText().strip(),
+                f["materials"].text().strip(), status, f["capa"].text().strip(), f["training"].text().strip(), cid,
+                f["notes"].toPlainText().strip(), now)
+        try:
+            if self.current_tbt_id:
+                self.db.execute("UPDATE tbt_register SET entry_type=?,tbt_date=?,tbt_time=?,topic=?,project=?,location=?,contractor=?,"
+                                "conducted_by=?,designation=?,language=?,attendee_count=?,duration_min=?,key_points=?,worker_feedback=?,"
+                                "materials=?,status=?,capa_ref=?,training_ref=?,campaign_id=?,notes=?,updated_at=? WHERE id=?",
+                                vals + (self.current_tbt_id,))
+                tid = self.current_tbt_id
+            else:
+                number = next_number("TBT", "tbt_register")
+                cur = self.db.execute(
+                    "INSERT INTO tbt_register(entry_type,tbt_date,tbt_time,topic,project,location,contractor,conducted_by,designation,"
+                    "language,attendee_count,duration_min,key_points,worker_feedback,materials,status,capa_ref,training_ref,campaign_id,"
+                    "notes,updated_at,number,source,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    vals + (number, "Manual", self._actor(), now))
+                tid = cur.lastrowid
+        except Exception as exc:
+            logging.exception("TBT register save failed")
+            return QMessageBox.critical(self, "Save Failed", f"Could not save.\n\n{exc}")
+        self.refresh_register(select_id=tid); self.refresh_plan(); self.refresh_campaigns()
+
+    def _register_delete(self):
+        if not self.current_tbt_id:
+            return QMessageBox.information(self, "Select Talk", "Select a register row first.")
+        if QMessageBox.question(self, "Delete Talk", "Delete this TBT record with its attendance list and attachment records?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute("DELETE FROM tbt_register WHERE id=?", (self.current_tbt_id,))
+        self.current_tbt_id = None
+        self._register_new()
+        self.refresh_register(); self.refresh_plan(); self.refresh_campaigns()
+
+    def _need_saved_talk(self):
+        if not self.current_tbt_id:
+            QMessageBox.information(self, "Save First", "Save or select a TBT record first.")
+            return False
+        return True
+
+    def _attendance_dialog(self):
+        if not self._need_saved_talk():
+            return
+        tid = self.current_tbt_id
+        dlg = QDialog(self); dlg.setWindowTitle("TBT Attendance"); dlg.resize(560, 600)
+        lay = QVBoxLayout(dlg)
+        search = QLineEdit(); search.setPlaceholderText("Search name, ID or company...")
+        lay.addWidget(search)
+        lst = QListWidget(); lay.addWidget(lst, 1)
+        existing = self.db.fetchall("SELECT employee_db_id,employee_id,name,designation,company FROM tbt_attendance WHERE tbt_id=?", (tid,))
+        ex_ids = {r["employee_db_id"] for r in existing if r["employee_db_id"] is not None}
+        emps = self.db.fetchall("SELECT id,employee_id,name,designation,company FROM employees WHERE COALESCE(active,1)=1 ORDER BY name")
+
+        def add_item(text, data, checked):
+            it = QListWidgetItem(text); it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+            it.setData(Qt.ItemDataRole.UserRole, data); lst.addItem(it)
+
+        for e in emps:
+            add_item(f"{safe(e['name'])}  |  {safe(e['employee_id'])}  |  {safe(e['company'])}  |  {safe(e['designation'])}",
+                     {"db_id": e["id"], "emp_id": safe(e["employee_id"]), "name": safe(e["name"]),
+                      "desig": safe(e["designation"]), "company": safe(e["company"])}, e["id"] in ex_ids)
+        for r in existing:
+            if r["employee_db_id"] is None:
+                add_item(f"{safe(r['name'])}  |  (manual entry)", {"db_id": None, "emp_id": safe(r["employee_id"]),
+                         "name": safe(r["name"]), "desig": safe(r["designation"]), "company": safe(r["company"])}, True)
+
+        def apply_filter(text):
+            t = text.strip().lower()
+            for i in range(lst.count()):
+                lst.item(i).setHidden(bool(t) and t not in lst.item(i).text().lower())
+        search.textChanged.connect(apply_filter)
+
+        def add_manual():
+            name, ok = QInputDialog.getText(dlg, "Add Manual Name", "Name (not in Master Data):")
+            if ok and name.strip():
+                add_item(f"{name.strip()}  |  (manual entry)", {"db_id": None, "emp_id": "", "name": name.strip(), "desig": "", "company": ""}, True)
+        b_manual = QPushButton("Add Name Not in Master Data"); b_manual.clicked.connect(add_manual)
+        lay.addWidget(b_manual)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        chosen = [lst.item(i).data(Qt.ItemDataRole.UserRole) for i in range(lst.count()) if lst.item(i).checkState() == Qt.CheckState.Checked]
+        self.db.execute("DELETE FROM tbt_attendance WHERE tbt_id=?", (tid,))
+        for c in chosen:
+            self.db.execute("INSERT INTO tbt_attendance(tbt_id,employee_db_id,employee_id,name,designation,company) VALUES(?,?,?,?,?,?)",
+                            (tid, c["db_id"], c["emp_id"], c["name"], c["desig"], c["company"]))
+        if len(chosen) > self.f["count"].value():
+            self.f["count"].setValue(len(chosen))
+            self._register_save()
+        else:
+            QMessageBox.information(self, "Attendance Saved", f"{len(chosen)} name(s) saved. The attendee count stays at {self.f['count'].value()} (use this for large Mass TBT groups).")
+
+    def _attachments_dialog(self):
+        if not self._need_saved_talk():
+            return
+        tid = self.current_tbt_id
+        number = self.f["number"].text()
+        dlg = QDialog(self); dlg.setWindowTitle("TBT Attachments"); dlg.resize(620, 420)
+        lay = QVBoxLayout(dlg)
+        lst = QListWidget(); lay.addWidget(lst, 1)
+
+        def reload():
+            lst.clear()
+            for r in self.db.fetchall("SELECT id,file_path,attachment_type FROM tbt_attachments WHERE tbt_id=? ORDER BY id", (tid,)):
+                it = QListWidgetItem(f"{Path(safe(r['file_path'])).name}   [{safe(r['attachment_type'])}]")
+                it.setData(Qt.ItemDataRole.UserRole, (r["id"], safe(r["file_path"]))); lst.addItem(it)
+
+        def add_files():
+            paths, _ = QFileDialog.getOpenFileNames(dlg, "Attach photos, attendance sheets or documents")
+            if not paths:
+                return
+            dest_dir = ATTACH_DIR / "tbt"; dest_dir.mkdir(parents=True, exist_ok=True)
+            for p in paths:
+                src = Path(p); dest = dest_dir / f"{number}_{_stamp()}_{src.name}"
+                try:
+                    shutil.copy2(src, dest)
+                    self.db.execute("INSERT INTO tbt_attachments(tbt_id,file_path,added_at) VALUES(?,?,?)", (tid, str(dest), _now()))
+                except Exception as exc:
+                    logging.exception("TBT attach failed")
+                    QMessageBox.warning(dlg, "Attach Failed", f"{src.name}\n{exc}")
+            reload()
+
+        def open_file():
+            it = lst.currentItem()
+            if it is None:
+                return
+            path = it.data(Qt.ItemDataRole.UserRole)[1]
+            if not Path(path).is_file():
+                return QMessageBox.warning(dlg, "File Missing", "The stored file cannot be found.")
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+        def remove():
+            it = lst.currentItem()
+            if it is None:
+                return
+            self.db.execute("DELETE FROM tbt_attachments WHERE id=?", (it.data(Qt.ItemDataRole.UserRole)[0],))
+            reload()
+
+        row = QHBoxLayout()
+        for text, fn in (("Add Files...", add_files), ("Open Selected", open_file), ("Remove Record", remove), ("Close", dlg.accept)):
+            b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
+        lay.addLayout(row)
+        reload()
+        dlg.exec()
+
+    def _print_attendance(self):
+        if not self._need_saved_talk():
+            return
+        r = self.db.fetchone("SELECT * FROM tbt_register WHERE id=?", (self.current_tbt_id,))
+        att = self.db.fetchall("SELECT employee_id,name,designation,company FROM tbt_attendance WHERE tbt_id=? ORDER BY id", (self.current_tbt_id,))
+        path, _ = QFileDialog.getSaveFileName(self, "Save Attendance Sheet", f"{r['number']}_attendance.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            ss = getSampleStyleSheet(); body = ss["BodyText"]
+            P = lambda t: Paragraph(_tbt_esc(safe(t)), body)
+            doc = SimpleDocTemplate(path, pagesize=A4, leftMargin=28, rightMargin=28, topMargin=28, bottomMargin=28)
+            story = [Paragraph("TOOLBOX TALK ATTENDANCE SHEET", ss["Title"])]
+            info = [[P("TBT No."), P(r["number"]), P("Date / Time"), P(f"{safe(r['tbt_date'])} {safe(r['tbt_time'])}")],
+                    [P("Type"), P(r["entry_type"]), P("Language"), P(r["language"])],
+                    [P("Topic"), P(r["topic"]), "", ""],
+                    [P("Project"), P(r["project"]), P("Location"), P(r["location"])],
+                    [P("Contractor"), P(r["contractor"]), P("Conducted by"), P(f"{safe(r['conducted_by'])} {safe(r['designation'])}")]]
+            t = Table(info, colWidths=[70, 200, 80, 185])
+            t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("SPAN", (1, 2), (3, 2)),
+                                   ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#D9EAF7")),
+                                   ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#D9EAF7")), ("VALIGN", (0, 0), (-1, -1), "TOP")]))
+            story += [t, Spacer(1, 8)]
+            if safe(r["key_points"]).strip():
+                story += [Paragraph("<b>Key points</b>", body), Paragraph(_tbt_esc(safe(r["key_points"])).replace("\n", "<br/>"), body), Spacer(1, 8)]
+            rows = [["S.No", "Name", "Employee ID", "Company / Designation", "Signature"]]
+            total = max(25, len(att) + 3)
+            for i in range(total):
+                if i < len(att):
+                    a = att[i]
+                    rows.append([str(i + 1), P(a["name"]), P(a["employee_id"]), P(f"{safe(a['company'])} {safe(a['designation'])}".strip()), ""])
+                else:
+                    rows.append([str(i + 1), "", "", "", ""])
+            at = Table(rows, colWidths=[32, 150, 75, 120, 158], repeatRows=1, rowHeights=[18] + [22] * total)
+            at.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+                                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+            story.append(at)
+            footer = safe(self.db.setting("report_footer", ""))
+            if footer:
+                story += [Spacer(1, 8), Paragraph(_tbt_esc(footer), ss["Italic"])]
+            doc.build(story)
+            QMessageBox.information(self, "Attendance Sheet Saved", path)
+        except Exception as exc:
+            logging.exception("TBT attendance PDF failed")
+            QMessageBox.critical(self, "PDF Failed", f"Could not create the PDF.\n\n{exc}")
+
+    def _export_table_excel(self, title, sheet_name, headers, rows, default_name):
+        path, _ = QFileDialog.getSaveFileName(self, f"Export {title}", default_name, "Excel Workbook (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            from openpyxl.utils import get_column_letter
+            wb = Workbook(); ws = wb.active; ws.title = sheet_name
+            ws.append([title.upper()]); ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
+            ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
+            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center"); ws.row_dimensions[1].height = 28
+            ws.append(headers)
+            for row in rows:
+                ws.append([xml_safe(v) for v in row])
+            thin = Side(style="thin", color="B7C9D6")
+            for cell in ws[2]:
+                cell.font = Font(bold=True, color="17365D"); cell.fill = PatternFill("solid", fgColor="D9EAF7")
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True); cell.border = Border(bottom=thin)
+            for row in ws.iter_rows(min_row=3):
+                for cell in row:
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+            ws.freeze_panes = "A3"
+            ws.auto_filter.ref = f"A2:{ws.cell(ws.max_row, ws.max_column).coordinate}"
+            for col in ws.columns:
+                longest = max((len(str(c.value or "")) for c in col[1:]), default=10)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(longest + 2, 12), 40)
+            wb.save(path)
+            QMessageBox.information(self, "Excel Exported", path)
+        except Exception as exc:
+            logging.exception("TBT Excel export failed")
+            QMessageBox.critical(self, "Excel Export Failed", f"Could not create the Excel file.\n\n{exc}")
+
+    def _export_register_excel(self):
+        rows = self.db.fetchall("SELECT t.*,c.number AS cmp_no FROM tbt_register t LEFT JOIN tbt_campaigns c ON c.id=t.campaign_id ORDER BY t.tbt_date,t.id")
+        headers = ["TBT No.", "Date", "Time", "Type", "Topic", "Source", "Trend Reference", "Project", "Location", "Contractor",
+                   "Conducted By", "Designation", "Language", "Attendees", "Duration (min)", "Key Points", "Worker Feedback",
+                   "Materials", "Status", "CAPA Link", "Training Link", "Campaign", "Effectiveness (30 days before/after)"]
+        data = []
+        for r in rows:
+            try:
+                eff = tbt_effectiveness(self.db, r["topic"], r["tbt_date"], safe(r["project"]))["text"]
+            except Exception:
+                eff = ""
+            data.append([r["number"], r["tbt_date"], r["tbt_time"], r["entry_type"], r["topic"], r["source"], r["trend_ref"], r["project"],
+                         r["location"], r["contractor"], r["conducted_by"], r["designation"], r["language"], r["attendee_count"],
+                         r["duration_min"], r["key_points"], r["worker_feedback"], r["materials"], r["status"], r["capa_ref"],
+                         r["training_ref"], r["cmp_no"], eff])
+        self._export_table_excel("TBT Register", "TBT Register", headers, data, "tbt_register.xlsx")
+
+    # ===== Tab 4: Campaign Register =====
+    def _build_campaigns(self):
+        lay = QVBoxLayout(self.campaign_tab)
+        split = QSplitter(Qt.Orientation.Vertical)
+        lay.addWidget(split, 1)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        host = QWidget(); grid = QGridLayout(host)
+        self.c = {}
+        c = self.c
+        c["number"] = QLineEdit(); c["number"].setReadOnly(True); c["number"].setPlaceholderText("(new)")
+        c["title"] = QLineEdit()
+        c["topic"] = QComboBox(); c["topic"].setEditable(True); c["topic"].addItems([t for t, _k in HSE_TBT_TOPIC_LIBRARY]); c["topic"].setCurrentText("")
+        c["start"] = QDateEdit(QDate.currentDate()); c["end"] = QDateEdit(QDate.currentDate().addDays(27))
+        for w in (c["start"], c["end"]):
+            w.setCalendarPopup(True); w.setDisplayFormat("yyyy-MM-dd")
+        c["status"] = QComboBox(); c["status"].addItems(TBT_CAMPAIGN_STATUSES)
+        c["project"] = QComboBox(); c["project"].setEditable(True); c["project"].addItem(""); c["project"].addItems(self._projects())
+        c["area"] = QLineEdit()
+        c["contractor"] = QComboBox(); c["contractor"].setEditable(True); c["contractor"].addItem(""); c["contractor"].addItems(self._companies())
+        c["owner"] = QLineEdit(); c["kpi"] = QLineEdit()
+        c["source"] = QLineEdit(); c["source"].setReadOnly(True)
+        c["objectives"] = QTextEdit(); c["objectives"].setMaximumHeight(60)
+        c["activities"] = QTextEdit(); c["activities"].setMaximumHeight(70)
+        c["result"] = QTextEdit(); c["result"].setMaximumHeight(60)
+        self.cmp_why = QTextEdit(); self.cmp_why.setReadOnly(True); self.cmp_why.setMaximumHeight(100)
+        self.cmp_effect = QLabel("Result: save and select a campaign to measure."); self.cmp_effect.setWordWrap(True)
+        self.cmp_effect.setStyleSheet("padding:6px;background:#EAF3FB;border:1px solid #B7C9D6;border-radius:4px;")
+        rows_def = [[("Campaign No.", "number"), ("Title", "title", 2), ("Status", "status")],
+                    [("Topic", "topic", 2), ("Start", "start"), ("End", "end")],
+                    [("Project", "project"), ("Target area", "area"), ("Contractor", "contractor"), ("Owner", "owner")],
+                    [("KPI target", "kpi", 3), ("Source", "source")]]
+        r = 0
+        for rowdef in rows_def:
+            col = 0
+            for item in rowdef:
+                span = item[2] if len(item) > 2 else 1
+                grid.addWidget(QLabel(item[0]), r * 2, col, 1, span)
+                grid.addWidget(c[item[1]], r * 2 + 1, col, 1, span)
+                col += span
+            r += 1
+        for label, widget in (("Objectives", c["objectives"]), ("Activities plan", c["activities"]), ("Result summary", c["result"]),
+                              ("Why this campaign was selected (saved at acceptance)", self.cmp_why)):
+            grid.addWidget(QLabel(label), r * 2, 0, 1, 4); grid.addWidget(widget, r * 2 + 1, 0, 1, 4); r += 1
+        grid.addWidget(self.cmp_effect, r * 2, 0, 1, 4)
+        btns = QHBoxLayout()
+        for text, fn in (("Save", self._campaign_save), ("New Campaign", self._campaign_new),
+                         ("Add Campaign TBT", self._campaign_add_tbt), ("Recalculate Result", self._campaign_recalc),
+                         ("Delete", self._campaign_delete)):
+            b = QPushButton(text); b.clicked.connect(fn); btns.addWidget(b)
+        btns.addStretch()
+        grid.addLayout(btns, r * 2 + 1, 0, 1, 4)
+        scroll.setWidget(host)
+        split.addWidget(scroll)
+        low = QWidget(); ll = QVBoxLayout(low)
+        b = QPushButton("Export Campaigns (Excel)"); b.clicked.connect(self._export_campaigns_excel)
+        rr = QHBoxLayout(); rr.addStretch(); rr.addWidget(b); ll.addLayout(rr)
+        self.cmp_table = self._make_table(["Campaign No.", "Title", "Topic", "Start", "End", "Status", "Project", "Owner", "Linked talks"])
+        ll.addWidget(self.cmp_table, 1)
+        split.addWidget(low)
+        split.setStretchFactor(0, 3); split.setStretchFactor(1, 2)
+        self.cmp_table.itemSelectionChanged.connect(self._on_campaign_select)
+
+    def refresh_campaigns(self, select_id=None):
+        self._loading = True
+        try:
+            rows = self.db.fetchall("SELECT c.id,c.number,c.title,c.topic,c.start_date,c.end_date,c.status,c.project,c.owner,"
+                                    "(SELECT COUNT(*) FROM tbt_register t WHERE t.campaign_id=c.id) AS n FROM tbt_campaigns c ORDER BY c.id DESC")
+            self._fill_table(self.cmp_table, [[r["id"], r["number"], r["title"], r["topic"], r["start_date"], r["end_date"],
+                                                r["status"], r["project"], r["owner"], r["n"]] for r in rows], status_col=5)
+        finally:
+            self._loading = False
+        target = select_id or self.current_cmp_id
+        if target:
+            if not self._select_row_by_id(self.cmp_table, target):
+                self._campaign_load(target)
+
+    def _on_campaign_select(self):
+        if self._loading:
+            return
+        cid = self._row_id(self.cmp_table)
+        if cid:
+            self._campaign_load(cid)
+
+    def _campaign_new(self):
+        self.current_cmp_id = None
+        c = self.c
+        c["number"].clear(); c["title"].clear(); c["topic"].setCurrentText("")
+        self._set_qdate(c["start"], date.today().isoformat()); self._set_qdate(c["end"], (date.today() + timedelta(days=27)).isoformat())
+        self._set_combo(c["status"], "Planned"); c["project"].setCurrentText(""); c["area"].clear(); c["contractor"].setCurrentText("")
+        c["owner"].clear(); c["kpi"].clear(); c["source"].setText("Manual")
+        c["objectives"].clear(); c["activities"].clear(); c["result"].clear(); self.cmp_why.clear()
+        self.cmp_effect.setText("Result: save and select a campaign to measure."); self.cmp_table.clearSelection()
+
+    def _campaign_load(self, cid):
+        r = self.db.fetchone("SELECT * FROM tbt_campaigns WHERE id=?", (cid,))
+        if not r:
+            return
+        self.current_cmp_id = cid
+        c = self.c
+        c["number"].setText(safe(r["number"])); c["title"].setText(safe(r["title"])); c["topic"].setCurrentText(safe(r["topic"]))
+        self._set_qdate(c["start"], r["start_date"]); self._set_qdate(c["end"], r["end_date"]); self._set_combo(c["status"], r["status"])
+        c["project"].setCurrentText(safe(r["project"])); c["area"].setText(safe(r["target_area"])); c["contractor"].setCurrentText(safe(r["contractor"]))
+        c["owner"].setText(safe(r["owner"])); c["kpi"].setText(safe(r["kpi_target"])); c["source"].setText(safe(r["source"]))
+        c["objectives"].setPlainText(safe(r["objectives"])); c["activities"].setPlainText(safe(r["activities"]))
+        c["result"].setPlainText(safe(r["result_summary"])); self.cmp_why.setPlainText(safe(r["justification"]) or "Manual campaign - no trend justification.")
+        self._campaign_recalc()
+
+    def _campaign_recalc(self):
+        topic = self.c["topic"].currentText().strip()
+        if not topic:
+            return
+        try:
+            res = tbt_campaign_result(self.db, topic, self._qdate_iso(self.c["start"]), self._qdate_iso(self.c["end"]),
+                                      self.c["project"].currentText().strip())
+            n = 0
+            if self.current_cmp_id:
+                n = self.db.fetchone("SELECT COUNT(*) AS n FROM tbt_register WHERE campaign_id=? AND status IN ('Delivered','Closed')",
+                                     (self.current_cmp_id,))["n"]
+            self.cmp_effect.setText(f"Result (30 days before start vs campaign period): {res['text']}   |   Delivered linked talks: {n}")
+        except Exception:
+            logging.exception("TBT campaign result failed")
+            self.cmp_effect.setText("Result: could not be calculated.")
+
+    def _campaign_save(self):
+        c = self.c
+        title = c["title"].text().strip(); topic = c["topic"].currentText().strip()
+        if not title:
+            title = f"{topic} Campaign" if topic else ""
+        if not title:
+            return QMessageBox.warning(self, "Title Required", "Enter a campaign title or topic.")
+        if self._qdate_iso(c["end"]) < self._qdate_iso(c["start"]):
+            return QMessageBox.warning(self, "Dates", "The end date is before the start date.")
+        now = _now()
+        vals = (title, topic, self._qdate_iso(c["start"]), self._qdate_iso(c["end"]), c["status"].currentText(),
+                c["project"].currentText().strip(), c["area"].text().strip(), c["contractor"].currentText().strip(),
+                c["owner"].text().strip(), c["objectives"].toPlainText().strip(), c["activities"].toPlainText().strip(),
+                c["kpi"].text().strip(), c["result"].toPlainText().strip(), now)
+        try:
+            if self.current_cmp_id:
+                self.db.execute("UPDATE tbt_campaigns SET title=?,topic=?,start_date=?,end_date=?,status=?,project=?,target_area=?,"
+                                "contractor=?,owner=?,objectives=?,activities=?,kpi_target=?,result_summary=?,updated_at=? WHERE id=?",
+                                vals + (self.current_cmp_id,))
+                cid = self.current_cmp_id
+            else:
+                number = next_number("CMP", "tbt_campaigns")
+                cur = self.db.execute(
+                    "INSERT INTO tbt_campaigns(title,topic,start_date,end_date,status,project,target_area,contractor,owner,objectives,"
+                    "activities,kpi_target,result_summary,updated_at,number,source,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    vals + (number, "Manual", self._actor(), now))
+                cid = cur.lastrowid
+        except Exception as exc:
+            logging.exception("TBT campaign save failed")
+            return QMessageBox.critical(self, "Save Failed", f"Could not save.\n\n{exc}")
+        self.refresh_campaigns(select_id=cid); self.refresh_plan(); self._reload_campaign_combo()
+
+    def _campaign_delete(self):
+        if not self.current_cmp_id:
+            return QMessageBox.information(self, "Select Campaign", "Select a campaign row first.")
+        if QMessageBox.question(self, "Delete Campaign", "Delete this campaign? Linked TBT records are kept but unlinked.",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute("UPDATE tbt_register SET campaign_id=NULL WHERE campaign_id=?", (self.current_cmp_id,))
+        self.db.execute("DELETE FROM tbt_campaigns WHERE id=?", (self.current_cmp_id,))
+        self.current_cmp_id = None
+        self._campaign_new(); self.refresh_campaigns(); self.refresh_plan(); self.refresh_register()
+
+    def _campaign_add_tbt(self):
+        if not self.current_cmp_id:
+            return QMessageBox.information(self, "Save First", "Save or select a campaign first.")
+        r = self.db.fetchone("SELECT * FROM tbt_campaigns WHERE id=?", (self.current_cmp_id,))
+        number = next_number("TBT", "tbt_register"); now = _now()
+        cur = self.db.execute(
+            "INSERT INTO tbt_register(number,entry_type,tbt_date,tbt_time,topic,source,trend_ref,project,location,contractor,status,"
+            "justification,campaign_id,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (number, "Campaign Activity", date.today().isoformat(), now_time(), safe(r["topic"]) or safe(r["title"]),
+             "Campaign", f"Campaign | {r['number']}", safe(r["project"]), safe(r["target_area"]), safe(r["contractor"]),
+             "Planned", safe(r["justification"]), self.current_cmp_id, self._actor(), now, now))
+        self.tabs.setCurrentWidget(self.register_tab)
+        self.refresh_register(select_id=cur.lastrowid); self.refresh_plan(); self.refresh_campaigns()
+
+    def _export_campaigns_excel(self):
+        rows = self.db.fetchall("SELECT c.*,(SELECT COUNT(*) FROM tbt_register t WHERE t.campaign_id=c.id) AS n FROM tbt_campaigns c ORDER BY c.id")
+        headers = ["Campaign No.", "Title", "Topic", "Start", "End", "Status", "Project", "Target Area", "Contractor", "Owner",
+                   "Objectives", "Activities", "KPI Target", "Result Summary", "Source", "Linked Talks"]
+        data = [[r["number"], r["title"], r["topic"], r["start_date"], r["end_date"], r["status"], r["project"], r["target_area"],
+                 r["contractor"], r["owner"], r["objectives"], r["activities"], r["kpi_target"], r["result_summary"], r["source"], r["n"]]
+                for r in rows]
+        self._export_table_excel("Campaign Register", "Campaigns", headers, data, "tbt_campaigns.xlsx")
+
+    # ---------- refresh everything ----------
+    def refresh_all(self):
+        self.refresh_recommendations()
+        self.refresh_plan()
+        self.refresh_register()
+        self.refresh_campaigns()
 
 
 # ============================================================
