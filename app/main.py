@@ -11,6 +11,7 @@ import calendar
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from collections import defaultdict
 
 from PySide6.QtCore import Qt, QRectF, QDate, QDateTime, QUrl
 from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel, QTextDocument, QDesktopServices
@@ -3370,9 +3371,762 @@ def aud_export_notification_word(audit_id, path):
     save_docx_validated(document, path)
 
 
+
+# Curated communication library: 100 topics with searchable risk keywords.
+HSE_TBT_TOPIC_LIBRARY = [
+    ('Working at Height – Fall Prevention and Rescue', ['work at height', 'height', 'fall', 'harness', 'anchor', 'scaffold', 'ladder', 'mewp']),
+    ('Scaffold Safety – Inspection, Tagging and Loading', ['scaffold', 'tag', 'toe board', 'guardrail', 'platform', 'access', 'loading']),
+    ('Ladder Safety and Three-Point Contact', ['ladder', 'step ladder', 'portable ladder', 'three point']),
+    ('Dropped Objects Prevention', ['dropped object', 'falling object', 'tool tether', 'overhead', 'exclusion zone']),
+    ('MEWP and Mobile Elevating Work Platform Safety', ['mewp', 'manlift', 'boom lift', 'scissor lift', 'elevated platform']),
+    ('Roof Work and Fragile Surface Protection', ['roof', 'fragile surface', 'roofing', 'roof work', 'fragile']),
+    ('Open Edges, Floor Openings and Covers', ['edge protection', 'floor opening', 'opening', 'cover', 'hole', 'unguarded edge']),
+    ('Fall Arrest Equipment Inspection and Care', ['harness', 'lanyard', 'lifeline', 'fall arrest', 'shock absorber']),
+    ('Safe Access and Egress at Work Areas', ['access', 'egress', 'walkway', 'stairway', 'safe route']),
+    ('Rescue Planning for Work at Height', ['rescue plan', 'height rescue', 'suspension trauma', 'work at height']),
+    ('Excavation and Trenching – Collapse Prevention', ['excavation', 'trench', 'collapse', 'shoring', 'trenching']),
+    ('Underground Utility Detection and Protection', ['underground', 'utility', 'cable', 'pipeline', 'service drawing', 'locator']),
+    ('Excavation Permit and Daily Inspection', ['excavation permit', 'permit to excavate', 'daily inspection', 'competent person']),
+    ('Safe Shoring, Sloping and Benching', ['shoring', 'sloping', 'benching', 'trench box', 'support system']),
+    ('Safe Access and Egress in Excavations', ['excavation access', 'trench ladder', 'egress', 'excavation']),
+    ('Spoil Piles, Plant and Vehicle Setback', ['spoil', 'excavator', 'edge distance', 'plant near excavation', 'vehicle near trench']),
+    ('Water Ingress and Excavation Dewatering', ['dewatering', 'water ingress', 'flooding', 'water in excavation', 'sump']),
+    ('Barricading and Excavation Warning Systems', ['barricade', 'barricading', 'excavation warning', 'open excavation']),
+    ('Hand Digging and Trial Pits Near Services', ['hand digging', 'trial pit', 'vacuum excavation', 'service crossing']),
+    ('Excavation Emergency and Rescue Response', ['excavation rescue', 'trench rescue', 'buried', 'engulfment']),
+    ('Safe Lifting Operations and Lift Planning', ['lifting', 'lift plan', 'crane', 'load chart', 'lifting operation']),
+    ('Rigging Gear Inspection and Rejection', ['rigging', 'sling', 'shackle', 'hook', 'lifting gear', 'webbing sling']),
+    ('Crane Stability, Ground Bearing and Outriggers', ['outrigger', 'ground bearing', 'crane stability', 'mats', 'crane setup']),
+    ('Suspended Loads and Exclusion Zones', ['suspended load', 'exclusion zone', 'under load', 'lifting zone']),
+    ('Rigger and Banksman Communication', ['rigger', 'banksman', 'signalman', 'hand signal', 'radio communication']),
+    ('Lifting Near Overhead Power Lines', ['overhead power line', 'powerline', 'crane clearance', 'electrical line']),
+    ('Forklift Safety and Load Handling', ['forklift', 'fork lift', 'pallet', 'forks', 'forklift load']),
+    ('Vehicle Reversing and Spotter Safety', ['reversing', 'reverse', 'spotter', 'blind spot', 'banksman']),
+    ('Man Basket and Personnel Lifting Safety', ['man basket', 'personnel basket', 'personnel lifting', 'work basket']),
+    ('Wind, Weather and Lifting Limits', ['wind speed', 'wind', 'weather', 'gust', 'lifting limit']),
+    ('Confined Space Entry – Roles and Controls', ['confined space', 'vessel entry', 'tank entry', 'manhole']),
+    ('Atmospheric Testing and Gas Monitor Use', ['gas test', 'gas monitor', 'lel', 'oxygen', 'h2s', 'co', 'atmosphere']),
+    ('Confined Space Ventilation and Lighting', ['ventilation', 'forced air', 'confined space lighting', 'lighting']),
+    ('Confined Space Standby Person and Communication', ['standby man', 'attendant', 'entrant', 'confined space communication']),
+    ('Confined Space Rescue and Emergency Drill', ['confined space rescue', 'rescue tripod', 'retrieval', 'rescue drill']),
+    ('Isolation and LOTO Before Entry', ['loto', 'lockout', 'tagout', 'isolation', 'zero energy']),
+    ('Heat Stress Inside Enclosed Work Areas', ['heat stress', 'temperature', 'humidity', 'heat index', 'confined space']),
+    ('Safe Entry Permit and Entry Register', ['entry permit', 'entry log', 'confined space permit', 'entry register']),
+    ('Continuous Gas Monitoring and Re-testing', ['continuous monitoring', 'gas retest', 'personal monitor', 'bump test']),
+    ('Confined Space Hazard Recognition', ['oxygen deficiency', 'toxic gas', 'flammable atmosphere', 'engulfment']),
+    ('Permit to Work – Roles and Responsibilities', ['permit to work', 'ptw', 'permit holder', 'permit issuer', 'performing authority']),
+    ('Permit Validity, Extension and Handover', ['permit expiry', 'permit extension', 'handover', 'shift handover', 'renewal']),
+    ('Job Safety Analysis and Risk Assessment', ['jsa', 'jha', 'risk assessment', 'method statement', 'task risk']),
+    ('SIMOPS and Interface Coordination', ['simops', 'simultaneous operations', 'interface', 'work conflict']),
+    ('Lockout Tagout and Energy Isolation', ['loto', 'lockout', 'tagout', 'isolation', 'stored energy']),
+    ('Gas Testing Requirements for High-Risk Work', ['gas test', 'gas testing', 'gas tester', 'flammable gas', 'lel']),
+    ('Permit Attachments and Supporting Certificates', ['supporting certificate', 'permit attachment', 'certificate', 'checklist']),
+    ('Permit Suspension and Stop Work Authority', ['permit suspension', 'stop work', 'suspended permit', 'unsafe condition']),
+    ('Permit Closeout and Worksite Restoration', ['permit closeout', 'permit closure', 'close permit', 'worksite restoration']),
+    ('Permit-to-Work Field Verification', ['field verification', 'permit audit', 'ptw inspection', 'site verification']),
+    ('Hot Work Permit and Fire Watch', ['hot work', 'fire watch', 'welding', 'cutting', 'grinding']),
+    ('Fire Prevention and Fire Extinguisher Use', ['fire prevention', 'extinguisher', 'fire extinguisher', 'fire class']),
+    ('Welding Safety and Fume Control', ['welding', 'welding fume', 'welder', 'weld fume']),
+    ('Gas Cylinder Storage and Handling', ['gas cylinder', 'oxygen cylinder', 'acetylene', 'cylinder storage']),
+    ('Flashback Arrestors and Gas Hose Inspection', ['flashback', 'flashback arrestor', 'gas hose', 'regulator']),
+    ('Flammable Liquids and Ignition Control', ['flammable liquid', 'ignition source', 'fuel storage', 'flammable']),
+    ('Fire Alarm, Muster and Evacuation', ['fire alarm', 'muster', 'evacuation', 'assembly point']),
+    ('Emergency Response and Incident Communication', ['emergency response', 'emergency communication', 'emergency plan']),
+    ('Fire Watch Handover and Post-Work Monitoring', ['post work fire watch', 'fire watch handover', 'fire patrol']),
+    ('Fire Doors, Exits and Access to Equipment', ['fire door', 'emergency exit', 'fire equipment access', 'escape route']),
+    ('Electrical Isolation and Safe Work', ['electrical isolation', 'electrical safety', 'live electrical', 'isolate']),
+    ('Temporary Electrical Distribution and RCDs', ['temporary power', 'distribution board', 'rcd', 'earth leakage', 'electrical panel']),
+    ('Portable Electrical Tools and Inspection', ['portable tool', 'power tool', 'electrical tool', 'inspection tag']),
+    ('Cable Routing and Protection', ['cable', 'extension lead', 'cable routing', 'cable protection']),
+    ('Working Near Overhead and Buried Cables', ['buried cable', 'overhead cable', 'electrical cable', 'cable route']),
+    ('Electrical Earthing and Bonding', ['earthing', 'grounding', 'bonding', 'earth connection']),
+    ('Battery Charging and Electrical Fire Risk', ['battery charging', 'battery', 'charging station', 'battery fire']),
+    ('Arc Flash Awareness and Electrical PPE', ['arc flash', 'electrical ppe', 'switchgear', 'arc rated']),
+    ('Electrical Equipment Defect Reporting', ['electrical defect', 'damaged plug', 'damaged cable', 'electric shock']),
+    ('Safe Use of Generators and Transformers', ['generator', 'transformer', 'temporary generator', 'distribution transformer']),
+    ('Chemical Handling and Safety Data Sheets', ['chemical', 'sds', 'safety data sheet', 'hazardous substance']),
+    ('Chemical Labelling and Container Compatibility', ['labelling', 'label', 'chemical container', 'incompatible chemical']),
+    ('Spill Prevention and Spill Response', ['spill', 'spill kit', 'leak', 'containment', 'chemical release']),
+    ('Chemical Storage and Segregation', ['chemical storage', 'segregation', 'flammable store', 'incompatible']),
+    ('Respiratory Protection and Mask Selection', ['respirator', 'respiratory', 'mask', 'cartridge', 'dust mask']),
+    ('Manual Handling of Chemical Containers', ['chemical drum', 'chemical handling', 'drum handling', 'container handling']),
+    ('Hazardous Waste Segregation and Disposal', ['hazardous waste', 'waste segregation', 'disposal', 'waste container']),
+    ('Noise Exposure and Hearing Conservation', ['noise', 'hearing protection', 'ear plug', 'ear muff', 'decibel']),
+    ('Dust Exposure and Respiratory Health', ['dust', 'silica', 'respiratory', 'dust suppression', 'cement dust']),
+    ('PPE Selection, Inspection and Correct Use', ['ppe', 'personal protective equipment', 'gloves', 'safety glasses', 'helmet']),
+    ('Hand Safety and Line-of-Fire Awareness', ['hand injury', 'pinch point', 'line of fire', 'hand safety', 'finger']),
+    ('Safe Use of Hand and Power Tools', ['hand tool', 'power tool', 'grinder', 'cutting tool', 'tool guard']),
+    ('Housekeeping and Clear Access Routes', ['housekeeping', 'trip hazard', 'obstruction', 'walkway', 'access route']),
+    ('Slips, Trips and Falls Prevention', ['slip', 'trip', 'fall', 'wet floor', 'uneven surface']),
+    ('Safe Material Storage and Stacking', ['material storage', 'stacking', 'stack', 'stored material', 'racking']),
+    ('Manual Handling and Ergonomics', ['manual handling', 'ergonomic', 'lifting by hand', 'back strain']),
+    ('Heat Stress Recognition and Prevention', ['heat stress', 'heat exhaustion', 'heat stroke', 'hydration', 'heat index']),
+    ('Hydration, Work-Rest Regime and Acclimatisation', ['hydration', 'water consumption', 'work rest', 'acclimatisation', 'acclimatization']),
+    ('Fatigue Management and Fitness for Work', ['fatigue', 'sleep', 'fitness for work', 'long shift', 'alertness']),
+    ('Sun Exposure and Outdoor Work Protection', ['sun exposure', 'sunburn', 'uv', 'outdoor work', 'shade']),
+    ('First Aid, Injury Reporting and Early Response', ['first aid', 'injury', 'medical treatment', 'first aider', 'incident reporting']),
+    ('Near-Miss Reporting and Learning', ['near miss', 'near-miss', 'unsafe act', 'unsafe condition', 'lesson learned']),
+    ('Incident Investigation and Root Cause', ['incident investigation', 'root cause', '5 why', 'causal analysis']),
+    ('Stop Work Authority and Safety Intervention', ['stop work authority', 'stop work', 'intervention', 'unsafe work']),
+    ('Safety Observation Quality and Closeout', ['observation', 'corrective action', 'closeout', 'close out', 'safety card']),
+    ('Audit Finding Closure and Corrective Action', ['audit finding', 'nonconformity', 'non-conformity', 'corrective action', 'audit']),
+    ('Training Competency and Certificate Validity', ['training', 'competency', 'certificate expiry', 'expired certificate', 'refresher']),
+    ('Supervisor Safety Leadership and Toolbox Talks', ['supervisor', 'safety leadership', 'toolbox talk', 'tbt', 'briefing']),
+    ('Traffic Management and Pedestrian Segregation', ['traffic management', 'pedestrian', 'vehicle route', 'segregation', 'speed limit']),
+    ('Mobile Plant and Heavy Equipment Safety', ['mobile plant', 'excavator', 'heavy equipment', 'plant equipment', 'operator']),
+]
+
+
 # ============================================================
 # MAIN WINDOW
+# =========================
+
 # ============================================================
+# HSE DECISION-SUPPORT DASHBOARD HELPERS
+# Insert these helpers AFTER the existing helper functions
+# (after parse_capa_actions / sync_observation_from_capa block)
+# and BEFORE class MainWindow.
+# They do not modify any existing module tables or behaviour.
+# ============================================================
+
+from collections import defaultdict
+
+# Suggested action library by observation category / theme.
+# Used only by the Action Dashboard; does not change other modules.
+HSE_ACTION_LIBRARY = {
+    "Slip Trip Fall": {
+        "severity_default": "High",
+        "reactive": [
+            "Close all overdue Slip/Trip observations within 7 days",
+            "Immediate focused walkthrough of top locations with rising counts",
+            "Verify housekeeping, walkways, cables and spill control on active permits",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Slip, Trip & Fall – common causes and controls",
+            "Increase area inspection frequency for next 30 days",
+            "Review lighting, anti-slip surfaces, drainage and access routes",
+            "Short awareness campaign / posters on housekeeping and walkways",
+            "Check related training compliance (workplace hazards / housekeeping)",
+        ],
+        "tbt_topic": "Slip, Trip & Fall – Causes, Controls and Good Housekeeping",
+        "training_hints": ["Housekeeping", "Workplace Hazards", "Slip Trip Fall", "Induction"],
+    },
+    "Work at Height": {
+        "severity_default": "Critical",
+        "reactive": [
+            "Stop and review any open high-priority Work at Height observations",
+            "Verify permits, harnesses, anchor points and edge protection this week",
+            "Confirm rescue plan and competent supervision at height work areas",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Working at Height – hierarchy of controls",
+            "Targeted inspection of scaffolds, MEWPs, ladders and fall-arrest equipment",
+            "Refresh Working at Height / Fall Protection training where due",
+            "Reinforce permit-to-work and exclusion-zone discipline",
+        ],
+        "tbt_topic": "Working at Height – Fall Prevention and Rescue",
+        "training_hints": ["Work at Height", "Fall Protection", "Scaffolding", "PTW", "Permit to Work"],
+    },
+    "Lifting Operations": {
+        "severity_default": "High",
+        "reactive": [
+            "Review open lifting observations and lift plans for active lifts",
+            "Verify certification of cranes, slings and lifting accessories",
+            "Confirm exclusion zones and banksman competence",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Safe Lifting and Rigging",
+            "Increase pre-lift checks and lift-plan compliance audits",
+            "Refresh lifting / rigger / banksman competency where gaps exist",
+        ],
+        "tbt_topic": "Safe Lifting, Rigging and Exclusion Zones",
+        "training_hints": ["Lifting", "Rigging", "Crane", "Banksman"],
+    },
+    "Scaffolding": {
+        "severity_default": "High",
+        "reactive": [
+            "Tag and isolate any scaffold with open high-risk findings",
+            "Competent person inspection of scaffolds in rising locations",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Scaffold tagging, access and loading",
+            "Increase scaffold inspection frequency",
+            "Verify scaffolder competence and design where required",
+        ],
+        "tbt_topic": "Scaffold Safety – Tagging, Access and Inspection",
+        "training_hints": ["Scaffolding", "Work at Height"],
+    },
+    "Excavation": {
+        "severity_default": "High",
+        "reactive": [
+            "Verify excavation permits, shoring/sloping and service location records",
+            "Immediate inspection of open excavations with rising observations",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Excavation and Trenching Safety",
+            "Confirm underground service drawings and competent person checks",
+            "Reinforce barricading and safe access/egress standards",
+        ],
+        "tbt_topic": "Excavation & Trenching – Collapse and Service Hazards",
+        "training_hints": ["Excavation", "PTW", "Permit to Work"],
+    },
+    "Confined Space": {
+        "severity_default": "Critical",
+        "reactive": [
+            "Stop entry if open critical confined-space observations exist",
+            "Verify gas testing, attendant, rescue plan and LOTO before any entry",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Confined Space Entry essentials",
+            "Drill / review rescue arrangements",
+            "Refresh confined-space and gas-testing competency",
+        ],
+        "tbt_topic": "Confined Space Entry – Atmosphere, Attendant and Rescue",
+        "training_hints": ["Confined Space", "Gas Testing", "LOTO", "PTW"],
+    },
+    "Hot Work": {
+        "severity_default": "High",
+        "reactive": [
+            "Verify hot-work permits, gas tests and fire watch on active jobs",
+            "Remove combustibles and confirm extinguishers at work fronts",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Hot Work controls and fire watch duties",
+            "Increase hot-work area inspections",
+            "Check welding equipment condition and flashback arrestors",
+        ],
+        "tbt_topic": "Hot Work – Permit, Gas Test and Fire Watch",
+        "training_hints": ["Hot Work", "Fire Safety", "PTW"],
+    },
+    "Electrical Safety": {
+        "severity_default": "High",
+        "reactive": [
+            "Isolate and quarantine defective electrical equipment flagged in observations",
+            "Verify LOTO and competent electrician controls",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Electrical safety and temporary power",
+            "Inspection of temporary distribution, RCDs and cable management",
+            "Refresh electrical safety / LOTO awareness where needed",
+        ],
+        "tbt_topic": "Electrical Safety – Isolation, RCD and Temporary Supplies",
+        "training_hints": ["Electrical", "LOTO", "Lockout"],
+    },
+    "PPE": {
+        "severity_default": "Medium",
+        "reactive": [
+            "Immediate coaching / stop-work for missing critical PPE",
+            "Replace damaged PPE identified in open observations",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Correct PPE selection and use",
+            "PPE condition and availability audit",
+            "Reinforce supervision and PPE compliance checks",
+        ],
+        "tbt_topic": "Personal Protective Equipment – Selection, Use and Care",
+        "training_hints": ["PPE", "Induction"],
+    },
+    "Housekeeping": {
+        "severity_default": "Medium",
+        "reactive": [
+            "Clear access routes and emergency exits flagged in observations",
+            "Remove waste and trip hazards in top locations this week",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Housekeeping and access-route standards",
+            "Daily/shift housekeeping checks in rising areas",
+            "Waste segregation and material-storage review",
+        ],
+        "tbt_topic": "Housekeeping – Clear Access and Safe Storage",
+        "training_hints": ["Housekeeping", "Workplace Hazards"],
+    },
+    "Fire Safety": {
+        "severity_default": "High",
+        "reactive": [
+            "Restore blocked extinguishers, exits or fire doors immediately",
+            "Verify hot-work and flammable storage controls",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Fire prevention and emergency response",
+            "Fire equipment accessibility inspection",
+            "Refresh fire-warden / emergency response awareness",
+        ],
+        "tbt_topic": "Fire Prevention, Extinguishers and Escape Routes",
+        "training_hints": ["Fire", "Emergency", "Hot Work"],
+    },
+    "Chemical Safety": {
+        "severity_default": "High",
+        "reactive": [
+            "Correct labelling, SDS availability and secondary containment gaps",
+            "Quarantine incompatible or poorly stored chemicals",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Chemical handling and spill response",
+            "Chemical register and SDS accessibility check",
+            "Spill-kit readiness and PPE verification",
+        ],
+        "tbt_topic": "Chemical Safety – SDS, Labelling and Spill Control",
+        "training_hints": ["Chemical", "HazCom", "Spill"],
+    },
+    "Permit to Work": {
+        "severity_default": "High",
+        "reactive": [
+            "Stop work under non-compliant or expired permits",
+            "Close gaps in isolation, gas test and supporting certificates",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT): Permit to Work discipline and holder duties",
+            "PTW compliance spot-checks this week",
+            "Verify PTW training validity for permit holders",
+        ],
+        "tbt_topic": "Permit to Work – Roles, Validity and Supporting Documents",
+        "training_hints": ["PTW", "Permit to Work"],
+    },
+    "Near Miss": {
+        "severity_default": "High",
+        "reactive": [
+            "Investigate recent near misses for root causes this week",
+            "Share immediate lessons with affected crews",
+        ],
+        "proactive": [
+            "Toolbox Talk (TBT) on the top near-miss themes",
+            "Increase reporting recognition and supervisory follow-up",
+            "Convert repeated near-miss themes into focused controls",
+        ],
+        "tbt_topic": "Learning from Near Misses – See It, Report It, Fix It",
+        "training_hints": ["Incident", "Hazard", "Observation"],
+    },
+}
+
+# Map loose category names from data to library keys
+def _action_library_key(category):
+    cat = safe(category).strip()
+    if not cat:
+        return None
+    low = cat.casefold()
+    # Direct match
+    for key in HSE_ACTION_LIBRARY:
+        if key.casefold() == low:
+            return key
+    # Fuzzy contains
+    aliases = {
+        "Slip Trip Fall": ["slip", "trip", "fall", "slipe", "stf"],
+        "Work at Height": ["height", "working at height", "wah", "fall protection"],
+        "Lifting Operations": ["lifting", "crane", "rigging", "hoist"],
+        "Scaffolding": ["scaffold"],
+        "Excavation": ["excavation", "trench"],
+        "Confined Space": ["confined"],
+        "Hot Work": ["hot work", "welding", "cutting"],
+        "Electrical Safety": ["electrical", "electric"],
+        "PPE": ["ppe", "personal protective"],
+        "Housekeeping": ["housekeeping", "house keeping"],
+        "Fire Safety": ["fire"],
+        "Chemical Safety": ["chemical", "hazmat", "hazcom"],
+        "Permit to Work": ["permit to work", "ptw", "permit"],
+        "Near Miss": ["near miss", "nearmiss"],
+    }
+    for key, words in aliases.items():
+        if any(w in low for w in words):
+            return key
+    return None
+
+
+def _month_bounds(ref_date=None):
+    """Return (this_month_start, this_month_end, last_month_start, last_month_end) as ISO dates."""
+    if ref_date is None:
+        ref_date = date.today()
+    this_start = ref_date.replace(day=1)
+    if this_start.month == 12:
+        next_start = this_start.replace(year=this_start.year + 1, month=1)
+    else:
+        next_start = this_start.replace(month=this_start.month + 1)
+    this_end = next_start - timedelta(days=1)
+    last_end = this_start - timedelta(days=1)
+    last_start = last_end.replace(day=1)
+    return (
+        this_start.isoformat(),
+        this_end.isoformat(),
+        last_start.isoformat(),
+        last_end.isoformat(),
+    )
+
+
+def _pct_change(current, previous):
+    try:
+        current = int(current or 0)
+        previous = int(previous or 0)
+    except Exception:
+        return 0.0
+    if previous == 0:
+        return 100.0 if current > 0 else 0.0
+    return round(100.0 * (current - previous) / previous, 1)
+
+
+def _severity_for_category(category, near_miss_count=0, incident_count=0):
+    key = _action_library_key(category)
+    base = "Medium"
+    if key and key in HSE_ACTION_LIBRARY:
+        base = HSE_ACTION_LIBRARY[key].get("severity_default", "Medium")
+    # Escalate when near misses / incidents already exist for the theme
+    if incident_count > 0:
+        if base == "Medium":
+            base = "High"
+        elif base == "High":
+            base = "Critical"
+    elif near_miss_count >= 3 and base == "Medium":
+        base = "High"
+    return base
+
+
+def _risk_level(freq_current, freq_previous, severity):
+    """Simple probability × severity style band."""
+    change = _pct_change(freq_current, freq_previous)
+    rising = freq_current > freq_previous and (change >= 25 or (freq_previous == 0 and freq_current >= 3))
+    high_abs = freq_current >= 8
+    sev = (severity or "Medium").casefold()
+    if sev == "critical" and (rising or high_abs):
+        return "Critical"
+    if sev in ("critical", "high") and (rising or high_abs or freq_current >= 5):
+        return "High"
+    if rising or high_abs:
+        return "High" if sev == "high" else "Medium"
+    if freq_current > 0:
+        return "Medium"
+    return "Low"
+
+
+def dashboard_period_counts():
+    """Core KPI counts for this month vs last month."""
+    t0, t1, l0, l1 = _month_bounds()
+    def cnt(sql, params=()):
+        row = db.fetchone(sql, params)
+        return int(row["c"] if row else 0)
+
+    data = {
+        "this_start": t0, "this_end": t1, "last_start": l0, "last_end": l1,
+        "obs_this": cnt("SELECT COUNT(*) c FROM observations WHERE obs_date>=? AND obs_date<=?", (t0, t1)),
+        "obs_last": cnt("SELECT COUNT(*) c FROM observations WHERE obs_date>=? AND obs_date<=?", (l0, l1)),
+        "open_obs": cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
+        "overdue_obs": cnt(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') "
+            "AND target_date IS NOT NULL AND trim(target_date)<>'' AND target_date < date('now')"
+        ),
+        "high_open": cnt(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') "
+            "AND lower(COALESCE(priority,'')) IN ('high','critical')"
+        ),
+        "nm_this": cnt(
+            "SELECT COUNT(*) c FROM observations WHERE obs_date>=? AND obs_date<=? "
+            "AND (lower(COALESCE(obs_type,'')) LIKE '%near miss%' OR lower(COALESCE(category,'')) LIKE '%near miss%')",
+            (t0, t1),
+        ),
+        "nm_last": cnt(
+            "SELECT COUNT(*) c FROM observations WHERE obs_date>=? AND obs_date<=? "
+            "AND (lower(COALESCE(obs_type,'')) LIKE '%near miss%' OR lower(COALESCE(category,'')) LIKE '%near miss%')",
+            (l0, l1),
+        ),
+        "inc_this": cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date>=? AND incident_date<=?", (t0, t1)),
+        "inc_last": cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date>=? AND incident_date<=?", (l0, l1)),
+        "open_inc": cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')"),
+        "open_capa": cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"),
+        "open_audit_findings": 0,
+    }
+    try:
+        data["open_audit_findings"] = cnt(
+            "SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')"
+        )
+    except Exception:
+        try:
+            data["open_audit_findings"] = cnt(
+                "SELECT COUNT(*) c FROM aud_findings WHERE status NOT IN ('Closed','Cancelled')"
+            )
+        except Exception:
+            data["open_audit_findings"] = 0
+    return data
+
+
+def dashboard_category_trends(limit=15):
+    """
+    Compare observation categories this month vs last month.
+    Returns list of dicts sorted by risk / increase.
+    """
+    t0, t1, l0, l1 = _month_bounds()
+    this_rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(category),''),'Unspecified') AS category, COUNT(*) AS c "
+        "FROM observations WHERE obs_date>=? AND obs_date<=? GROUP BY 1",
+        (t0, t1),
+    )
+    last_rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(category),''),'Unspecified') AS category, COUNT(*) AS c "
+        "FROM observations WHERE obs_date>=? AND obs_date<=? GROUP BY 1",
+        (l0, l1),
+    )
+    this_map = {safe(r["category"]): int(r["c"]) for r in this_rows}
+    last_map = {safe(r["category"]): int(r["c"]) for r in last_rows}
+    all_cats = sorted(set(this_map) | set(last_map), key=lambda x: x.lower())
+
+    # Near miss / incident linkage per category (simple text match on type/category)
+    nm_rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(category),''),'Unspecified') AS category, COUNT(*) AS c "
+        "FROM observations WHERE obs_date>=? AND lower(COALESCE(obs_type,'')) LIKE '%near miss%' "
+        "GROUP BY 1",
+        (l0,),
+    )
+    nm_map = {safe(r["category"]): int(r["c"]) for r in nm_rows}
+    inc_rows = db.fetchall(
+        "SELECT lower(COALESCE(incident_type,'')) AS t, COUNT(*) AS c FROM incidents "
+        "WHERE incident_date>=? GROUP BY 1",
+        (l0,),
+    )
+
+    results = []
+    for cat in all_cats:
+        cur = this_map.get(cat, 0)
+        prev = last_map.get(cat, 0)
+        if cur == 0 and prev == 0:
+            continue
+        change = cur - prev
+        pct = _pct_change(cur, prev)
+        nm = nm_map.get(cat, 0)
+        # rough incident link: category words appearing in incident types
+        inc = 0
+        cl = cat.casefold()
+        for r in inc_rows:
+            if cl and cl in safe(r["t"]):
+                inc += int(r["c"])
+        severity = _severity_for_category(cat, nm, inc)
+        risk = _risk_level(cur, prev, severity)
+        results.append({
+            "category": cat,
+            "this_month": cur,
+            "last_month": prev,
+            "change": change,
+            "pct": pct,
+            "near_misses": nm,
+            "related_incidents": inc,
+            "severity": severity,
+            "risk": risk,
+            "rising": change > 0 and (pct >= 20 or prev == 0),
+        })
+
+    # Sort: Critical/High first, then largest positive change
+    order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    results.sort(key=lambda x: (order.get(x["risk"], 9), -x["change"], -x["this_month"]))
+    return results[:limit]
+
+
+def dashboard_location_trends(limit=10):
+    t0, t1, l0, l1 = _month_bounds()
+    this_rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(location),''),'Unspecified') AS location, COUNT(*) AS c "
+        "FROM observations WHERE obs_date>=? AND obs_date<=? GROUP BY 1",
+        (t0, t1),
+    )
+    last_rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(location),''),'Unspecified') AS location, COUNT(*) AS c "
+        "FROM observations WHERE obs_date>=? AND obs_date<=? GROUP BY 1",
+        (l0, l1),
+    )
+    this_map = {safe(r["location"]): int(r["c"]) for r in this_rows}
+    last_map = {safe(r["location"]): int(r["c"]) for r in last_rows}
+    results = []
+    for loc in set(this_map) | set(last_map):
+        cur = this_map.get(loc, 0)
+        prev = last_map.get(loc, 0)
+        if cur == 0 and prev == 0:
+            continue
+        change = cur - prev
+        pct = _pct_change(cur, prev)
+        results.append({
+            "location": loc,
+            "this_month": cur,
+            "last_month": prev,
+            "change": change,
+            "pct": pct,
+            "rising": change > 0 and (pct >= 25 or prev == 0),
+        })
+    results.sort(key=lambda x: (-x["change"], -x["this_month"]))
+    return results[:limit]
+
+
+def dashboard_type_distribution():
+    rows = db.fetchall(
+        "SELECT COALESCE(NULLIF(trim(obs_type),''),'Unspecified') AS obs_type, COUNT(*) AS c "
+        "FROM observations GROUP BY 1 ORDER BY c DESC"
+    )
+    return {safe(r["obs_type"]): int(r["c"]) for r in rows}
+
+
+def dashboard_build_actions(category_trends=None):
+    """
+    Build prioritised reactive + proactive action cards from trends,
+    open high-priority items, near misses, and open audit/CAPA pressure.
+    """
+    if category_trends is None:
+        category_trends = dashboard_category_trends(20)
+    kpis = dashboard_period_counts()
+    actions = []
+
+    for item in category_trends:
+        if not item["rising"] and item["risk"] not in ("High", "Critical"):
+            # still surface high absolute volume
+            if item["this_month"] < 5:
+                continue
+        key = _action_library_key(item["category"])
+        lib = HSE_ACTION_LIBRARY.get(key, None) if key else None
+        trigger = (
+            f"{item['category']}: {item['last_month']} last month → {item['this_month']} this month "
+            f"({item['change']:+d}, {item['pct']:+.0f}%). "
+            f"Near misses (recent): {item['near_misses']}. Related incidents (recent): {item['related_incidents']}."
+        )
+        if lib:
+            reactive = list(lib["reactive"])
+            proactive = list(lib["proactive"])
+            tbt = lib["tbt_topic"]
+            training = list(lib.get("training_hints", []))
+        else:
+            reactive = [
+                f"Close overdue observations in category '{item['category']}' within 7 days",
+                f"Targeted inspection of locations showing this category this week",
+            ]
+            proactive = [
+                f"Toolbox Talk (TBT) focused on {item['category']}",
+                f"Increase supervision and inspection frequency for {item['category']}",
+                "Share trend with supervisors and request focused hazard awareness",
+            ]
+            tbt = f"Hazard awareness – {item['category']}"
+            training = [item["category"]]
+
+        # Extra pressure from open high/critical in same category
+        open_high = db.fetchone(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') "
+            "AND lower(COALESCE(priority,'')) IN ('high','critical') "
+            "AND COALESCE(NULLIF(trim(category),''),'Unspecified')=?",
+            (item["category"],),
+        )
+        open_high_n = int(open_high["c"] if open_high else 0)
+        if open_high_n:
+            reactive.insert(0, f"Escalate {open_high_n} open High/Critical item(s) in this category")
+
+        actions.append({
+            "title": item["category"],
+            "risk": item["risk"],
+            "severity": item["severity"],
+            "trigger": trigger,
+            "this_month": item["this_month"],
+            "last_month": item["last_month"],
+            "change": item["change"],
+            "pct": item["pct"],
+            "reactive": reactive,
+            "proactive": proactive,
+            "tbt_topic": tbt,
+            "training_hints": training,
+            "priority_score": {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}.get(item["risk"], 5),
+        })
+
+    # Global pressure actions
+    if kpis["overdue_obs"] > 0:
+        actions.append({
+            "title": "Overdue Observation Actions",
+            "risk": "High" if kpis["overdue_obs"] >= 5 else "Medium",
+            "severity": "High",
+            "trigger": f"{kpis['overdue_obs']} observation action(s) are overdue (past target date).",
+            "this_month": kpis["overdue_obs"],
+            "last_month": 0,
+            "change": kpis["overdue_obs"],
+            "pct": 0,
+            "reactive": [
+                "Produce overdue list and assign owners today",
+                "Close or formally extend with justification within 7 days",
+            ],
+            "proactive": [
+                "Weekly overdue review in HSE meeting",
+                "Escalate items older than 14 days to area owners",
+            ],
+            "tbt_topic": "Closing the loop – timely corrective action",
+            "training_hints": [],
+            "priority_score": 1 if kpis["overdue_obs"] >= 5 else 2,
+        })
+
+    if kpis["nm_this"] > kpis["nm_last"] and kpis["nm_this"] >= 3:
+        actions.append({
+            "title": "Rising Near Miss Reporting / Events",
+            "risk": "High",
+            "severity": "High",
+            "trigger": (
+                f"Near miss related observations: {kpis['nm_last']} last month → "
+                f"{kpis['nm_this']} this month."
+            ),
+            "this_month": kpis["nm_this"],
+            "last_month": kpis["nm_last"],
+            "change": kpis["nm_this"] - kpis["nm_last"],
+            "pct": _pct_change(kpis["nm_this"], kpis["nm_last"]),
+            "reactive": [
+                "Review each recent near miss for immediate controls",
+                "Share lessons with crews this week",
+            ],
+            "proactive": [
+                "Toolbox Talk (TBT): Learning from near misses",
+                "Encourage reporting and verify follow-up quality",
+                "Convert repeated near-miss themes into engineering/admin controls",
+            ],
+            "tbt_topic": "Learning from Near Misses",
+            "training_hints": ["Incident", "Hazard Awareness"],
+            "priority_score": 1,
+        })
+
+    if kpis["open_capa"] >= 5:
+        actions.append({
+            "title": "Open CAPA Backlog",
+            "risk": "Medium",
+            "severity": "Medium",
+            "trigger": f"{kpis['open_capa']} CAPA records remain open.",
+            "this_month": kpis["open_capa"],
+            "last_month": 0,
+            "change": 0,
+            "pct": 0,
+            "reactive": [
+                "Prioritise CAPA linked to High/Critical observations and incidents",
+                "Verify evidence quality before closure",
+            ],
+            "proactive": [
+                "CAPA effectiveness sampling this month",
+                "Align CAPA owners and target dates in next HSE meeting",
+            ],
+            "tbt_topic": "",
+            "training_hints": [],
+            "priority_score": 2,
+        })
+
+    actions.sort(key=lambda x: (x["priority_score"], -abs(x.get("change", 0))))
+    return actions
+
+
+def dashboard_kpi_card_data():
+    k = dashboard_period_counts()
+    def trend(cur, prev):
+        ch = cur - prev
+        pct = _pct_change(cur, prev)
+        if ch > 0:
+            arrow, color = "↑", "#B00020"
+        elif ch < 0:
+            arrow, color = "↓", "#1B7A3D"
+        else:
+            arrow, color = "→", "#555555"
+        return f"{arrow} {ch:+d} ({pct:+.0f}%) vs last month", color
+
+    cards = [
+        ("Observations (this month)", str(k["obs_this"]), *trend(k["obs_this"], k["obs_last"])),
+        ("Open Observations", str(k["open_obs"]), "Active workload", "#17365D"),
+        ("Overdue Actions", str(k["overdue_obs"]), "Past target date", "#B00020" if k["overdue_obs"] else "#1B7A3D"),
+        ("High / Critical Open", str(k["high_open"]), "Priority focus", "#B00020" if k["high_open"] else "#1B7A3D"),
+        ("Near Misses (this month)", str(k["nm_this"]), *trend(k["nm_this"], k["nm_last"])),
+        ("Incidents (this month)", str(k["inc_this"]), *trend(k["inc_this"], k["inc_last"])),
+        ("Open Incidents", str(k["open_inc"]), "Investigation load", "#17365D"),
+        ("Open CAPA / Findings", str(k["open_capa"] + k["open_audit_findings"]), "System pressure", "#17365D"),
+    ]
+    return cards, k
+
 
 class MainWindow(QMainWindow):
 
@@ -3555,101 +4309,973 @@ class MainWindow(QMainWindow):
 
     # ========================================================
     # DASHBOARD
-    # ========================================================
-
+    # ======================
 
     def dashboard(self):
-        w,layout=self.page("HSE Dashboard")
-        cards=QHBoxLayout()
-        values=[
-            ("Observations","SELECT COUNT(*) c FROM observations"),
-            ("Open Observations","SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
-            ("Overdue","SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date < date('now')"),
-            ("Incidents","SELECT COUNT(*) c FROM incidents"),
-            ("Audits","SELECT COUNT(*) c FROM audits"),
-            ("CAPA","SELECT COUNT(*) c FROM capa")
-        ]
-        for name,sql in values:
-            value=db.fetchone(sql)["c"]
-            box=QGroupBox(name); bl=QVBoxLayout(box)
-            label=QLabel(str(value)); label.setStyleSheet("font-size:28px;font-weight:bold;color:#17365D;")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            bl.addWidget(label); cards.addWidget(box)
-        layout.addLayout(cards)
-        layout.addWidget(QLabel(f"<b>Company:</b> {company_name()}    <b>Project:</b> {db.setting('project_name','')}"))
-        selector=QComboBox(); selector.addItems(["HSE Home Dashboard","Inspection Dashboard","Incident Dashboard"]); layout.addWidget(selector)
-        def switch_dashboard(text):
-            if text=="Inspection Dashboard": self.observations()
-            elif text=="Incident Dashboard": self.incidents()
-        selector.currentTextChanged.connect(switch_dashboard)
+        """Dynamic analytical dashboard + Action Dashboard (decision support).
+        Replaces only the previous static dashboard. No other modules are modified.
+        """
+        w, layout = self.page("HSE Decision Dashboard")
 
-        charts=QHBoxLayout()
-        pie=PieChartWidget()
-        obs_types=db.fetchall("SELECT obs_type,COUNT(*) c FROM observations GROUP BY obs_type ORDER BY obs_type COLLATE NOCASE")
-        pie.set_values({safe(r["obs_type"]) or "Unspecified":r["c"] for r in obs_types})
-        pie_box=QGroupBox("Observation Type Distribution (no categories merged)"); pl=QVBoxLayout(pie_box); pl.addWidget(pie)
-        bar=BarChartWidget()
-        stats={"Observations":db.fetchone("SELECT COUNT(*) c FROM observations")["c"],
-               "Incidents":db.fetchone("SELECT COUNT(*) c FROM incidents")["c"],
-               "Audits":db.fetchone("SELECT COUNT(*) c FROM audits")["c"],
-               "CAPA":db.fetchone("SELECT COUNT(*) c FROM capa")["c"]}
-        bar.set_values(stats)
-        bar_box=QGroupBox("HSE Register Summary"); bl=QVBoxLayout(bar_box); bl.addWidget(bar)
-        charts.addWidget(pie_box,1); charts.addWidget(bar_box,1); layout.addLayout(charts)
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
 
-        # A clear, complete category register. Every category is a separate row, including zero counts.
-        cat_box=QGroupBox("HSE Observation Categories — click a row to view that category")
-        cat_layout=QVBoxLayout(cat_box)
-        cat_table=QTableWidget()
-        categories=sorted(set(CATEGORIES), key=lambda x: x.lower())
-        counts={safe(r["category"]):int(r["c"]) for r in db.fetchall("SELECT category,COUNT(*) c FROM observations GROUP BY category")}
-        cat_table.setColumnCount(3)
-        cat_table.setHorizontalHeaderLabels(["Category","Observations","Open / Active"])
-        cat_table.setRowCount(len(categories))
-        cat_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
-        cat_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
-        cat_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeToContents)
-        cat_table.setAlternatingRowColors(True)
-        cat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        cat_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        for r,cat in enumerate(categories):
-            total=counts.get(cat,0)
-            active=db.fetchone("SELECT COUNT(*) c FROM observations WHERE category=? AND status NOT IN ('Closed','Cancelled')",(cat,))["c"]
-            cat_table.setItem(r,0,QTableWidgetItem(cat))
-            cat_table.setItem(r,1,QTableWidgetItem(str(total)))
-            cat_table.setItem(r,2,QTableWidgetItem(str(active)))
-        cat_table.setMinimumHeight(min(330, max(150, len(categories)*26+35)))
-        def open_category(row,_column):
-            item=cat_table.item(row,0)
+        # ------------------------------------------------------------------
+        # TAB 1 – Dynamic analytical dashboard
+        # ------------------------------------------------------------------
+        tab_dyn = QWidget()
+        dyn = QVBoxLayout(tab_dyn)
+        dyn.setContentsMargins(6, 6, 6, 6)
+
+        # Period banner
+        kpis_data, kraw = dashboard_kpi_card_data()
+        period_lbl = QLabel(
+            f"<b>Company:</b> {xml_safe(company_name())} &nbsp;&nbsp; "
+            f"<b>Project:</b> {xml_safe(db.setting('project_name',''))} &nbsp;&nbsp; "
+            f"<b>Comparison:</b> This month ({kraw['this_start']} → {kraw['this_end']}) "
+            f"vs Last month ({kraw['last_start']} → {kraw['last_end']})"
+        )
+        period_lbl.setWordWrap(True)
+        dyn.addWidget(period_lbl)
+
+        # KPI cards
+        cards_wrap = QWidget()
+        cards_layout = QGridLayout(cards_wrap)
+        cards_layout.setSpacing(8)
+        for i, (title, value, subtitle, color) in enumerate(kpis_data):
+            box = QGroupBox(title)
+            bl = QVBoxLayout(box)
+            val = QLabel(value)
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val.setStyleSheet(f"font-size:26px;font-weight:bold;color:{color};")
+            sub = QLabel(subtitle)
+            sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            sub.setStyleSheet(f"font-size:11px;color:{color};")
+            sub.setWordWrap(True)
+            bl.addWidget(val)
+            bl.addWidget(sub)
+            cards_layout.addWidget(box, i // 4, i % 4)
+        dyn.addWidget(cards_wrap)
+
+        # Charts row
+        charts = QHBoxLayout()
+        pie = PieChartWidget()
+        pie.set_values(dashboard_type_distribution())
+        pie_box = QGroupBox("Observation Type Distribution")
+        pl = QVBoxLayout(pie_box)
+        pl.addWidget(pie)
+        charts.addWidget(pie_box, 1)
+
+        bar = BarChartWidget()
+        cat_trends = dashboard_category_trends(8)
+        bar.set_values({t["category"][:18]: t["this_month"] for t in cat_trends if t["this_month"] > 0} or {"No data": 0})
+        bar_box = QGroupBox("Top Categories This Month")
+        bl = QVBoxLayout(bar_box)
+        bl.addWidget(bar)
+        charts.addWidget(bar_box, 1)
+        dyn.addLayout(charts)
+
+        # Rising categories table
+        rise_box = QGroupBox("Category Trends — This Month vs Last Month (click row for register filter)")
+        rise_l = QVBoxLayout(rise_box)
+        rise_table = QTableWidget()
+        rise_headers = ["Category", "Last Month", "This Month", "Change", "% Change", "Near Misses", "Risk", "Signal"]
+        rise_table.setColumnCount(len(rise_headers))
+        rise_table.setHorizontalHeaderLabels(rise_headers)
+        rise_table.setAlternatingRowColors(True)
+        rise_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        rise_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        rise_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        trends = dashboard_category_trends(20)
+        rise_table.setRowCount(len(trends))
+        for r, t in enumerate(trends):
+            signal = "Rising – act" if t["rising"] else ("Watch" if t["this_month"] > 0 else "Stable")
+            vals = [
+                t["category"], str(t["last_month"]), str(t["this_month"]),
+                f"{t['change']:+d}", f"{t['pct']:+.0f}%", str(t["near_misses"]),
+                t["risk"], signal,
+            ]
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setToolTip(v)
+                if c == 6:
+                    if t["risk"] == "Critical":
+                        item.setForeground(QBrush(QColor("#8B0000")))
+                    elif t["risk"] == "High":
+                        item.setForeground(QBrush(QColor("#B00020")))
+                    elif t["risk"] == "Medium":
+                        item.setForeground(QBrush(QColor("#B36B00")))
+                rise_table.setItem(r, c, item)
+
+        def open_trend_category(row, _col):
+            item = rise_table.item(row, 0)
             if item:
-                self.observation_dashboard_filter=item.text()
-                self.observations()
-        cat_table.cellDoubleClicked.connect(open_category)
-        cat_layout.addWidget(cat_table)
-        layout.addWidget(cat_box,1)
+                self.observation_dashboard_filter = item.text()
+                # Navigate to inspection register with filter (existing behaviour)
+                try:
+                    self.nav.setCurrentRow(1)
+                except Exception:
+                    self.observations()
 
-        recent_inc=QGroupBox("Recent Incidents"); ril=QVBoxLayout(recent_inc); it=QTableWidget(); it.setColumnCount(5); it.setHorizontalHeaderLabels(["ID / Number","Date","Type","Status","Completion"]); ir=db.fetchall("SELECT id,number,incident_date,incident_type,status,incident_title,description,investigation_method,direct_cause,root_cause FROM incidents ORDER BY id DESC LIMIT 10"); it.setRowCount(len(ir))
-        for rr,x in enumerate(ir):
-            total=10; done=sum(bool(safe(x[k])) for k in ["incident_date","incident_time"] if k in x.keys())
-            done += sum(bool(safe(x[k])) for k in ["location","project","incident_type","description","investigation_method","direct_cause","root_cause"] if k in x.keys())
-            pct=round(done*100/total)
-            for cc,v in enumerate([f"{safe(x['id'])} / {safe(x['number'])}",x['incident_date'],x['incident_type'],x['status'],f"{pct}%"]): it.setItem(rr,cc,QTableWidgetItem(safe(v)))
-        ril.addWidget(it); layout.addWidget(recent_inc)
+        rise_table.cellDoubleClicked.connect(open_trend_category)
+        rise_l.addWidget(rise_table)
+        dyn.addWidget(rise_box, 1)
 
-        recent=QGroupBox("Recent Observations")
-        recent_layout=QVBoxLayout(recent)
-        table=QTableWidget(); table.setColumnCount(8)
-        table.setHorizontalHeaderLabels(["S.No.","Observation No.","Date","Type","Category","Location","Status","Action Taken"])
-        table.horizontalHeader().setSectionResizeMode(7,QHeaderView.Stretch)
-        for c in range(7): table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeToContents)
-        rows=db.fetchall("SELECT id,number,obs_date,obs_type,category,location,status,corrective_action FROM observations ORDER BY id DESC LIMIT 10")
-        table.setRowCount(len(rows))
-        for r,row in enumerate(rows):
-            vals=[str(r+1),row["number"],row["obs_date"],row["obs_type"],row["category"],row["location"],row["status"],format_corrective_actions_display(row)]
-            for c,v in enumerate(vals):
-                item=QTableWidgetItem(safe(v)); item.setToolTip(safe(v)); table.setItem(r,c,item)
-        table.setAlternatingRowColors(True); table.setWordWrap(True)
-        recent_layout.addWidget(table)
+        # Location hotspots + recent incidents
+        bottom = QHBoxLayout()
+        loc_box = QGroupBox("Location Hotspots (month-on-month)")
+        loc_l = QVBoxLayout(loc_box)
+        loc_table = QTableWidget()
+        loc_table.setColumnCount(5)
+        loc_table.setHorizontalHeaderLabels(["Location", "Last Month", "This Month", "Change", "%"])
+        loc_table.setAlternatingRowColors(True)
+        loc_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        loc_trends = dashboard_location_trends(10)
+        loc_table.setRowCount(len(loc_trends))
+        for r, t in enumerate(loc_trends):
+            for c, v in enumerate([
+                t["location"], str(t["last_month"]), str(t["this_month"]),
+                f"{t['change']:+d}", f"{t['pct']:+.0f}%",
+            ]):
+                loc_table.setItem(r, c, QTableWidgetItem(v))
+        loc_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        loc_l.addWidget(loc_table)
+        bottom.addWidget(loc_box, 1)
+
+        inc_box = QGroupBox("Recent Incidents")
+        inc_l = QVBoxLayout(inc_box)
+        it = QTableWidget()
+        it.setColumnCount(4)
+        it.setHorizontalHeaderLabels(["Number", "Date", "Type", "Status"])
+        it.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        ir = db.fetchall(
+            "SELECT number,incident_date,incident_type,status FROM incidents ORDER BY id DESC LIMIT 8"
+        )
+        it.setRowCount(len(ir))
+        for rr, x in enumerate(ir):
+            for cc, v in enumerate([x["number"], x["incident_date"], x["incident_type"], x["status"]]):
+                it.setItem(rr, cc, QTableWidgetItem(safe(v)))
+        it.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        inc_l.addWidget(it)
+        bottom.addWidget(inc_box, 1)
+        dyn.addLayout(bottom)
+
+        # Quick jump
+        jump = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh Dashboard")
+        btn_actions = QPushButton("Go to Action Dashboard")
+        btn_obs = QPushButton("Open Inspection Register")
+        btn_inc = QPushButton("Open Incident Module")
+        jump.addWidget(btn_refresh)
+        jump.addWidget(btn_actions)
+        jump.addWidget(btn_obs)
+        jump.addWidget(btn_inc)
+        jump.addStretch()
+        dyn.addLayout(jump)
+
+        tabs.addTab(tab_dyn, "Dynamic Dashboard")
+
+        # ------------------------------------------------------------------
+        # TAB 2 – Action Dashboard (what you need to do)
+        # ------------------------------------------------------------------
+        tab_act = QWidget()
+        act = QVBoxLayout(tab_act)
+        act.setContentsMargins(6, 6, 6, 6)
+
+        intro = QLabel(
+            "<b>Action Dashboard</b> — prioritised reactive and proactive measures based on "
+            "observation trends, near misses, incidents, overdue actions and open CAPA/findings. "
+            "Use this to decide TBTs, focused inspections, training and controls."
+        )
+        intro.setWordWrap(True)
+        act.addWidget(intro)
+
+        action_cards = dashboard_build_actions(trends)
+
+        # Summary strip
+        n_crit = sum(1 for a in action_cards if a["risk"] == "Critical")
+        n_high = sum(1 for a in action_cards if a["risk"] == "High")
+        summary = QLabel(
+            f"Recommended focus areas: <b>{len(action_cards)}</b> &nbsp;|&nbsp; "
+            f"Critical: <b>{n_crit}</b> &nbsp;|&nbsp; High: <b>{n_high}</b> &nbsp;|&nbsp; "
+            f"Suggested TBTs this period: <b>{sum(1 for a in action_cards if a.get('tbt_topic'))}</b>"
+        )
+        summary.setStyleSheet("background:#E8F0FA;color:#17365D;padding:10px;border-radius:5px;font-size:13px;")
+        act.addWidget(summary)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_body = QWidget()
+        scroll_layout = QVBoxLayout(scroll_body)
+
+        if not action_cards:
+            empty = QLabel(
+                "No strong rising trends or pressure signals right now. "
+                "Continue routine inspections and keep closing open actions."
+            )
+            empty.setWordWrap(True)
+            scroll_layout.addWidget(empty)
+        else:
+            for idx, a in enumerate(action_cards, 1):
+                risk_color = {
+                    "Critical": "#8B0000",
+                    "High": "#B00020",
+                    "Medium": "#B36B00",
+                    "Low": "#1B7A3D",
+                }.get(a["risk"], "#17365D")
+                box = QGroupBox(f"{idx}. {a['title']}  —  Risk: {a['risk']}  |  Severity signal: {a['severity']}")
+                box.setStyleSheet(f"QGroupBox {{ font-weight:bold; border:2px solid {risk_color}; margin-top:12px; padding:8px; }}")
+                gl = QVBoxLayout(box)
+
+                trigger = QLabel(f"<b>Why this appears:</b> {xml_safe(a['trigger'])}")
+                trigger.setWordWrap(True)
+                gl.addWidget(trigger)
+
+                cols = QHBoxLayout()
+
+                # Reactive
+                react_box = QGroupBox("Reactive / Immediate")
+                rl = QVBoxLayout(react_box)
+                for line in a["reactive"]:
+                    rl.addWidget(QLabel(f"• {xml_safe(line)}"))
+                cols.addWidget(react_box, 1)
+
+                # Proactive
+                pro_box = QGroupBox("Proactive / Preventive Controls")
+                pl2 = QVBoxLayout(pro_box)
+                for line in a["proactive"]:
+                    pl2.addWidget(QLabel(f"• {xml_safe(line)}"))
+                cols.addWidget(pro_box, 1)
+                gl.addLayout(cols)
+
+                # TBT + training
+                extra = []
+                if a.get("tbt_topic"):
+                    extra.append(f"<b>Suggested TBT topic:</b> {xml_safe(a['tbt_topic'])}")
+                if a.get("training_hints"):
+                    extra.append(
+                        "<b>Training to review:</b> " + xml_safe(", ".join(a["training_hints"]))
+                    )
+                if extra:
+                    extra_lbl = QLabel("<br/>".join(extra))
+                    extra_lbl.setWordWrap(True)
+                    extra_lbl.setStyleSheet("background:#F7F9FC;padding:8px;border-radius:4px;")
+                    gl.addWidget(extra_lbl)
+
+                scroll_layout.addWidget(box)
+
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_body)
+        act.addWidget(scroll, 1)
+
+        # This week's TBT shortlist
+        tbt_box = QGroupBox("This Week's Suggested Toolbox Talk (TBT) Shortlist")
+        tbt_l = QVBoxLayout(tbt_box)
+        tbt_topics = []
+        seen = set()
+        for a in action_cards:
+            topic = safe(a.get("tbt_topic")).strip()
+            if topic and topic.casefold() not in seen:
+                seen.add(topic.casefold())
+                tbt_topics.append(f"• {topic}  (linked to: {a['title']}, risk {a['risk']})")
+        if not tbt_topics:
+            tbt_l.addWidget(QLabel("No urgent TBT themes detected from current trends."))
+        else:
+            for line in tbt_topics[:8]:
+                tbt_l.addWidget(QLabel(xml_safe(line)))
+        act.addWidget(tbt_box)
+
+        btn_row = QHBoxLayout()
+        btn_refresh_act = QPushButton("Refresh Actions")
+        btn_print_plan = QPushButton("Copy Action Summary to Clipboard")
+        btn_row.addWidget(btn_refresh_act)
+        btn_row.addWidget(btn_print_plan)
+        btn_row.addStretch()
+        act.addLayout(btn_row)
+
+        tabs.addTab(tab_act, "Action Dashboard")
+
+        # ------------------------------------------------------------------
+        # TAB 3 – Cross-module Management Overview (dashboard-only addition)
+        # ------------------------------------------------------------------
+        tab_mgmt = QWidget()
+        mgmt_scroll = QScrollArea()
+        mgmt_scroll.setWidgetResizable(True)
+        mgmt_body = QWidget()
+        mgmt = QVBoxLayout(mgmt_body)
+        mgmt.setContentsMargins(8, 8, 8, 8)
+        mgmt.setSpacing(8)
+        mgmt_scroll.setWidget(mgmt_body)
+        mgmt_outer = QVBoxLayout(tab_mgmt)
+        mgmt_outer.setContentsMargins(0, 0, 0, 0)
+        mgmt_outer.addWidget(mgmt_scroll)
+
+        filter_box = QGroupBox("Management Overview Filters")
+        filter_row = QHBoxLayout(filter_box)
+        start_filter = QDateEdit()
+        start_filter.setCalendarPopup(True)
+        start_filter.setDisplayFormat("yyyy-MM-dd")
+        end_filter = QDateEdit()
+        end_filter.setCalendarPopup(True)
+        end_filter.setDisplayFormat("yyyy-MM-dd")
+        today_qd = QDate.currentDate()
+        start_filter.setDate(QDate(today_qd.year(), today_qd.month(), 1))
+        end_filter.setDate(today_qd)
+        saved_filters = getattr(self, "_dashboard_mgmt_filters", {})
+        if saved_filters:
+            try:
+                start_filter.setDate(QDate.fromString(saved_filters.get("start", ""), "yyyy-MM-dd"))
+                end_filter.setDate(QDate.fromString(saved_filters.get("end", ""), "yyyy-MM-dd"))
+            except Exception:
+                pass
+        project_filter = QComboBox()
+        project_filter.addItem("All Projects")
+        company_filter = QComboBox()
+        company_filter.addItem("All Contractors")
+        try:
+            for row in db.fetchall("SELECT DISTINCT project FROM projects WHERE COALESCE(active,1)=1 AND trim(COALESCE(project,''))<>'' ORDER BY project"):
+                value = safe(row["project"])
+                if value and value not in [project_filter.itemText(i) for i in range(project_filter.count())]:
+                    project_filter.addItem(value)
+        except Exception:
+            pass
+        try:
+            company_values = set()
+            for row in db.fetchall("SELECT name FROM companies WHERE trim(COALESCE(name,''))<>'' ORDER BY name"):
+                company_values.add(safe(row["name"]))
+            for table, col in (("observations", "company"), ("incidents", "company"), ("employees", "company"), ("ptw_permits", "performing_company")):
+                try:
+                    for row in db.fetchall(f"SELECT DISTINCT {col} AS v FROM {table} WHERE trim(COALESCE({col},''))<>''"):
+                        company_values.add(safe(row["v"]))
+                except Exception:
+                    pass
+            for value in sorted(x for x in company_values if x):
+                company_filter.addItem(value)
+        except Exception:
+            pass
+        if saved_filters:
+            project_filter.setCurrentText(saved_filters.get("project", "All Projects"))
+            company_filter.setCurrentText(saved_filters.get("company", "All Contractors"))
+        filter_row.addWidget(QLabel("From")); filter_row.addWidget(start_filter)
+        filter_row.addWidget(QLabel("To")); filter_row.addWidget(end_filter)
+        filter_row.addWidget(QLabel("Project")); filter_row.addWidget(project_filter, 1)
+        filter_row.addWidget(QLabel("Contractor")); filter_row.addWidget(company_filter, 1)
+        btn_apply_mgmt = QPushButton("Apply Filters")
+        btn_export_mgmt = QPushButton("Export Management PDF")
+        filter_row.addWidget(btn_apply_mgmt)
+        filter_row.addWidget(btn_export_mgmt)
+        mgmt.addWidget(filter_box)
+
+        mgmt_summary = QLabel("Cross-module performance overview. Select a period/project/contractor and apply filters.")
+        mgmt_summary.setWordWrap(True)
+        mgmt.addWidget(mgmt_summary)
+
+        mgmt_kpi_wrap = QWidget()
+        mgmt_kpi_grid = QGridLayout(mgmt_kpi_wrap)
+        mgmt_kpi_grid.setSpacing(7)
+        mgmt.addWidget(mgmt_kpi_wrap)
+
+        mgmt_charts_row = QHBoxLayout()
+        monthly_chart = BarChartWidget()
+        monthly_box = QGroupBox("Monthly Observations – Last 12 Months")
+        monthly_l = QVBoxLayout(monthly_box); monthly_l.addWidget(monthly_chart)
+        incident_month_chart = BarChartWidget()
+        incident_month_box = QGroupBox("Monthly Incidents – Last 12 Months")
+        incident_month_l = QVBoxLayout(incident_month_box); incident_month_l.addWidget(incident_month_chart)
+        incident_chart = PieChartWidget()
+        incident_box = QGroupBox("Incident Type Distribution")
+        incident_l = QVBoxLayout(incident_box); incident_l.addWidget(incident_chart)
+        mgmt_charts_row.addWidget(monthly_box, 2)
+        mgmt_charts_row.addWidget(incident_month_box, 2)
+        mgmt_charts_row.addWidget(incident_box, 1)
+        mgmt.addLayout(mgmt_charts_row)
+
+        lead_lag_box = QGroupBox("Leading and Lagging Indicators")
+        lead_lag_layout = QHBoxLayout(lead_lag_box)
+        leading_label = QLabel(); leading_label.setWordWrap(True)
+        lagging_label = QLabel(); lagging_label.setWordWrap(True)
+        lead_lag_layout.addWidget(leading_label, 1)
+        lead_lag_layout.addWidget(lagging_label, 1)
+        mgmt.addWidget(lead_lag_box)
+
+        tables_row = QHBoxLayout()
+        repeat_box = QGroupBox("Recurring Hazard Themes")
+        repeat_layout = QVBoxLayout(repeat_box)
+        repeat_table = QTableWidget(); repeat_table.setColumnCount(4)
+        repeat_table.setHorizontalHeaderLabels(["Category", "Records", "High/Critical", "Locations"])
+        repeat_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        repeat_table.setAlternatingRowColors(True)
+        repeat_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        repeat_layout.addWidget(repeat_table)
+        contractor_box = QGroupBox("Contractor Performance Comparison")
+        contractor_layout = QVBoxLayout(contractor_box)
+        contractor_table = QTableWidget(); contractor_table.setColumnCount(4)
+        contractor_table.setHorizontalHeaderLabels(["Contractor", "Observations", "Incidents", "Open Actions"])
+        contractor_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        contractor_table.setAlternatingRowColors(True)
+        contractor_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        contractor_layout.addWidget(contractor_table)
+        tables_row.addWidget(repeat_box, 1); tables_row.addWidget(contractor_box, 1)
+        mgmt.addLayout(tables_row, 1)
+
+        mgmt_data = {}
+        def _mgmt_table_exists(table_name):
+            try:
+                return bool(db.fetchone("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,)))
+            except Exception:
+                return False
+
+        def _mgmt_columns(table_name):
+            try:
+                return {safe(r["name"]) for r in db.fetchall(f"PRAGMA table_info({table_name})")}
+            except Exception:
+                return set()
+
+        def _mgmt_count(table_name, date_col=None, project_col=None, company_col=None, extra="", extra_params=()):
+            if not _mgmt_table_exists(table_name):
+                return 0
+            cols = _mgmt_columns(table_name)
+            clauses = []; params = []
+            if date_col and date_col in cols:
+                clauses.append(f"date({date_col}) BETWEEN date(?) AND date(?)")
+                params.extend([mgmt_data["start"], mgmt_data["end"]])
+            if project_filter.currentText() != "All Projects" and project_col and project_col in cols:
+                clauses.append(f"{project_col}=?"); params.append(project_filter.currentText())
+            if company_filter.currentText() != "All Contractors" and company_col and company_col in cols:
+                clauses.append(f"{company_col}=?"); params.append(company_filter.currentText())
+            if extra:
+                clauses.append(extra); params.extend(extra_params)
+            sql = f"SELECT COUNT(*) AS c FROM {table_name}" + (" WHERE " + " AND ".join(clauses) if clauses else "")
+            try:
+                row = db.fetchone(sql, tuple(params)); return int(row["c"] if row else 0)
+            except Exception:
+                return 0
+
+        def _mgmt_fill_table(table, rows):
+            table.setRowCount(len(rows))
+            for rr, values in enumerate(rows):
+                for cc, value in enumerate(values):
+                    item = QTableWidgetItem(safe(value)); item.setToolTip(safe(value))
+                    table.setItem(rr, cc, item)
+
+        def _mgmt_refresh():
+            if start_filter.date() > end_filter.date():
+                QMessageBox.warning(self, "Dashboard Filters", "The start date cannot be later than the end date.")
+                return
+            mgmt_data["start"] = start_filter.date().toString("yyyy-MM-dd")
+            mgmt_data["end"] = end_filter.date().toString("yyyy-MM-dd")
+            mgmt_data["project"] = project_filter.currentText()
+            mgmt_data["company"] = company_filter.currentText()
+            self._dashboard_mgmt_filters = dict(mgmt_data)
+
+            obs_n = _mgmt_count("observations", "obs_date", "project", "company")
+            inc_n = _mgmt_count("incidents", "incident_date", "project", "company")
+            audits_n = _mgmt_count("audits", "audit_date", "project", None)
+            capa_n = _mgmt_count("capa", "created_at", None, None)
+            findings_n = _mgmt_count("aud_findings", "created_at", None, None) if _mgmt_table_exists("aud_findings") else _mgmt_count("audit_findings", None, None, None)
+            open_obs = _mgmt_count("observations", None, "project", "company", "status NOT IN ('Closed','Cancelled')")
+            high_open_obs = _mgmt_count("observations", None, "project", "company", "status NOT IN ('Closed','Cancelled') AND lower(COALESCE(priority,'')) IN ('high','critical')")
+            overdue_obs = _mgmt_count("observations", None, "project", "company", "status NOT IN ('Closed','Cancelled') AND COALESCE(trim(target_date),'')<>'' AND date(target_date)<date('now')")
+            open_inc = _mgmt_count("incidents", None, "project", "company", "status NOT IN ('Closed','Cancelled')")
+            open_capa = _mgmt_count("capa", None, None, None, "status NOT IN ('Closed','Cancelled')")
+            open_findings = _mgmt_count("aud_findings", None, None, None, "status NOT IN ('Closed','Cancelled')") if _mgmt_table_exists("aud_findings") else _mgmt_count("audit_findings", None, None, None, "status NOT IN ('Closed','Cancelled')")
+            active_permits = _mgmt_count("ptw_permits", None, "project", "performing_company", "lower(COALESCE(status,'')) IN ('active','issued','issued/active','approved')")
+            expired_permits = _mgmt_count("ptw_permits", None, "project", "performing_company", "status NOT IN ('Closed','Cancelled') AND COALESCE(trim(planned_end),'')<>'' AND datetime(planned_end)<datetime('now')")
+
+            # Mandatory training compliance: only assignments with an in-date, verified record count as complete.
+            assigned = completed = 0
+            if _mgmt_table_exists("training_assignments") and _mgmt_table_exists("training_records"):
+                try:
+                    where = ["lower(COALESCE(ta.requirement,'Mandatory')) LIKE '%mandatory%'"]
+                    params = []
+                    if company_filter.currentText() != "All Contractors":
+                        where.append("e.company=?"); params.append(company_filter.currentText())
+                    if project_filter.currentText() != "All Projects":
+                        # Training assignments are employee-based, not project-based; do not falsely project-filter them.
+                        pass
+                    assigned_row = db.fetchone("SELECT COUNT(*) c FROM training_assignments ta JOIN employees e ON e.id=ta.employee_db_id JOIN training_courses tc ON tc.id=ta.course_id WHERE " + " AND ".join(where), tuple(params))
+                    done_sql = "SELECT COUNT(*) c FROM training_assignments ta JOIN employees e ON e.id=ta.employee_db_id JOIN training_courses tc ON tc.id=ta.course_id WHERE " + " AND ".join(where) + " AND EXISTS (SELECT 1 FROM training_records tr WHERE tr.employee_db_id=ta.employee_db_id AND tr.course_id=ta.course_id AND lower(COALESCE(tr.verification_status,'verified')) IN ('verified','approved') AND (COALESCE(trim(tr.expiry_date),'')='' OR date(tr.expiry_date)>=date('now')))"
+                    done_row = db.fetchone(done_sql, tuple(params))
+                    assigned = int(assigned_row["c"] if assigned_row else 0)
+                    completed = int(done_row["c"] if done_row else 0)
+                except Exception:
+                    assigned = completed = 0
+            training_pct = round(100.0 * completed / assigned, 1) if assigned else 0.0
+
+            kpis = [
+                ("Observations", obs_n, "#17365D"), ("Incidents", inc_n, "#B00020"),
+                ("Audits", audits_n, "#17365D"), ("Open Audit Findings", open_findings, "#B36B00"),
+                ("Open CAPA", open_capa, "#B36B00"), ("High/Critical Open", high_open_obs, "#B00020" if high_open_obs else "#1B7A3D"),
+                ("Overdue Observations", overdue_obs, "#B00020" if overdue_obs else "#1B7A3D"),
+                ("Open Incidents", open_inc, "#B00020" if open_inc else "#1B7A3D"),
+                ("Training Compliance", f"{training_pct:.1f}%", "#1B7A3D" if training_pct >= 90 else "#B36B00"),
+                ("Active PTWs", active_permits, "#17365D"), ("Expired PTWs", expired_permits, "#B00020" if expired_permits else "#1B7A3D"),
+            ]
+            while mgmt_kpi_grid.count():
+                item = mgmt_kpi_grid.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            for idx, (title, value, color) in enumerate(kpis):
+                card = QGroupBox(title); card_l = QVBoxLayout(card)
+                value_lbl = QLabel(str(value)); value_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                value_lbl.setStyleSheet(f"font-size:23px;font-weight:bold;color:{color};")
+                card_l.addWidget(value_lbl)
+                mgmt_kpi_grid.addWidget(card, idx // 5, idx % 5)
+
+            mgmt_summary.setText(
+                f"<b>Period:</b> {mgmt_data['start']} to {mgmt_data['end']} &nbsp; | &nbsp; "
+                f"<b>Project:</b> {xml_safe(mgmt_data['project'])} &nbsp; | &nbsp; "
+                f"<b>Contractor:</b> {xml_safe(mgmt_data['company'])}<br>"
+                f"<b>Open workload:</b> {open_obs} observations, {open_inc} incidents, {open_capa} CAPA and {open_findings} audit findings.<br>"
+                f"<i>Note: Training compliance is an employee-assignment snapshot; CAPA and audit finding totals are system-wide where the existing records do not contain project/contractor fields.</i>"
+            )
+
+            leading = obs_n + audits_n + completed
+            lagging = inc_n
+            leading_label.setText(f"<b>LEADING INDICATORS</b><br>Observations raised: {obs_n}<br>Audits recorded: {audits_n}<br>Mandatory training assignments completed: {completed} of {assigned} ({training_pct:.1f}%)<br><br><i>Leading indicators reflect preventive activity, not proof of risk reduction.</i>")
+            lagging_label.setText(f"<b>LAGGING INDICATORS</b><br>Incidents recorded: {lagging}<br>Open incidents: {open_inc}<br>Overdue observation actions: {overdue_obs}<br>Open audit findings: {open_findings}<br>Expired non-closed PTWs: {expired_permits}")
+
+            # Twelve-month observation trend. Contractor/project filters are respected where available.
+            monthly = {}
+            today = date.today()
+            for offset in range(11, -1, -1):
+                month_num = today.month - offset
+                year = today.year
+                while month_num <= 0:
+                    month_num += 12; year -= 1
+                first = date(year, month_num, 1)
+                last_day = calendar.monthrange(year, month_num)[1]
+                last = date(year, month_num, last_day)
+                monthly[first.strftime("%b-%y")] = 0
+                if _mgmt_table_exists("observations"):
+                    clauses = ["date(obs_date) BETWEEN date(?) AND date(?)"]; params = [first.isoformat(), last.isoformat()]
+                    if project_filter.currentText() != "All Projects": clauses.append("project=?"); params.append(project_filter.currentText())
+                    if company_filter.currentText() != "All Contractors": clauses.append("company=?"); params.append(company_filter.currentText())
+                    try:
+                        row = db.fetchone("SELECT COUNT(*) c FROM observations WHERE " + " AND ".join(clauses), tuple(params))
+                        monthly[first.strftime("%b-%y")] = int(row["c"] if row else 0)
+                    except Exception: pass
+            monthly_chart.set_values(monthly)
+            monthly_incidents = {}
+            for offset in range(11, -1, -1):
+                month_num = today.month - offset
+                year = today.year
+                while month_num <= 0:
+                    month_num += 12; year -= 1
+                first = date(year, month_num, 1)
+                last = date(year, month_num, calendar.monthrange(year, month_num)[1])
+                monthly_incidents[first.strftime("%b-%y")] = 0
+                if _mgmt_table_exists("incidents"):
+                    clauses = ["date(incident_date) BETWEEN date(?) AND date(?)"]; params = [first.isoformat(), last.isoformat()]
+                    if project_filter.currentText() != "All Projects": clauses.append("project=?"); params.append(project_filter.currentText())
+                    if company_filter.currentText() != "All Contractors": clauses.append("company=?"); params.append(company_filter.currentText())
+                    try:
+                        row = db.fetchone("SELECT COUNT(*) c FROM incidents WHERE " + " AND ".join(clauses), tuple(params))
+                        monthly_incidents[first.strftime("%b-%y")] = int(row["c"] if row else 0)
+                    except Exception: pass
+            incident_month_chart.set_values(monthly_incidents)
+
+            # Incident type distribution for selected filters.
+            incident_types = {}
+            if _mgmt_table_exists("incidents"):
+                clauses = ["date(incident_date) BETWEEN date(?) AND date(?)"]
+                params = [mgmt_data["start"], mgmt_data["end"]]
+                if project_filter.currentText() != "All Projects": clauses.append("project=?"); params.append(project_filter.currentText())
+                if company_filter.currentText() != "All Contractors": clauses.append("company=?"); params.append(company_filter.currentText())
+                try:
+                    rows = db.fetchall("SELECT COALESCE(NULLIF(trim(incident_type),''),'Unspecified') t, COUNT(*) c FROM incidents WHERE " + " AND ".join(clauses) + " GROUP BY 1 ORDER BY c DESC LIMIT 8", tuple(params))
+                    incident_types = {safe(r["t"]): int(r["c"]) for r in rows}
+                except Exception: pass
+            incident_chart.set_values(incident_types)
+
+            # Recurring hazard categories and location count.
+            repeat_rows = []
+            if _mgmt_table_exists("observations"):
+                clauses = ["date(obs_date) BETWEEN date(?) AND date(?)"]; params = [mgmt_data["start"], mgmt_data["end"]]
+                if project_filter.currentText() != "All Projects": clauses.append("project=?"); params.append(project_filter.currentText())
+                if company_filter.currentText() != "All Contractors": clauses.append("company=?"); params.append(company_filter.currentText())
+                try:
+                    rows = db.fetchall("SELECT COALESCE(NULLIF(trim(category),''),'Unspecified') category, COUNT(*) total, SUM(CASE WHEN lower(COALESCE(priority,'')) IN ('high','critical') THEN 1 ELSE 0 END) high_count, COUNT(DISTINCT COALESCE(NULLIF(trim(location),''),'Unspecified')) locations FROM observations WHERE " + " AND ".join(clauses) + " GROUP BY 1 HAVING COUNT(*)>=2 ORDER BY total DESC LIMIT 12", tuple(params))
+                    repeat_rows = [[r["category"], r["total"], r["high_count"], r["locations"]] for r in rows]
+                except Exception: pass
+            _mgmt_fill_table(repeat_table, repeat_rows)
+
+            # Contractor comparison uses the contractor dimension present on observations/incidents.
+            contractor_rows = []
+            try:
+                rows = db.fetchall("SELECT company FROM observations WHERE date(obs_date) BETWEEN date(?) AND date(?) AND trim(COALESCE(company,''))<>'' UNION SELECT company FROM incidents WHERE date(incident_date) BETWEEN date(?) AND date(?) AND trim(COALESCE(company,''))<>'' ORDER BY company", (mgmt_data["start"], mgmt_data["end"], mgmt_data["start"], mgmt_data["end"]))
+                for row in rows[:20]:
+                    contractor = safe(row["company"])
+                    o = db.fetchone("SELECT COUNT(*) c FROM observations WHERE date(obs_date) BETWEEN date(?) AND date(?) AND company=?", (mgmt_data["start"], mgmt_data["end"], contractor))
+                    i = db.fetchone("SELECT COUNT(*) c FROM incidents WHERE date(incident_date) BETWEEN date(?) AND date(?) AND company=?", (mgmt_data["start"], mgmt_data["end"], contractor))
+                    a = db.fetchone("SELECT COUNT(*) c FROM observations WHERE company=? AND status NOT IN ('Closed','Cancelled')", (contractor,))
+                    contractor_rows.append([contractor, int(o["c"] if o else 0), int(i["c"] if i else 0), int(a["c"] if a else 0)])
+            except Exception:
+                contractor_rows = []
+            if company_filter.currentText() != "All Contractors":
+                contractor_rows = [r for r in contractor_rows if r[0] == company_filter.currentText()]
+            _mgmt_fill_table(contractor_table, contractor_rows)
+
+            mgmt_data.update({"obs": obs_n, "inc": inc_n, "audits": audits_n, "findings": open_findings,
+                              "capa": open_capa, "open_obs": open_obs, "high_open_obs": high_open_obs, "overdue": overdue_obs,
+                              "open_inc": open_inc, "training_pct": training_pct, "assigned": assigned,
+                              "completed": completed, "active_ptw": active_permits, "expired_ptw": expired_permits,
+                              "monthly": monthly, "incident_types": incident_types,
+                              "repeat_rows": repeat_rows, "contractor_rows": contractor_rows})
+
+        def _export_mgmt_pdf():
+            if not mgmt_data.get("start"):
+                _mgmt_refresh()
+            if not mgmt_data.get("start"):
+                return
+            path, _ = QFileDialog.getSaveFileName(self, "Export HSE Management Dashboard", "HSE_Management_Dashboard.pdf", "PDF Files (*.pdf)")
+            if not path: return
+            try:
+                styles = getSampleStyleSheet()
+                story = [Paragraph("HSE MANAGEMENT DASHBOARD", styles["Title"]),
+                         Paragraph(f"Company: {xml_safe(company_name())} | Project: {xml_safe(mgmt_data.get('project','All Projects'))}", styles["Normal"]),
+                         Paragraph(f"Period: {mgmt_data['start']} to {mgmt_data['end']} | Contractor: {xml_safe(mgmt_data.get('company','All Contractors'))}", styles["Normal"]), Spacer(1, 10)]
+                data = [["Indicator", "Result"], ["Observations", mgmt_data.get("obs",0)], ["Incidents", mgmt_data.get("inc",0)],
+                        ["Audits", mgmt_data.get("audits",0)], ["Open audit findings", mgmt_data.get("findings",0)],
+                        ["Open CAPA", mgmt_data.get("capa",0)], ["Open observations", mgmt_data.get("open_obs",0)],
+                        ["High/Critical open observations", mgmt_data.get("high_open_obs",0)], ["Overdue observations", mgmt_data.get("overdue",0)], ["Open incidents", mgmt_data.get("open_inc",0)],
+                        ["Mandatory training compliance", f"{mgmt_data.get('training_pct',0):.1f}% ({mgmt_data.get('completed',0)}/{mgmt_data.get('assigned',0)})"],
+                        ["Active PTWs", mgmt_data.get("active_ptw",0)], ["Expired PTWs", mgmt_data.get("expired_ptw",0)]]
+                tbl = Table(data, colWidths=[260, 220]); tbl.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("PADDING",(0,0),(-1,-1),6)])); story.append(tbl)
+                story.append(Spacer(1, 12)); story.append(Paragraph("Recurring Hazard Themes", styles["Heading2"]))
+                rep = [["Category", "Records", "High/Critical", "Locations"]] + (mgmt_data.get("repeat_rows") or [["No repeated themes", "", "", ""]])
+                rt = Table(rep, repeatRows=1); rt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9E2F3")),("GRID",(0,0),(-1,-1),0.35,colors.grey),("PADDING",(0,0),(-1,-1),5)])); story.append(rt)
+                story.append(Spacer(1, 12)); story.append(Paragraph("Contractor Performance", styles["Heading2"]))
+                con = [["Contractor", "Observations", "Incidents", "Open Actions"]] + (mgmt_data.get("contractor_rows") or [["No contractor data", "", "", ""]])
+                ct = Table(con, repeatRows=1); ct.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9E2F3")),("GRID",(0,0),(-1,-1),0.35,colors.grey),("PADDING",(0,0),(-1,-1),5)])); story.append(ct)
+                SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=28, leftMargin=28, topMargin=28, bottomMargin=28).build(story)
+                QMessageBox.information(self, "Dashboard Export", f"Management dashboard exported successfully:\n{path}")
+            except Exception as exc:
+                logging.exception("Management dashboard PDF export failed")
+                QMessageBox.critical(self, "Dashboard Export", f"Could not export dashboard PDF:\n{exc}")
+
+        btn_apply_mgmt.clicked.connect(_mgmt_refresh)
+        btn_export_mgmt.clicked.connect(_export_mgmt_pdf)
+        _mgmt_refresh()
+        tabs.addTab(tab_mgmt, "Management Overview")
+
+        # ------------------------------------------------------------------
+        # TAB 4 – HSE Communication Planner (dashboard-only addition)
+        # Reads existing module records; does not alter their tables or workflows.
+        # ------------------------------------------------------------------
+        tab_comms = QWidget()
+        comms_outer = QVBoxLayout(tab_comms)
+        comms_scroll = QScrollArea(); comms_scroll.setWidgetResizable(True)
+        comms_body = QWidget(); comms = QVBoxLayout(comms_body)
+        comms.setContentsMargins(10, 10, 10, 10); comms.setSpacing(8)
+        comms_scroll.setWidget(comms_body); comms_outer.addWidget(comms_scroll)
+
+        comms_intro = QLabel(
+            "<b>Automatic HSE Communication Planner</b> — analyses existing Observation, Audit, "
+            "Training, PTW and Incident records to recommend a daily TBT, weekly Mass TBT and monthly campaign. "
+            "Recommendations are decision support and require HSE review/approval before delivery."
+        )
+        comms_intro.setWordWrap(True); comms.addWidget(comms_intro)
+
+        comms_filter_box = QGroupBox("Recommendation Period")
+        comms_filter = QHBoxLayout(comms_filter_box)
+        comms_period = QComboBox(); comms_period.addItems(["Day", "Week", "Month", "Custom Range"])
+        comms_date = QDateEdit(); comms_date.setCalendarPopup(True); comms_date.setDisplayFormat("yyyy-MM-dd")
+        comms_date.setDate(QDate.currentDate())
+        btn_comms_refresh = QPushButton("Refresh Recommendations")
+        comms_filter.addWidget(QLabel("Analysis basis")); comms_filter.addWidget(comms_period)
+        comms_filter.addWidget(QLabel("Reference date")); comms_filter.addWidget(comms_date)
+        comms_filter.addWidget(QLabel("Custom range uses Management Overview dates"))
+        comms_filter.addWidget(btn_comms_refresh)
+        comms.addWidget(comms_filter_box)
+
+        comms_status = QLabel("Recommendations will refresh automatically when the period or reference date changes.")
+        comms_status.setWordWrap(True); comms.addWidget(comms_status)
+
+        comms_cards = QGridLayout(); comms_cards.setSpacing(8); comms.addLayout(comms_cards)
+        comms_tables = QHBoxLayout(); comms.addLayout(comms_tables)
+        comms_evidence_box = QGroupBox("Evidence Behind the Recommendations")
+        comms_evidence_layout = QVBoxLayout(comms_evidence_box)
+        comms_evidence_table = QTableWidget(); comms_evidence_table.setColumnCount(5)
+        comms_evidence_table.setHorizontalHeaderLabels(["Topic", "Observations", "Audit Findings", "PTW / Incidents", "Training Gaps"])
+        comms_evidence_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        comms_evidence_table.setAlternatingRowColors(True)
+        comms_evidence_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        comms_evidence_layout.addWidget(comms_evidence_table); comms_tables.addWidget(comms_evidence_box, 2)
+
+        comms_library_box = QGroupBox("TBT Topic Library — 100 Topics")
+        comms_library_layout = QVBoxLayout(comms_library_box)
+        comms_search = QLineEdit(); comms_search.setPlaceholderText("Search the 100 TBT topics...")
+        comms_library_list = QListWidget(); comms_library_layout.addWidget(comms_search); comms_library_layout.addWidget(comms_library_list)
+        comms_tables.addWidget(comms_library_box, 1)
+
+        comms_topic_index = {}
+        for topic_title, topic_keywords in HSE_TBT_TOPIC_LIBRARY:
+            comms_topic_index[topic_title] = topic_keywords
+            comms_library_list.addItem(topic_title)
+
+        def _comms_date_range(mode, anchor_date):
+            if mode == "Day":
+                return anchor_date, anchor_date
+            if mode == "Week":
+                return anchor_date - timedelta(days=anchor_date.weekday()), anchor_date
+            if mode == "Month":
+                return anchor_date.replace(day=1), anchor_date
+            return date.fromisoformat(start_filter.date().toString("yyyy-MM-dd")), date.fromisoformat(end_filter.date().toString("yyyy-MM-dd"))
+
+        def _comms_record_text(row, fields):
+            return " ".join(safe(row[k]) for k in fields if k in row.keys() and row[k] is not None).lower()
+
+        training_snapshot_cache = None
+
+        def _comms_fetch_sources(start_date, end_date):
+            nonlocal training_snapshot_cache
+            records = []
+            project_name = project_filter.currentText()
+            contractor_name = company_filter.currentText()
+            # Observation module
+            try:
+                clauses = ["date(obs_date) BETWEEN date(?) AND date(?)"]
+                params = [start_date.isoformat(), end_date.isoformat()]
+                if project_name != "All Projects": clauses.append("project=?"); params.append(project_name)
+                if contractor_name != "All Contractors": clauses.append("company=?"); params.append(contractor_name)
+                rows = db.fetchall("SELECT obs_date,project,company,location,category,subcategory,observation,immediate_action,corrective_action,priority,status FROM observations WHERE " + " AND ".join(clauses), tuple(params))
+                for r in rows:
+                    records.append({"source":"observation", "text":_comms_record_text(r, ["category","subcategory","observation","immediate_action","corrective_action","location"]), "risk":safe(r["priority"]).lower(), "label":safe(r["category"]) or "Observation"})
+            except Exception: logging.exception("Planner observation read failed")
+
+            # Audit findings are linked through their parent audit date/project.
+            for table_name in ("aud_findings", "audit_findings"):
+                try:
+                    if not _mgmt_table_exists(table_name): continue
+                    if table_name == "aud_findings":
+                        rows = db.fetchall("SELECT a.audit_date,a.project,a.location,f.checklist_pts,f.evidence,f.corrective_action,f.procedure,f.status FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE date(a.audit_date) BETWEEN date(?) AND date(?)", (start_date.isoformat(), end_date.isoformat()))
+                    else:
+                        rows = db.fetchall("SELECT a.audit_date,a.project,a.location,f.clause,f.sub_clause,f.requirement,f.finding_type,f.observation,f.evidence,f.corrective_action,f.status FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE date(a.audit_date) BETWEEN date(?) AND date(?)", (start_date.isoformat(), end_date.isoformat()))
+                    for r in rows:
+                        if project_name != "All Projects" and "project" in r.keys() and safe(r["project"]) != project_name: continue
+                        records.append({"source":"audit", "text":_comms_record_text(r, ["checklist_pts","clause","sub_clause","requirement","finding_type","observation","evidence","corrective_action","procedure","location"]), "risk":"high" if safe(r["status"]).lower() not in ("closed","verified") else "", "label":"Audit finding"})
+                except Exception: logging.exception("Planner audit read failed: %s", table_name)
+
+            # PTW permits: analyse scope, permit type, hazards, checks and work description.
+            try:
+                clauses = ["date(COALESCE(NULLIF(planned_start,''),NULLIF(created_at,''))) BETWEEN date(?) AND date(?)"]
+                params = [start_date.isoformat(), end_date.isoformat()]
+                if project_name != "All Projects": clauses.append("project=?"); params.append(project_name)
+                if contractor_name != "All Contractors": clauses.append("(performing_company=? OR subcontractor=? OR applicant_company=? OR permit_holder_company=?)"); params.extend([contractor_name]*4)
+                rows = db.fetchall("SELECT permit_type,work_scope,work_description,hazards,risk_controls,safety_checks,location,status,planned_start,planned_end FROM ptw_permits WHERE " + " AND ".join(clauses), tuple(params))
+                for r in rows:
+                    records.append({"source":"ptw", "text":_comms_record_text(r, ["permit_type","work_scope","work_description","hazards","risk_controls","safety_checks","location"]), "risk":"high" if safe(r["status"]).lower() in ("expired","suspended") else "", "label":safe(r["permit_type"]) or "PTW"})
+            except Exception: logging.exception("Planner PTW read failed")
+
+            # Incidents provide lagging-indicator evidence.
+            try:
+                clauses = ["date(incident_date) BETWEEN date(?) AND date(?)"]
+                params = [start_date.isoformat(), end_date.isoformat()]
+                if project_name != "All Projects": clauses.append("project=?"); params.append(project_name)
+                if contractor_name != "All Contractors": clauses.append("company=?"); params.append(contractor_name)
+                rows = db.fetchall("SELECT incident_type,description,location,status FROM incidents WHERE " + " AND ".join(clauses), tuple(params))
+                for r in rows:
+                    records.append({"source":"incident", "text":_comms_record_text(r, ["incident_type","description","location"]), "risk":"high", "label":safe(r["incident_type"]) or "Incident"})
+            except Exception: logging.exception("Planner incident read failed")
+
+            # Training gaps are a current compliance snapshot; assignments have no event date.
+            # Cache once per dashboard refresh because the same snapshot feeds all three periods.
+            try:
+                if training_snapshot_cache is None:
+                    training_snapshot_cache = []
+                    if _mgmt_table_exists("training_assignments") and _mgmt_table_exists("training_courses") and _mgmt_table_exists("employees"):
+                        ecols = _mgmt_columns("employees")
+                        employee_company = "e.company" if "company" in ecols else "''"
+                        rows = db.fetchall(f"""SELECT ta.employee_db_id,ta.course_id,tc.course_name,e.designation,
+                            {employee_company} AS employee_company,
+                            CASE WHEN EXISTS (SELECT 1 FROM training_records tr WHERE tr.employee_db_id=ta.employee_db_id
+                                AND tr.course_id=ta.course_id AND lower(COALESCE(tr.verification_status,'verified')) IN ('verified','approved')
+                                AND (COALESCE(trim(tr.expiry_date),'')='' OR date(tr.expiry_date)>=date('now'))) THEN 1 ELSE 0 END AS has_valid_record
+                            FROM training_assignments ta JOIN training_courses tc ON tc.id=ta.course_id
+                            JOIN employees e ON e.id=ta.employee_db_id
+                            WHERE COALESCE(tc.active,1)=1 AND lower(COALESCE(ta.requirement,'Mandatory')) LIKE '%mandatory%'""")
+                        for r in rows:
+                            valid = bool(r["has_valid_record"])
+                            if not valid:
+                                training_snapshot_cache.append({"source":"training", "text":(safe(r["course_name"])+" "+safe(r["designation"])).lower(),
+                                    "risk":"medium", "label":safe(r["course_name"]) or "Training gap", "company":safe(r["employee_company"])})
+                for training_record in training_snapshot_cache:
+                    if contractor_name != "All Contractors" and training_record.get("company") != contractor_name:
+                        continue
+                    records.append(training_record)
+            except Exception: logging.exception("Planner training gap read failed")
+            return records
+
+        def _comms_score(records):
+            scores = {}
+            for title, keywords in HSE_TBT_TOPIC_LIBRARY:
+                detail = {"observation":0,"audit":0,"ptw":0,"incident":0,"training":0,"score":0,"risk":0}
+                for rec in records:
+                    if any(k in rec["text"] for k in keywords):
+                        src = rec["source"]
+                        detail[src] += 1
+                        weight = {"observation":3,"audit":3,"ptw":3,"incident":4,"training":2}.get(src,1)
+                        detail["score"] += weight + (3 if rec.get("risk") in ("critical","high") else 1 if rec.get("risk")=="medium" else 0)
+                        if rec.get("risk") in ("critical","high"): detail["risk"] += 1
+                if detail["score"]:
+                    scores[title] = detail
+            return sorted(scores.items(), key=lambda x:(x[1]["score"], x[1]["risk"], sum(x[1][k] for k in ("observation","audit","ptw","incident","training"))), reverse=True)
+
+        def _comms_card(title, period_text, recommendation, reason, fallback):
+            box = QGroupBox(title + " — " + period_text)
+            box.setMinimumHeight(150)
+            lay = QVBoxLayout(box)
+            topic_lbl = QLabel("<b>" + xml_safe(recommendation[0] if recommendation else fallback) + "</b>")
+            topic_lbl.setWordWrap(True); topic_lbl.setStyleSheet("font-size:15px;color:#17365D;")
+            lay.addWidget(topic_lbl)
+            reason_lbl = QLabel(reason)
+            reason_lbl.setWordWrap(True); lay.addWidget(reason_lbl)
+            if recommendation:
+                d = recommendation[1]
+                counts = f"Observations {d['observation']} | Audit findings {d['audit']} | PTWs {d['ptw']} | Incidents {d['incident']} | Training gaps {d['training']}"
+                evidence_lbl = QLabel(counts); evidence_lbl.setWordWrap(True); evidence_lbl.setStyleSheet("color:#555;font-size:11px;")
+                lay.addWidget(evidence_lbl)
+            return box
+
+        def _comms_refresh(*_):
+            try:
+                anchor_date = date.fromisoformat(comms_date.date().toString("yyyy-MM-dd"))
+                mode = comms_period.currentText()
+                if mode == "Custom Range":
+                    ranges = {"Daily TBT": _comms_date_range("Custom Range", anchor_date), "Weekly Mass TBT": _comms_date_range("Custom Range", anchor_date), "Monthly Campaign": _comms_date_range("Custom Range", anchor_date)}
+                    range_labels = {k:f"{v[0].isoformat()} to {v[1].isoformat()}" for k,v in ranges.items()}
+                else:
+                    day_range = (anchor_date, anchor_date)
+                    week_range = (anchor_date-timedelta(days=6), anchor_date)
+                    month_range = (anchor_date.replace(day=1), anchor_date)
+                    ranges = {"Daily TBT":day_range, "Weekly Mass TBT":week_range, "Monthly Campaign":month_range}
+                    range_labels = {"Daily TBT":anchor_date.isoformat(), "Weekly Mass TBT":f"{week_range[0]} to {week_range[1]}", "Monthly Campaign":f"{month_range[0]} to {month_range[1]}"}
+                if mode == "Week":
+                    week_start = anchor_date - timedelta(days=anchor_date.weekday())
+                    ranges["Weekly Mass TBT"] = (week_start, anchor_date)
+                    range_labels["Weekly Mass TBT"] = f"{week_start} to {anchor_date}"
+                elif mode == "Month":
+                    month_start = anchor_date.replace(day=1)
+                    month_end = date(anchor_date.year, anchor_date.month, calendar.monthrange(anchor_date.year, anchor_date.month)[1])
+                    ranges["Monthly Campaign"] = (month_start, month_end)
+                    range_labels["Monthly Campaign"] = f"{month_start} to {month_end}"
+
+                daily_records = _comms_fetch_sources(*ranges["Daily TBT"])
+                weekly_records = _comms_fetch_sources(*ranges["Weekly Mass TBT"])
+                monthly_records = _comms_fetch_sources(*ranges["Monthly Campaign"])
+                daily_rank = _comms_score(daily_records)
+                weekly_rank = _comms_score(weekly_records)
+                monthly_rank = _comms_score(monthly_records)
+                while comms_cards.count():
+                    item = comms_cards.takeAt(0)
+                    widget = item.widget()
+                    if widget: widget.deleteLater()
+
+                def explain(rank, records, period_name):
+                    if not rank:
+                        return f"No matching risk signals were found in the selected {period_name} window. Continue planned site briefings and review new records."
+                    title, d = rank[0]
+                    total = sum(d[k] for k in ("observation","audit","ptw","incident","training"))
+                    sources = [name for name,key in (("observations","observation"),("audit findings","audit"),("PTW records","ptw"),("incidents","incident"),("training gaps","training")) if d[key]]
+                    return f"Selected because {total} related source records matched across {', '.join(sources)}. Priority score {d['score']} with {d['risk']} high/critical signals."
+
+                daily_pick = daily_rank[0] if daily_rank else None
+                weekly_pick = weekly_rank[0] if weekly_rank else None
+                monthly_pick = monthly_rank[0] if monthly_rank else None
+                cards = [
+                    _comms_card("Daily Toolbox Talk", range_labels["Daily TBT"], daily_pick, explain(daily_rank,daily_records,"daily"), "General Site Safety Awareness"),
+                    _comms_card("Weekly Mass TBT", range_labels["Weekly Mass TBT"], weekly_pick, explain(weekly_rank,weekly_records,"weekly"), "Review the week's site-wide safety priorities"),
+                    _comms_card("Monthly HSE Campaign", range_labels["Monthly Campaign"], monthly_pick, explain(monthly_rank,monthly_records,"monthly"), "Monthly HSE Risk Awareness Campaign"),
+                ]
+                for idx, card in enumerate(cards): comms_cards.addWidget(card, 0, idx)
+
+                all_ranked = {}
+                for rank in (daily_rank,weekly_rank,monthly_rank):
+                    for title, detail in rank:
+                        if title not in all_ranked: all_ranked[title] = detail.copy()
+                        else:
+                            for key in ("observation","audit","ptw","incident","training","score","risk"):
+                                all_ranked[title][key] = max(all_ranked[title][key], detail[key])
+                sorted_rows = sorted(all_ranked.items(), key=lambda x:x[1]["score"], reverse=True)[:30]
+                comms_evidence_table.setRowCount(len(sorted_rows))
+                for rr,(topic,detail) in enumerate(sorted_rows):
+                    vals = [topic, detail["observation"], detail["audit"], detail["ptw"]+detail["incident"], detail["training"]]
+                    for cc,val in enumerate(vals): comms_evidence_table.setItem(rr,cc,QTableWidgetItem(safe(val)))
+                comms_status.setText(
+                    f"Analysed {len(HSE_TBT_TOPIC_LIBRARY)} topics | Daily source records: {len(daily_records)} | "
+                    f"Weekly source records: {len(weekly_records)} | Monthly source records: {len(monthly_records)} | "
+                    f"Project: {project_filter.currentText()} | Contractor: {company_filter.currentText()}. "
+                    "Training gaps are a current assignment snapshot; employee training assignments are not project-scoped."
+                )
+            except Exception as exc:
+                logging.exception("HSE communication planner refresh failed")
+                comms_status.setText("Could not calculate recommendations: " + safe(exc))
+
+        def _comms_search_topics(value):
+            term = safe(value).lower().strip()
+            comms_library_list.clear()
+            for title, _keywords in HSE_TBT_TOPIC_LIBRARY:
+                if not term or term in title.lower() or any(term in kw for kw in _keywords):
+                    comms_library_list.addItem(title)
+
+        comms_search.textChanged.connect(_comms_search_topics)
+        def _comms_manual_refresh():
+            # Force a fresh read of training compliance and all module records.
+            nonlocal training_snapshot_cache
+            training_snapshot_cache = None
+            _comms_refresh()
+        btn_comms_refresh.clicked.connect(_comms_manual_refresh)
+        comms_period.currentTextChanged.connect(_comms_refresh)
+        comms_date.dateChanged.connect(_comms_refresh)
+        project_filter.currentTextChanged.connect(_comms_refresh)
+        company_filter.currentTextChanged.connect(_comms_refresh)
+        start_filter.dateChanged.connect(lambda *_: _comms_refresh() if comms_period.currentText()=="Custom Range" else None)
+        end_filter.dateChanged.connect(lambda *_: _comms_refresh() if comms_period.currentText()=="Custom Range" else None)
+        _comms_refresh()
+        tabs.addTab(tab_comms, "TBT & Campaign Planner")
+
+        # ------------------------------------------------------------------
+        # Wiring
+        # ------------------------------------------------------------------
+        def _reload():
+            # Rebuild by re-entering dashboard (keeps other modules untouched)
+            try:
+                self._module_cache.pop(0, None)
+            except Exception:
+                pass
+            self.dashboard()
+
+        def _copy_summary():
+            lines = [
+                f"HSE Action Summary — {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                f"Company: {company_name()} | Project: {db.setting('project_name','')}",
+                "",
+            ]
+            for i, a in enumerate(action_cards, 1):
+                lines.append(f"{i}. {a['title']} [{a['risk']}]")
+                lines.append(f"   Trigger: {a['trigger']}")
+                lines.append("   Reactive:")
+                for x in a["reactive"]:
+                    lines.append(f"    - {x}")
+                lines.append("   Proactive:")
+                for x in a["proactive"]:
+                    lines.append(f"    - {x}")
+                if a.get("tbt_topic"):
+                    lines.append(f"   TBT: {a['tbt_topic']}")
+                lines.append("")
+            text = "\n".join(lines)
+            try:
+                QApplication.clipboard().setText(text)
+                QMessageBox.information(self, "Copied", "Action summary copied to clipboard.")
+            except Exception:
+                QMessageBox.information(self, "Action Summary", text[:4000])
+
+        btn_refresh.clicked.connect(_reload)
+        btn_refresh_act.clicked.connect(_reload)
+        btn_actions.clicked.connect(lambda: tabs.setCurrentIndex(1))
+        btn_obs.clicked.connect(lambda: self.nav.setCurrentRow(1))
+        btn_inc.clicked.connect(lambda: self.nav.setCurrentRow(2))
+        btn_print_plan.clicked.connect(_copy_summary)
         layout.addWidget(recent,1)
 
 
@@ -10938,7 +12564,6 @@ class PTWModule(QWidget):
         self.submit_certs_btn.setMinimumHeight(44)
         self.submit_certs_btn.setMinimumWidth(260)
         self.submit_certs_btn.setStyleSheet("font-weight:bold;font-size:14px;")
-        self.submit_certs_btn.setEnabled(True)
         self.submit_certs_btn.clicked.connect(self._submit_from_certificates_tab)
         action_row2.addWidget(self.submit_certs_btn)
         action_row2.addStretch()
@@ -11638,7 +13263,7 @@ class PTWModule(QWidget):
         attached_count = 0
         for c in rows:
             path_v = _s(c["attachment_path"]).strip()
-            has_file = self._certificate_has_attachment(path_v)
+            has_file = bool(path_v) and Path(path_v).is_file()
             if has_file:
                 attached_count += 1
             display.append(dict(
@@ -11667,8 +13292,8 @@ class PTWModule(QWidget):
             else:
                 self.cert_attach_status.setText(f"{missing} listed document(s) still need a file attachment before Submit for Review is allowed.")
         if hasattr(self, "submit_certs_btn"):
-            # Always allow click so the user gets a clear message; validation runs in submit handler.
-            self.submit_certs_btn.setEnabled(True)
+            status = _s(permit["status"]).strip() if permit else ""
+            self.submit_certs_btn.setEnabled(total > 0 and missing == 0 and status in ("Draft", "Awaiting Documents", "Returned for Correction"))
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -12010,34 +13635,18 @@ class PTWModule(QWidget):
             "Update the application as needed, attach documents/certificates, then click Submit for Review."
         )
 
-    def _certificate_has_attachment(self, attachment_path):
-        """True if a supporting document has a stored attachment path (file preferred, path also accepted)."""
-        path_v = _s(attachment_path).strip()
-        if not path_v:
-            return False
-        try:
-            if Path(path_v).is_file():
-                return True
-        except Exception:
-            pass
-        # Path was saved by the app even if the file was moved/offline — still count as attached for workflow.
-        return True
-
     def _required_certificates_attachment_status(self, pid):
-        rows = self.db.fetchall(
-            "SELECT certificate_type,attachment_path FROM ptw_certificates WHERE permit_id=? ORDER BY id",
-            (pid,),
-        )
+        rows = self.db.fetchall("SELECT certificate_type,attachment_path FROM ptw_certificates WHERE permit_id=? ORDER BY id", (pid,))
         total = len(rows)
         attached = 0
         missing = []
         for c in rows:
-            if self._certificate_has_attachment(c["attachment_path"]):
+            path_v = _s(c["attachment_path"]).strip()
+            if path_v and Path(path_v).is_file():
                 attached += 1
             else:
                 missing.append(_s(c["certificate_type"]) or "Document")
         return total, attached, missing
-
 
     def _resubmit_permit_for_review(self, pid, source_label="Application"):
         r = self._permit_row(pid)
@@ -12086,21 +13695,17 @@ class PTWModule(QWidget):
         self._resubmit_permit_for_review(pid, "Attachments / Safety Documents")
 
     def _submit_from_certificates_tab(self):
+        if not hasattr(self, "cert_permit"):
+            return QMessageBox.warning(self, "Certificates", "Supporting Certificates tab is not ready.")
+        pid = self.cert_permit.currentData()
+        if not pid:
+            return QMessageBox.warning(self, "Permit Required", "Select a permit in Supporting Certificates first.")
+        # Refresh checklist so attachment counts are current before gating submit
         try:
-            if not hasattr(self, "cert_permit"):
-                return QMessageBox.warning(self, "Certificates", "Supporting Certificates tab is not ready.")
-            pid = self.cert_permit.currentData()
-            if not pid:
-                return QMessageBox.warning(self, "Permit Required", "Select a permit in Supporting Certificates first.")
-            try:
-                self._refresh_certificates_for_selected_permit()
-            except Exception:
-                logging.exception("Certificate checklist refresh before submit failed")
-            self._resubmit_permit_for_review(pid, "Supporting Certificates")
-        except Exception as exc:
-            logging.exception("Submit from certificates failed")
-            QMessageBox.critical(self, "Submit Failed", "Could not submit the permit for review.\n\n" + str(exc))
-
+            self._refresh_certificates_for_selected_permit()
+        except Exception:
+            logging.exception("Certificate checklist refresh before submit failed")
+        self._resubmit_permit_for_review(pid, "Supporting Certificates")
 
     def _load_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
