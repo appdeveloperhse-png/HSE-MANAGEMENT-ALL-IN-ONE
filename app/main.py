@@ -3559,102 +3559,623 @@ class MainWindow(QMainWindow):
 
 
     def dashboard(self):
-        # Create the Recent Observations widget at the start of the dashboard.
-        # This ensures the local name always exists before any dashboard code
-        # can reference it (prevents NameError: name 'recent' is not defined).
-        recent = QGroupBox("Recent Observations")
-        w,layout=self.page("HSE Dashboard")
-        cards=QHBoxLayout()
-        values=[
-            ("Observations","SELECT COUNT(*) c FROM observations"),
-            ("Open Observations","SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
-            ("Overdue","SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date < date('now')"),
-            ("Incidents","SELECT COUNT(*) c FROM incidents"),
-            ("Audits","SELECT COUNT(*) c FROM audits"),
-            ("CAPA","SELECT COUNT(*) c FROM capa")
+        """Professional analytical HSE dashboard with trends, KPIs and proactive actions.
+        Only the Home Dashboard UI is rebuilt; no other modules are modified.
+        """
+        w, layout = self.page("HSE Analytical Dashboard")
+
+        header = QLabel(
+            f"<b>Company:</b> {company_name()} &nbsp;&nbsp; "
+            f"<b>Project:</b> {db.setting('project_name', '') or '—'} &nbsp;&nbsp; "
+            f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        )
+        header.setStyleSheet("color:#17365D; padding:4px 2px 8px 2px;")
+        layout.addWidget(header)
+
+        tabs = QTabWidget()
+        layout.addWidget(tabs, 1)
+
+        # ── shared date helpers ──────────────────────────────────────────────
+        today_d = date.today()
+        this_month_start = today_d.replace(day=1).isoformat()
+        if today_d.month == 1:
+            last_month_start = date(today_d.year - 1, 12, 1).isoformat()
+            last_month_end = date(today_d.year - 1, 12, 31).isoformat()
+        else:
+            last_month_start = date(today_d.year, today_d.month - 1, 1).isoformat()
+            last_day = calendar.monthrange(today_d.year, today_d.month - 1)[1]
+            last_month_end = date(today_d.year, today_d.month - 1, last_day).isoformat()
+        this_month_label = today_d.strftime("%b %Y")
+        last_month_label = (date.fromisoformat(last_month_start)).strftime("%b %Y")
+
+        def _cnt(sql, params=()):
+            try:
+                return int(db.fetchone(sql, params)["c"] or 0)
+            except Exception:
+                return 0
+
+        def _delta_text(cur, prev):
+            if prev == 0 and cur == 0:
+                return "0 (no change)"
+            if prev == 0:
+                return f"+{cur} (new)"
+            diff = cur - prev
+            pct = int(round(100.0 * diff / prev)) if prev else 0
+            sign = "+" if diff > 0 else ""
+            return f"{sign}{diff} ({sign}{pct}%)"
+
+        def _delta_color(cur, prev, invert=False):
+            if cur == prev:
+                return "#555555"
+            better = (cur > prev) if invert else (cur < prev)
+            if cur > prev:
+                return "#1B7A3D" if invert else "#C0392B"
+            return "#C0392B" if invert else "#1B7A3D"
+
+        HIGH_RISK_CATEGORIES = {
+            "Slip Trip Fall": ("High", "Trips and falls are a leading cause of lost-time injuries."),
+            "Work at Height": ("Critical", "Falls from height frequently result in serious or fatal outcomes."),
+            "Excavation": ("High", "Collapse and struck-by hazards can escalate rapidly."),
+            "Electrical Safety": ("Critical", "Electrical incidents often involve high severity."),
+            "Lifting Operations": ("High", "Lifting failures can cause multiple casualties and property damage."),
+            "Scaffolding": ("High", "Scaffold failures and falls are high-severity events."),
+            "Confined Space": ("Critical", "Atmospheric and entrapment hazards are life-threatening."),
+            "Hot Work": ("High", "Fire and explosion potential requires strict control."),
+            "Permit to Work": ("High", "PTW breakdowns indicate system control failure."),
+            "Dropped Objects": ("High", "Dropped objects cause serious injuries and near-misses."),
+            "Chemical Safety": ("High", "Chemical exposure and spills escalate quickly."),
+            "Fire Safety": ("Critical", "Fire events threaten people, assets and continuity."),
+            "Traffic Management": ("High", "Vehicle-pedestrian interface incidents are often severe."),
+            "Plant and Machinery": ("High", "Mobile plant incidents carry high energy."),
+        }
+
+        # =====================================================================
+        # TAB 1 — DYNAMIC OVERVIEW
+        # =====================================================================
+        overview = QWidget()
+        ov = QVBoxLayout(overview)
+        ov.setContentsMargins(6, 8, 6, 6)
+        ov.setSpacing(10)
+
+        card_row = QHBoxLayout()
+        kpi_defs = [
+            ("Observations", _cnt("SELECT COUNT(*) c FROM observations"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"), "Open"),
+            ("Overdue Obs.", _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
+             None, None),
+            ("Incidents", _cnt("SELECT COUNT(*) c FROM incidents"),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')"), "Open"),
+            ("Near Misses", _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%'")
+                          + _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%'"),
+             None, None),
+            ("Open Audits", _cnt("SELECT COUNT(*) c FROM audits WHERE status NOT IN ('Closed','Completed','Cancelled')"),
+             None, None),
+            ("Open CAPA", _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"),
+             None, None),
         ]
-        for name,sql in values:
-            value=db.fetchone(sql)["c"]
-            box=QGroupBox(name); bl=QVBoxLayout(box)
-            label=QLabel(str(value)); label.setStyleSheet("font-size:28px;font-weight:bold;color:#17365D;")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            bl.addWidget(label); cards.addWidget(box)
-        layout.addLayout(cards)
-        layout.addWidget(QLabel(f"<b>Company:</b> {company_name()}    <b>Project:</b> {db.setting('project_name','')}"))
-        selector=QComboBox(); selector.addItems(["HSE Home Dashboard","Inspection Dashboard","Incident Dashboard"]); layout.addWidget(selector)
-        def switch_dashboard(text):
-            if text=="Inspection Dashboard": self.observations()
-            elif text=="Incident Dashboard": self.incidents()
-        selector.currentTextChanged.connect(switch_dashboard)
+        for title, total, sub, sub_label in kpi_defs:
+            box = QGroupBox(title)
+            box.setStyleSheet(
+                "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;background:#F7FBFF;}"
+                "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#17365D;}"
+            )
+            bl = QVBoxLayout(box)
+            lab = QLabel(str(total))
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lab.setStyleSheet("font-size:30px;font-weight:bold;color:#17365D;")
+            bl.addWidget(lab)
+            if sub is not None:
+                sub_lab = QLabel(f"{sub_label}: {sub}")
+                sub_lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                sub_lab.setStyleSheet("font-size:11px;color:#555;")
+                bl.addWidget(sub_lab)
+            card_row.addWidget(box)
+        ov.addLayout(card_row)
 
-        charts=QHBoxLayout()
-        pie=PieChartWidget()
-        obs_types=db.fetchall("SELECT obs_type,COUNT(*) c FROM observations GROUP BY obs_type ORDER BY obs_type COLLATE NOCASE")
-        pie.set_values({safe(r["obs_type"]) or "Unspecified":r["c"] for r in obs_types})
-        pie_box=QGroupBox("Observation Type Distribution (no categories merged)"); pl=QVBoxLayout(pie_box); pl.addWidget(pie)
-        bar=BarChartWidget()
-        stats={"Observations":db.fetchone("SELECT COUNT(*) c FROM observations")["c"],
-               "Incidents":db.fetchone("SELECT COUNT(*) c FROM incidents")["c"],
-               "Audits":db.fetchone("SELECT COUNT(*) c FROM audits")["c"],
-               "CAPA":db.fetchone("SELECT COUNT(*) c FROM capa")["c"]}
-        bar.set_values(stats)
-        bar_box=QGroupBox("HSE Register Summary"); bl=QVBoxLayout(bar_box); bl.addWidget(bar)
-        charts.addWidget(pie_box,1); charts.addWidget(bar_box,1); layout.addLayout(charts)
+        trend_box = QGroupBox(f"Trend Snapshot — {this_month_label} vs {last_month_label}")
+        trend_box.setStyleSheet(
+            "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#17365D;}"
+        )
+        tl = QVBoxLayout(trend_box)
+        trend_grid = QGridLayout()
+        trend_items = [
+            ("New Observations",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end))),
+            ("New Incidents",
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end))),
+            ("Near Miss Obs.",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end))),
+            ("Observations Closed",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date, '') >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date, '') >= ? AND COALESCE(closeout_date, '') <= ?", (last_month_start, last_month_end))),
+        ]
+        for col, (name, cur, prev) in enumerate(trend_items):
+            name_l = QLabel(f"<b>{name}</b>")
+            name_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cur_l = QLabel(f"{cur} this month")
+            cur_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cur_l.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;")
+            delta = _delta_text(cur, prev)
+            d_l = QLabel(f"vs last month: {delta}")
+            d_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            invert = name == "Observations Closed"
+            d_l.setStyleSheet(f"font-size:12px;color:{_delta_color(cur, prev, invert=invert)};")
+            prev_l = QLabel(f"Last month: {prev}")
+            prev_l.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            prev_l.setStyleSheet("font-size:11px;color:#666;")
+            cell = QVBoxLayout()
+            cell.addWidget(name_l)
+            cell.addWidget(cur_l)
+            cell.addWidget(d_l)
+            cell.addWidget(prev_l)
+            wrap = QWidget()
+            wrap.setLayout(cell)
+            wrap.setStyleSheet("background:#F8FBFF;border:1px solid #D6E4F0;border-radius:4px;padding:4px;")
+            trend_grid.addWidget(wrap, 0, col)
+        tl.addLayout(trend_grid)
+        ov.addWidget(trend_box)
 
-        # A clear, complete category register. Every category is a separate row, including zero counts.
-        cat_box=QGroupBox("HSE Observation Categories — click a row to view that category")
-        cat_layout=QVBoxLayout(cat_box)
-        cat_table=QTableWidget()
-        categories=sorted(set(CATEGORIES), key=lambda x: x.lower())
-        counts={safe(r["category"]):int(r["c"]) for r in db.fetchall("SELECT category,COUNT(*) c FROM observations GROUP BY category")}
-        cat_table.setColumnCount(3)
-        cat_table.setHorizontalHeaderLabels(["Category","Observations","Open / Active"])
-        cat_table.setRowCount(len(categories))
-        cat_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.Stretch)
-        cat_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeToContents)
-        cat_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeToContents)
-        cat_table.setAlternatingRowColors(True)
-        cat_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        cat_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        for r,cat in enumerate(categories):
-            total=counts.get(cat,0)
-            active=db.fetchone("SELECT COUNT(*) c FROM observations WHERE category=? AND status NOT IN ('Closed','Cancelled')",(cat,))["c"]
-            cat_table.setItem(r,0,QTableWidgetItem(cat))
-            cat_table.setItem(r,1,QTableWidgetItem(str(total)))
-            cat_table.setItem(r,2,QTableWidgetItem(str(active)))
-        cat_table.setMinimumHeight(min(330, max(150, len(categories)*26+35)))
-        def open_category(row,_column):
-            item=cat_table.item(row,0)
+        charts = QHBoxLayout()
+        pie = PieChartWidget()
+        obs_types = db.fetchall(
+            "SELECT obs_type, COUNT(*) c FROM observations GROUP BY obs_type ORDER BY c DESC"
+        )
+        pie.set_values({safe(r["obs_type"]) or "Unspecified": r["c"] for r in obs_types[:12]})
+        pie_box = QGroupBox("Observation Type Distribution")
+        pl = QVBoxLayout(pie_box)
+        pl.addWidget(pie)
+        charts.addWidget(pie_box, 1)
+
+        bar = BarChartWidget()
+        cat_counts = db.fetchall(
+            "SELECT category, COUNT(*) c FROM observations GROUP BY category ORDER BY c DESC LIMIT 8"
+        )
+        bar.set_values({safe(r["category"]) or "Other": r["c"] for r in cat_counts})
+        bar_box = QGroupBox("Top Observation Categories")
+        bl = QVBoxLayout(bar_box)
+        bl.addWidget(bar)
+        charts.addWidget(bar_box, 1)
+        ov.addLayout(charts)
+
+        rise_box = QGroupBox("Category Momentum & Risk Outlook (this month vs last month)")
+        rise_box.setStyleSheet(
+            "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;color:#17365D;}"
+        )
+        rl = QVBoxLayout(rise_box)
+        rise_table = QTableWidget()
+        rise_table.setColumnCount(7)
+        rise_table.setHorizontalHeaderLabels([
+            "Category", f"{last_month_label}", f"{this_month_label}", "Change",
+            "Open Now", "Risk Level", "Outlook / Probability Note"
+        ])
+        rise_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        rise_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.Stretch)
+        for c in range(1, 6):
+            rise_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        rise_table.setAlternatingRowColors(True)
+        rise_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        rise_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+
+        all_cats = sorted(set(CATEGORIES), key=lambda x: x.lower())
+        momentum = []
+        for cat in all_cats:
+            cur = _cnt(
+                "SELECT COUNT(*) c FROM observations WHERE category=? AND obs_date >= ?",
+                (cat, this_month_start)
+            )
+            prev = _cnt(
+                "SELECT COUNT(*) c FROM observations WHERE category=? AND obs_date >= ? AND obs_date <= ?",
+                (cat, last_month_start, last_month_end)
+            )
+            open_n = _cnt(
+                "SELECT COUNT(*) c FROM observations WHERE category=? AND status NOT IN ('Closed','Cancelled')",
+                (cat,)
+            )
+            if cur == 0 and prev == 0 and open_n == 0:
+                continue
+            change = cur - prev
+            risk_level, risk_note = HIGH_RISK_CATEGORIES.get(cat, ("Medium", "Monitor trend and close open actions."))
+            if change > 0 and cat in HIGH_RISK_CATEGORIES:
+                outlook = (
+                    f"Rising. {risk_note} Probability of a more severe event increases if controls are not reinforced."
+                )
+            elif change > 0:
+                outlook = "Rising. Increase awareness and verify controls before the trend becomes an incident pattern."
+            elif change < 0:
+                outlook = "Improving. Maintain current controls and verify sustainability."
+            else:
+                outlook = "Stable. Continue routine monitoring and close open items."
+            momentum.append((cat, prev, cur, change, open_n, risk_level, outlook))
+
+        momentum.sort(key=lambda x: (-x[3], -x[4], x[0].lower()))
+        rise_table.setRowCount(len(momentum))
+        for r, (cat, prev, cur, change, open_n, risk_level, outlook) in enumerate(momentum):
+            vals = [cat, str(prev), str(cur), _delta_text(cur, prev), str(open_n), risk_level, outlook]
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setToolTip(v)
+                if c == 3:
+                    item.setForeground(QColor(_delta_color(cur, prev)))
+                if c == 5:
+                    if risk_level == "Critical":
+                        item.setForeground(QColor("#8B0000"))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    elif risk_level == "High":
+                        item.setForeground(QColor("#C0392B"))
+                rise_table.setItem(r, c, item)
+
+        def open_rise_category(row, _col):
+            item = rise_table.item(row, 0)
             if item:
-                self.observation_dashboard_filter=item.text()
+                self.observation_dashboard_filter = item.text()
                 self.observations()
-        cat_table.cellDoubleClicked.connect(open_category)
-        cat_layout.addWidget(cat_table)
-        layout.addWidget(cat_box,1)
+        rise_table.cellDoubleClicked.connect(open_rise_category)
+        rise_table.setMinimumHeight(min(320, max(160, len(momentum) * 28 + 40)))
+        rl.addWidget(rise_table)
+        note = QLabel("Double-click a category to open the Observation register filtered to that category.")
+        note.setStyleSheet("color:#555;font-size:11px;")
+        rl.addWidget(note)
+        ov.addWidget(rise_box, 1)
 
-        recent_inc=QGroupBox("Recent Incidents"); ril=QVBoxLayout(recent_inc); it=QTableWidget(); it.setColumnCount(5); it.setHorizontalHeaderLabels(["ID / Number","Date","Type","Status","Completion"]); ir=db.fetchall("SELECT id,number,incident_date,incident_type,status,incident_title,description,investigation_method,direct_cause,root_cause FROM incidents ORDER BY id DESC LIMIT 10"); it.setRowCount(len(ir))
-        for rr,x in enumerate(ir):
-            total=10; done=sum(bool(safe(x[k])) for k in ["incident_date","incident_time"] if k in x.keys())
-            done += sum(bool(safe(x[k])) for k in ["location","project","incident_type","description","investigation_method","direct_cause","root_cause"] if k in x.keys())
-            pct=round(done*100/total)
-            for cc,v in enumerate([f"{safe(x['id'])} / {safe(x['number'])}",x['incident_date'],x['incident_type'],x['status'],f"{pct}%"]): it.setItem(rr,cc,QTableWidgetItem(safe(v)))
-        ril.addWidget(it); layout.addWidget(recent_inc)
+        recent_row = QHBoxLayout()
+        recent_obs = QGroupBox("Recent Observations")
+        rol = QVBoxLayout(recent_obs)
+        ot = QTableWidget()
+        ot.setColumnCount(6)
+        ot.setHorizontalHeaderLabels(["No.", "Date", "Type", "Category", "Status", "Location"])
+        ot.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        rows = db.fetchall(
+            "SELECT number,obs_date,obs_type,category,status,location FROM observations ORDER BY id DESC LIMIT 8"
+        )
+        ot.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, key in enumerate(["number", "obs_date", "obs_type", "category", "status", "location"]):
+                ot.setItem(r, c, QTableWidgetItem(safe(row[key])))
+        ot.setAlternatingRowColors(True)
+        ot.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        rol.addWidget(ot)
+        recent_row.addWidget(recent_obs, 1)
 
-        recent_layout=QVBoxLayout(recent)
-        table=QTableWidget(); table.setColumnCount(8)
-        table.setHorizontalHeaderLabels(["S.No.","Observation No.","Date","Type","Category","Location","Status","Action Taken"])
-        table.horizontalHeader().setSectionResizeMode(7,QHeaderView.Stretch)
-        for c in range(7): table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeToContents)
-        rows=db.fetchall("SELECT id,number,obs_date,obs_type,category,location,status,corrective_action FROM observations ORDER BY id DESC LIMIT 10")
-        table.setRowCount(len(rows))
-        for r,row in enumerate(rows):
-            vals=[str(r+1),row["number"],row["obs_date"],row["obs_type"],row["category"],row["location"],row["status"],format_corrective_actions_display(row)]
-            for c,v in enumerate(vals):
-                item=QTableWidgetItem(safe(v)); item.setToolTip(safe(v)); table.setItem(r,c,item)
-        table.setAlternatingRowColors(True); table.setWordWrap(True)
-        recent_layout.addWidget(table)
-        layout.addWidget(recent,1)
+        recent_inc = QGroupBox("Recent Incidents")
+        ril = QVBoxLayout(recent_inc)
+        it = QTableWidget()
+        it.setColumnCount(5)
+        it.setHorizontalHeaderLabels(["No.", "Date", "Type", "Status", "Location"])
+        it.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        ir = db.fetchall(
+            "SELECT number,incident_date,incident_type,status,location FROM incidents ORDER BY id DESC LIMIT 8"
+        )
+        it.setRowCount(len(ir))
+        for r, row in enumerate(ir):
+            for c, key in enumerate(["number", "incident_date", "incident_type", "status", "location"]):
+                it.setItem(r, c, QTableWidgetItem(safe(row[key])))
+        it.setAlternatingRowColors(True)
+        it.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        ril.addWidget(it)
+        recent_row.addWidget(recent_inc, 1)
+        ov.addLayout(recent_row)
 
+        nav = QHBoxLayout()
+        for label, fn in [
+            ("Open Observations Register", self.observations),
+            ("Open Incidents", self.incidents),
+            ("Refresh Dashboard", self.dashboard),
+        ]:
+            b = QPushButton(label)
+            b.clicked.connect(fn)
+            nav.addWidget(b)
+        nav.addStretch()
+        ov.addLayout(nav)
+
+        tabs.addTab(overview, "Dynamic Dashboard")
+
+        # =====================================================================
+        # TAB 2 — KPI DETAIL
+        # =====================================================================
+        kpi_page = QWidget()
+        kl = QVBoxLayout(kpi_page)
+        kl.setContentsMargins(6, 8, 6, 6)
+
+        kpi_title = QLabel("<b>HSE Leading & Lagging Indicators</b>")
+        kpi_title.setStyleSheet("font-size:15px;color:#17365D;")
+        kl.addWidget(kpi_title)
+
+        kpi_table = QTableWidget()
+        kpi_table.setColumnCount(5)
+        kpi_table.setHorizontalHeaderLabels([
+            "KPI", "Current", f"{this_month_label}", f"{last_month_label}", "Trend"
+        ])
+        kpi_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        for c in range(1, 5):
+            kpi_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeToContents)
+        kpi_table.setAlternatingRowColors(True)
+        kpi_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        kpi_rows = [
+            ("Total Observations (all time)",
+             _cnt("SELECT COUNT(*) c FROM observations"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end)),
+             False),
+            ("Open Observations",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
+             None, None, False),
+            ("Overdue Observations",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
+             None, None, False),
+            ("Observations Closed (period)",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed'"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status='Closed' AND COALESCE(closeout_date,'') >= ? AND COALESCE(closeout_date,'') <= ?", (last_month_start, last_month_end)),
+             True),
+            ("Total Incidents (all time)",
+             _cnt("SELECT COUNT(*) c FROM incidents"),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end)),
+             False),
+            ("Open Incidents",
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE status NOT IN ('Closed','Cancelled')"),
+             None, None, False),
+            ("Near Miss Observations",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%'"),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?", (last_month_start, last_month_end)),
+             False),
+            ("Near Miss Incidents",
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%'"),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%' AND incident_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM incidents WHERE lower(COALESCE(incident_type,'')) LIKE '%near miss%' AND incident_date >= ? AND incident_date <= ?", (last_month_start, last_month_end)),
+             False),
+            ("Audits (all time)",
+             _cnt("SELECT COUNT(*) c FROM audits"),
+             _cnt("SELECT COUNT(*) c FROM audits WHERE audit_date >= ?", (this_month_start,)),
+             _cnt("SELECT COUNT(*) c FROM audits WHERE audit_date >= ? AND audit_date <= ?", (last_month_start, last_month_end)),
+             False),
+            ("Open Audit Findings",
+             _cnt("SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')"),
+             None, None, False),
+            ("Open CAPA",
+             _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"),
+             None, None, False),
+            ("Overdue CAPA",
+             _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"),
+             None, None, False),
+            ("High / Critical Priority Open Obs.",
+             _cnt("SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND priority IN ('High','Critical')"),
+             None, None, False),
+        ]
+        kpi_table.setRowCount(len(kpi_rows))
+        for r, (name, current, this_m, last_m, invert) in enumerate(kpi_rows):
+            kpi_table.setItem(r, 0, QTableWidgetItem(name))
+            kpi_table.setItem(r, 1, QTableWidgetItem(str(current)))
+            kpi_table.setItem(r, 2, QTableWidgetItem("-" if this_m is None else str(this_m)))
+            kpi_table.setItem(r, 3, QTableWidgetItem("-" if last_m is None else str(last_m)))
+            if this_m is not None and last_m is not None:
+                t = _delta_text(this_m, last_m)
+                item = QTableWidgetItem(t)
+                item.setForeground(QColor(_delta_color(this_m, last_m, invert=invert)))
+            else:
+                item = QTableWidgetItem("-")
+            kpi_table.setItem(r, 4, item)
+        kl.addWidget(kpi_table)
+
+        status_box = QGroupBox("Observation Status Mix")
+        sl = QHBoxLayout(status_box)
+        status_pie = PieChartWidget()
+        st_rows = db.fetchall("SELECT status, COUNT(*) c FROM observations GROUP BY status")
+        status_pie.set_values({safe(r["status"]) or "Unknown": r["c"] for r in st_rows})
+        sl.addWidget(status_pie)
+        priority_pie = PieChartWidget()
+        pr_rows = db.fetchall(
+            "SELECT priority, COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') GROUP BY priority"
+        )
+        priority_pie.set_values({safe(r["priority"]) or "Unspecified": r["c"] for r in pr_rows})
+        pr_box = QGroupBox("Open Observations by Priority")
+        prl = QVBoxLayout(pr_box)
+        prl.addWidget(priority_pie)
+        sl.addWidget(pr_box)
+        kl.addWidget(status_box)
+
+        kpi_note = QLabel(
+            "Leading indicators (observations, near misses, open actions) help predict lagging outcomes "
+            "(injuries, serious incidents). Rising leading indicators in high-risk categories require proactive intervention."
+        )
+        kpi_note.setWordWrap(True)
+        kpi_note.setStyleSheet("color:#444;padding:6px;")
+        kl.addWidget(kpi_note)
+
+        tabs.addTab(kpi_page, "KPI & Trends")
+
+        # =====================================================================
+        # TAB 3 — PROACTIVE ACTION BOARD
+        # =====================================================================
+        action_page = QWidget()
+        al = QVBoxLayout(action_page)
+        al.setContentsMargins(6, 8, 6, 6)
+
+        al.addWidget(QLabel(
+            "<b>Proactive Action Board</b> — recommended controls based on current trends, "
+            "open risks, near misses and audit/CAPA status."
+        ))
+
+        actions = []
+
+        for cat, prev, cur, change, open_n, risk_level, outlook in momentum:
+            if change <= 0 and open_n == 0:
+                continue
+            if change > 0 or (open_n >= 3 and cat in HIGH_RISK_CATEGORIES):
+                priority = "Critical" if risk_level == "Critical" and change > 0 else (
+                    "High" if change > 0 or risk_level in ("High", "Critical") else "Medium"
+                )
+                reactive = (
+                    f"Close the {open_n} open observation(s) in {cat}. "
+                    f"Verify corrective actions are effective and evidence is attached."
+                )
+                control = (
+                    f"Increase focused workplace inspections on {cat} for the next 2 weeks. "
+                    f"Confirm permits, PPE, barriers and task controls are in place."
+                )
+                proactive = (
+                    f"Deliver a Toolbox Talk (TBT) on {cat} to affected crews. "
+                    f"Refresh related training / competency where validity is near expiry. "
+                    f"Share near-miss lessons from this category at the next safety meeting."
+                )
+                if cat == "Slip Trip Fall":
+                    proactive += " Emphasise housekeeping, cable management, walkway clearance and spill response."
+                elif cat == "Work at Height":
+                    proactive += " Reinforce harness inspection, anchor points, edge protection and rescue plans."
+                elif cat == "Permit to Work":
+                    proactive += " Audit live permits, verify isolation/LOTO and daily revalidation discipline."
+                elif cat == "Hot Work":
+                    proactive += " Confirm gas testing, fire watch and post-work fire watch duration."
+                reason = (
+                    f"{cat}: {cur} this month vs {prev} last month ({_delta_text(cur, prev)}). "
+                    f"{open_n} still open. {outlook}"
+                )
+                actions.append((priority, cat, reason, reactive, control, proactive))
+
+        nm_this = _cnt(
+            "SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ?",
+            (this_month_start,)
+        )
+        nm_last = _cnt(
+            "SELECT COUNT(*) c FROM observations WHERE lower(COALESCE(obs_type,'')) LIKE '%near miss%' AND obs_date >= ? AND obs_date <= ?",
+            (last_month_start, last_month_end)
+        )
+        if nm_this > nm_last or nm_this >= 3:
+            actions.append((
+                "High",
+                "Near Miss Reporting",
+                f"Near-miss observations: {nm_this} this month vs {nm_last} last month.",
+                "Investigate each near miss for root cause and close corrective actions promptly.",
+                "Ensure stop-work authority is understood and used without fear of blame.",
+                "Run a TBT on near-miss reporting culture. Review trends in the next HSE meeting and feed lessons into JSA/PTW reviews."
+            ))
+
+        overdue_n = _cnt(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"
+        )
+        if overdue_n > 0:
+            actions.append((
+                "High" if overdue_n >= 5 else "Medium",
+                "Overdue Observations",
+                f"{overdue_n} observation(s) are past their target date and still open.",
+                "Escalate overdue items to responsible supervisors and set revised realistic close-out dates.",
+                "Block new high-risk work where the same hazard remains uncontrolled.",
+                "Add overdue action review to the weekly HSE meeting agenda until the backlog is cleared."
+            ))
+
+        hi_open = _cnt(
+            "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND priority IN ('High','Critical')"
+        )
+        if hi_open > 0:
+            actions.append((
+                "Critical" if hi_open >= 3 else "High",
+                "High / Critical Priority Observations",
+                f"{hi_open} high or critical priority observation(s) remain open.",
+                "Treat as priority close-out: verify immediate controls, evidence and verification sign-off.",
+                "Increase supervision frequency on the affected areas until closed and verified.",
+                "Brief management; schedule targeted TBT and competency check for the crews involved."
+            ))
+
+        open_capa = _cnt("SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')")
+        overdue_capa = _cnt(
+            "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') AND target_date <> '' AND target_date < date('now')"
+        )
+        open_findings = _cnt("SELECT COUNT(*) c FROM audit_findings WHERE status NOT IN ('Closed','Cancelled')")
+        if open_capa or open_findings:
+            actions.append((
+                "High" if overdue_capa or open_findings >= 5 else "Medium",
+                "CAPA & Audit Findings",
+                f"Open CAPA: {open_capa} (overdue: {overdue_capa}). Open audit findings: {open_findings}.",
+                "Chase responsible persons for evidence of completion; escalate overdue CAPA.",
+                "Link related observations/incidents to CAPA so systemic causes are addressed once.",
+                "Use recurring finding themes as TBT topics and update procedures / training matrix where needed."
+            ))
+
+        inc_this = _cnt("SELECT COUNT(*) c FROM incidents WHERE incident_date >= ?", (this_month_start,))
+        if inc_this > 0:
+            actions.append((
+                "High",
+                "Incident Learning",
+                f"{inc_this} incident record(s) logged this month.",
+                "Complete investigation and implement corrective actions before similar work restarts.",
+                "Share immediate lessons with all affected crews; update JSA / method statements.",
+                "Schedule a focused TBT from investigation findings and verify training effectiveness."
+            ))
+
+        if not actions:
+            actions.append((
+                "Low",
+                "Sustain Performance",
+                "No strong adverse trends detected from current observation / incident / CAPA data.",
+                "Continue closing open items on time and maintain inspection discipline.",
+                "Keep routine workplace inspections and permit checks on schedule.",
+                "Maintain regular TBTs on seasonal and task-specific risks; keep training matrix current."
+            ))
+
+        prio_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+        actions.sort(key=lambda a: (prio_order.get(a[0], 9), a[1]))
+
+        action_table = QTableWidget()
+        action_table.setColumnCount(6)
+        action_table.setHorizontalHeaderLabels([
+            "Priority", "Focus Area", "Why (data signal)", "Reactive Action", "Control Action", "Proactive Action (TBT / Training / Awareness)"
+        ])
+        action_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        action_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        action_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        action_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
+        action_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        action_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        action_table.setAlternatingRowColors(True)
+        action_table.setWordWrap(True)
+        action_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        action_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        action_table.setRowCount(len(actions))
+        for r, (priority, focus, reason, reactive, control, proactive) in enumerate(actions):
+            vals = [priority, focus, reason, reactive, control, proactive]
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setToolTip(v)
+                if c == 0:
+                    if priority == "Critical":
+                        item.setForeground(QColor("#8B0000"))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    elif priority == "High":
+                        item.setForeground(QColor("#C0392B"))
+                        item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
+                    elif priority == "Medium":
+                        item.setForeground(QColor("#B9770E"))
+                    else:
+                        item.setForeground(QColor("#1B7A3D"))
+                action_table.setItem(r, c, item)
+            action_table.setRowHeight(r, 72)
+        al.addWidget(action_table, 1)
+
+        guide = QGroupBox("How to use this board")
+        gl = QVBoxLayout(guide)
+        gl.addWidget(QLabel(
+            "• Reactive — close what is already open and prevent immediate recurrence.\n"
+            "• Control — strengthen barriers at the workplace (inspections, permits, supervision).\n"
+            "• Proactive — reduce future probability via TBT, training, awareness and system improvements.\n"
+            "• Rising counts in high-severity categories (Work at Height, Electrical, Confined Space, Slip/Trip, etc.) "
+            "increase the probability of a serious outcome if left unaddressed.\n"
+            "• Revisit this tab after new observations, incidents, audits or CAPA updates — recommendations refresh from live data."
+        ))
+        al.addWidget(guide)
+
+        refresh_btn = QPushButton("Refresh Recommendations")
+        refresh_btn.clicked.connect(self.dashboard)
+        al.addWidget(refresh_btn)
+
+        tabs.addTab(action_page, "Proactive Action Board")
+        tabs.setCurrentIndex(0)
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
