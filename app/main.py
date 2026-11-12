@@ -5624,7 +5624,16 @@ class MainWindow(QMainWindow):
             logo.setPixmap(QPixmap(logo_path).scaled(70,55,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
         banner.addWidget(logo); banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"),1); layout.addLayout(banner)
         toolbar=QHBoxLayout()
-        buttons=[("+ New Incident", None),("Edit Selected",None),("Delete Selected",None),("Export CSV",lambda:self.export_csv("incidents")),( "Export Excel",lambda:self.export_excel("incidents")),( "Export PDF",lambda:self.export_pdf("incidents")),( "Export Word",lambda:self.export_docx("incidents")),( "Professional Report",None)]
+        buttons=[
+            ("+ New Incident", None),
+            ("Edit Selected", None),
+            ("Delete Selected", None),
+            ("Export CSV", lambda: self.export_csv("incidents")),
+            ("Export Excel", lambda: self.export_excel("incidents")),
+            ("Export PDF", lambda: self.export_pdf("incidents")),
+            ("Export Word", lambda: self.export_docx("incidents")),
+            ("Professional Report", None),
+        ]
         btns={}
         for text,fn in buttons:
             b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
@@ -5692,6 +5701,20 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logging.exception("Incident professional report failed")
                 QMessageBox.critical(self, "Report Error", str(e))
+        btns["+ New Incident"].clicked.connect(lambda: self.incident_form(load))
+        def edit_selected():
+            rid = self.selected_id(table, "Edit Incident")
+            if rid is None:
+                return
+            rr = db.fetchone("SELECT status FROM incidents WHERE id=?", (rid,))
+            if rr and safe(rr["status"]).lower() == "closed":
+                QMessageBox.information(self, "Submitted", "This report has been submitted and cannot be edited.")
+                return
+            self.incident_form(load, rid)
+        btns["Edit Selected"].clicked.connect(edit_selected)
+        btns["Delete Selected"].clicked.connect(
+            lambda: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load)
+        )
         btns["Professional Report"].clicked.connect(professional)
         load()
 
