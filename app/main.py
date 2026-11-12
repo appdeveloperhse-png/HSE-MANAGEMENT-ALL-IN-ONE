@@ -3578,12 +3578,19 @@ class MainWindow(QMainWindow):
     # ========================================================
 
 
+    def show_export_success(self, path):
+        """Shared success dialog used by STOP Card and other module exports."""
+        QMessageBox.information(
+            self,
+            "Export Successful",
+            f"File saved successfully:\n{path}"
+        )
+
     def dashboard(self):
-        """Professional HSE KPI Dashboard with shared filters, Leading/Lagging KPIs,
-        comparison periods, manpower metrics, charts, and intelligent preventive actions.
-        Other modules are intentionally left unchanged.
+        """HSE Performance Dashboard with separate tabs for Filters/KPIs/Charts and
+        Predictive Action Board. Filters apply to KPIs, charts, actions and export.
+        Includes observations, incidents, audit findings and CAPA. Other modules unchanged.
         """
-        # Remove previous dashboard instance from the stack/cache so Refresh is live.
         if hasattr(self, "_module_cache") and 0 in self._module_cache:
             old = self._module_cache.pop(0, None)
             if old is not None:
@@ -3599,22 +3606,10 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 2, 6, 6)
         layout.setSpacing(4)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        body = QWidget()
-        root = QVBoxLayout(body)
-        root.setContentsMargins(4, 4, 4, 4)
-        root.setSpacing(8)
-        scroll.setWidget(body)
-        layout.addWidget(scroll, 1)
-
         # ------------------------------------------------------------------
-        # Shared filter / slicer bar (applies to every chart and KPI)
+        # Shared filter bar (always visible — applies to every tab + export)
         # ------------------------------------------------------------------
-        filter_box = QGroupBox("Filters  ·  shared across all KPIs, charts and predictive actions")
+        filter_box = QGroupBox("Filters  ·  shared across KPI tabs, charts, predictive actions and export")
         filter_box.setStyleSheet(
             "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;background:#F0F5FA;}"
             "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 6px;color:#17365D;}"
@@ -3622,77 +3617,67 @@ class MainWindow(QMainWindow):
         fl = QGridLayout(filter_box)
         fl.setSpacing(8)
 
-        # Project
         fl.addWidget(QLabel("Project"), 0, 0)
         project_cb = QComboBox()
         project_cb.addItem("Overall (All Projects)", "")
         for pr in db.fetchall("SELECT project FROM projects WHERE active=1 ORDER BY project COLLATE NOCASE"):
             project_cb.addItem(safe(pr["project"]), safe(pr["project"]))
-        # also include projects that appear in data but not yet in master
         for pr in db.fetchall(
-            "SELECT DISTINCT project FROM observations WHERE COALESCE(trim(project),'')<>'' "
+            "SELECT DISTINCT project AS project FROM observations WHERE COALESCE(trim(project),'')<>'' "
             "UNION SELECT DISTINCT project FROM incidents WHERE COALESCE(trim(project),'')<>'' "
-            "ORDER BY 1 COLLATE NOCASE"
+            "UNION SELECT DISTINCT project FROM audits WHERE COALESCE(trim(project),'')<>'' "
+            "ORDER BY project COLLATE NOCASE"
         ):
-            name = safe(pr["project"])
-            if name and project_cb.findData(name) < 0:
-                project_cb.addItem(name, name)
+            val = safe(pr["project"])
+            if val and project_cb.findData(val) < 0:
+                project_cb.addItem(val, val)
         fl.addWidget(project_cb, 0, 1)
 
-        # Location
-        fl.addWidget(QLabel("Location / Area"), 0, 2)
+        fl.addWidget(QLabel("Location"), 0, 2)
         location_cb = QComboBox()
         location_cb.addItem("Overall (All Locations)", "")
         for loc in db.fetchall(
-            "SELECT DISTINCT location FROM observations WHERE COALESCE(trim(location),'')<>'' "
+            "SELECT DISTINCT location AS location FROM observations WHERE COALESCE(trim(location),'')<>'' "
             "UNION SELECT DISTINCT location FROM incidents WHERE COALESCE(trim(location),'')<>'' "
-            "ORDER BY 1 COLLATE NOCASE"
+            "UNION SELECT DISTINCT location FROM audits WHERE COALESCE(trim(location),'')<>'' "
+            "ORDER BY location COLLATE NOCASE"
         ):
             location_cb.addItem(safe(loc["location"]), safe(loc["location"]))
         fl.addWidget(location_cb, 0, 3)
 
-        # Date range (primary period)
-        fl.addWidget(QLabel("Period From"), 1, 0)
-        date_from = QDateEdit()
-        date_from.setCalendarPopup(True)
-        date_from.setDisplayFormat("yyyy-MM-dd")
-        date_from.setDate(QDate.currentDate().addMonths(-1).addDays(1 - QDate.currentDate().day()))
-        fl.addWidget(date_from, 1, 1)
-
-        fl.addWidget(QLabel("Period To"), 1, 2)
-        date_to = QDateEdit()
-        date_to.setCalendarPopup(True)
-        date_to.setDisplayFormat("yyyy-MM-dd")
-        date_to.setDate(QDate.currentDate())
-        fl.addWidget(date_to, 1, 3)
-
-        # Comparison mode
-        fl.addWidget(QLabel("Compare Against"), 2, 0)
-        compare_cb = QComboBox()
-        compare_cb.addItems([
-            "Previous Period (same length)",
-            "Previous Month",
-            "Previous Week",
-            "Same Period Last Year",
-            "Year to Date vs Prior YTD",
-            "No Comparison"
-        ])
-        fl.addWidget(compare_cb, 2, 1)
-
-        # Quick period presets
-        fl.addWidget(QLabel("Quick Select"), 2, 2)
+        fl.addWidget(QLabel("Period Preset"), 1, 0)
         preset_cb = QComboBox()
         preset_cb.addItems([
-            "This Month", "Last Month", "This Week", "Last Week",
-            "Last 30 Days", "Last 90 Days", "Year to Date", "Full Year"
+            "This Month", "Last Month", "Last 30 Days", "Last 90 Days",
+            "Year to Date", "This Year", "Custom Range"
         ])
-        fl.addWidget(preset_cb, 2, 3)
+        fl.addWidget(preset_cb, 1, 1)
 
-        # Manpower / Man-hours (persist in settings; filter-scoped display)
+        fl.addWidget(QLabel("From"), 1, 2)
+        from_date = QDateEdit()
+        from_date.setCalendarPopup(True)
+        from_date.setDisplayFormat("yyyy-MM-dd")
+        from_date.setDate(QDate.currentDate().addMonths(-1))
+        fl.addWidget(from_date, 1, 3)
+
+        fl.addWidget(QLabel("To"), 2, 0)
+        to_date = QDateEdit()
+        to_date.setCalendarPopup(True)
+        to_date.setDisplayFormat("yyyy-MM-dd")
+        to_date.setDate(QDate.currentDate())
+        fl.addWidget(to_date, 2, 1)
+
+        fl.addWidget(QLabel("Comparison"), 2, 2)
+        compare_cb = QComboBox()
+        compare_cb.addItems([
+            "None", "Previous equal period", "Previous month", "Previous year same dates"
+        ])
+        fl.addWidget(compare_cb, 2, 3)
+
         fl.addWidget(QLabel("Manpower (headcount)"), 3, 0)
         manpower_spin = QSpinBox()
-        manpower_spin.setRange(0, 500000)
-        manpower_spin.setValue(int(safe(db.setting("dashboard_manpower", "0")) or 0))
+        manpower_spin.setRange(0, 100000)
+        manpower_spin.setValue(int(float(safe(db.setting("dashboard_manpower", "0")) or 0)))
         fl.addWidget(manpower_spin, 3, 1)
 
         fl.addWidget(QLabel("Man-Hours (period)"), 3, 2)
@@ -3706,7 +3691,7 @@ class MainWindow(QMainWindow):
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply Filters")
         apply_btn.setMinimumHeight(34)
-        apply_btn.setStyleSheet("font-weight:bold;background:#17365D;")
+        apply_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
         refresh_btn = QPushButton("Refresh Live Data")
         export_btn = QPushButton("Export Dashboard Report (Word)")
         btn_row.addWidget(apply_btn)
@@ -3715,26 +3700,64 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         fl.addLayout(btn_row, 4, 0, 1, 4)
 
-        root.addWidget(filter_box)
+        layout.addWidget(filter_box)
 
-        # ------------------------------------------------------------------
-        # Status header
-        # ------------------------------------------------------------------
         header = QLabel("")
-        header.setStyleSheet("color:#17365D; padding:2px 0 2px 0; font-size:12px;")
+        header.setStyleSheet("color:#17365D; padding:2px 0; font-size:12px;")
         header.setWordWrap(True)
-        root.addWidget(header)
+        layout.addWidget(header)
 
-        # Content container that will be rebuilt on Apply
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(10)
-        root.addWidget(content, 1)
+        # Tabs: KPI | Charts | Predictive Action Board
+        tabs = QTabWidget()
+        kpi_tab = QWidget()
+        charts_tab = QWidget()
+        action_tab = QWidget()
+        tabs.addTab(kpi_tab, "KPI Dashboard")
+        tabs.addTab(charts_tab, "Charts & Trends")
+        tabs.addTab(action_tab, "Predictive Action Board")
+        layout.addWidget(tabs, 1)
 
-        # ------------------------------------------------------------------
-        # Helpers
-        # ------------------------------------------------------------------
+        kpi_layout = QVBoxLayout(kpi_tab)
+        kpi_layout.setContentsMargins(4, 6, 4, 4)
+        charts_layout = QVBoxLayout(charts_tab)
+        charts_layout.setContentsMargins(4, 6, 4, 4)
+        action_layout = QVBoxLayout(action_tab)
+        action_layout.setContentsMargins(4, 6, 4, 4)
+
+        kpi_scroll = QScrollArea()
+        kpi_scroll.setWidgetResizable(True)
+        kpi_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        kpi_body = QWidget()
+        kpi_root = QVBoxLayout(kpi_body)
+        kpi_root.setSpacing(10)
+        kpi_scroll.setWidget(kpi_body)
+        kpi_layout.addWidget(kpi_scroll)
+
+        charts_scroll = QScrollArea()
+        charts_scroll.setWidgetResizable(True)
+        charts_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        charts_body = QWidget()
+        charts_root = QVBoxLayout(charts_body)
+        charts_root.setSpacing(10)
+        charts_scroll.setWidget(charts_body)
+        charts_layout.addWidget(charts_scroll)
+
+        action_scroll = QScrollArea()
+        action_scroll.setWidgetResizable(True)
+        action_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        action_body = QWidget()
+        action_root = QVBoxLayout(action_body)
+        action_root.setSpacing(10)
+        action_scroll.setWidget(action_body)
+        action_layout.addWidget(action_scroll)
+
+        # State shared with export
+        state = {
+            "proj": "", "loc": "", "d0": "", "d1": "", "c0": "", "c1": "",
+            "mh": 0.0, "mp": 0, "compare": "None",
+            "metrics": {}, "top_cats": [], "rising": [], "actions": [],
+        }
+
         def _cnt(sql, params=()):
             try:
                 row = db.fetchone(sql, params)
@@ -3753,165 +3776,306 @@ class MainWindow(QMainWindow):
             sign = "+" if diff > 0 else ""
             return f"{sign}{diff} ({sign}{pct}%)"
 
-        def _delta_color(cur, prev, invert=False):
-            if cur == prev:
-                return "#555555"
-            better = (cur < prev) if not invert else (cur > prev)
-            return "#1B7A3D" if better else "#C0392B"
-
         def _scope_clause(date_col, project_col="project", location_col="location"):
-            """Return (sql_fragment, params) for the primary period + project/location filters."""
-            parts = []
+            clauses = []
             params = []
-            d0 = date_from.date().toString("yyyy-MM-dd")
-            d1 = date_to.date().toString("yyyy-MM-dd")
-            parts.append(f"COALESCE({date_col},'') >= ? AND COALESCE({date_col},'') <= ?")
-            params.extend([d0, d1])
-            proj = safe(project_cb.currentData()).strip()
-            loc = safe(location_cb.currentData()).strip()
+            d0 = from_date.date().toString("yyyy-MM-dd")
+            d1 = to_date.date().toString("yyyy-MM-dd")
+            if d0:
+                clauses.append(f"COALESCE({date_col},'') >= ?")
+                params.append(d0)
+            if d1:
+                clauses.append(f"COALESCE({date_col},'') <= ?")
+                params.append(d1)
+            proj = safe(project_cb.currentData())
+            loc = safe(location_cb.currentData())
             if proj:
-                parts.append(f"COALESCE(trim({project_col}),'') = ?")
+                clauses.append(f"COALESCE({project_col},'') = ?")
                 params.append(proj)
             if loc:
-                parts.append(f"COALESCE(trim({location_col}),'') = ?")
+                clauses.append(f"COALESCE({location_col},'') = ?")
                 params.append(loc)
-            return " AND ".join(parts), params
-
-        def _compare_range():
-            """Return (comp_from, comp_to) ISO dates based on compare mode and primary range."""
-            d0 = date_from.date().toPython()
-            d1 = date_to.date().toPython()
-            length = (d1 - d0).days + 1
-            mode = compare_cb.currentText()
-            if mode == "No Comparison":
-                return None, None
-            if mode == "Previous Period (same length)":
-                c1 = d0 - timedelta(days=1)
-                c0 = c1 - timedelta(days=length - 1)
-            elif mode == "Previous Month":
-                if d0.month == 1:
-                    c0 = date(d0.year - 1, 12, 1)
-                    c1 = date(d0.year - 1, 12, calendar.monthrange(d0.year - 1, 12)[1])
-                else:
-                    c0 = date(d0.year, d0.month - 1, 1)
-                    c1 = date(d0.year, d0.month - 1, calendar.monthrange(d0.year, d0.month - 1)[1])
-            elif mode == "Previous Week":
-                c1 = d0 - timedelta(days=1)
-                c0 = c1 - timedelta(days=6)
-            elif mode == "Same Period Last Year":
-                try:
-                    c0 = d0.replace(year=d0.year - 1)
-                    c1 = d1.replace(year=d1.year - 1)
-                except ValueError:
-                    c0 = d0 - timedelta(days=365)
-                    c1 = d1 - timedelta(days=365)
-            else:  # YTD vs Prior YTD
-                c0 = date(d0.year - 1, 1, 1)
-                c1 = date(d1.year - 1, d1.month, min(d1.day, calendar.monthrange(d1.year - 1, d1.month)[1]))
-            return c0.isoformat(), c1.isoformat()
+            where = " AND ".join(clauses) if clauses else "1=1"
+            return where, params, d0, d1, proj, loc
 
         def _scope_clause_range(date_col, start, end, project_col="project", location_col="location"):
-            parts = [f"COALESCE({date_col},'') >= ? AND COALESCE({date_col},'') <= ?"]
-            params = [start, end]
-            proj = safe(project_cb.currentData()).strip()
-            loc = safe(location_cb.currentData()).strip()
+            clauses = []
+            params = []
+            if start:
+                clauses.append(f"COALESCE({date_col},'') >= ?")
+                params.append(start)
+            if end:
+                clauses.append(f"COALESCE({date_col},'') <= ?")
+                params.append(end)
+            proj = safe(project_cb.currentData())
+            loc = safe(location_cb.currentData())
             if proj:
-                parts.append(f"COALESCE(trim({project_col}),'') = ?")
+                clauses.append(f"COALESCE({project_col},'') = ?")
                 params.append(proj)
             if loc:
-                parts.append(f"COALESCE(trim({location_col}),'') = ?")
+                clauses.append(f"COALESCE({location_col},'') = ?")
                 params.append(loc)
-            return " AND ".join(parts), params
+            where = " AND ".join(clauses) if clauses else "1=1"
+            return where, params
 
-        def _kpi_card(title, value, subtitle="", color="#17365D", bg="#FFFFFF"):
-            card = QFrame()
-            card.setFrameShape(QFrame.Shape.StyledPanel)
-            card.setStyleSheet(
-                f"QFrame{{background:{bg};border:1px solid #C5D4E0;border-radius:8px;}}"
-            )
-            v = QVBoxLayout(card)
-            v.setContentsMargins(10, 8, 10, 8)
-            v.setSpacing(2)
-            t = QLabel(title)
-            t.setStyleSheet("color:#555;font-size:11px;")
-            t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            val = QLabel(str(value))
-            val.setStyleSheet(f"color:{color};font-size:22px;font-weight:bold;")
-            val.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sub = QLabel(subtitle)
-            sub.setStyleSheet("color:#666;font-size:10px;")
-            sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sub.setWordWrap(True)
-            v.addWidget(t)
-            v.addWidget(val)
-            v.addWidget(sub)
-            return card
+        def _audit_finding_scope(start=None, end=None):
+            """Audit findings joined to parent audits for project/location/date filters."""
+            clauses = ["1=1"]
+            params = []
+            d0 = start if start is not None else from_date.date().toString("yyyy-MM-dd")
+            d1 = end if end is not None else to_date.date().toString("yyyy-MM-dd")
+            if d0:
+                clauses.append("COALESCE(a.audit_date,'') >= ?")
+                params.append(d0)
+            if d1:
+                clauses.append("COALESCE(a.audit_date,'') <= ?")
+                params.append(d1)
+            proj = safe(project_cb.currentData())
+            loc = safe(location_cb.currentData())
+            if proj:
+                clauses.append("COALESCE(a.project,'') = ?")
+                params.append(proj)
+            if loc:
+                clauses.append("COALESCE(a.location,'') = ?")
+                params.append(loc)
+            where = " AND ".join(clauses)
+            return where, params
+
+        def _comparison_range(d0, d1):
+            mode = compare_cb.currentText()
+            if mode == "None" or not d0 or not d1:
+                return "", ""
+            try:
+                start = date.fromisoformat(d0)
+                end = date.fromisoformat(d1)
+            except Exception:
+                return "", ""
+            span = (end - start).days + 1
+            if mode == "Previous equal period":
+                c1 = start - timedelta(days=1)
+                c0 = c1 - timedelta(days=span - 1)
+                return c0.isoformat(), c1.isoformat()
+            if mode == "Previous month":
+                first = start.replace(day=1)
+                prev_last = first - timedelta(days=1)
+                prev_first = prev_last.replace(day=1)
+                return prev_first.isoformat(), prev_last.isoformat()
+            if mode == "Previous year same dates":
+                try:
+                    return start.replace(year=start.year - 1).isoformat(), end.replace(year=end.year - 1).isoformat()
+                except Exception:
+                    return "", ""
+            return "", ""
 
         def _apply_preset():
-            today_d = QDate.currentDate()
-            p = preset_cb.currentText()
-            if p == "This Month":
-                date_from.setDate(QDate(today_d.year(), today_d.month(), 1))
-                date_to.setDate(today_d)
-            elif p == "Last Month":
-                first = QDate(today_d.year(), today_d.month(), 1).addMonths(-1)
-                last = QDate(today_d.year(), today_d.month(), 1).addDays(-1)
-                date_from.setDate(first)
-                date_to.setDate(last)
-            elif p == "This Week":
-                date_from.setDate(today_d.addDays(-(today_d.dayOfWeek() - 1)))
-                date_to.setDate(today_d)
-            elif p == "Last Week":
-                end = today_d.addDays(-(today_d.dayOfWeek()))
-                start = end.addDays(-6)
-                date_from.setDate(start)
-                date_to.setDate(end)
-            elif p == "Last 30 Days":
-                date_from.setDate(today_d.addDays(-29))
-                date_to.setDate(today_d)
-            elif p == "Last 90 Days":
-                date_from.setDate(today_d.addDays(-89))
-                date_to.setDate(today_d)
-            elif p == "Year to Date":
-                date_from.setDate(QDate(today_d.year(), 1, 1))
-                date_to.setDate(today_d)
-            elif p == "Full Year":
-                date_from.setDate(QDate(today_d.year(), 1, 1))
-                date_to.setDate(QDate(today_d.year(), 12, 31))
-            rebuild()
+            preset = preset_cb.currentText()
+            today_q = QDate.currentDate()
+            if preset == "This Month":
+                from_date.setDate(QDate(today_q.year(), today_q.month(), 1))
+                to_date.setDate(today_q)
+            elif preset == "Last Month":
+                first_this = QDate(today_q.year(), today_q.month(), 1)
+                last_prev = first_this.addDays(-1)
+                from_date.setDate(QDate(last_prev.year(), last_prev.month(), 1))
+                to_date.setDate(last_prev)
+            elif preset == "Last 30 Days":
+                from_date.setDate(today_q.addDays(-29))
+                to_date.setDate(today_q)
+            elif preset == "Last 90 Days":
+                from_date.setDate(today_q.addDays(-89))
+                to_date.setDate(today_q)
+            elif preset == "Year to Date":
+                from_date.setDate(QDate(today_q.year(), 1, 1))
+                to_date.setDate(today_q)
+            elif preset == "This Year":
+                from_date.setDate(QDate(today_q.year(), 1, 1))
+                to_date.setDate(QDate(today_q.year(), 12, 31))
+            # Custom Range: leave dates as-is
+
+        def _clear_layout(lay):
+            while lay.count():
+                item = lay.takeAt(0)
+                wid = item.widget()
+                child = item.layout()
+                if wid is not None:
+                    wid.setParent(None)
+                    wid.deleteLater()
+                elif child is not None:
+                    _clear_layout(child)
+
+        def _kpi_card(title, value, subtitle="", color="#17365D"):
+            box = QFrame()
+            box.setFrameShape(QFrame.Shape.StyledPanel)
+            box.setStyleSheet(
+                f"QFrame{{background:white;border:1px solid #C5D5E4;border-radius:8px;border-left:5px solid {color};}}"
+            )
+            vl = QVBoxLayout(box)
+            vl.setContentsMargins(10, 8, 10, 8)
+            t = QLabel(title)
+            t.setStyleSheet("color:#555;font-size:11px;font-weight:bold;")
+            t.setWordWrap(True)
+            v = QLabel(str(value))
+            v.setStyleSheet(f"color:{color};font-size:22px;font-weight:bold;")
+            s = QLabel(subtitle)
+            s.setStyleSheet("color:#666;font-size:10px;")
+            s.setWordWrap(True)
+            vl.addWidget(t)
+            vl.addWidget(v)
+            vl.addWidget(s)
+            return box
+
+        CONTROL_LIBRARY = {
+            "Slip Trip Fall": {
+                "risk": "High",
+                "prevent": "Eliminate floor hazards before they become injuries: daily walkway checks, immediate spill response, cable management standards, non-slip footwear at access points.",
+                "train": "Housekeeping & slip/trip awareness; Spill response.",
+                "comms": "Pre-start reminder on walkway clearance.",
+                "campaign": "Walkway Clear / See-It-Fix-It week at hotspot locations.",
+            },
+            "Work at Height": {
+                "risk": "Critical",
+                "prevent": "Verify fall protection plan, inspected harnesses/anchor points, edge protection and rescue readiness before work starts.",
+                "train": "Working at height competence refresh; Rescue plan briefing.",
+                "comms": "Toolbox on anchor selection and 100% tie-off.",
+                "campaign": "WaH equipment inspection blitz.",
+            },
+            "PPE": {
+                "risk": "Medium",
+                "prevent": "Match PPE to task hazards, enforce condition checks, replace defective items, and verify use at the workface.",
+                "train": "Task-specific PPE selection and limitations.",
+                "comms": "Supervisor PPE spot-checks each shift.",
+                "campaign": "PPE condition and fit-check week.",
+            },
+            "Electrical Safety": {
+                "risk": "High",
+                "prevent": "Control temporary supplies, test RCDs, lock distribution boards, and enforce isolation before electrical work.",
+                "train": "Electrical awareness for non-electricians; LOTO refresher.",
+                "comms": "Pre-task check on cables and boards.",
+                "campaign": "Temporary power inspection campaign.",
+            },
+            "Lifting Operations": {
+                "risk": "Critical",
+                "prevent": "Approved lift plan, certified gear, competent banksman, exclusion zones and no personnel under load.",
+                "train": "Rigger/banksman competence; Lift categorisation.",
+                "comms": "Lift plan briefing before critical lifts.",
+                "campaign": "Lifting gear colour-code verification.",
+            },
+            "Scaffolding": {
+                "risk": "High",
+                "prevent": "Competent erection, correct tagging, complete guardrails/toe boards, and inspection before use or after alteration.",
+                "train": "Scaffold user awareness; Tag meaning.",
+                "comms": "Do not use untagged or red-tagged scaffolds.",
+                "campaign": "Scaffold tag compliance sweep.",
+            },
+            "Confined Space": {
+                "risk": "Critical",
+                "prevent": "Valid entry permit, correct gas testing sequence, continuous monitoring, attendant and staged rescue plan.",
+                "train": "Confined space entry and rescue roles.",
+                "comms": "No entry without live permit and attendant.",
+                "campaign": "Confined space kit and log audit.",
+            },
+            "Fire Safety": {
+                "risk": "High",
+                "prevent": "Keep extinguishers accessible, control hot work with permits, clear exits and store flammables correctly.",
+                "train": "Fire extinguisher use; Hot work controls.",
+                "comms": "Assembly point and alarm response reminder.",
+                "campaign": "Fire route and extinguisher inspection week.",
+            },
+            "Housekeeping": {
+                "risk": "Medium",
+                "prevent": "Clear walkways, segregate waste, secure materials and remove scrap daily at hotspot areas.",
+                "train": "Housekeeping standards and waste segregation.",
+                "comms": "End-of-shift clean-as-you-go reminder.",
+                "campaign": "5S / housekeeping score day.",
+            },
+            "Permit to Work": {
+                "risk": "High",
+                "prevent": "Correct permit type, matching scope, isolations complete, certificates attached and live permit displayed at the workface.",
+                "train": "PTW roles and isolation verification.",
+                "comms": "Permit board status review each shift.",
+                "campaign": "PTW quality sample (scope vs activity).",
+            },
+            "Excavation": {
+                "risk": "High",
+                "prevent": "Locate services, issue excavation permit, apply protective system, safe access and daily competent inspection.",
+                "train": "Excavation awareness; Underground service identification.",
+                "comms": "No dig without clearance and protective system.",
+                "campaign": "Excavation barricade and spoil distance check.",
+            },
+            "Chemical Safety": {
+                "risk": "High",
+                "prevent": "Current SDS, labelled containers, segregation, spill kits and correct PPE for chemical tasks.",
+                "train": "Hazard communication / chemical handling.",
+                "comms": "Spill kit location and SDS access reminder.",
+                "campaign": "Chemical store labelling and segregation audit.",
+            },
+            "Dropped Objects": {
+                "risk": "High",
+                "prevent": "Tool tethering at height, exclusion zones below, secure loose materials and include DROPS in risk assessment.",
+                "train": "Dropped object prevention and tool tethering.",
+                "comms": "Secure tools before ascending.",
+                "campaign": "DROPS walkdown of height work areas.",
+            },
+            "Near Miss": {
+                "risk": "High",
+                "prevent": "Investigate high-potential near misses, share findings quickly and close actions that remove the hazard.",
+                "train": "Near-miss reporting and investigation basics.",
+                "comms": "Share one near-miss learning in toolbox talks.",
+                "campaign": "Near-miss quality reporting drive.",
+            },
+            "Major Nonconformity": {
+                "risk": "Critical",
+                "prevent": "Treat major NCs as system failures: contain risk, correct root cause, verify effectiveness and brief affected teams.",
+                "train": "Root cause and corrective action effectiveness.",
+                "comms": "Communicate major finding and required interim controls.",
+                "campaign": "Focused compliance check on the failed clause/process.",
+            },
+            "Minor Nonconformity": {
+                "risk": "Medium",
+                "prevent": "Close minor NCs before they escalate; verify the same gap is not present in similar areas.",
+                "train": "Procedure refresh for the affected process.",
+                "comms": "Share the finding with supervisors of similar work.",
+                "campaign": "Sample audit of the same requirement in peer areas.",
+            },
+        }
+
+        def _library_for(name):
+            key = safe(name).strip()
+            if key in CONTROL_LIBRARY:
+                return CONTROL_LIBRARY[key]
+            for k, v in CONTROL_LIBRARY.items():
+                if k.lower() in key.lower() or key.lower() in k.lower():
+                    return v
+            return {
+                "risk": "Medium",
+                "prevent": f"Analyse the trend in '{key}', identify underlying causes, assign owners and verify controls before recurrence.",
+                "train": f"Targeted briefing on controls related to {key}.",
+                "comms": f"Communicate the rising trend in {key} at pre-start meetings.",
+                "campaign": f"Focused inspection campaign on {key} hotspots.",
+            }
 
         def rebuild():
-            # Persist manpower inputs
+            _clear_layout(kpi_root)
+            _clear_layout(charts_root)
+            _clear_layout(action_root)
+
+            obs_where, obs_params, d0, d1, proj, loc = _scope_clause("obs_date")
+            inc_where, inc_params, _, _, _, _ = _scope_clause("incident_date")
+            aud_where, aud_params = _audit_finding_scope()
+            c0, c1 = _comparison_range(d0, d1)
+
             db.set_setting("dashboard_manpower", str(manpower_spin.value()))
-            db.set_setting("dashboard_man_hours", str(int(manhours_spin.value())))
+            db.set_setting("dashboard_man_hours", str(int(manhours_spin.value() or 0)))
 
-            # Clear previous content
-            while content_layout.count():
-                item = content_layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-                elif item.layout():
-                    pass
+            scope_bits = []
+            scope_bits.append(f"Period: {d0} → {d1}" if d0 and d1 else "Period: all dates")
+            scope_bits.append(f"Project: {proj or 'All'}")
+            scope_bits.append(f"Location: {loc or 'All'}")
+            if c0 and c1:
+                scope_bits.append(f"Compared to: {c0} → {c1}")
+            header.setText("  |  ".join(scope_bits))
 
-            d0 = date_from.date().toString("yyyy-MM-dd")
-            d1 = date_to.date().toString("yyyy-MM-dd")
-            proj = safe(project_cb.currentData()).strip() or "Overall"
-            loc = safe(location_cb.currentData()).strip() or "Overall"
-            c0, c1 = _compare_range()
-            compare_label = f"vs {c0} → {c1}" if c0 else "no comparison"
-
-            header.setText(
-                f"<b>Company:</b> {xml_safe(company_name())} &nbsp;|&nbsp; "
-                f"<b>Scope:</b> Project = {xml_safe(proj)} · Location = {xml_safe(loc)} &nbsp;|&nbsp; "
-                f"<b>Period:</b> {d0} → {d1} &nbsp;|&nbsp; "
-                f"<b>Compare:</b> {xml_safe(compare_label)} &nbsp;|&nbsp; "
-                f"<b>Generated:</b> {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-            )
-
-            # ---- Primary period counts ----
-            obs_where, obs_params = _scope_clause("obs_date")
-            inc_where, inc_params = _scope_clause("incident_date")
-
+            # ---- Core counts ----
             total_obs = _cnt(f"SELECT COUNT(*) c FROM observations WHERE {obs_where}", obs_params)
             open_obs = _cnt(
                 f"SELECT COUNT(*) c FROM observations WHERE {obs_where} AND status NOT IN ('Closed','Cancelled')",
@@ -3925,6 +4089,18 @@ class MainWindow(QMainWindow):
                 f"SELECT COUNT(*) c FROM observations WHERE {obs_where} AND lower(COALESCE(obs_type,'')) LIKE '%near miss%'",
                 obs_params
             )
+            overdue_obs = _cnt(
+                f"SELECT COUNT(*) c FROM observations WHERE {obs_where} "
+                f"AND status NOT IN ('Closed','Cancelled') "
+                f"AND COALESCE(target_date,'') <> '' AND target_date < ?",
+                obs_params + [today()]
+            )
+            high_open = _cnt(
+                f"SELECT COUNT(*) c FROM observations WHERE {obs_where} "
+                f"AND status NOT IN ('Closed','Cancelled') AND lower(COALESCE(priority,'')) IN ('high','critical')",
+                obs_params
+            )
+
             total_inc = _cnt(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where}", inc_params)
             lti = _cnt(
                 f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) LIKE '%lost time%'",
@@ -3935,22 +4111,95 @@ class MainWindow(QMainWindow):
                 f"('lost time injury','medical treatment case','restricted work case','fatality')",
                 inc_params
             )
+            fatality = _cnt(
+                f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) LIKE '%fatal%'",
+                inc_params
+            )
+            open_inc = _cnt(
+                f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND status NOT IN ('Closed','Cancelled')",
+                inc_params
+            )
+
+            # Audit findings (legacy + v2)
+            total_findings = 0
+            open_findings = 0
+            major_nc = 0
+            minor_nc = 0
+            try:
+                total_findings += _cnt(
+                    f"SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where}",
+                    aud_params
+                )
+                open_findings += _cnt(
+                    f"SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.status,'')) NOT IN ('closed','cancelled')",
+                    aud_params
+                )
+                major_nc += _cnt(
+                    f"SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.finding_type,'')) LIKE '%major%'",
+                    aud_params
+                )
+                minor_nc += _cnt(
+                    f"SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.finding_type,'')) LIKE '%minor%'",
+                    aud_params
+                )
+            except Exception:
+                logging.exception("Legacy audit_findings KPI failed")
+            try:
+                total_findings += _cnt(
+                    f"SELECT COUNT(*) c FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where}",
+                    aud_params
+                )
+                open_findings += _cnt(
+                    f"SELECT COUNT(*) c FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.status,'')) NOT IN ('closed','cancelled')",
+                    aud_params
+                )
+                # v2 stores classification in observation_text / checklist; approximate via status/capa
+                major_nc += _cnt(
+                    f"SELECT COUNT(*) c FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND (lower(COALESCE(f.capa_required,''))='yes' OR lower(COALESCE(f.closeout_status,'')) LIKE '%major%')",
+                    aud_params
+                )
+            except Exception:
+                logging.exception("aud_findings KPI failed")
+
             open_capa = _cnt(
                 "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled')"
             )
-            overdue_obs = _cnt(
-                f"SELECT COUNT(*) c FROM observations WHERE {obs_where} "
-                f"AND status NOT IN ('Closed','Cancelled') "
-                f"AND COALESCE(target_date,'') <> '' AND target_date < ?",
-                obs_params + [today()]
+            overdue_capa = _cnt(
+                "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+                "AND COALESCE(target_date,'') <> '' AND target_date < ?",
+                (today(),)
+            )
+            capa_from_audit = _cnt(
+                "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+                "AND lower(COALESCE(source,'')) LIKE '%audit%'"
+            )
+            capa_from_inc = _cnt(
+                "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+                "AND (lower(COALESCE(source,'')) LIKE '%incident%' OR lower(COALESCE(source,'')) LIKE '%accident%')"
+            )
+            capa_from_obs = _cnt(
+                "SELECT COUNT(*) c FROM capa WHERE status NOT IN ('Closed','Cancelled') "
+                "AND (lower(COALESCE(source,'')) LIKE '%observation%' OR lower(COALESCE(source,'')) LIKE '%inspection%')"
             )
 
-            # Comparison period
+            mh = float(manhours_spin.value() or 0)
+            mp = int(manpower_spin.value() or 0)
+            trir = (recordable * 200000.0 / mh) if mh > 0 else 0.0
+            ltifr = (lti * 1_000_000.0 / mh) if mh > 0 else 0.0
+            obs_per_100 = (total_obs * 100.0 / mp) if mp > 0 else 0.0
+            nm_per_100 = (near_miss * 100.0 / mp) if mp > 0 else 0.0
+
             def period_counts(start, end):
                 if not start:
                     return {}
                 ow, op = _scope_clause_range("obs_date", start, end)
                 iw, ip = _scope_clause_range("incident_date", start, end)
+                aw, ap = _audit_finding_scope(start, end)
                 return {
                     "obs": _cnt(f"SELECT COUNT(*) c FROM observations WHERE {ow}", op),
                     "open": _cnt(f"SELECT COUNT(*) c FROM observations WHERE {ow} AND status NOT IN ('Closed','Cancelled')", op),
@@ -3962,130 +4211,110 @@ class MainWindow(QMainWindow):
                         f"SELECT COUNT(*) c FROM incidents WHERE {iw} AND lower(COALESCE(incident_type,'')) IN "
                         f"('lost time injury','medical treatment case','restricted work case','fatality')", ip
                     ),
+                    "findings": (
+                        _cnt(f"SELECT COUNT(*) c FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aw}", ap)
+                        + _cnt(f"SELECT COUNT(*) c FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aw}", ap)
+                    ),
                 }
 
             prev = period_counts(c0, c1) if c0 else {}
 
-            # Rates (need man-hours)
-            mh = float(manhours_spin.value() or 0)
-            mp = int(manpower_spin.value() or 0)
-            trir = (recordable * 200000.0 / mh) if mh > 0 else 0.0
-            ltifr = (lti * 1_000_000.0 / mh) if mh > 0 else 0.0
-            obs_per_100 = (total_obs * 100.0 / mp) if mp > 0 else 0.0
-            nm_per_100 = (near_miss * 100.0 / mp) if mp > 0 else 0.0
+            metrics = {
+                "total_obs": total_obs, "open_obs": open_obs, "closed_obs": closed_obs,
+                "near_miss": near_miss, "overdue_obs": overdue_obs, "high_open": high_open,
+                "total_inc": total_inc, "open_inc": open_inc, "lti": lti, "recordable": recordable,
+                "fatality": fatality, "trir": trir, "ltifr": ltifr,
+                "total_findings": total_findings, "open_findings": open_findings,
+                "major_nc": major_nc, "minor_nc": minor_nc,
+                "open_capa": open_capa, "overdue_capa": overdue_capa,
+                "capa_from_audit": capa_from_audit, "capa_from_inc": capa_from_inc, "capa_from_obs": capa_from_obs,
+                "obs_per_100": obs_per_100, "nm_per_100": nm_per_100,
+                "mh": mh, "mp": mp,
+            }
+            state.update({
+                "proj": proj, "loc": loc, "d0": d0, "d1": d1, "c0": c0, "c1": c1,
+                "mh": mh, "mp": mp, "compare": compare_cb.currentText(),
+                "metrics": metrics, "prev": prev,
+            })
 
-            # ========== TOP KPI CARDS ==========
-            cards = QHBoxLayout()
-            cards.setSpacing(8)
-            cards.addWidget(_kpi_card("Total Observations", total_obs,
-                                      _delta_text(total_obs, prev.get("obs", 0)) if prev else "selected period",
-                                      "#17365D", "#E8F0F8"))
-            cards.addWidget(_kpi_card("Open / Overdue", f"{open_obs} / {overdue_obs}",
-                                      _delta_text(open_obs, prev.get("open", 0)) if prev else "needs action",
-                                      "#C0392B" if overdue_obs else "#B9770E", "#FDEDEC"))
-            cards.addWidget(_kpi_card("Closed", closed_obs,
-                                      _delta_text(closed_obs, prev.get("closed", 0)) if prev else "selected period",
-                                      "#1B7A3D", "#E8F8F0"))
-            cards.addWidget(_kpi_card("Incidents", total_inc,
-                                      _delta_text(total_inc, prev.get("inc", 0)) if prev else "selected period",
-                                      "#8B0000" if total_inc else "#17365D", "#FDF2E9"))
-            cards.addWidget(_kpi_card("Near Misses", near_miss,
-                                      _delta_text(near_miss, prev.get("nm", 0)) if prev else "leading signal",
-                                      "#1A5276", "#EBF5FB"))
-            cards.addWidget(_kpi_card("Manpower", mp, f"{mh:,.0f} man-hrs", "#4A235A", "#F5EEF8"))
-            content_layout.addLayout(cards)
+            # ========== KPI TAB ==========
+            lead_title = QLabel("Leading Indicators (activity & early signals)")
+            lead_title.setStyleSheet("font-size:14px;font-weight:bold;color:#17365D;")
+            kpi_root.addWidget(lead_title)
+            lead_row = QHBoxLayout()
+            lead_row.addWidget(_kpi_card(
+                "Observations", total_obs,
+                _delta_text(total_obs, prev.get("obs", 0)) if prev else "Selected period",
+                "#1F4E79"
+            ))
+            lead_row.addWidget(_kpi_card(
+                "Open Observations", open_obs,
+                f"Overdue: {overdue_obs} · High/Critical open: {high_open}",
+                "#C0392B" if overdue_obs else "#1F4E79"
+            ))
+            lead_row.addWidget(_kpi_card(
+                "Near Misses", near_miss,
+                f"{nm_per_100:.1f} per 100 workers" if mp else "Set manpower for rate",
+                "#D35400"
+            ))
+            lead_row.addWidget(_kpi_card(
+                "Audit Findings", total_findings,
+                f"Open: {open_findings} · Major-type: {major_nc} · Minor-type: {minor_nc}",
+                "#6C3483"
+            ))
+            kpi_root.addLayout(lead_row)
 
-            # ========== LEADING vs LAGGING ==========
-            split = QHBoxLayout()
-            split.setSpacing(10)
+            lead_row2 = QHBoxLayout()
+            lead_row2.addWidget(_kpi_card(
+                "Open CAPA", open_capa,
+                f"Overdue CAPA: {overdue_capa}",
+                "#C0392B" if overdue_capa else "#1F4E79"
+            ))
+            lead_row2.addWidget(_kpi_card(
+                "CAPA from Audit", capa_from_audit, "Open CAPA sourced from audits", "#6C3483"
+            ))
+            lead_row2.addWidget(_kpi_card(
+                "CAPA from Incidents", capa_from_inc, "Open CAPA sourced from incidents", "#922B21"
+            ))
+            lead_row2.addWidget(_kpi_card(
+                "CAPA from Observations", capa_from_obs, "Open CAPA sourced from inspections", "#1F4E79"
+            ))
+            kpi_root.addLayout(lead_row2)
 
-            # Leading
-            lead_box = QGroupBox("Leading Indicators  (predictive · activity-based)")
-            lead_box.setStyleSheet(
-                "QGroupBox{font-weight:bold;border:2px solid #1B7A3D;border-radius:6px;margin-top:10px;background:#F4FBF6;}"
-                "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 6px;color:#1B7A3D;}"
+            lag_title = QLabel("Lagging Indicators (outcomes already realised)")
+            lag_title.setStyleSheet("font-size:14px;font-weight:bold;color:#17365D;margin-top:8px;")
+            kpi_root.addWidget(lag_title)
+            lag_row = QHBoxLayout()
+            lag_row.addWidget(_kpi_card(
+                "Total Incidents", total_inc,
+                _delta_text(total_inc, prev.get("inc", 0)) if prev else f"Open incidents: {open_inc}",
+                "#922B21"
+            ))
+            lag_row.addWidget(_kpi_card(
+                "Lost Time Injuries", lti,
+                f"LTIFR: {ltifr:.2f} per 1M hrs" if mh else "Set man-hours for LTIFR",
+                "#C0392B"
+            ))
+            lag_row.addWidget(_kpi_card(
+                "Recordable Cases", recordable,
+                f"TRIR: {trir:.2f} per 200k hrs" if mh else "Set man-hours for TRIR",
+                "#C0392B"
+            ))
+            lag_row.addWidget(_kpi_card(
+                "Fatalities", fatality, "Zero target", "#7B241C" if fatality else "#1B7A3D"
+            ))
+            kpi_root.addLayout(lag_row)
+
+            rates = QLabel(
+                f"Rates use manpower={mp} and man-hours={mh:,.0f}. "
+                "Leading indicators drive prevention; lagging indicators confirm outcomes."
             )
-            ll = QGridLayout(lead_box)
-            leading_items = [
-                ("Observation Rate / 100 workers", f"{obs_per_100:.1f}", True),
-                ("Near-Miss Rate / 100 workers", f"{nm_per_100:.1f}", True),
-                ("Open Observations", str(open_obs), False),
-                ("Overdue Actions", str(overdue_obs), False),
-                ("Open CAPA", str(open_capa), False),
-                ("Closed this period", str(closed_obs), True),
-            ]
-            for i, (name, val, good_high) in enumerate(leading_items):
-                ll.addWidget(QLabel(f"<b>{name}</b>"), i, 0)
-                vlab = QLabel(val)
-                vlab.setStyleSheet("font-size:16px;font-weight:bold;color:#17365D;")
-                ll.addWidget(vlab, i, 1)
-                if prev and name == "Open Observations":
-                    d = QLabel(_delta_text(open_obs, prev.get("open", 0)))
-                    d.setStyleSheet(f"color:{_delta_color(open_obs, prev.get('open', 0))};")
-                    ll.addWidget(d, i, 2)
-                elif prev and name == "Closed this period":
-                    d = QLabel(_delta_text(closed_obs, prev.get("closed", 0)))
-                    d.setStyleSheet(f"color:{_delta_color(closed_obs, prev.get('closed', 0), invert=True)};")
-                    ll.addWidget(d, i, 2)
-            note_l = QLabel("Higher observation & near-miss reporting usually signals a healthy reporting culture. "
-                            "Rising overdue actions is an early warning.")
-            note_l.setWordWrap(True)
-            note_l.setStyleSheet("color:#555;font-size:10px;")
-            ll.addWidget(note_l, len(leading_items), 0, 1, 3)
-            split.addWidget(lead_box, 1)
+            rates.setWordWrap(True)
+            rates.setStyleSheet("color:#555;padding:4px;")
+            kpi_root.addWidget(rates)
+            kpi_root.addStretch()
 
-            # Lagging
-            lag_box = QGroupBox("Lagging Indicators  (outcome · after-the-event)")
-            lag_box.setStyleSheet(
-                "QGroupBox{font-weight:bold;border:2px solid #C0392B;border-radius:6px;margin-top:10px;background:#FDF6F5;}"
-                "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 6px;color:#C0392B;}"
-            )
-            lg = QGridLayout(lag_box)
-            lagging_items = [
-                ("Total Incidents", str(total_inc)),
-                ("Lost Time Injuries (LTI)", str(lti)),
-                ("Recordable Incidents", str(recordable)),
-                ("TRIR (per 200k hrs)", f"{trir:.2f}" if mh > 0 else "Set man-hours"),
-                ("LTIFR (per 1M hrs)", f"{ltifr:.2f}" if mh > 0 else "Set man-hours"),
-                ("Days since last incident", "—"),
-            ]
-            # days since last incident (scoped)
-            last_inc = db.fetchone(
-                f"SELECT incident_date FROM incidents WHERE {inc_where} ORDER BY incident_date DESC LIMIT 1",
-                inc_params
-            ) if total_inc else None
-            if last_inc and safe(last_inc["incident_date"]):
-                try:
-                    days_since = (date.today() - date.fromisoformat(safe(last_inc["incident_date"]))).days
-                    lagging_items[-1] = ("Days since last incident", str(max(0, days_since)))
-                except Exception:
-                    pass
-
-            for i, (name, val) in enumerate(lagging_items):
-                lg.addWidget(QLabel(f"<b>{name}</b>"), i, 0)
-                vlab = QLabel(val)
-                vlab.setStyleSheet("font-size:16px;font-weight:bold;color:#8B0000;")
-                lg.addWidget(vlab, i, 1)
-                if prev and name == "Total Incidents":
-                    d = QLabel(_delta_text(total_inc, prev.get("inc", 0)))
-                    d.setStyleSheet(f"color:{_delta_color(total_inc, prev.get('inc', 0))};")
-                    lg.addWidget(d, i, 2)
-                elif prev and name == "Lost Time Injuries (LTI)":
-                    d = QLabel(_delta_text(lti, prev.get("lti", 0)))
-                    d.setStyleSheet(f"color:{_delta_color(lti, prev.get('lti', 0))};")
-                    lg.addWidget(d, i, 2)
-            note_g = QLabel("Lagging indicators confirm what already happened. Drive them down by acting on leading signals.")
-            note_g.setWordWrap(True)
-            note_g.setStyleSheet("color:#555;font-size:10px;")
-            lg.addWidget(note_g, len(lagging_items), 0, 1, 3)
-            split.addWidget(lag_box, 1)
-            content_layout.addLayout(split)
-
-            # ========== CHARTS ROW ==========
-            charts_row = QHBoxLayout()
-            charts_row.setSpacing(8)
-
-            # Category bar (observations)
+            # ========== CHARTS TAB ==========
             cat_data = {}
             try:
                 rows = db.fetchall(
@@ -4097,99 +4326,68 @@ class MainWindow(QMainWindow):
                     cat_data[safe(r["cat"])] = int(r["c"])
             except Exception:
                 logging.exception("Category chart failed")
-            cat_box = QGroupBox("Observations by Category")
-            cat_box.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            cl = QVBoxLayout(cat_box)
-            cat_chart = BarChartWidget(cat_data)
-            cat_chart.setMinimumHeight(220)
-            cl.addWidget(cat_chart)
-            charts_row.addWidget(cat_box, 2)
 
-            # Status pie
-            status_data = {}
+            type_data = {}
             try:
                 rows = db.fetchall(
-                    f"SELECT COALESCE(NULLIF(trim(status),''),'Open') st, COUNT(*) c "
-                    f"FROM observations WHERE {obs_where} GROUP BY st",
+                    f"SELECT COALESCE(NULLIF(trim(obs_type),''),'Other') t, COUNT(*) c "
+                    f"FROM observations WHERE {obs_where} GROUP BY t ORDER BY c DESC LIMIT 10",
                     obs_params
                 )
                 for r in rows:
-                    status_data[safe(r["st"])] = int(r["c"])
+                    type_data[safe(r["t"])] = int(r["c"])
             except Exception:
-                logging.exception("Status chart failed")
-            st_box = QGroupBox("Observation Status")
-            st_box.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            sl = QVBoxLayout(st_box)
-            st_chart = PieChartWidget(status_data)
-            st_chart.setMinimumHeight(220)
-            sl.addWidget(st_chart)
-            charts_row.addWidget(st_box, 1)
+                pass
 
-            # Priority / Type mix
-            prio_data = {}
+            finding_type_data = {}
             try:
                 rows = db.fetchall(
-                    f"SELECT COALESCE(NULLIF(trim(priority),''),'Medium') p, COUNT(*) c "
-                    f"FROM observations WHERE {obs_where} GROUP BY p",
+                    f"SELECT COALESCE(NULLIF(trim(f.finding_type),''),'Other') t, COUNT(*) c "
+                    f"FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"GROUP BY t ORDER BY c DESC LIMIT 10",
+                    aud_params
+                )
+                for r in rows:
+                    finding_type_data[safe(r["t"])] = int(r["c"])
+            except Exception:
+                pass
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(f.status),''),'Open') t, COUNT(*) c "
+                    f"FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"GROUP BY t ORDER BY c DESC LIMIT 10",
+                    aud_params
+                )
+                for r in rows:
+                    key = f"v2-{safe(r['t'])}"
+                    finding_type_data[key] = finding_type_data.get(key, 0) + int(r["c"])
+            except Exception:
+                pass
+
+            inc_type_data = {}
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(incident_type),''),'Other') t, COUNT(*) c "
+                    f"FROM incidents WHERE {inc_where} GROUP BY t ORDER BY c DESC LIMIT 10",
+                    inc_params
+                )
+                for r in rows:
+                    inc_type_data[safe(r["t"])] = int(r["c"])
+            except Exception:
+                pass
+
+            loc_data = {}
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(location),''),'Other') p, COUNT(*) c "
+                    f"FROM observations WHERE {obs_where} GROUP BY p ORDER BY c DESC LIMIT 10",
                     obs_params
                 )
                 for r in rows:
-                    prio_data[safe(r["p"])] = int(r["c"])
+                    loc_data[safe(r["p"])] = int(r["c"])
             except Exception:
-                logging.exception("Priority chart failed")
-            pr_box = QGroupBox("Priority Mix")
-            pr_box.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            pl = QVBoxLayout(pr_box)
-            pr_chart = PieChartWidget(prio_data)
-            pr_chart.setMinimumHeight(220)
-            pl.addWidget(pr_chart)
-            charts_row.addWidget(pr_box, 1)
+                pass
 
-            content_layout.addLayout(charts_row)
-
-            # Project / Location distribution (when Overall is selected)
-            dist_row = QHBoxLayout()
-            if not safe(project_cb.currentData()).strip():
-                proj_data = {}
-                try:
-                    rows = db.fetchall(
-                        f"SELECT COALESCE(NULLIF(trim(project),''),'(Blank)') p, COUNT(*) c "
-                        f"FROM observations WHERE {obs_where} GROUP BY p ORDER BY c DESC LIMIT 10",
-                        obs_params
-                    )
-                    for r in rows:
-                        proj_data[safe(r["p"])] = int(r["c"])
-                except Exception:
-                    pass
-                pb = QGroupBox("By Project")
-                pb.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-                pbl = QVBoxLayout(pb)
-                pbl.addWidget(PieChartWidget(proj_data))
-                dist_row.addWidget(pb)
-            if not safe(location_cb.currentData()).strip():
-                loc_data = {}
-                try:
-                    rows = db.fetchall(
-                        f"SELECT COALESCE(NULLIF(trim(location),''),'(Blank)') p, COUNT(*) c "
-                        f"FROM observations WHERE {obs_where} GROUP BY p ORDER BY c DESC LIMIT 10",
-                        obs_params
-                    )
-                    for r in rows:
-                        loc_data[safe(r["p"])] = int(r["c"])
-                except Exception:
-                    pass
-                lb = QGroupBox("By Location")
-                lb.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-                lbl = QVBoxLayout(lb)
-                lbl.addWidget(PieChartWidget(loc_data))
-                dist_row.addWidget(lb)
-            if dist_row.count():
-                content_layout.addLayout(dist_row)
-
-            # ========== MONTHLY TREND (stacked style via bar of totals) ==========
-            trend_box = QGroupBox("Monthly Observation Trend (within selected range)")
-            trend_box.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            tl = QVBoxLayout(trend_box)
             month_data = {}
             try:
                 rows = db.fetchall(
@@ -4201,116 +4399,58 @@ class MainWindow(QMainWindow):
                     month_data[safe(r["ym"])] = int(r["c"])
             except Exception:
                 logging.exception("Monthly trend failed")
-            tl.addWidget(BarChartWidget(month_data))
-            content_layout.addWidget(trend_box)
 
-            # ========== PREDICTIVE / PREVENTIVE ACTION BOARD ==========
-            action_box = QGroupBox("Predictive Action Board  ·  Preventive focus (avoid recurrence of observed trends)")
-            action_box.setStyleSheet(
-                "QGroupBox{font-weight:bold;border:2px solid #17365D;border-radius:6px;margin-top:10px;background:#F7FAFC;}"
-                "QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 6px;color:#17365D;}"
-            )
-            al = QVBoxLayout(action_box)
+            row1 = QHBoxLayout()
+            gb = QGroupBox("Observations by Category")
+            gb.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl = QVBoxLayout(gb)
+            gl.addWidget(PieChartWidget(cat_data))
+            row1.addWidget(gb)
+            gb2 = QGroupBox("Observations by Type")
+            gb2.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl2 = QVBoxLayout(gb2)
+            gl2.addWidget(PieChartWidget(type_data))
+            row1.addWidget(gb2)
+            charts_root.addLayout(row1)
 
+            row2 = QHBoxLayout()
+            gb3 = QGroupBox("Audit Findings Distribution")
+            gb3.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl3 = QVBoxLayout(gb3)
+            gl3.addWidget(PieChartWidget(finding_type_data or {"No findings": 0}))
+            row2.addWidget(gb3)
+            gb4 = QGroupBox("Incidents by Type")
+            gb4.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl4 = QVBoxLayout(gb4)
+            gl4.addWidget(PieChartWidget(inc_type_data or {"No incidents": 0}))
+            row2.addWidget(gb4)
+            charts_root.addLayout(row2)
+
+            row3 = QHBoxLayout()
+            gb5 = QGroupBox("Observations by Location")
+            gb5.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl5 = QVBoxLayout(gb5)
+            gl5.addWidget(BarChartWidget(loc_data))
+            row3.addWidget(gb5)
+            gb6 = QGroupBox("Monthly Observation Trend")
+            gb6.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
+            gl6 = QVBoxLayout(gb6)
+            gl6.addWidget(BarChartWidget(month_data))
+            row3.addWidget(gb6)
+            charts_root.addLayout(row3)
+            charts_root.addStretch()
+
+            # ========== PREDICTIVE ACTION BOARD (trend-based, multi-source) ==========
             intro = QLabel(
-                "Actions below are generated from the <b>current filter scope</b>. "
-                "They target the categories and locations that are rising or dominant in the selected period, "
-                "and describe what to do <b>now</b> so the same pattern does not continue or escalate. "
-                "This is prevention, not close-out of old records."
+                "<b>Trend-based preventive actions</b> (not a list of every observation). "
+                "Suggestions are driven by rising or dominant categories from observations, "
+                "open/major audit findings, open incident patterns and linked CAPA pressure under the current filters. "
+                "Use these to stop recurrence — not to close individual historical records."
             )
             intro.setWordWrap(True)
-            intro.setStyleSheet("color:#333;padding:4px;")
-            al.addWidget(intro)
+            intro.setStyleSheet("color:#333;padding:6px;background:#EEF4FA;border-radius:4px;")
+            action_root.addWidget(intro)
 
-            # Build intelligent recommendations from live top categories + open high-priority items
-            CONTROL_LIBRARY = {
-                "Slip Trip Fall": {
-                    "risk": "High",
-                    "prevent": "Eliminate floor hazards before they become injuries: daily walkway checks, immediate spill response, cable management standards, non-slip footwear enforcement at access points.",
-                    "train": "Housekeeping & slip/trip awareness; Spill response; Temporary works access briefings.",
-                    "comms": "Pre-start reminder on walkway clearance; Toolbox on wet floors and temporary obstacles.",
-                    "campaign": "Walkway Clear / See-It-Fix-It week focused on the locations with the highest counts.",
-                },
-                "Work at Height": {
-                    "risk": "Critical",
-                    "prevent": "Enforce hierarchy of controls: avoid height where possible, collective protection first, 100% tie-off only as last line. Verify rescue plan and competent supervision before every height task.",
-                    "train": "Working at Height competency refresh; Harness inspection; Anchor selection; Rescue drills.",
-                    "comms": "Permit brief before every height task; Stop-work authority reminder at the work front.",
-                    "campaign": "100% Tie-Off / Harness Check day on the affected project or area.",
-                },
-                "Electrical Safety": {
-                    "risk": "Critical",
-                    "prevent": "No live work without permit and competent persons. Lock-out verification (try-start), RCD testing, and temporary supply inspections before energisation.",
-                    "train": "Electrical safety & LOTO; Temporary power inspection checklist.",
-                    "comms": "Isolation board brief; Toolbox on damaged cables and unauthorised modifications.",
-                    "campaign": "Cable & distribution board inspection blitz in the trend location.",
-                },
-                "Lifting Operations": {
-                    "risk": "High",
-                    "prevent": "Lift plan for non-routine lifts, exclusion zones enforced, certified gear only, banksman competence verified. Weather hold criteria must be followed.",
-                    "train": "Rigger / banksman competency; Lift planning essentials.",
-                    "comms": "Pre-lift brief; Tag-line and exclusion zone rules posted.",
-                    "campaign": "Lifting gear colour-code verification day.",
-                },
-                "Scaffolding": {
-                    "risk": "High",
-                    "prevent": "Only competent scaffolders erect/alter. Green-tag before use, daily visual checks, no overloading, full guardrails and safe access.",
-                    "train": "Scaffold user awareness; Scaffolder competence verification.",
-                    "comms": "Do not alter scaffolding — report defects immediately.",
-                    "campaign": "Scaffold tag audit across the project.",
-                },
-                "Confined Space": {
-                    "risk": "Critical",
-                    "prevent": "Correct classification, gas testing sequence, continuous monitoring, attendant and rescue staged before entry. No entry on expired permit.",
-                    "train": "Confined space entry & rescue; Gas testing competency.",
-                    "comms": "Entry log and attendant duties brief.",
-                    "campaign": "Confined space rescue drill on the highest-risk area.",
-                },
-                "PPE": {
-                    "risk": "Medium",
-                    "prevent": "Task-specific PPE selection, condition checks, replacement of defective items, and supervisor verification at the work front.",
-                    "train": "Correct PPE use and limitations; Fit testing where required.",
-                    "comms": "PPE standard of the week at site entrances.",
-                    "campaign": "PPE condition and compliance spot-checks.",
-                },
-                "Housekeeping": {
-                    "risk": "Medium",
-                    "prevent": "Assigned housekeeping zones, end-of-shift clearance, waste segregation, and immediate removal of scrap and sharp objects.",
-                    "train": "Workplace housekeeping standards.",
-                    "comms": "Clean-as-you-go reminder in pre-start.",
-                    "campaign": "Housekeeping league / recognition for best area.",
-                },
-                "Fire Safety": {
-                    "risk": "High",
-                    "prevent": "Hot-work permit discipline, combustible control, extinguisher access, clear exits, and post-work fire watch.",
-                    "train": "Hot work & fire watch; Extinguisher use.",
-                    "comms": "Hot-work area checklist at the permit board.",
-                    "campaign": "Fire equipment access and exit-route audit.",
-                },
-                "Dropped Objects": {
-                    "risk": "High",
-                    "prevent": "Tool tethering at height, exclusion zones below, secure storage of materials, and DROPS inspections before work.",
-                    "train": "Dropped object prevention; Tool tethering practical.",
-                    "comms": "Exclusion zone brief for teams working below.",
-                    "campaign": "Tether and toe-board verification day.",
-                },
-                "Permit to Work": {
-                    "risk": "High",
-                    "prevent": "Correct permit type, live isolations, SIMOPS check, displayed permit, and formal close-out. No work on expired permits.",
-                    "train": "PTW roles and responsibilities; Isolation verification.",
-                    "comms": "Permit board status review each shift.",
-                    "campaign": "PTW quality sample audit (scope vs activity match).",
-                },
-                "Near Miss": {
-                    "risk": "High",
-                    "prevent": "Treat every near miss as a free lesson: investigate high-potential ones, share findings quickly, and close actions that remove the hazard.",
-                    "train": "Near-miss reporting and investigation basics.",
-                    "comms": "Share one near-miss learning in every toolbox talk this week.",
-                    "campaign": "Near-miss reporting drive with recognition for quality reports.",
-                },
-            }
-
-            # Top categories in scope
             top_cats = []
             try:
                 rows = db.fetchall(
@@ -4322,7 +4462,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 logging.exception("Top categories for actions failed")
 
-            # Rising categories vs previous period (if comparison available)
             rising = []
             if c0 and c1:
                 try:
@@ -4341,283 +4480,277 @@ class MainWindow(QMainWindow):
                 except Exception:
                     logging.exception("Rising category calc failed")
 
-            # High-priority open items in scope
-            high_open = _cnt(
-                f"SELECT COUNT(*) c FROM observations WHERE {obs_where} "
-                f"AND status NOT IN ('Closed','Cancelled') AND lower(COALESCE(priority,'')) IN ('high','critical')",
-                obs_params
-            )
+            # Audit finding themes (use finding_type / observation text keywords)
+            audit_themes = []
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(f.finding_type),''),'Finding') theme, COUNT(*) c "
+                    f"FROM audit_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.status,'')) NOT IN ('closed','cancelled') "
+                    f"GROUP BY theme ORDER BY c DESC LIMIT 6",
+                    aud_params
+                )
+                audit_themes = [(safe(r["theme"]), int(r["c"]), "audit_findings") for r in rows]
+            except Exception:
+                pass
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(f.procedure),''), COALESCE(NULLIF(trim(f.clause_sno),''),'Audit finding')) theme, COUNT(*) c "
+                    f"FROM aud_findings f JOIN audits a ON a.id=f.audit_id WHERE {aud_where} "
+                    f"AND lower(COALESCE(f.status,'')) NOT IN ('closed','cancelled') "
+                    f"GROUP BY theme ORDER BY c DESC LIMIT 6",
+                    aud_params
+                )
+                for r in rows:
+                    audit_themes.append((safe(r["theme"]), int(r["c"]), "aud_findings"))
+            except Exception:
+                pass
 
-            actions = []
-            # Rising trends first (preventive)
+            incident_themes = []
+            try:
+                rows = db.fetchall(
+                    f"SELECT COALESCE(NULLIF(trim(incident_type),''),'Incident') theme, COUNT(*) c "
+                    f"FROM incidents WHERE {inc_where} GROUP BY theme ORDER BY c DESC LIMIT 5",
+                    inc_params
+                )
+                incident_themes = [(safe(r["theme"]), int(r["c"])) for r in rows]
+            except Exception:
+                pass
+
+            # Build action rows: rising first, then dominant observation categories, then audit themes, then incidents
+            action_rows = []
+            seen = set()
+
+            def _add_action(theme, count, source, note=""):
+                key = theme.casefold()
+                if not theme or key in seen:
+                    return
+                seen.add(key)
+                lib = _library_for(theme)
+                action_rows.append({
+                    "theme": theme,
+                    "count": count,
+                    "source": source,
+                    "risk": lib["risk"],
+                    "prevent": lib["prevent"],
+                    "train": lib["train"],
+                    "comms": lib["comms"],
+                    "campaign": lib["campaign"],
+                    "note": note,
+                })
+
             for cat, cur, prev_c in rising[:5]:
-                lib = CONTROL_LIBRARY.get(cat) or CONTROL_LIBRARY.get(
-                    next((k for k in CONTROL_LIBRARY if k.lower() in cat.lower()), ""), None
+                _add_action(
+                    cat, cur, "Observation trend",
+                    f"Rising vs comparison period ({prev_c} → {cur})"
                 )
-                if lib:
-                    actions.append((
-                        lib["risk"],
-                        cat,
-                        f"Count rose from {prev_c} → {cur} in the comparison window under current filters. "
-                        f"This pattern will continue unless controls are strengthened at the source.",
-                        lib["prevent"],
-                        lib["train"],
-                        lib["comms"],
-                        lib["campaign"],
-                    ))
-                else:
-                    actions.append((
-                        "Medium",
-                        cat,
-                        f"Rising trend ({prev_c} → {cur}). Focus supervision and inspections on this category.",
-                        f"Increase targeted inspections and close open actions related to {cat} within 7 days. "
-                        f"Brief supervisors on the specific failure modes seen in recent observations.",
-                        f"Short toolbox on {cat} controls and stop-work expectations.",
-                        f"Supervisor briefing pack for {cat}.",
-                        f"{cat} focus week on the filtered project/location.",
-                    ))
+            for cat, cur in top_cats:
+                if len(action_rows) >= 8:
+                    break
+                if cur >= 2:
+                    _add_action(cat, cur, "Observation volume", f"Dominant category in selected filters ({cur} records)")
 
-            # Dominant categories even if not rising
-            for cat, cur in top_cats[:5]:
-                if any(a[1] == cat for a in actions):
-                    continue
-                lib = CONTROL_LIBRARY.get(cat) or CONTROL_LIBRARY.get(
-                    next((k for k in CONTROL_LIBRARY if k.lower() in cat.lower()), ""), None
+            for theme, cur, src in audit_themes:
+                if len(action_rows) >= 12:
+                    break
+                _add_action(theme, cur, "Audit findings", f"Open/active audit findings ({cur})")
+
+            for theme, cur in incident_themes:
+                if len(action_rows) >= 15:
+                    break
+                if cur >= 1:
+                    _add_action(theme, cur, "Incident register", f"Incident pattern in period ({cur})")
+
+            if open_capa >= 3:
+                _add_action(
+                    "CAPA backlog",
+                    open_capa,
+                    "CAPA register",
+                    f"Open CAPA={open_capa}, overdue={overdue_capa}; prioritise verification and effectiveness checks"
                 )
-                if not lib:
-                    continue
-                actions.append((
-                    lib["risk"],
-                    cat,
-                    f"{cur} observations in the selected period — dominant category under current filters.",
-                    lib["prevent"],
-                    lib["train"],
-                    lib["comms"],
-                    lib["campaign"],
-                ))
 
-            if high_open >= 3:
-                actions.append((
-                    "High",
-                    "Open High/Critical Actions",
-                    f"{high_open} high or critical observations remain open in this scope.",
-                    "Prioritise verification and physical close-out of high/critical items within 48–72 hours. "
-                    "Assign a single owner for the backlog and report daily until under control. "
-                    "Do not open new non-urgent work in the same area until critical hazards are controlled.",
-                    "Close-out verification checklist for supervisors.",
-                    "Daily stand-up on open critical actions.",
-                    "Critical action burn-down until the backlog is cleared.",
-                ))
+            if not action_rows:
+                empty = QLabel(
+                    "No strong trends under the current filters. "
+                    "Widen the period or clear project/location filters, or wait for more observations, audit findings or incidents."
+                )
+                empty.setWordWrap(True)
+                action_root.addWidget(empty)
+            else:
+                table = QTableWidget(len(action_rows), 7)
+                table.setHorizontalHeaderLabels([
+                    "Theme / Trend", "Source", "Count", "Risk",
+                    "Preventive Action (avoid recurrence)", "Training / Communication", "Campaign / Focus"
+                ])
+                table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+                table.setWordWrap(True)
+                table.setAlternatingRowColors(True)
+                table.verticalHeader().setVisible(False)
+                for i, a in enumerate(action_rows):
+                    values = [
+                        a["theme"], a["source"], str(a["count"]), a["risk"],
+                        a["prevent"] + (f"\nNote: {a['note']}" if a["note"] else ""),
+                        f"{a['train']}\n{a['comms']}", a["campaign"]
+                    ]
+                    for c, val in enumerate(values):
+                        item = QTableWidgetItem(val)
+                        item.setToolTip(val)
+                        table.setItem(i, c, item)
+                    table.setRowHeight(i, 72)
+                action_root.addWidget(table)
 
-            if near_miss >= 3 and (not prev or near_miss >= prev.get("nm", 0)):
-                actions.append((
-                    "High",
-                    "Near-Miss Learning",
-                    f"{near_miss} near misses in period — treat as leading signal of potential injury.",
-                    "Investigate high-potential near misses within 48 hours, share learning across shifts, "
-                    "and implement one engineered or administrative control per significant near miss so the same energy does not reach a person next time.",
-                    "Near-miss investigation & learning share.",
-                    "One near-miss learning in every toolbox this week.",
-                    "Near-miss quality reporting recognition.",
-                ))
-
-            if total_inc > 0 and lti > 0:
-                actions.append((
-                    "Critical",
-                    "Post-Incident Prevention",
-                    f"{lti} LTI(s) and {total_inc} incident(s) in scope — lagging outcomes already realised.",
-                    "Complete root-cause actions, verify effectiveness at the work front, and apply the same controls "
-                    "to similar activities/locations that have not yet failed. Focus on the energy source that caused harm, not only paperwork close-out.",
-                    "Lessons-learned brief tied to the actual root causes.",
-                    "Mandatory pre-task brief on the incident energy source.",
-                    "Targeted assurance checks on identical tasks elsewhere on the project.",
-                ))
-
-            if not actions:
-                actions.append((
-                    "Low",
-                    "Sustain & Monitor",
-                    "No strong adverse concentration under the current filters.",
-                    "Maintain planned inspections, timely close-out, permit discipline and training currency. "
-                    "Keep near-miss reporting encouraged so weak signals still surface.",
-                    "Role-based and mandatory training current.",
-                    "Routine toolbox and pre-task briefs.",
-                    "Continue Safe Behaviour recognition.",
-                ))
-
-            # Focus statement
-            focus_cats = ", ".join(a[1] for a in actions[:3])
-            focus_lbl = QLabel(
-                f"<b>Where to focus now:</b> {xml_safe(focus_cats)} &nbsp;|&nbsp; "
-                f"<b>Scope:</b> {xml_safe(proj)} / {xml_safe(loc)} &nbsp;|&nbsp; "
-                f"<b>Period:</b> {d0} → {d1}"
-            )
-            focus_lbl.setWordWrap(True)
-            focus_lbl.setStyleSheet("background:#E8F0F8;padding:8px;border-radius:4px;color:#17365D;")
-            al.addWidget(focus_lbl)
-
-            action_table = QTableWidget()
-            action_table.setColumnCount(7)
-            action_table.setHorizontalHeaderLabels([
-                "Priority", "Focus Area", "Why this trend matters",
-                "Preventive Action (what to do to avoid recurrence)",
-                "Training", "Communication", "Campaign / Drive"
-            ])
-            for c in (2, 3, 4, 5, 6):
-                action_table.horizontalHeader().setSectionResizeMode(c, QHeaderView.Stretch)
-            action_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-            action_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            action_table.setAlternatingRowColors(True)
-            action_table.setWordWrap(True)
-            action_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            action_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-            action_table.setRowCount(len(actions))
-            prio_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
-            actions.sort(key=lambda a: (prio_order.get(a[0], 9), a[1]))
-            for r, row_vals in enumerate(actions):
-                for c, v in enumerate(row_vals):
-                    item = QTableWidgetItem(v)
-                    item.setToolTip(v)
-                    if c == 0:
-                        if row_vals[0] == "Critical":
-                            item.setForeground(QColor("#8B0000"))
-                            item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                        elif row_vals[0] == "High":
-                            item.setForeground(QColor("#C0392B"))
-                            item.setFont(QFont("Arial", 9, QFont.Weight.Bold))
-                        elif row_vals[0] == "Medium":
-                            item.setForeground(QColor("#B9770E"))
-                        else:
-                            item.setForeground(QColor("#1B7A3D"))
-                    action_table.setItem(r, c, item)
-                action_table.setRowHeight(r, 96)
-            al.addWidget(action_table, 1)
-
-            guide = QLabel(
-                "• Filters at the top drive every number, chart and recommendation on this page (real-time from the database).\n"
-                "• Leading indicators tell you where risk is building; lagging indicators confirm outcomes already realised.\n"
-                "• Predictive actions are written as prevention: stop the same energy, location or behaviour from producing the next incident.\n"
-                "• Set Manpower and Man-Hours so rates (TRIR, LTIFR, observations per 100 workers) are meaningful for the selected scope.\n"
-                "• Change Project / Location / dates and click Apply Filters to re-scope the entire dashboard."
-            )
-            guide.setWordWrap(True)
-            guide.setStyleSheet("color:#444;font-size:10px;padding:4px;")
-            al.addWidget(guide)
-            content_layout.addWidget(action_box)
-
-            # Footer actions
-            foot = QHBoxLayout()
-            re_btn = QPushButton("Rebuild Recommendations")
-            re_btn.clicked.connect(rebuild)
-            foot.addWidget(re_btn)
-            foot.addStretch()
-            content_layout.addLayout(foot)
+            state["top_cats"] = top_cats
+            state["rising"] = rising
+            state["actions"] = action_rows
+            action_root.addStretch()
 
         def export_report():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export HSE Dashboard Report",
-                f"HSE_Dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
-                "Word Documents (*.docx)"
-            )
-            if not path:
-                return
             try:
-                d0 = date_from.date().toString("yyyy-MM-dd")
-                d1 = date_to.date().toString("yyyy-MM-dd")
-                proj = safe(project_cb.currentData()).strip() or "Overall"
-                loc = safe(location_cb.currentData()).strip() or "Overall"
-                obs_where, obs_params = _scope_clause("obs_date")
-                inc_where, inc_params = _scope_clause("incident_date")
-                total_obs = _cnt(f"SELECT COUNT(*) c FROM observations WHERE {obs_where}", obs_params)
-                open_obs = _cnt(
-                    f"SELECT COUNT(*) c FROM observations WHERE {obs_where} AND status NOT IN ('Closed','Cancelled')",
-                    obs_params
+                rebuild()  # ensure state matches current filters
+                m = state.get("metrics") or {}
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "Export HSE Dashboard Report",
+                    f"HSE_Dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.docx",
+                    "Word Documents (*.docx)"
                 )
-                closed_obs = _cnt(
-                    f"SELECT COUNT(*) c FROM observations WHERE {obs_where} AND status='Closed'",
-                    obs_params
-                )
-                near_miss = _cnt(
-                    f"SELECT COUNT(*) c FROM observations WHERE {obs_where} AND lower(COALESCE(obs_type,'')) LIKE '%near miss%'",
-                    obs_params
-                )
-                total_inc = _cnt(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where}", inc_params)
-                lti = _cnt(
-                    f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) LIKE '%lost time%'",
-                    inc_params
-                )
-                mh = float(manhours_spin.value() or 0)
-                mp = int(manpower_spin.value() or 0)
-                trir = ( _cnt(
-                    f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) IN "
-                    f"('lost time injury','medical treatment case','restricted work case','fatality')",
-                    inc_params
-                ) * 200000.0 / mh) if mh > 0 else 0.0
+                if not path:
+                    return
+                if not path.lower().endswith(".docx"):
+                    path += ".docx"
 
                 doc = Document()
+                set_docx_landscape(doc)
                 add_docx_report_header(
                     doc, "HSE PERFORMANCE DASHBOARD REPORT", "KPI",
                     f"{document_prefix()}-KPI-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 )
                 add_docx_kv_table(doc, [
                     ("Company", company_name()),
-                    ("Project Scope", proj),
-                    ("Location Scope", loc),
-                    ("Period", f"{d0} to {d1}"),
-                    ("Comparison Mode", compare_cb.currentText()),
-                    ("Manpower", str(mp)),
-                    ("Man-Hours", f"{mh:,.0f}"),
+                    ("Project Scope", state.get("proj") or "All Projects"),
+                    ("Location Scope", state.get("loc") or "All Locations"),
+                    ("Period", f"{state.get('d0')} to {state.get('d1')}"),
+                    ("Comparison Mode", state.get("compare") or "None"),
+                    ("Comparison Period", f"{state.get('c0')} to {state.get('c1')}" if state.get("c0") else "N/A"),
+                    ("Manpower", str(state.get("mp") or 0)),
+                    ("Man-Hours", f"{float(state.get('mh') or 0):,.0f}"),
                     ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
                 ])
-                doc.add_heading("Summary KPIs", level=2)
-                add_docx_kv_table(doc, [
-                    ("Total Observations", str(total_obs)),
-                    ("Open Observations", str(open_obs)),
-                    ("Closed Observations", str(closed_obs)),
-                    ("Near Misses", str(near_miss)),
-                    ("Total Incidents", str(total_inc)),
-                    ("Lost Time Injuries", str(lti)),
-                    ("TRIR (per 200k hrs)", f"{trir:.2f}" if mh > 0 else "N/A — set man-hours"),
-                ])
-                doc.add_heading("Observations by Category", level=2)
+
+                doc.add_heading("Leading Indicators", level=2)
+                lead_rows = [
+                    ["Indicator", "Value", "Notes"],
+                    ["Total Observations", str(m.get("total_obs", 0)), "Activity / reporting volume"],
+                    ["Open Observations", str(m.get("open_obs", 0)), f"Overdue: {m.get('overdue_obs', 0)}; High/Critical open: {m.get('high_open', 0)}"],
+                    ["Near Misses", str(m.get("near_miss", 0)), f"Per 100 workers: {m.get('nm_per_100', 0):.1f}" if state.get("mp") else "Set manpower for rate"],
+                    ["Audit Findings (total)", str(m.get("total_findings", 0)), f"Open: {m.get('open_findings', 0)}"],
+                    ["Major-type Findings", str(m.get("major_nc", 0)), "From audit registers"],
+                    ["Minor-type Findings", str(m.get("minor_nc", 0)), "From audit registers"],
+                    ["Open CAPA", str(m.get("open_capa", 0)), f"Overdue: {m.get('overdue_capa', 0)}"],
+                    ["CAPA from Audit / Incident / Observation",
+                     f"{m.get('capa_from_audit', 0)} / {m.get('capa_from_inc', 0)} / {m.get('capa_from_obs', 0)}",
+                     "Open CAPA by source"],
+                ]
+                t = doc.add_table(rows=1, cols=3)
+                for i, h in enumerate(lead_rows[0]):
+                    t.rows[0].cells[i].text = h
+                for row in lead_rows[1:]:
+                    cells = t.add_row().cells
+                    for i, v in enumerate(row):
+                        cells[i].text = xml_safe(v)
+                style_docx_table(t, header=True, font_size=8)
+
+                doc.add_heading("Lagging Indicators", level=2)
+                lag_rows = [
+                    ["Indicator", "Value", "Notes"],
+                    ["Total Incidents", str(m.get("total_inc", 0)), f"Open: {m.get('open_inc', 0)}"],
+                    ["Lost Time Injuries (LTI)", str(m.get("lti", 0)),
+                     f"LTIFR: {m.get('ltifr', 0):.2f} per 1M hrs" if state.get("mh") else "Set man-hours for LTIFR"],
+                    ["Recordable Cases", str(m.get("recordable", 0)),
+                     f"TRIR: {m.get('trir', 0):.2f} per 200k hrs" if state.get("mh") else "Set man-hours for TRIR"],
+                    ["Fatalities", str(m.get("fatality", 0)), "Zero target"],
+                ]
+                t2 = doc.add_table(rows=1, cols=3)
+                for i, h in enumerate(lag_rows[0]):
+                    t2.rows[0].cells[i].text = h
+                for row in lag_rows[1:]:
+                    cells = t2.add_row().cells
+                    for i, v in enumerate(row):
+                        cells[i].text = xml_safe(v)
+                style_docx_table(t2, header=True, font_size=8)
+
+                prev = state.get("prev") or {}
+                if prev:
+                    doc.add_heading("Comparison Snapshot", level=2)
+                    add_docx_kv_table(doc, [
+                        ("Prior Observations", str(prev.get("obs", 0))),
+                        ("Prior Near Misses", str(prev.get("nm", 0))),
+                        ("Prior Incidents", str(prev.get("inc", 0))),
+                        ("Prior LTI", str(prev.get("lti", 0))),
+                        ("Prior Audit Findings", str(prev.get("findings", 0))),
+                    ])
+
+                doc.add_heading("Observations by Category (filtered)", level=2)
                 try:
+                    obs_where, obs_params, _, _, _, _ = _scope_clause("obs_date")
                     rows = db.fetchall(
                         f"SELECT COALESCE(NULLIF(trim(category),''),'Other') cat, COUNT(*) c "
                         f"FROM observations WHERE {obs_where} GROUP BY cat ORDER BY c DESC",
                         obs_params
                     )
                     if rows:
-                        t = doc.add_table(rows=1, cols=2)
-                        t.rows[0].cells[0].text = "Category"
-                        t.rows[0].cells[1].text = "Count"
+                        tc = doc.add_table(rows=1, cols=2)
+                        tc.rows[0].cells[0].text = "Category"
+                        tc.rows[0].cells[1].text = "Count"
                         for r in rows:
-                            cells = t.add_row().cells
+                            cells = tc.add_row().cells
                             cells[0].text = xml_safe(r["cat"])
                             cells[1].text = str(r["c"])
-                        style_docx_table(t, header=True, font_size=9)
+                        style_docx_table(tc, header=True, font_size=9)
+                    else:
+                        doc.add_paragraph("No observation categories in scope.")
                 except Exception:
                     doc.add_paragraph("Category breakdown unavailable.")
+
+                doc.add_heading("Predictive / Preventive Actions (trend-based)", level=2)
+                actions = state.get("actions") or []
+                if not actions:
+                    doc.add_paragraph("No strong trends identified under the selected filters.")
+                else:
+                    at = doc.add_table(rows=1, cols=5)
+                    for i, h in enumerate(["Theme", "Source", "Count", "Risk", "Preventive Action"]):
+                        at.rows[0].cells[i].text = h
+                    for a in actions:
+                        cells = at.add_row().cells
+                        cells[0].text = xml_safe(a.get("theme", ""))
+                        cells[1].text = xml_safe(a.get("source", ""))
+                        cells[2].text = str(a.get("count", ""))
+                        cells[3].text = xml_safe(a.get("risk", ""))
+                        note = a.get("note") or ""
+                        prevent = a.get("prevent", "")
+                        cells[4].text = xml_safe(prevent + (f" | {note}" if note else ""))
+                    style_docx_table(at, header=True, font_size=8)
+
                 doc.add_heading("Interpretation", level=2)
                 doc.add_paragraph(
-                    "Leading indicators (observations, near misses, open and overdue actions) show current control activity "
-                    "and early risk signals. Lagging indicators (incidents, LTI, TRIR) confirm outcomes already realised. "
-                    "Use the Predictive Action Board in the live dashboard for preventive measures tailored to rising categories "
-                    "under the same filters."
+                    "Leading indicators (observations, near misses, open/overdue actions, audit findings and CAPA) "
+                    "show current control activity and early risk signals under the selected filters. "
+                    "Lagging indicators (incidents, LTI, recordable cases, TRIR/LTIFR, fatalities) confirm outcomes "
+                    "already realised. Preventive actions target rising or dominant trends from observations, "
+                    "audit findings, incident patterns and CAPA pressure — not every individual historical record."
                 )
                 add_docx_footer(doc)
                 save_docx_validated(doc, path)
-                QMessageBox.information(self, "Report Exported", f"Dashboard report saved:\n{path}")
+                self.show_export_success(path)
             except Exception as exc:
                 logging.exception("Dashboard Word export failed")
                 QMessageBox.critical(self, "Export Failed", str(exc))
 
-        # Wire controls
         preset_cb.currentIndexChanged.connect(lambda *_: _apply_preset())
         apply_btn.clicked.connect(rebuild)
         refresh_btn.clicked.connect(rebuild)
         export_btn.clicked.connect(export_report)
 
-        # Initial build
+        _apply_preset()
         rebuild()
 
         if not hasattr(self, "_module_cache"):
