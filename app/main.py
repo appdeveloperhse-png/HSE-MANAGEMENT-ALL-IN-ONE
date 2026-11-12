@@ -1195,12 +1195,16 @@ def copy_attachments(paths, record_number, table_name, record_id, attachment_typ
 
 
 def add_docx_cell_shading(cell, fill="17365D"):
+    """Apply cell background fill with required OOXML attributes (Word-safe)."""
     tcPr = cell._tc.get_or_add_tcPr()
     shd = tcPr.find(qn("w:shd"))
     if shd is None:
         shd = OxmlElement("w:shd")
         tcPr.append(shd)
-    shd.set(qn("w:fill"), fill)
+    # w:val is required by Office Open XML; missing it breaks Word open
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill or "FFFFFF")
 
 
 def set_docx_cell_borders(cell, **kwargs):
@@ -1221,6 +1225,9 @@ def set_docx_cell_borders(cell, **kwargs):
             for key in ["val", "sz", "space", "color"]:
                 if key in edge_data:
                     element.set(qn("w:{}".format(key)), str(edge_data[key]))
+            # OOXML borders should include space; default 0 when omitted
+            if "space" not in edge_data:
+                element.set(qn("w:space"), "0")
 
 
 def style_docx_table(table, header=True, font_size=7):
@@ -1865,10 +1872,9 @@ def _add_card_image_evidence(cell, attachments):
 
 
 def generate_observation_card_docx(observation_ids, path):
-    """Draft a landscape STOP Card (card layout, not a register report).
-    One card per selected observation. Border frame, logo, document number,
-    checklist style fields and embedded evidence. Uses top-level bordered tables
-    only (Word-safe) while keeping a true card appearance.
+    """Landscape STOP Card for selected observation(s).
+    Card look (bordered bands, logo, document number, checklists, embedded evidence)
+    with strict Word-safe OOXML (no nested tables, valid shading, ASCII checks).
     """
     if isinstance(observation_ids, (int, str)):
         observation_ids = [int(observation_ids)]
@@ -1896,86 +1902,79 @@ def generate_observation_card_docx(observation_ids, path):
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
-    section.left_margin = Inches(0.30)
-    section.right_margin = Inches(0.30)
-    section.top_margin = Inches(0.28)
-    section.bottom_margin = Inches(0.28)
+    section.left_margin = Inches(0.35)
+    section.right_margin = Inches(0.35)
+    section.top_margin = Inches(0.30)
+    section.bottom_margin = Inches(0.30)
 
-    def border(cell, color="17365D", sz=12):
+    def _shade(cell, fill):
+        add_docx_cell_shading(cell, fill)
+
+    def _border(cell, color="17365D", sz="12"):
         set_docx_cell_borders(
             cell,
-            top={"val": "single", "sz": sz, "color": color},
-            bottom={"val": "single", "sz": sz, "color": color},
-            left={"val": "single", "sz": sz, "color": color},
-            right={"val": "single", "sz": sz, "color": color},
+            top={"val": "single", "sz": sz, "space": "0", "color": color},
+            bottom={"val": "single", "sz": sz, "space": "0", "color": color},
+            left={"val": "single", "sz": sz, "space": "0", "color": color},
+            right={"val": "single", "sz": sz, "space": "0", "color": color},
         )
 
-    def thin_border(cell, color="8FA6BF", sz=6):
-        border(cell, color=color, sz=sz)
-
-    def cell_text(cell, text, size=8, bold=False, center=False):
+    def _write(cell, text, size=9, bold=False, center=False, white=False):
         cell.text = ""
         p = cell.paragraphs[0]
         p.paragraph_format.space_after = Pt(0)
         p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.line_spacing = 1.0
         if center:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(xml_safe(text) if text is not None else "")
+        run = p.add_run(xml_safe(text))
         run.font.size = Pt(size)
         run.bold = bold
+        if white:
+            try:
+                from docx.shared import RGBColor
+                run.font.color.rgb = RGBColor(255, 255, 255)
+            except Exception:
+                pass
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        _set_docx_cell_margins(cell, 40, 50, 40, 50)
 
-    def add_para(cell, text, size=8, bold=False, center=False):
-        if cell.paragraphs and not cell.paragraphs[0].text and not cell.paragraphs[0].runs:
-            p = cell.paragraphs[0]
-        else:
-            p = cell.add_paragraph()
-        p.paragraph_format.space_after = Pt(1)
-        p.paragraph_format.space_before = Pt(0)
-        if center:
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(xml_safe(text) if text is not None else "")
-        run.font.size = Pt(size)
-        run.bold = bold
-        return p
+    def _check(selected, value):
+        return "[X]" if safe(selected) == safe(value) else "[ ]"
 
     for card_index, row in enumerate(rows):
         if card_index:
             doc.add_page_break()
 
-        # 1) HEADER band: Logo | Title | Document number
+        # ---- Header: Logo | Title | Document number ----
         header = doc.add_table(rows=1, cols=3)
         header.autofit = False
-        hw = [Inches(1.50), Inches(7.40), Inches(1.90)]
-        for i, w in enumerate(hw):
-            cell = header.rows[0].cells[i]
-            cell.width = w
-            border(cell, "17365D", 12)
-            add_docx_cell_shading(cell, "17365D")
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            _set_docx_cell_margins(cell, 50, 50, 50, 50)
+        widths = (Inches(1.6), Inches(7.2), Inches(2.0))
+        for i, w in enumerate(widths):
+            c = header.rows[0].cells[i]
+            c.width = w
+            _border(c, "17365D", "12")
+            _shade(c, "17365D")
 
         logo_cell = header.rows[0].cells[0]
-        add_docx_cell_shading(logo_cell, "FFFFFF")
+        _shade(logo_cell, "FFFFFF")
         logo_cell.text = ""
         logo_path = report_logo_path()
+        placed_logo = False
         if logo_path and Path(logo_path).exists():
             try:
                 p = logo_cell.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                p.add_run().add_picture(str(logo_path), width=Inches(1.05))
+                p.add_run().add_picture(str(logo_path), width=Inches(1.1))
+                placed_logo = True
             except Exception:
-                cell_text(logo_cell, company_name(), 9, True, True)
-        else:
-            cell_text(logo_cell, company_name(), 9, True, True)
+                placed_logo = False
+        if not placed_logo:
+            _write(logo_cell, company_name(), 9, True, True)
 
         title_cell = header.rows[0].cells[1]
         title_cell.text = ""
         p = title_cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run("HSE OBSERVATION  ·  STOP CARD")
+        r = p.add_run("HSE OBSERVATION  |  STOP CARD")
         r.bold = True
         r.font.size = Pt(16)
         try:
@@ -1989,7 +1988,7 @@ def generate_observation_card_docx(observation_ids, path):
         r2.bold = True
         r2.font.size = Pt(10)
         try:
-            r2.font.color.rgb = RGBColor(220, 230, 240)
+            r2.font.color.rgb = RGBColor(230, 238, 246)
         except Exception:
             pass
         project_name = safe(db.setting("project_name", ""))
@@ -1999,12 +1998,12 @@ def generate_observation_card_docx(observation_ids, path):
             r3 = p3.add_run("Project: " + xml_safe(project_name))
             r3.font.size = Pt(8)
             try:
-                r3.font.color.rgb = RGBColor(200, 215, 230)
+                r3.font.color.rgb = RGBColor(200, 214, 230)
             except Exception:
                 pass
 
         doc_cell = header.rows[0].cells[2]
-        add_docx_cell_shading(doc_cell, "0F2A47")
+        _shade(doc_cell, "0F2A47")
         doc_cell.text = ""
         p = doc_cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -2026,22 +2025,8 @@ def generate_observation_card_docx(observation_ids, path):
         except Exception:
             pass
 
-        # 2) BODY: left details | right checklist
-        body = doc.add_table(rows=1, cols=2)
-        body.autofit = False
-        left = body.rows[0].cells[0]
-        right = body.rows[0].cells[1]
-        left.width = Inches(5.5)
-        right.width = Inches(5.3)
-        for cell in (left, right):
-            thin_border(cell, "8FA6BF", 8)
-            add_docx_cell_shading(cell, "FFFFFF")
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-            _set_docx_cell_margins(cell, 60, 60, 60, 60)
-            cell.text = ""
-
-        add_para(left, "OBSERVATION DETAILS", 9, True, True)
-        fields = [
+        # ---- Meta details (card body top) ----
+        pairs = [
             ("Originator", safe(row["observer"])),
             ("Designation", safe(row["observer_designation"])),
             ("Company", safe(row["observer_company"] or row["company"])),
@@ -2055,153 +2040,142 @@ def generate_observation_card_docx(observation_ids, path):
             ("Status", safe(row["status"])),
             ("Target Date", safe(row["target_date"])),
         ]
-        for label, value in fields:
-            p = left.add_paragraph()
-            p.paragraph_format.space_after = Pt(2)
-            p.paragraph_format.space_before = Pt(1)
-            r1 = p.add_run(xml_safe(label) + ": ")
-            r1.bold = True
-            r1.font.size = Pt(8)
-            r2 = p.add_run(xml_safe(value))
-            r2.font.size = Pt(8)
+        meta = doc.add_table(rows=1, cols=6)
+        meta.autofit = False
+        headers6 = ["Field", "Value", "Field", "Value", "Field", "Value"]
+        for i, h in enumerate(headers6):
+            meta.rows[0].cells[i].text = h
+            _shade(meta.rows[0].cells[i], "D6E3F0")
+            _border(meta.rows[0].cells[i], "8FA6BF", "6")
+        for i in range(0, len(pairs), 3):
+            cells = meta.add_row().cells
+            chunk = pairs[i:i + 3]
+            for j in range(3):
+                if j < len(chunk):
+                    cells[j * 2].text = xml_safe(chunk[j][0])
+                    cells[j * 2 + 1].text = xml_safe(chunk[j][1])
+                else:
+                    cells[j * 2].text = ""
+                    cells[j * 2 + 1].text = ""
+                for k in (j * 2, j * 2 + 1):
+                    _border(cells[k], "8FA6BF", "6")
+                    for p in cells[k].paragraphs:
+                        for run in p.runs:
+                            run.font.size = Pt(8)
+                        if not p.runs:
+                            run = p.add_run(cells[k].text)
+                            run.font.size = Pt(8)
+                    if k % 2 == 0:
+                        for p in cells[k].paragraphs:
+                            for run in p.runs:
+                                run.bold = True
 
-        p = left.add_paragraph()
-        p.paragraph_format.space_before = Pt(6)
-        r = p.add_run("Observation")
-        r.bold = True
-        r.font.size = Pt(8)
-        p = left.add_paragraph()
-        r = p.add_run(xml_safe(row["observation"]) or "No observation detail recorded.")
-        r.font.size = Pt(8)
+        # ---- Observation + Action boxes ----
+        obs_box = doc.add_table(rows=2, cols=2)
+        obs_box.autofit = False
+        labels = ["OBSERVATION DETAIL", "ACTION TAKEN / CORRECTIVE ACTION"]
+        values = [
+            safe(row["observation"]) or "No observation detail recorded.",
+            format_corrective_actions_display(row) or "No action recorded.",
+        ]
+        for i in range(2):
+            h = obs_box.rows[0].cells[i]
+            v = obs_box.rows[1].cells[i]
+            h.width = Inches(5.4)
+            v.width = Inches(5.4)
+            _border(h, "17365D", "8")
+            _border(v, "17365D", "8")
+            _shade(h, "17365D")
+            _shade(v, "FFFFFF")
+            _write(h, labels[i], 9, True, True, white=True)
+            _write(v, values[i], 8, False, False)
 
-        p = left.add_paragraph()
-        p.paragraph_format.space_before = Pt(6)
-        r = p.add_run("Action Taken / Corrective Action")
-        r.bold = True
-        r.font.size = Pt(8)
-        p = left.add_paragraph()
-        r = p.add_run(xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
-        r.font.size = Pt(8)
+        # ---- Checklists: Type / Priority / Status (compact card style) ----
+        chk = doc.add_table(rows=4, cols=1)
+        chk.autofit = False
+        blocks = [
+            ("OBSERVATION TYPE", [(t, _check(row["obs_type"], t)) for t in OBS_TYPES]),
+            ("HAZARD CATEGORY", [(c, _check(row["category"], c)) for c in CATEGORIES]),
+            ("PRIORITY", [(p, _check(row["priority"], p)) for p in PRIORITIES]),
+            ("STATUS", [(s, _check(row["status"], s)) for s in STATUSES]),
+        ]
+        for i, (title, items) in enumerate(blocks):
+            cell = chk.rows[i].cells[0]
+            _border(cell, "8FA6BF", "6")
+            _shade(cell, "F7FAFC" if i % 2 == 0 else "FFFFFF")
+            cell.text = ""
+            p = cell.paragraphs[0]
+            r = p.add_run(title + "  ")
+            r.bold = True
+            r.font.size = Pt(8)
+            # keep line length reasonable for Word
+            line = "   ".join(f"{mark} {name}" for name, mark in items)
+            # split long category line
+            if len(line) > 180:
+                # write multiple paragraphs of ~8 items
+                p2 = cell.add_paragraph()
+                buf = []
+                for name, mark in items:
+                    buf.append(f"{mark} {name}")
+                    if len(buf) >= 6:
+                        run = p2.add_run("   ".join(buf))
+                        run.font.size = Pt(7)
+                        p2 = cell.add_paragraph()
+                        buf = []
+                if buf:
+                    run = p2.add_run("   ".join(buf))
+                    run.font.size = Pt(7)
+            else:
+                run = p.add_run(line)
+                run.font.size = Pt(7)
 
-        add_para(right, "HAZARD IDENTIFICATION", 9, True, True)
-        selected_cat = safe(row["category"])
-        selected_priority = safe(row["priority"])
-        selected_status = safe(row["status"])
-        selected_type = safe(row["obs_type"])
-
-        p = right.add_paragraph()
-        r = p.add_run("Observation Type")
-        r.bold = True
-        r.font.size = Pt(8)
-        type_line = right.add_paragraph()
-        type_line.paragraph_format.space_after = Pt(2)
-        for typ in OBS_TYPES:
-            mark = "☑" if typ == selected_type else "☐"
-            run = type_line.add_run(f"{mark} {typ}   ")
-            run.font.size = Pt(6.5)
-            if typ == selected_type:
-                run.bold = True
-
-        p = right.add_paragraph()
-        r = p.add_run("Hazard Category")
-        r.bold = True
-        r.font.size = Pt(8)
-        cat_line = right.add_paragraph()
-        cat_line.paragraph_format.space_after = Pt(1)
-        for i, cat in enumerate(CATEGORIES):
-            mark = "☑" if cat == selected_cat else "☐"
-            run = cat_line.add_run(f"{mark} {cat}   ")
-            run.font.size = Pt(6.2)
-            if cat == selected_cat:
-                run.bold = True
-            if (i + 1) % 4 == 0:
-                cat_line = right.add_paragraph()
-                cat_line.paragraph_format.space_after = Pt(1)
-
-        p = right.add_paragraph()
-        r = p.add_run("Priority")
-        r.bold = True
-        r.font.size = Pt(8)
-        pr = right.add_paragraph()
-        for opt in PRIORITIES:
-            mark = "☑" if opt == selected_priority else "☐"
-            run = pr.add_run(f"{mark} {opt}    ")
-            run.font.size = Pt(8)
-            if opt == selected_priority:
-                run.bold = True
-
-        p = right.add_paragraph()
-        r = p.add_run("Status")
-        r.bold = True
-        r.font.size = Pt(8)
-        st = right.add_paragraph()
-        for opt in STATUSES:
-            mark = "☑" if opt == selected_status else "☐"
-            run = st.add_run(f"{mark} {opt}    ")
-            run.font.size = Pt(7.5)
-            if opt == selected_status:
-                run.bold = True
-
-        # 3) Evidence strip with embedded images
-        evidence = doc.add_table(rows=1, cols=1)
-        evidence.autofit = False
-        ecell = evidence.cell(0, 0)
-        ecell.width = Inches(10.8)
-        thin_border(ecell, "8FA6BF", 8)
-        add_docx_cell_shading(ecell, "F8FBFF")
-        _set_docx_cell_margins(ecell, 50, 60, 50, 60)
-        ecell.text = ""
-        p = ecell.paragraphs[0]
-        r = p.add_run("EVIDENCE / ATTACHMENTS")
-        r.bold = True
-        r.font.size = Pt(9)
+        # ---- Evidence with embedded images ----
+        evid = doc.add_table(rows=2, cols=1)
+        evid.autofit = False
+        eh = evid.rows[0].cells[0]
+        eb = evid.rows[1].cells[0]
+        _border(eh, "17365D", "8")
+        _border(eb, "17365D", "8")
+        _shade(eh, "17365D")
+        _shade(eb, "FFFFFF")
+        _write(eh, "EVIDENCE / ATTACHMENTS", 9, True, True, white=True)
+        eb.text = ""
         attachments = attachment_rows("observation_attachments", row["id"])
         if not attachments:
-            p2 = ecell.add_paragraph()
-            run = p2.add_run("No evidence attached.")
-            run.font.size = Pt(8)
+            p = eb.paragraphs[0]
+            r = p.add_run("No evidence attached.")
+            r.font.size = Pt(8)
         else:
-            img_p = ecell.add_paragraph()
-            img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             names = []
+            img_p = eb.paragraphs[0]
+            img_p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             for a in attachments:
                 fp = Path(safe(a["file_path"]))
                 names.append(fp.name)
                 if fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
                     try:
-                        img_p.add_run().add_picture(str(fp), width=Inches(1.35))
-                        img_p.add_run("   ")
+                        img_p.add_run().add_picture(str(fp), width=Inches(1.4))
+                        img_p.add_run("  ")
                     except Exception:
                         pass
-            np = ecell.add_paragraph()
-            run = np.add_run("Files: " + "; ".join(xml_safe(n) for n in names))
-            run.font.size = Pt(7)
+            np = eb.add_paragraph()
+            r = np.add_run("Files: " + "; ".join(xml_safe(n) for n in names))
+            r.font.size = Pt(7)
 
-        # 4) Sign-off strip
+        # ---- Sign-off ----
         sig = doc.add_table(rows=2, cols=3)
         sig.autofit = False
-        labels = ["Originator / Observer", "Supervisor / Reviewer", "HSE Close-out"]
-        for i, label in enumerate(labels):
-            c0 = sig.rows[0].cells[i]
-            c1 = sig.rows[1].cells[i]
-            c0.width = Inches(3.6)
-            c1.width = Inches(3.6)
-            thin_border(c0, "17365D", 10)
-            thin_border(c1, "17365D", 10)
-            add_docx_cell_shading(c0, "17365D")
-            add_docx_cell_shading(c1, "FFFFFF")
-            cell_text(c0, label, 8, True, True)
-            try:
-                from docx.shared import RGBColor
-                for run in c0.paragraphs[0].runs:
-                    run.font.color.rgb = RGBColor(255, 255, 255)
-            except Exception:
-                pass
-            cell_text(
-                c1,
-                "Name: ____________________\nSign:  ____________________\nDate:  ____________________",
-                8, False, False
-            )
+        for i, label in enumerate(["Originator / Observer", "Supervisor / Reviewer", "HSE Close-out"]):
+            h = sig.rows[0].cells[i]
+            b = sig.rows[1].cells[i]
+            h.width = Inches(3.55)
+            b.width = Inches(3.55)
+            _border(h, "17365D", "8")
+            _border(b, "17365D", "8")
+            _shade(h, "17365D")
+            _shade(b, "FFFFFF")
+            _write(h, label, 8, True, True, white=True)
+            _write(b, "Name: __________________\nSign: __________________\nDate: __________________", 8, False, False)
 
     target = Path(path)
     if target.suffix.lower() != ".docx":
