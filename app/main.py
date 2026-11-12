@@ -1865,9 +1865,9 @@ def _add_card_image_evidence(cell, attachments):
 
 
 def generate_observation_card_docx(observation_ids, path):
-    """Create one professional STOP Card per selected observation.
-    Each card occupies exactly one A4 portrait page. Multiple selected observations
-    are placed in the same Word file, one card per page.
+    """Create professional STOP Card(s) for selected observation(s).
+    Uses only top-level tables (no nested tables inside cells) so Word can open the file.
+    One card per page when multiple observations are selected.
     """
     if isinstance(observation_ids, (int, str)):
         observation_ids = [int(observation_ids)]
@@ -1895,266 +1895,183 @@ def generate_observation_card_docx(observation_ids, path):
     section.orientation = WD_ORIENT.PORTRAIT
     section.page_width = Inches(8.27)
     section.page_height = Inches(11.69)
-    section.left_margin = Inches(0.12)
-    section.right_margin = Inches(0.12)
-    section.top_margin = Inches(0.12)
-    section.bottom_margin = Inches(0.12)
-    section.header_distance = Inches(0.03)
-    section.footer_distance = Inches(0.03)
+    section.left_margin = Inches(0.45)
+    section.right_margin = Inches(0.45)
+    section.top_margin = Inches(0.40)
+    section.bottom_margin = Inches(0.40)
 
-    def add_border(cell, color="777777", sz=5):
-        set_docx_cell_borders(cell,
-            top={"val":"single","sz":sz,"color":color},
-            bottom={"val":"single","sz":sz,"color":color},
-            left={"val":"single","sz":sz,"color":color},
-            right={"val":"single","sz":sz,"color":color})
+    def _border_cell(cell, color="808080", sz=6):
+        set_docx_cell_borders(
+            cell,
+            top={"val": "single", "sz": sz, "color": color},
+            bottom={"val": "single", "sz": sz, "color": color},
+            left={"val": "single", "sz": sz, "color": color},
+            right={"val": "single", "sz": sz, "color": color},
+        )
 
-    def add_text(cell, text, size=7.0, bold=False, align=None):
-        cell.text = ""
-        p = cell.paragraphs[0]
-        p.paragraph_format.space_after = Pt(0)
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.line_spacing = 0.82
-        if align is not None:
-            p.alignment = align
-        r = p.add_run(xml_safe(text) if text else "")
-        r.font.size = Pt(size)
-        r.bold = bold
-        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-        _set_docx_cell_margins(cell, 18, 25, 18, 25)
-
-    def add_section_heading(cell, title, size=7.0):
-        cell.text = ""
-        p = cell.paragraphs[0]
-        p.paragraph_format.space_after = Pt(0)
-        p.paragraph_format.space_before = Pt(0)
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r = p.add_run(xml_safe(title))
-        r.bold = True
-        r.font.size = Pt(size)
-        add_docx_cell_shading(cell, "E7EDF7")
-        _set_docx_cell_margins(cell, 18, 25, 18, 25)
-        add_border(cell)
+    def _set_run(paragraph, text, size=9, bold=False, center=False):
+        # Replace existing runs safely without relying on paragraph.clear()
+        for run in list(paragraph.runs):
+            run.text = ""
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.paragraph_format.space_before = Pt(0)
+        if center:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = paragraph.add_run(xml_safe(text) if text is not None else "")
+        run.font.size = Pt(size)
+        run.bold = bold
+        return run
 
     for card_index, row in enumerate(rows):
         if card_index:
             doc.add_page_break()
 
-        # Header: use the complete A4 width rather than the reduced sample size.
+        # ---- Header table (3 columns, top-level only) ----
         header = doc.add_table(rows=1, cols=3)
         header.autofit = False
-        header.alignment = WD_TABLE_ALIGNMENT.CENTER
-        hw = [1.05, 5.70, 1.28]
-        for i, w in enumerate(hw):
-            header.rows[0].cells[i].width = Inches(w)
-            _set_docx_cell_margins(header.rows[0].cells[i], 20, 30, 20, 30)
-            add_border(header.rows[0].cells[i], sz=6)
+        widths = [Inches(1.4), Inches(4.6), Inches(1.5)]
+        for i, w in enumerate(widths):
+            header.rows[0].cells[i].width = w
+            _border_cell(header.rows[0].cells[i], "17365D", 8)
+            header.rows[0].cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
-        c = header.rows[0].cells[0]
-        c.text = ""
-        logo_path = report_logo_path()
-        if logo_path and Path(logo_path).exists():
+        left = header.rows[0].cells[0]
+        left.text = ""
+        logo = report_logo_path()
+        if logo and Path(logo).exists():
             try:
-                c.paragraphs[0].add_run().add_picture(logo_path, width=Inches(0.82))
+                left.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                left.paragraphs[0].add_run().add_picture(str(logo), width=Inches(0.95))
             except Exception:
-                add_text(c, company_name(), 7.5, True, WD_ALIGN_PARAGRAPH.CENTER)
+                _set_run(left.paragraphs[0], company_name(), 9, True, True)
         else:
-            add_text(c, company_name(), 7.5, True, WD_ALIGN_PARAGRAPH.CENTER)
-        c.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+            _set_run(left.paragraphs[0], company_name(), 9, True, True)
 
-        c = header.rows[0].cells[1]
-        c.text = ""
-        p = c.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(0)
+        mid = header.rows[0].cells[1]
+        mid.text = ""
+        p = mid.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run("HSE OBSERVATION AND STOP CARD")
-        r.bold = True; r.font.size = Pt(13)
-        company_line = c.add_paragraph()
-        company_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        company_line.paragraph_format.space_after = Pt(0)
-        company_run = company_line.add_run(xml_safe(company_name()))
-        company_run.bold = True; company_run.font.size = Pt(8)
+        r.bold = True
+        r.font.size = Pt(14)
+        p2 = mid.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(xml_safe(company_name()))
+        r2.bold = True
+        r2.font.size = Pt(9)
         project_name = safe(db.setting("project_name", ""))
         if project_name:
-            project_line = c.add_paragraph()
-            project_line.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            project_line.paragraph_format.space_after = Pt(0)
-            project_run = project_line.add_run("Project: " + xml_safe(project_name))
-            project_run.font.size = Pt(6.5)
+            p3 = mid.add_paragraph()
+            p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            r3 = p3.add_run("Project: " + xml_safe(project_name))
+            r3.font.size = Pt(8)
 
-        c = header.rows[0].cells[2]
-        c.text = ""
-        p = c.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_after = Pt(0)
-        r = p.add_run("Document Number\n"); r.bold = True; r.font.size = Pt(6.5)
-        r = p.add_run(xml_safe(row["number"])); r.bold = True; r.font.size = Pt(8)
-
-        spacer = doc.add_paragraph()
-        spacer.paragraph_format.space_after = Pt(1)
-        spacer.paragraph_format.space_before = Pt(0)
-
-        outer = doc.add_table(rows=1, cols=2)
-        outer.autofit = False
-        outer.alignment = WD_TABLE_ALIGNMENT.CENTER
-        outer_widths = [3.95, 3.96]
-        for i, w in enumerate(outer_widths):
-            outer.rows[0].cells[i].width = Inches(w)
-            outer.rows[0].cells[i].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
-            _set_docx_cell_margins(outer.rows[0].cells[i], 12, 14, 12, 14)
-            add_border(outer.rows[0].cells[i], sz=6)
-
-        # LEFT SIDE ---------------------------------------------------------
-        left = outer.rows[0].cells[0]
-        left.text = ""
-        lt = left.add_table(rows=1, cols=2)
-        lt.autofit = False
-        lt.alignment = WD_TABLE_ALIGNMENT.CENTER
-        lt.columns[0].width = Inches(1.30)
-        lt.columns[1].width = Inches(2.57)
-        lt.rows[0].cells[0].merge(lt.rows[0].cells[1])
-        add_section_heading(lt.rows[0].cells[0], "OBSERVATION / STOP CARD", 7.5)
-
-        fields = [
-            ("Originator's Name", row["observer"]),
-            ("Company", row["observer_company"] or row["company"]),
-            ("Observer Designation", row["observer_designation"]),
-            ("Time and Date", f'{safe(row["obs_date"])}  {safe(row["obs_time"])}'.strip()),
-            ("Location", row["location"]),
-            ("Project / Area", " / ".join(x for x in [safe(row["project"]), safe(row["area"])] if x)),
-            ("Reported / Responsible", row["responsible"]),
-            ("Status", row["status"]),
-            ("Target Date", row["target_date"]),
-        ]
-        for label, value in fields:
-            cells = lt.add_row().cells
-            cells[0].width = Inches(1.30); cells[1].width = Inches(2.57)
-            add_text(cells[0], label, 6.1, True)
-            add_text(cells[1], value, 6.5)
-            add_docx_cell_shading(cells[0], "F0F0F0")
-            add_border(cells[0]); add_border(cells[1])
-
-        cells = lt.add_row().cells
-        cells[0].merge(cells[1])
-        add_section_heading(cells[0], "Observation Type", 7.0)
-        p = cells[0].add_paragraph()
-        p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.line_spacing = 0.75
-        for i, typ in enumerate(OBS_TYPES):
-            mark = "☑" if typ == safe(row["obs_type"]) else "☐"
-            rr = p.add_run(f"{mark} {typ}")
-            rr.font.size = Pt(5.9)
-            if i < len(OBS_TYPES)-1:
-                rr.add_text("   ")
-
-        cells = lt.add_row().cells
-        cells[0].merge(cells[1])
-        add_section_heading(cells[0], "Observation Details", 7.0)
-        p = cells[0].add_paragraph(xml_safe(row["observation"]) or "No observation detail recorded.")
-        p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0); p.paragraph_format.line_spacing = 0.82
-        for rr in p.runs: rr.font.size = Pt(7.2)
-
-        cells = lt.add_row().cells
-        cells[0].merge(cells[1])
-        add_section_heading(cells[0], "Action Taken / Corrective Action", 7.0)
-        p = cells[0].add_paragraph(xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
-        p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0); p.paragraph_format.line_spacing = 0.82
-        for rr in p.runs: rr.font.size = Pt(7.2)
-
-        cells = lt.add_row().cells
-        cells[0].merge(cells[1])
-        add_section_heading(cells[0], "Related Factors / Category", 7.0)
-        p = cells[0].add_paragraph()
-        p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0)
-        related = safe(row["category"])
-        if safe(row["subcategory"]):
-            related += " / " + safe(row["subcategory"])
-        rr = p.add_run(("☑ " + related) if related else "☐ Not specified")
-        rr.font.size = Pt(6.7)
-
-        cells = lt.add_row().cells
-        cells[0].merge(cells[1])
-        add_section_heading(cells[0], "Evidence", 7.0)
-        _add_card_image_evidence(cells[0], attachment_rows("observation_attachments", row["id"]))
-
-        # RIGHT SIDE --------------------------------------------------------
-        right = outer.rows[0].cells[1]
+        right = header.rows[0].cells[2]
         right.text = ""
-        rt = right.add_table(rows=1, cols=2)
-        rt.autofit = False
-        rt.alignment = WD_TABLE_ALIGNMENT.CENTER
-        rt.columns[0].width = Inches(1.12)
-        rt.columns[1].width = Inches(2.72)
-        rt.rows[0].cells[0].merge(rt.rows[0].cells[1])
-        add_section_heading(rt.rows[0].cells[0], "HAZARD IDENTIFICATION CARD", 7.5)
+        p = right.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("Document No.")
+        r.bold = True
+        r.font.size = Pt(8)
+        p2 = right.add_paragraph()
+        p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r2 = p2.add_run(xml_safe(row["number"]))
+        r2.bold = True
+        r2.font.size = Pt(10)
 
+        doc.add_paragraph()
+
+        # ---- Details key/value table ----
+        details = [
+            ("Originator / Observer", safe(row["observer"])),
+            ("Observer Designation", safe(row["observer_designation"])),
+            ("Observer Company", safe(row["observer_company"] or row["company"])),
+            ("Date / Time", f'{safe(row["obs_date"])}  {safe(row["obs_time"])}'.strip()),
+            ("Location", safe(row["location"])),
+            ("Project / Area", " / ".join(x for x in [safe(row["project"]), safe(row["area"])] if x)),
+            ("Responsible Person", safe(row["responsible"])),
+            ("Observation Type", safe(row["obs_type"])),
+            ("Category / Subcategory", " / ".join(x for x in [safe(row["category"]), safe(row["subcategory"])] if x)),
+            ("Priority", safe(row["priority"])),
+            ("Status", safe(row["status"])),
+            ("Target Date", safe(row["target_date"])),
+        ]
+        kv = doc.add_table(rows=1, cols=2)
+        kv.autofit = False
+        kv.rows[0].cells[0].text = "Field"
+        kv.rows[0].cells[1].text = "Value"
+        for label, value in details:
+            cells = kv.add_row().cells
+            cells[0].text = xml_safe(label)
+            cells[1].text = xml_safe(value)
+        style_docx_table(kv, header=True, font_size=9)
+        for r_i, rx in enumerate(kv.rows):
+            rx.cells[0].width = Inches(2.2)
+            rx.cells[1].width = Inches(5.3)
+            if r_i == 0:
+                for cell in rx.cells:
+                    add_docx_cell_shading(cell, "17365D")
+
+        # Observation detail
+        doc.add_heading("Observation Detail", level=2)
+        box = doc.add_table(rows=1, cols=1)
+        box.cell(0, 0).text = xml_safe(row["observation"]) or "No observation detail recorded."
+        style_docx_table(box, header=False, font_size=9)
+
+        # Action taken
+        doc.add_heading("Action Taken / Corrective Action", level=2)
+        box2 = doc.add_table(rows=1, cols=1)
+        box2.cell(0, 0).text = xml_safe(format_corrective_actions_display(row)) or "No action recorded."
+        style_docx_table(box2, header=False, font_size=9)
+
+        # Category checklist (simple text, not nested grid)
+        doc.add_heading("Hazard Category Checklist", level=2)
         selected_cat = safe(row["category"])
-        selected_subcat = safe(row["subcategory"])
-        selected_priority = safe(row["priority"])
-        selected_status = safe(row["status"])
+        marks = []
+        for cat in CATEGORIES:
+            marks.append(("☑ " if cat == selected_cat else "☐ ") + cat)
+        # three columns via a flat table of text
+        cols = 3
+        n = len(marks)
+        per = (n + cols - 1) // cols
+        chk = doc.add_table(rows=per, cols=cols)
+        for rix in range(per):
+            for j in range(cols):
+                idx = rix + j * per
+                chk.rows[rix].cells[j].text = xml_safe(marks[idx]) if idx < n else ""
+        style_docx_table(chk, header=False, font_size=8)
 
-        hazard_cells = rt.add_row().cells
-        hazard_cells[0].width = Inches(1.12); hazard_cells[1].width = Inches(2.72)
-        add_text(hazard_cells[0], "Hazard Category", 6.2, True, WD_ALIGN_PARAGRAPH.CENTER)
-        add_docx_cell_shading(hazard_cells[0], "F0F0F0")
-        hazard_cells[1].text = ""
-        # Three compact columns: every menu category remains visible without using the sample card.
-        grid = hazard_cells[1].add_table(rows=0, cols=3)
-        grid.autofit = False
-        for col in grid.columns:
-            col.width = Inches(0.88)
-        n = len(CATEGORIES)
-        per_col = (n + 2) // 3
-        for rix in range(per_col):
-            cells3 = grid.add_row().cells
-            for j in range(3):
-                idx_cat = rix + j * per_col
-                text_cat = CATEGORIES[idx_cat] if idx_cat < n else ""
-                add_text(cells3[j], (("☑ " if text_cat == selected_cat else "☐ ") + text_cat) if text_cat else "", 5.0)
-                if text_cat == selected_cat:
-                    for run in cells3[j].paragraphs[0].runs:
-                        run.bold = True
-        if selected_subcat:
-            p = hazard_cells[1].add_paragraph()
-            p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0)
-            rr = p.add_run("Subcategory: " + selected_subcat); rr.bold = True; rr.font.size = Pt(5.8)
-        add_border(hazard_cells[0]); add_border(hazard_cells[1])
+        # Evidence names + optional images (top-level paragraphs, not nested)
+        doc.add_heading("Evidence / Attachments", level=2)
+        attachments = attachment_rows("observation_attachments", row["id"])
+        if not attachments:
+            doc.add_paragraph("No evidence attached.")
+        else:
+            for i, a in enumerate(attachments, 1):
+                fp = Path(safe(a["file_path"]))
+                doc.add_paragraph(f"{i}. {xml_safe(fp.name)}  |  Type: {xml_safe(a['attachment_type'])}")
+                if fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+                    try:
+                        p = doc.add_paragraph()
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p.add_run().add_picture(str(fp), width=Inches(2.2))
+                    except Exception:
+                        pass
 
-        def add_card_checklist(label, options, selected_value, font_size=5.9):
-            cells = rt.add_row().cells
-            add_text(cells[0], label, 6.2, True, WD_ALIGN_PARAGRAPH.CENTER)
-            add_docx_cell_shading(cells[0], "F0F0F0")
-            cells[1].text = ""
-            p = cells[1].paragraphs[0]
-            p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0); p.paragraph_format.line_spacing = 0.76
-            for option in options:
-                mark = "☑" if option == selected_value else "☐"
-                rr = p.add_run(f"{mark} {option}   ")
-                rr.font.size = Pt(font_size)
-            add_border(cells[0]); add_border(cells[1])
-
-        add_card_checklist("Priority", PRIORITIES, selected_priority, 6.0)
-        add_card_checklist("Status", STATUSES, selected_status, 6.0)
-
-        action_cells = rt.add_row().cells
-        add_text(action_cells[0], "Action / Control", 6.2, True, WD_ALIGN_PARAGRAPH.CENTER)
-        add_docx_cell_shading(action_cells[0], "F0F0F0")
-        add_text(action_cells[1], format_corrective_actions_display(row) or "No action recorded.", 6.2)
-        add_border(action_cells[0]); add_border(action_cells[1])
-
-        # Keep the two nested tables visually compact and prevent row splitting.
-        for nested in (lt, rt, grid):
-            for rr in nested.rows:
-                trPr = rr._tr.get_or_add_trPr()
-                cant = OxmlElement("w:cantSplit")
-                trPr.append(cant)
-                for cell in rr.cells:
-                    _set_docx_cell_margins(cell, 14, 20, 14, 20)
-
-        # Keep the whole outer card on one page where possible.
-        for rr in outer.rows:
-            trPr = rr._tr.get_or_add_trPr()
-            trPr.append(OxmlElement("w:cantSplit"))
+        # Sign-off
+        doc.add_heading("Review / Acknowledgement", level=2)
+        sig = doc.add_table(rows=2, cols=3)
+        for i, label in enumerate(["Observed By", "Reviewed By", "Closed / Verified By"]):
+            sig.rows[0].cells[i].text = label
+            sig.rows[1].cells[i].text = "Name: ____________________\nSignature: ______________\nDate: ___________________"
+        style_docx_table(sig, header=True, font_size=8)
 
     add_docx_footer(doc)
+    # Ensure .docx extension
+    target = Path(path)
+    if target.suffix.lower() != ".docx":
+        target = target.with_suffix(".docx")
+        path = str(target)
     save_docx_validated(doc, path)
 
 def generate_table_docx(table_name, path, record_ids=None):
@@ -3634,6 +3551,60 @@ class MainWindow(QMainWindow):
     # DASHBOARD
     # ========================================================
 
+
+
+    def selected_id(self, table, title="Record"):
+        """Return the integer primary key from column 0 of the selected table row."""
+        try:
+            row = table.currentRow()
+        except Exception:
+            row = -1
+        if row < 0 or not table.item(row, 0):
+            QMessageBox.information(self, title, "Select a row first.")
+            return None
+        item = table.item(row, 0)
+        # Prefer UserRole if set, otherwise plain text
+        try:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data is not None:
+                return int(data)
+        except Exception:
+            pass
+        try:
+            return int(item.text())
+        except Exception:
+            QMessageBox.warning(self, title, "Could not read the selected record id.")
+            return None
+
+    def delete_selected_record(self, table, table_name, attachment_table, label, refresh_cb=None):
+        rid = self.selected_id(table, f"Delete {label}")
+        if rid is None:
+            return
+        ans = QMessageBox.question(
+            self, f"Delete {label}",
+            f"Delete the selected {label.lower()} and its attachments? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            if attachment_table:
+                col = {
+                    "observation_attachments": "observation_id",
+                    "incident_attachments": "incident_id",
+                    "audit_attachments": "audit_id",
+                    "capa_attachments": "capa_id",
+                }.get(attachment_table)
+                if col:
+                    db.execute(f"DELETE FROM {attachment_table} WHERE {col}=?", (rid,))
+            db.execute(f"DELETE FROM {table_name} WHERE id=?", (rid,))
+            if callable(refresh_cb):
+                refresh_cb()
+            QMessageBox.information(self, "Deleted", f"{label} deleted.")
+        except Exception as exc:
+            logging.exception("Delete failed")
+            QMessageBox.critical(self, "Delete Failed", str(exc))
 
     def show_export_success(self, path):
         """Shared success dialog used by STOP Card and other module exports."""
@@ -5215,7 +5186,15 @@ class MainWindow(QMainWindow):
             if not path:
                 return
             try:
+                if not path.lower().endswith(".docx"):
+                    path += ".docx"
                 generate_observation_card_docx(obs_ids, path)
+                if not Path(path).exists() or Path(path).stat().st_size < 500:
+                    raise ValueError("STOP Card file was not created correctly.")
+                with zipfile.ZipFile(path, "r") as z:
+                    bad = z.testzip()
+                    if bad:
+                        raise ValueError(f"Generated STOP Card is corrupt: {bad}")
                 self.show_export_success(path)
             except Exception as e:
                 logging.exception("Observation card report failed")
@@ -5560,45 +5539,50 @@ class MainWindow(QMainWindow):
                 vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",attached_names,"Available" if report_details.get("professional_report_generated") else "Not Generated"]
                 for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
         def professional():
-            incident_id=self.selected_id(table,"Professional Report")
-            if incident_id is None:return
-            number=table.item(table.currentRow(),1).text()
-            path,_=QFileDialog.getSaveFileName(
-                self,"Save Investigation Report",
+            # Professional Investigation Report for the SELECTED incident only
+            # (not the full register export).
+            incident_id = self.selected_id(table, "Professional Report")
+            if incident_id is None:
+                return
+            row = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,))
+            if not row:
+                QMessageBox.warning(self, "Professional Report", "The selected incident no longer exists.")
+                return
+            number = safe(row["number"]) or f"INC-{incident_id}"
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Investigation Professional Report",
                 f"{number}_Investigation_Report.docx",
                 "Word Document (*.docx)"
             )
-            if not path:return
+            if not path:
+                return
             if not path.lower().endswith(".docx"):
                 path += ".docx"
             try:
-                generate_incident_docx(incident_id, path)
+                generate_incident_docx(int(incident_id), path)
                 if not Path(path).exists() or Path(path).stat().st_size < 800:
                     raise ValueError("The Investigation Professional Report was not created correctly.")
-                # Validate OOXML package
                 with zipfile.ZipFile(path, "r") as z:
                     bad = z.testzip()
                     if bad:
                         raise ValueError(f"Generated report is corrupt: {bad}")
-                rr=db.fetchone("SELECT investigation_details FROM incidents WHERE id=?",(incident_id,))
-                try: details=json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
-                except Exception: details={}
-                details["professional_report_generated"]=True
-                details["professional_report_path"]=str(path)
-                db.execute("UPDATE incidents SET investigation_details=? WHERE id=?",(json.dumps(details,ensure_ascii=False),incident_id))
-                self.show_export_success(path); load()
+                rr = db.fetchone("SELECT investigation_details FROM incidents WHERE id=?", (incident_id,))
+                try:
+                    details = json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
+                except Exception:
+                    details = {}
+                details["professional_report_generated"] = True
+                details["professional_report_path"] = str(path)
+                db.execute(
+                    "UPDATE incidents SET investigation_details=? WHERE id=?",
+                    (json.dumps(details, ensure_ascii=False), incident_id)
+                )
+                self.show_export_success(path)
+                load()
             except Exception as e:
-                logging.exception("Incident Word report failed")
-                QMessageBox.critical(self,"Report Error",str(e))
-        btns["+ New Incident"].clicked.connect(lambda:self.incident_form(load))
-        def edit_selected():
-            rid=self.selected_id(table,"Edit Incident")
-            if rid is None:return
-            rr=db.fetchone("SELECT status FROM incidents WHERE id=?",(rid,))
-            if rr and safe(rr["status"]).lower()=="closed": QMessageBox.information(self,"Submitted","This report has been submitted and cannot be edited."); return
-            self.incident_form(load,rid)
-        btns["Edit Selected"].clicked.connect(edit_selected)
-        btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"incidents","incident_attachments","Incident",load))
+                logging.exception("Incident professional report failed")
+                QMessageBox.critical(self, "Report Error", str(e))
         btns["Professional Report"].clicked.connect(professional)
         load()
 
