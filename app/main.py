@@ -1346,7 +1346,11 @@ def add_docx_kv_table(document, pairs):
         cells = table.add_row().cells
         cells[0].text = xml_safe(key)
         cells[1].text = xml_safe(value)
-        cells[0].paragraphs[0].runs[0].bold = True
+        for p in cells[0].paragraphs:
+            if not p.runs:
+                p.add_run(xml_safe(key))
+            for run in p.runs:
+                run.bold = True
     style_docx_table(table, header=False)
     return table
 
@@ -1694,16 +1698,21 @@ def add_observation_attachments_to_docx(document, observation_rows):
 
 
 def generate_observation_docx(path, record_ids=None):
+    """Professional observation register export that Word can open reliably.
+    Avoids exact row heights and font overrides on drawing runs that corrupt OOXML.
+    """
     columns, data, rows = observation_export_rows(record_ids)
     if not rows:
         raise ValueError("There is no observation data to export.")
     doc = Document()
     set_docx_landscape(doc)
-    # Keep the report compact and professional: one table, one row per current observation.
-    add_docx_report_header(doc,"HSE OBSERVATION REPORT","OBS",f"{document_prefix()}-OBS-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}")
-    pg=doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    pg.alignment=WD_ALIGN_PARAGRAPH.RIGHT
-    pg.paragraph_format.space_after=Pt(2)
+    add_docx_report_header(
+        doc, "HSE OBSERVATION REPORT", "OBS",
+        f"{document_prefix()}-OBS-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    )
+    pg = doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Records: {len(rows)}")
+    pg.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    pg.paragraph_format.space_after = Pt(4)
 
     preferred = observation_word_sequence()
     idx = {name: columns.index(name) for name in preferred if name in columns}
@@ -1711,62 +1720,70 @@ def generate_observation_docx(path, record_ids=None):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     for c, name in enumerate(preferred):
-        table.rows[0].cells[c].text = name
+        table.rows[0].cells[c].text = xml_safe(name)
 
+    widths = [0.40, 0.75, 0.95, 0.90, 0.95, 1.85, 1.40, 0.95, 1.90, 0.80]
     for values, row in zip(data[:1000], rows[:1000]):
         cells = table.add_row().cells
         attachments = attachment_rows("observation_attachments", row["id"])
         for c, name in enumerate(preferred):
-            cell=cells[c]
-            cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell = cells[c]
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             if name == "Evidence":
-                cell.text=""
+                cell.text = ""
                 if not attachments:
-                    cell.paragraphs[0].add_run("None").font.size=Pt(5.2)
+                    run = cell.paragraphs[0].add_run("None")
+                    run.font.size = Pt(7)
                 else:
-                    for ai,a in enumerate(attachments):
-                        p2=cell.paragraphs[0] if ai==0 else cell.add_paragraph()
-                        p2.paragraph_format.space_after=Pt(0)
-                        p2.paragraph_format.space_before=Pt(0)
-                        path2=Path(safe(a["file_path"]))
-                        if path2.exists() and path2.suffix.lower() in {".png",".jpg",".jpeg",".bmp"}:
+                    shown = 0
+                    for a in attachments:
+                        path2 = Path(safe(a["file_path"]))
+                        p2 = cell.paragraphs[0] if shown == 0 else cell.add_paragraph()
+                        p2.paragraph_format.space_after = Pt(0)
+                        p2.paragraph_format.space_before = Pt(0)
+                        embedded = False
+                        if path2.exists() and path2.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"} and shown < 3:
                             try:
-                                p2.add_run().add_picture(str(path2), width=Inches(0.38))
+                                p2.add_run().add_picture(str(path2), width=Inches(0.45))
+                                embedded = True
+                                shown += 1
                             except Exception:
-                                pass
-                        if not (path2.exists() and path2.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}):
-                            run=p2.add_run(" " + path2.name)
-                            run.font.size=Pt(4.8)
+                                embedded = False
+                        if not embedded:
+                            run = p2.add_run(xml_safe(path2.name or "attachment"))
+                            run.font.size = Pt(7)
+                            shown += 1
             elif name == "Observation Type":
-                cell.text=xml_safe(row["obs_type"])
+                cell.text = xml_safe(row["obs_type"])
             elif name == "Observation Detail":
-                cell.text=xml_safe(row["observation"])
+                cell.text = xml_safe(row["observation"])
             elif name == "Action Taken":
-                cell.text=xml_safe(format_corrective_actions_display(row))
+                cell.text = xml_safe(format_corrective_actions_display(row))
             elif name == "Responsible":
-                cell.text=xml_safe(row["responsible"])
+                cell.text = xml_safe(row["responsible"])
             elif name == "Category":
-                cell.text=xml_safe(row["category"])
+                cell.text = xml_safe(row["category"])
             elif name == "S.No.":
-                cell.text=str(values[idx[name]])
+                cell.text = xml_safe(values[idx[name]] if name in idx else "")
             else:
-                cell.text=xml_safe(values[idx[name]])
+                cell.text = xml_safe(values[idx[name]] if name in idx else "")
 
-    # A4 landscape: total 10.95 inches, safely inside the 11.19-inch usable width.
-    widths=[0.34,0.70,0.92,0.88,0.95,1.92,1.45,0.90,2.10,0.79]
-    for row_i,rowx in enumerate(table.rows):
-        trPr=rowx._tr.get_or_add_trPr()
-        cant_split=OxmlElement("w:cantSplit"); trPr.append(cant_split)
-        _set_docx_row_height(rowx, 2160, "exact")  # 1.5 inch for every observation-table row.
-        for i,cell in enumerate(rowx.cells):
-            cell.width=Inches(widths[i])
-            cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    for row_i, rowx in enumerate(table.rows):
+        # atLeast height only — exact fixed height with images breaks Word OOXML
+        _set_docx_row_height(rowx, 600 if row_i == 0 else 900, "atLeast")
+        for i, cell in enumerate(rowx.cells):
+            if i < len(widths):
+                cell.width = Inches(widths[i])
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
             for p2 in cell.paragraphs:
-                p2.paragraph_format.space_after=Pt(0)
-                p2.paragraph_format.space_before=Pt(0)
-                p2.paragraph_format.line_spacing=0.85
+                p2.paragraph_format.space_after = Pt(0)
+                p2.paragraph_format.space_before = Pt(0)
+                # Only resize plain text runs; leave drawing runs alone
                 for run in p2.runs:
-                    run.font.size=Pt(8)
+                    if run._element.xpath(".//*[local-name()='drawing']") or run._element.xpath(".//*[local-name()='pict']"):
+                        continue
+                    if run.font.size is None:
+                        run.font.size = Pt(8)
     style_docx_table(table, header=True, font_size=8)
     add_docx_footer(doc)
     save_docx_validated(doc, path)
@@ -2196,88 +2213,128 @@ def generate_table_docx(table_name, path, record_ids=None):
 
 
 class PieChartWidget(QWidget):
-    def __init__(self, values=None, parent=None):
+    def __init__(self, values=None, parent=None, title=""):
         super().__init__(parent)
         self.values = values or {}
-        self.setMinimumHeight(260)
+        self.title = title or ""
+        self.setMinimumHeight(340)
+        self.setMinimumWidth(320)
+        self.setStyleSheet("background:#FFFFFF;border:1px solid #D6E2EE;border-radius:8px;")
 
     def set_values(self, values):
         self.values = values or {}
         self.update()
 
     def paintEvent(self, event):
-        painter=QPainter(self)
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect=self.rect().adjusted(20,20,-20,-20)
-        total=sum(max(0,int(v)) for v in self.values.values())
-        if total<=0:
-            painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,"No observation data")
-            painter.end(); return
-        center=rect.center()
-        radius=min(rect.width(),rect.height())//3
-        start=0
-        palette=[Qt.GlobalColor.darkBlue,Qt.GlobalColor.darkGreen,Qt.GlobalColor.darkRed,
-                 Qt.GlobalColor.darkCyan,Qt.GlobalColor.darkMagenta,Qt.GlobalColor.darkYellow,
-                 Qt.GlobalColor.gray]
-        for i,(label,value) in enumerate(self.values.items()):
-            value=max(0,int(value))
-            span=int(round(360*16*value/total))
-            painter.setBrush(QBrush(palette[i%len(palette)]))
-            painter.setPen(QPen(Qt.GlobalColor.white,1))
-            painter.drawPie(QRectF(center.x()-radius,center.y()-radius,2*radius,2*radius),start,span)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+        rect = self.rect().adjusted(16, 28 if self.title else 16, -16, -16)
+        if self.title:
+            painter.setPen(QPen(QColor("#17365D")))
+            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            painter.drawText(12, 18, self.title)
+        total = sum(max(0, int(v)) for v in self.values.values())
+        if total <= 0:
+            painter.setPen(QPen(QColor("#888888")))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No data in selected filters")
+            painter.end()
+            return
+        center = rect.center()
+        radius = max(40, min(rect.width(), rect.height()) // 3)
+        start = 0
+        palette = [
+            QColor("#1F4E79"), QColor("#2E86AB"), QColor("#28A745"), QColor("#F39C12"),
+            QColor("#E74C3C"), QColor("#8E44AD"), QColor("#16A085"), QColor("#7F8C8D"),
+            QColor("#C0392B"), QColor("#2980B9"), QColor("#27AE60"), QColor("#D35400"),
+        ]
+        for i, (label, value) in enumerate(self.values.items()):
+            value = max(0, int(value))
+            span = int(round(360 * 16 * value / total))
+            painter.setBrush(QBrush(palette[i % len(palette)]))
+            painter.setPen(QPen(QColor("#FFFFFF"), 2))
+            painter.drawPie(
+                QRectF(center.x() - radius, center.y() - radius, 2 * radius, 2 * radius),
+                start, span
+            )
             start += span
-        y=25
-        x=rect.left()
-        painter.setFont(QFont("Arial",9))
-        for i,(label,value) in enumerate(self.values.items()):
-            painter.setBrush(QBrush(palette[i%len(palette)]))
-            painter.drawRect(x,y,14,14)
-            painter.setPen(QPen(Qt.GlobalColor.black))
-            painter.drawText(x+20,y+12,f"{label}: {value}")
-            y += 20
+        # Legend on the right
+        legend_x = center.x() + radius + 18
+        legend_y = rect.top() + 8
+        painter.setFont(QFont("Segoe UI", 9))
+        for i, (label, value) in enumerate(list(self.values.items())[:12]):
+            painter.setBrush(QBrush(palette[i % len(palette)]))
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.drawRoundedRect(legend_x, legend_y, 12, 12, 2, 2)
+            painter.setPen(QPen(QColor("#333333")))
+            pct = int(round(100 * int(value) / total)) if total else 0
+            painter.drawText(legend_x + 18, legend_y + 11, f"{str(label)[:18]}  {value} ({pct}%)")
+            legend_y += 18
         painter.end()
 
 
 class BarChartWidget(QWidget):
-    def __init__(self, values=None, parent=None):
+    def __init__(self, values=None, parent=None, title=""):
         super().__init__(parent)
-        self.values=values or {}
-        self.setMinimumHeight(260)
+        self.values = values or {}
+        self.title = title or ""
+        self.setMinimumHeight(340)
+        self.setMinimumWidth(360)
+        self.setStyleSheet("background:#FFFFFF;border:1px solid #D6E2EE;border-radius:8px;")
 
     def set_values(self, values):
-        self.values=values or {}
+        self.values = values or {}
         self.update()
 
-    def paintEvent(self,event):
-        painter=QPainter(self)
+    def paintEvent(self, event):
+        painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        rect=self.rect().adjusted(45,20,-20,-45)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+        top = 28 if self.title else 16
+        rect = self.rect().adjusted(48, top, -16, -52)
+        if self.title:
+            painter.setPen(QPen(QColor("#17365D")))
+            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            painter.drawText(12, 18, self.title)
         if not self.values:
-            painter.drawText(rect,Qt.AlignmentFlag.AlignCenter,"No data")
-            painter.end(); return
-        maxv=max([int(v) for v in self.values.values()] or [1])
-        count=len(self.values)
-        barw=max(18,int(rect.width()/max(count,1)*0.65))
-        gap=max(8,int(rect.width()/max(count,1)*0.35))
-        x=rect.left()
-        colors=[Qt.GlobalColor.darkBlue,Qt.GlobalColor.darkGreen,Qt.GlobalColor.darkRed,
-                Qt.GlobalColor.darkCyan,Qt.GlobalColor.darkMagenta,Qt.GlobalColor.darkYellow]
-        for i,(label,value) in enumerate(self.values.items()):
-            value=int(value)
-            h=int(rect.height()*value/maxv) if maxv else 0
-            y=rect.bottom()-h
-            painter.setBrush(QBrush(colors[i%len(colors)]))
-            painter.setPen(QPen(Qt.GlobalColor.black))
-            painter.drawRect(x,y,barw,h)
-            painter.setPen(QPen(Qt.GlobalColor.black))
-            painter.drawText(x,y-5,str(value))
+            painter.setPen(QPen(QColor("#888888")))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "No data in selected filters")
+            painter.end()
+            return
+        maxv = max([int(v) for v in self.values.values()] or [1]) or 1
+        count = max(len(self.values), 1)
+        barw = max(22, int(rect.width() / count * 0.55))
+        gap = max(10, int(rect.width() / count * 0.30))
+        x = rect.left()
+        colors = [
+            QColor("#1F4E79"), QColor("#2E86AB"), QColor("#28A745"), QColor("#F39C12"),
+            QColor("#E74C3C"), QColor("#8E44AD"), QColor("#16A085"), QColor("#7F8C8D"),
+        ]
+        # grid lines
+        painter.setPen(QPen(QColor("#E8EEF4"), 1))
+        for g in range(5):
+            gy = rect.bottom() - int(rect.height() * g / 4)
+            painter.drawLine(rect.left(), gy, rect.right(), gy)
+        painter.setFont(QFont("Segoe UI", 8))
+        for i, (label, value) in enumerate(self.values.items()):
+            value = int(value)
+            h = int(rect.height() * value / maxv) if maxv else 0
+            y = rect.bottom() - h
+            color = colors[i % len(colors)]
+            painter.setBrush(QBrush(color))
+            painter.setPen(QPen(color.darker(110), 1))
+            painter.drawRoundedRect(x, y, barw, max(h, 1), 4, 4)
+            painter.setPen(QPen(QColor("#17365D")))
+            painter.drawText(x, y - 4, str(value))
             painter.save()
-            painter.translate(x+barw/2,rect.bottom()+12)
-            painter.rotate(-45)
-            painter.drawText(0,0,str(label)[:16])
+            painter.translate(x + barw / 2, rect.bottom() + 10)
+            painter.rotate(-40)
+            painter.setPen(QPen(QColor("#444444")))
+            painter.drawText(0, 0, str(label)[:18])
             painter.restore()
-            x += barw+gap
-        painter.drawLine(rect.left(),rect.bottom(),rect.right(),rect.bottom())
+            x += barw + gap
+        painter.setPen(QPen(QColor("#17365D"), 1.5))
+        painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
         painter.end()
 
 
@@ -3586,6 +3643,174 @@ class MainWindow(QMainWindow):
             f"File saved successfully:\n{path}"
         )
 
+
+    @staticmethod
+    def table_data_static(table_name, record_ids=None):
+        """Return (columns, rows) for register exports. Observations use dedicated export fields."""
+        if table_name == "observations":
+            columns, data, _rows = observation_export_rows(record_ids)
+            return columns, data
+        column_map = {
+            "incidents": [
+                ("Number", "number"), ("Date", "incident_date"), ("Time", "incident_time"),
+                ("Type", "incident_type"), ("Location", "location"), ("Project", "project"),
+                ("Company", "company"), ("Department", "department"), ("Method", "investigation_method"),
+                ("Status", "status"), ("Person Involved", "person_involved"),
+                ("Description", "description"), ("Root Cause", "root_cause"),
+                ("Corrective Action", "corrective_action"), ("CAPA No.", "capa_number"),
+            ],
+            "capa": [
+                ("Number", "number"), ("Source", "source"), ("Reference", "reference_number"),
+                ("Finding", "finding"), ("Root Cause", "root_cause"),
+                ("Corrective Action", "corrective_action"), ("Preventive Action", "preventive_action"),
+                ("Responsible", "responsible"), ("Priority", "priority"),
+                ("Target Date", "target_date"), ("Status", "status"), ("Verification", "verification"),
+            ],
+            "audits": [
+                ("Number", "number"), ("Date", "audit_date"), ("Type", "audit_type"),
+                ("Standard", "standard"), ("Project", "project"), ("Location", "location"),
+                ("Auditor", "auditor"), ("Status", "status"),
+            ],
+        }
+        fields = column_map.get(table_name)
+        if not fields:
+            return [], []
+        params = []
+        where = ""
+        if record_ids:
+            placeholders = ",".join("?" for _ in record_ids)
+            where = f" WHERE id IN ({placeholders})"
+            params = list(record_ids)
+        rows = db.fetchall(f"SELECT * FROM {table_name}{where} ORDER BY id DESC", params)
+        columns = [c[0] for c in fields]
+        data = []
+        for row in rows:
+            values = []
+            for _, key in fields:
+                try:
+                    values.append(xml_safe(row[key] if key in row.keys() else ""))
+                except Exception:
+                    values.append("")
+            data.append(values)
+        return columns, data
+
+    def export_csv(self, table_name):
+        columns, data = self.table_data_static(table_name)
+        if not columns:
+            return QMessageBox.information(self, "Export", "No data to export.")
+        path, _ = QFileDialog.getSaveFileName(self, f"Export {table_name} CSV", f"{table_name}.csv", "CSV Files (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                writer.writerows(data)
+            self.show_export_success(path)
+        except Exception as exc:
+            logging.exception("CSV export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def export_excel(self, table_name):
+        columns, data = self.table_data_static(table_name)
+        if not columns:
+            return QMessageBox.information(self, "Export", "No data to export.")
+        path, _ = QFileDialog.getSaveFileName(self, f"Export {table_name} Excel", f"{table_name}.xlsx", "Excel Workbook (*.xlsx)")
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = table_name[:31]
+            title = table_name.replace("_", " ").title() + " Register"
+            ws.append([title])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(columns)))
+            ws["A1"].font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 24
+            ws.append(columns)
+            headfill = PatternFill("solid", fgColor="D9EAF7")
+            for cell in ws[2]:
+                cell.font = Font(bold=True, color="17365D")
+                cell.fill = headfill
+                cell.alignment = Alignment(horizontal="center", wrap_text=True)
+            for row in data:
+                ws.append(list(row))
+            for col in ws.columns:
+                from openpyxl.utils import get_column_letter
+                letter = get_column_letter(col[0].column)
+                longest = max((len(str(c.value or "")) for c in col), default=10)
+                ws.column_dimensions[letter].width = min(max(longest + 2, 12), 40)
+            ws.freeze_panes = "A3"
+            wb.save(path)
+            self.show_export_success(path)
+        except Exception as exc:
+            logging.exception("Excel export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def export_docx(self, table_name):
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Export {table_name} Word", f"{table_name}.docx", "Word Documents (*.docx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        try:
+            generate_table_docx(table_name, path)
+            if not Path(path).exists() or Path(path).stat().st_size < 500:
+                raise ValueError("The Word report was not created correctly.")
+            self.show_export_success(path)
+        except Exception as exc:
+            logging.exception("Word export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def export_pdf(self, table_name):
+        """PDF export via ReportLab simple table for register data."""
+        columns, data = self.table_data_static(table_name)
+        if not columns:
+            return QMessageBox.information(self, "Export", "No data to export.")
+        path, _ = QFileDialog.getSaveFileName(self, f"Export {table_name} PDF", f"{table_name}.pdf", "PDF Files (*.pdf)")
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        try:
+            doc = SimpleDocTemplate(path, pagesize=landscape(A4), leftMargin=24, rightMargin=24, topMargin=28, bottomMargin=28)
+            styles = getSampleStyleSheet()
+            story = [
+                Paragraph(xml_safe(f"{table_name.replace('_',' ').title()} Register — {company_name()}"), styles["Title"]),
+                Paragraph(xml_safe(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"), styles["Normal"]),
+                Spacer(1, 10),
+            ]
+            # Limit columns for readability
+            use_cols = columns[:10]
+            table_data = [use_cols]
+            for row in data[:500]:
+                table_data.append([xml_safe(row[i] if i < len(row) else "")[:80] for i in range(len(use_cols))])
+            t = Table(table_data, repeatRows=1)
+            t.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, -1), 7),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B7C9D6")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F5F9FC")]),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]))
+            story.append(t)
+            doc.build(story)
+            self.show_export_success(path)
+        except Exception as exc:
+            logging.exception("PDF export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+
     def dashboard(self):
         """HSE Performance Dashboard with separate tabs for Filters/KPIs/Charts and
         Predictive Action Board. Filters apply to KPIs, charts, actions and export.
@@ -3693,10 +3918,14 @@ class MainWindow(QMainWindow):
         apply_btn.setMinimumHeight(34)
         apply_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;")
         refresh_btn = QPushButton("Refresh Live Data")
-        export_btn = QPushButton("Export Dashboard Report (Word)")
+        export_word_btn = QPushButton("Export Dashboard Report (Word)")
+        export_word_btn.setStyleSheet("font-weight:bold;")
+        export_excel_btn = QPushButton("Export Dashboard Report (Excel)")
+        export_excel_btn.setStyleSheet("font-weight:bold;")
         btn_row.addWidget(apply_btn)
         btn_row.addWidget(refresh_btn)
-        btn_row.addWidget(export_btn)
+        btn_row.addWidget(export_word_btn)
+        btn_row.addWidget(export_excel_btn)
         btn_row.addStretch()
         fl.addLayout(btn_row, 4, 0, 1, 4)
 
@@ -4400,45 +4629,36 @@ class MainWindow(QMainWindow):
             except Exception:
                 logging.exception("Monthly trend failed")
 
+            def _chart_panel(title, widget):
+                box = QGroupBox(title)
+                box.setStyleSheet(
+                    "QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:8px;margin-top:10px;background:#FBFCFE;}"
+                    "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 8px;color:#17365D;}"
+                )
+                lay = QVBoxLayout(box)
+                lay.setContentsMargins(8, 14, 8, 8)
+                widget.setMinimumHeight(360)
+                lay.addWidget(widget)
+                return box
+
             row1 = QHBoxLayout()
-            gb = QGroupBox("Observations by Category")
-            gb.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl = QVBoxLayout(gb)
-            gl.addWidget(PieChartWidget(cat_data))
-            row1.addWidget(gb)
-            gb2 = QGroupBox("Observations by Type")
-            gb2.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl2 = QVBoxLayout(gb2)
-            gl2.addWidget(PieChartWidget(type_data))
-            row1.addWidget(gb2)
+            row1.setSpacing(12)
+            row1.addWidget(_chart_panel("Observations by Category", PieChartWidget(cat_data)))
+            row1.addWidget(_chart_panel("Observations by Type", PieChartWidget(type_data)))
             charts_root.addLayout(row1)
 
             row2 = QHBoxLayout()
-            gb3 = QGroupBox("Audit Findings Distribution")
-            gb3.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl3 = QVBoxLayout(gb3)
-            gl3.addWidget(PieChartWidget(finding_type_data or {"No findings": 0}))
-            row2.addWidget(gb3)
-            gb4 = QGroupBox("Incidents by Type")
-            gb4.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl4 = QVBoxLayout(gb4)
-            gl4.addWidget(PieChartWidget(inc_type_data or {"No incidents": 0}))
-            row2.addWidget(gb4)
+            row2.setSpacing(12)
+            row2.addWidget(_chart_panel("Audit Findings Distribution", PieChartWidget(finding_type_data or {"No findings": 0})))
+            row2.addWidget(_chart_panel("Incidents by Type", PieChartWidget(inc_type_data or {"No incidents": 0})))
             charts_root.addLayout(row2)
 
             row3 = QHBoxLayout()
-            gb5 = QGroupBox("Observations by Location")
-            gb5.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl5 = QVBoxLayout(gb5)
-            gl5.addWidget(BarChartWidget(loc_data))
-            row3.addWidget(gb5)
-            gb6 = QGroupBox("Monthly Observation Trend")
-            gb6.setStyleSheet("QGroupBox{font-weight:bold;border:1px solid #B7C9D6;border-radius:6px;margin-top:8px;}")
-            gl6 = QVBoxLayout(gb6)
-            gl6.addWidget(BarChartWidget(month_data))
-            row3.addWidget(gb6)
+            row3.setSpacing(12)
+            row3.addWidget(_chart_panel("Observations by Location", BarChartWidget(loc_data)))
+            row3.addWidget(_chart_panel("Monthly Observation Trend", BarChartWidget(month_data)))
             charts_root.addLayout(row3)
-            charts_root.addStretch()
+            charts_root.addStretch(1)
 
             # ========== PREDICTIVE ACTION BOARD (trend-based, multi-source) ==========
             intro = QLabel(
@@ -4745,10 +4965,119 @@ class MainWindow(QMainWindow):
                 logging.exception("Dashboard Word export failed")
                 QMessageBox.critical(self, "Export Failed", str(exc))
 
+
+        def export_report_excel():
+            try:
+                rebuild()
+                m = state.get("metrics") or {}
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "Export HSE Dashboard Report (Excel)",
+                    f"HSE_Dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                    "Excel Workbook (*.xlsx)"
+                )
+                if not path:
+                    return
+                if not path.lower().endswith(".xlsx"):
+                    path += ".xlsx"
+                wb = Workbook()
+                ws = wb.active
+                ws.title = "KPI Summary"
+                ws.append(["HSE PERFORMANCE DASHBOARD"])
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=4)
+                ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
+                ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+                ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+                ws.row_dimensions[1].height = 28
+                meta = [
+                    ("Company", company_name()),
+                    ("Project Scope", state.get("proj") or "All Projects"),
+                    ("Location Scope", state.get("loc") or "All Locations"),
+                    ("Period", f"{state.get('d0')} to {state.get('d1')}"),
+                    ("Comparison", state.get("compare") or "None"),
+                    ("Manpower", state.get("mp") or 0),
+                    ("Man-Hours", state.get("mh") or 0),
+                    ("Generated", datetime.now().strftime("%Y-%m-%d %H:%M")),
+                ]
+                for k, v in meta:
+                    ws.append([k, v])
+                ws.append([])
+                ws.append(["LEADING INDICATORS", "Value", "Notes"])
+                for cell in ws[ws.max_row]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="1F4E79")
+                lead = [
+                    ("Total Observations", m.get("total_obs", 0), "Activity volume"),
+                    ("Open Observations", m.get("open_obs", 0), f"Overdue {m.get('overdue_obs', 0)}"),
+                    ("Near Misses", m.get("near_miss", 0), ""),
+                    ("Audit Findings", m.get("total_findings", 0), f"Open {m.get('open_findings', 0)}"),
+                    ("Major-type Findings", m.get("major_nc", 0), ""),
+                    ("Minor-type Findings", m.get("minor_nc", 0), ""),
+                    ("Open CAPA", m.get("open_capa", 0), f"Overdue {m.get('overdue_capa', 0)}"),
+                    ("CAPA from Audit", m.get("capa_from_audit", 0), ""),
+                    ("CAPA from Incidents", m.get("capa_from_inc", 0), ""),
+                    ("CAPA from Observations", m.get("capa_from_obs", 0), ""),
+                ]
+                for row in lead:
+                    ws.append(list(row))
+                ws.append([])
+                ws.append(["LAGGING INDICATORS", "Value", "Notes"])
+                for cell in ws[ws.max_row]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="922B21")
+                lag = [
+                    ("Total Incidents", m.get("total_inc", 0), f"Open {m.get('open_inc', 0)}"),
+                    ("Lost Time Injuries", m.get("lti", 0), f"LTIFR {m.get('ltifr', 0):.2f}"),
+                    ("Recordable Cases", m.get("recordable", 0), f"TRIR {m.get('trir', 0):.2f}"),
+                    ("Fatalities", m.get("fatality", 0), "Zero target"),
+                ]
+                for row in lag:
+                    ws.append(list(row))
+                from openpyxl.utils import get_column_letter
+                for col in ws.columns:
+                    letter = get_column_letter(col[0].column)
+                    ws.column_dimensions[letter].width = 28
+
+                wa = wb.create_sheet("Preventive Actions")
+                wa.append(["Theme", "Source", "Count", "Risk", "Preventive Action", "Note"])
+                for cell in wa[1]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="17365D")
+                for a in state.get("actions") or []:
+                    wa.append([
+                        a.get("theme", ""), a.get("source", ""), a.get("count", ""),
+                        a.get("risk", ""), a.get("prevent", ""), a.get("note", "")
+                    ])
+                for col in wa.columns:
+                    letter = get_column_letter(col[0].column)
+                    wa.column_dimensions[letter].width = 24
+
+                wc = wb.create_sheet("Observation Categories")
+                wc.append(["Category", "Count"])
+                for cell in wc[1]:
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = PatternFill("solid", fgColor="17365D")
+                try:
+                    obs_where2, obs_params2, _, _, _, _ = _scope_clause("obs_date")
+                    rows = db.fetchall(
+                        f"SELECT COALESCE(NULLIF(trim(category),''),'Other') cat, COUNT(*) c "
+                        f"FROM observations WHERE {obs_where2} GROUP BY cat ORDER BY c DESC",
+                        obs_params2
+                    )
+                    for r in rows:
+                        wc.append([safe(r["cat"]), int(r["c"])])
+                except Exception:
+                    pass
+                wb.save(path)
+                self.show_export_success(path)
+            except Exception as exc:
+                logging.exception("Dashboard Excel export failed")
+                QMessageBox.critical(self, "Export Failed", str(exc))
+
         preset_cb.currentIndexChanged.connect(lambda *_: _apply_preset())
         apply_btn.clicked.connect(rebuild)
         refresh_btn.clicked.connect(rebuild)
-        export_btn.clicked.connect(export_report)
+        export_word_btn.clicked.connect(export_report)
+        export_excel_btn.clicked.connect(export_report_excel)
 
         _apply_preset()
         rebuild()
@@ -5233,19 +5562,34 @@ class MainWindow(QMainWindow):
         def professional():
             incident_id=self.selected_id(table,"Professional Report")
             if incident_id is None:return
-            number=table.item(table.currentRow(),1).text(); path,_=QFileDialog.getSaveFileName(self,"Save Investigation Report",f"{number}_Investigation_Report.docx","Word Document (*.docx)")
+            number=table.item(table.currentRow(),1).text()
+            path,_=QFileDialog.getSaveFileName(
+                self,"Save Investigation Report",
+                f"{number}_Investigation_Report.docx",
+                "Word Document (*.docx)"
+            )
             if not path:return
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
             try:
-                generate_incident_docx(incident_id,path)
-                if not Path(path).exists() or Path(path).stat().st_size < 1000:
+                generate_incident_docx(incident_id, path)
+                if not Path(path).exists() or Path(path).stat().st_size < 800:
                     raise ValueError("The Investigation Professional Report was not created correctly.")
+                # Validate OOXML package
+                with zipfile.ZipFile(path, "r") as z:
+                    bad = z.testzip()
+                    if bad:
+                        raise ValueError(f"Generated report is corrupt: {bad}")
                 rr=db.fetchone("SELECT investigation_details FROM incidents WHERE id=?",(incident_id,))
                 try: details=json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
                 except Exception: details={}
-                details["professional_report_generated"]=True; details["professional_report_path"]=str(path)
+                details["professional_report_generated"]=True
+                details["professional_report_path"]=str(path)
                 db.execute("UPDATE incidents SET investigation_details=? WHERE id=?",(json.dumps(details,ensure_ascii=False),incident_id))
                 self.show_export_success(path); load()
-            except Exception as e: logging.exception("Incident Word report failed"); QMessageBox.critical(self,"Report Error",str(e))
+            except Exception as e:
+                logging.exception("Incident Word report failed")
+                QMessageBox.critical(self,"Report Error",str(e))
         btns["+ New Incident"].clicked.connect(lambda:self.incident_form(load))
         def edit_selected():
             rid=self.selected_id(table,"Edit Incident")
