@@ -1872,9 +1872,10 @@ def _add_card_image_evidence(cell, attachments):
 
 
 def generate_observation_card_docx(observation_ids, path):
-    """Client-ready A4 landscape STOP Card: one observation per page.
-    Equal left/right halves, visible ticks on selected type/category/priority/status,
-    logo, document number, embedded evidence. Stays inside page margins (Word-safe OOXML).
+    """A4 landscape STOP Card — one observation per page.
+    Equal left/right layout using ONLY top-level tables (no nested tables).
+    Visible ticks on selected type/category/priority/status, logo, document no.,
+    embedded evidence. Strict Word-safe OOXML.
     """
     if isinstance(observation_ids, (int, str)):
         observation_ids = [int(observation_ids)]
@@ -1897,25 +1898,21 @@ def generate_observation_card_docx(observation_ids, path):
     if not rows:
         raise ValueError("The selected observation(s) no longer exist.")
 
-    # Usable width on A4 landscape with 0.4" margins: 11.69 - 0.8 = 10.89"
-    PAGE_W = 10.80
-    HALF_W = 5.35
-    COL_GAP = 0.10
-
     doc = Document()
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width = Inches(11.69)
     section.page_height = Inches(8.27)
-    section.left_margin = Inches(0.40)
-    section.right_margin = Inches(0.40)
-    section.top_margin = Inches(0.35)
-    section.bottom_margin = Inches(0.35)
+    # Keep content inside A4 landscape printable area
+    section.left_margin = Inches(0.45)
+    section.right_margin = Inches(0.45)
+    section.top_margin = Inches(0.40)
+    section.bottom_margin = Inches(0.40)
 
-    def _shade(cell, fill):
+    def shade(cell, fill):
         add_docx_cell_shading(cell, fill)
 
-    def _border(cell, color="17365D", sz="8"):
+    def border(cell, color="17365D", sz="8"):
         set_docx_cell_borders(
             cell,
             top={"val": "single", "sz": sz, "space": "0", "color": color},
@@ -1924,22 +1921,21 @@ def generate_observation_card_docx(observation_ids, path):
             right={"val": "single", "sz": sz, "space": "0", "color": color},
         )
 
-    def _set_widths(table, widths):
+    def widths(table, inch_list):
         table.autofit = False
         for row in table.rows:
             for i, cell in enumerate(row.cells):
-                if i < len(widths):
-                    cell.width = Inches(widths[i])
+                if i < len(inch_list):
+                    cell.width = Inches(inch_list[i])
 
-    def _p(cell, text, size=8, bold=False, center=False, white=False, after=0):
-        """Add a paragraph into a cell (does not clear existing content)."""
-        if cell.paragraphs and not cell.paragraphs[0].text and not cell.paragraphs[0].runs:
-            p = cell.paragraphs[0]
-        else:
-            p = cell.add_paragraph()
-        p.paragraph_format.space_after = Pt(after)
+    def tick(selected, value):
+        return "[X]" if safe(selected).strip().casefold() == safe(value).strip().casefold() else "[ ]"
+
+    def write_cell(cell, text, size=8, bold=False, center=False, white=False):
+        cell.text = ""
+        p = cell.paragraphs[0]
+        p.paragraph_format.space_after = Pt(0)
         p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.line_spacing = 1.0
         if center:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         run = p.add_run(xml_safe(text) if text is not None else "")
@@ -1951,16 +1947,7 @@ def generate_observation_card_docx(observation_ids, path):
                 run.font.color.rgb = RGBColor(255, 255, 255)
             except Exception:
                 pass
-        return p
-
-    def _clear_cell(cell):
-        cell.text = ""
-        for p in cell.paragraphs:
-            p.paragraph_format.space_after = Pt(0)
-            p.paragraph_format.space_before = Pt(0)
-
-    def _tick(selected, value):
-        return "☑" if safe(selected).strip() == safe(value).strip() else "☐"
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
     for card_index, row in enumerate(rows):
         if card_index:
@@ -1972,18 +1959,16 @@ def generate_observation_card_docx(observation_ids, path):
         selected_priority = safe(row["priority"])
         selected_status = safe(row["status"])
 
-        # ========== HEADER (full width) ==========
+        # ---- Header: logo | title | document number (full width ~10.8") ----
         header = doc.add_table(rows=1, cols=3)
-        _set_widths(header, [1.50, 7.40, 1.90])
-        for cell in header.rows[0].cells:
-            _border(cell, "17365D", "12")
-            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            _set_docx_cell_margins(cell, 40, 40, 40, 40)
+        widths(header, [1.50, 7.40, 1.90])
+        for c in header.rows[0].cells:
+            border(c, "17365D", "12")
+            c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
-        # Logo
         logo_cell = header.rows[0].cells[0]
-        _shade(logo_cell, "FFFFFF")
-        _clear_cell(logo_cell)
+        shade(logo_cell, "FFFFFF")
+        logo_cell.text = ""
         logo_path = report_logo_path()
         logo_ok = False
         if logo_path and Path(logo_path).exists():
@@ -1995,12 +1980,11 @@ def generate_observation_card_docx(observation_ids, path):
             except Exception:
                 logo_ok = False
         if not logo_ok:
-            _p(logo_cell, company_name(), 9, True, True)
+            write_cell(logo_cell, company_name(), 9, True, True)
 
-        # Title
         title_cell = header.rows[0].cells[1]
-        _shade(title_cell, "17365D")
-        _clear_cell(title_cell)
+        shade(title_cell, "17365D")
+        title_cell.text = ""
         p = title_cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run("HSE OBSERVATION AND STOP CARD")
@@ -2031,10 +2015,9 @@ def generate_observation_card_docx(observation_ids, path):
             except Exception:
                 pass
 
-        # Document number
         doc_cell = header.rows[0].cells[2]
-        _shade(doc_cell, "0F2A47")
-        _clear_cell(doc_cell)
+        shade(doc_cell, "0F2A47")
+        doc_cell.text = ""
         p = doc_cell.paragraphs[0]
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER
         r = p.add_run("DOCUMENT NO.")
@@ -2055,20 +2038,24 @@ def generate_observation_card_docx(observation_ids, path):
         except Exception:
             pass
 
-        # ========== EQUAL TWO-COLUMN BODY ==========
+        # ---- Equal two-column body (NO nested tables) ----
         body = doc.add_table(rows=1, cols=2)
-        _set_widths(body, [HALF_W, HALF_W])
+        widths(body, [5.35, 5.35])
         left = body.rows[0].cells[0]
         right = body.rows[0].cells[1]
         for cell in (left, right):
-            _border(cell, "8FA6BF", "8")
-            _shade(cell, "FFFFFF")
+            border(cell, "8FA6BF", "8")
+            shade(cell, "FFFFFF")
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            cell.text = ""
             _set_docx_cell_margins(cell, 50, 55, 50, 55)
-            _clear_cell(cell)
 
-        # ----- LEFT HALF: details + observation + action + evidence -----
-        _p(left, "OBSERVATION DETAILS", 9, True, True, after=4)
+        # LEFT content as paragraphs only
+        p = left.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("OBSERVATION DETAILS")
+        r.bold = True
+        r.font.size = Pt(9)
 
         left_fields = [
             ("Originator", safe(row["observer"])),
@@ -2085,7 +2072,6 @@ def generate_observation_card_docx(observation_ids, path):
         for label, value in left_fields:
             p = left.add_paragraph()
             p.paragraph_format.space_after = Pt(1)
-            p.paragraph_format.space_before = Pt(0)
             r1 = p.add_run(xml_safe(label) + ": ")
             r1.bold = True
             r1.font.size = Pt(8)
@@ -2093,25 +2079,25 @@ def generate_observation_card_docx(observation_ids, path):
             r2.font.size = Pt(8)
 
         p = left.add_paragraph()
-        p.paragraph_format.space_before = Pt(6)
+        p.paragraph_format.space_before = Pt(4)
         r = p.add_run("Observation")
         r.bold = True
         r.font.size = Pt(8)
         p = left.add_paragraph()
-        p.paragraph_format.space_after = Pt(4)
         r = p.add_run(xml_safe(row["observation"]) or "No observation detail recorded.")
         r.font.size = Pt(8)
 
         p = left.add_paragraph()
+        p.paragraph_format.space_before = Pt(4)
         r = p.add_run("Action Taken / Corrective Action")
         r.bold = True
         r.font.size = Pt(8)
         p = left.add_paragraph()
-        p.paragraph_format.space_after = Pt(4)
         r = p.add_run(xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
         r.font.size = Pt(8)
 
         p = left.add_paragraph()
+        p.paragraph_format.space_before = Pt(4)
         r = p.add_run("Evidence / Attachments")
         r.bold = True
         r.font.size = Pt(8)
@@ -2128,9 +2114,9 @@ def generate_observation_card_docx(observation_ids, path):
             for a in attachments:
                 fp = Path(safe(a["file_path"]))
                 names.append(fp.name)
-                if shown < 4 and fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+                if shown < 3 and fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
                     try:
-                        img_p.add_run().add_picture(str(fp), width=Inches(1.15))
+                        img_p.add_run().add_picture(str(fp), width=Inches(1.10))
                         img_p.add_run("  ")
                         shown += 1
                     except Exception:
@@ -2139,115 +2125,97 @@ def generate_observation_card_docx(observation_ids, path):
             r = np.add_run("Files: " + "; ".join(xml_safe(n) for n in names))
             r.font.size = Pt(7)
 
-        # ----- RIGHT HALF: type + category boxes with ticks + priority/status -----
-        _p(right, "HAZARD IDENTIFICATION CARD", 9, True, True, after=4)
+        # RIGHT content as paragraphs only (ticks visible with [X]/[ ])
+        p = right.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = p.add_run("HAZARD IDENTIFICATION")
+        r.bold = True
+        r.font.size = Pt(9)
 
-        # Observation type checklist
         p = right.add_paragraph()
         r = p.add_run("Observation Type")
         r.bold = True
         r.font.size = Pt(8)
-        # 2 items per line for readability inside half-page width
-        line = right.add_paragraph()
-        line.paragraph_format.space_after = Pt(1)
+        # two items per line
+        buf = []
         for i, typ in enumerate(OBS_TYPES):
-            mark = _tick(selected_type, typ)
-            run = line.add_run(f"{mark} {typ}   ")
-            run.font.size = Pt(7)
-            if safe(typ) == selected_type:
-                run.bold = True
-            if (i + 1) % 2 == 0:
+            mark = tick(selected_type, typ)
+            item = f"{mark} {typ}"
+            if safe(typ).casefold() == selected_type.casefold():
+                item = f"{mark} {typ}"
+            buf.append(item)
+            if len(buf) == 2 or i == len(OBS_TYPES) - 1:
                 line = right.add_paragraph()
-                line.paragraph_format.space_after = Pt(1)
+                line.paragraph_format.space_after = Pt(0)
+                for j, part in enumerate(buf):
+                    run = line.add_run(part + ("    " if j == 0 and len(buf) > 1 else ""))
+                    run.font.size = Pt(7)
+                    # bold selected
+                    if part.startswith("[X]"):
+                        run.bold = True
+                buf = []
 
-        # Category boxes with tick on selected
         p = right.add_paragraph()
         p.paragraph_format.space_before = Pt(4)
-        r = p.add_run("Hazard Category  (selected category is ticked)")
+        r = p.add_run("Hazard Category (selected category is marked [X])")
         r.bold = True
         r.font.size = Pt(8)
-
-        # Category grid as a compact table of checkbox labels (3 columns)
-        cat_table = right.add_table(rows=0, cols=3)
-        cat_table.autofit = False
-        n = len(CATEGORIES)
-        per_col = (n + 2) // 3
-        # build rows
-        for rix in range(per_col):
-            cells = cat_table.add_row().cells
-            for j in range(3):
-                idx = rix + j * per_col
-                cells[j].width = Inches(1.65)
-                _border(cells[j], "B7C9D6", "4")
-                if idx < n:
-                    cat = CATEGORIES[idx]
-                    mark = _tick(selected_cat, cat)
-                    _clear_cell(cells[j])
-                    p = cells[j].paragraphs[0]
-                    p.paragraph_format.space_after = Pt(0)
-                    p.paragraph_format.space_before = Pt(0)
-                    run = p.add_run(f"{mark} {cat}")
-                    run.font.size = Pt(6.5)
-                    if safe(cat) == selected_cat:
-                        run.bold = True
-                        _shade(cells[j], "DCEAF8")
-                    else:
-                        _shade(cells[j], "FFFFFF")
-                else:
-                    _clear_cell(cells[j])
-                    _shade(cells[j], "FFFFFF")
-
+        # three categories per line for equal half-page width
+        buf = []
+        for i, cat in enumerate(CATEGORIES):
+            mark = tick(selected_cat, cat)
+            buf.append(f"{mark} {cat}")
+            if len(buf) == 3 or i == len(CATEGORIES) - 1:
+                line = right.add_paragraph()
+                line.paragraph_format.space_after = Pt(0)
+                text_line = "   ".join(buf)
+                run = line.add_run(text_line)
+                run.font.size = Pt(6.5)
+                buf = []
         if selected_sub:
             p = right.add_paragraph()
-            p.paragraph_format.space_before = Pt(3)
             r = p.add_run("Subcategory: " + xml_safe(selected_sub))
             r.bold = True
             r.font.size = Pt(8)
 
-        # Priority ticks
         p = right.add_paragraph()
-        p.paragraph_format.space_before = Pt(6)
+        p.paragraph_format.space_before = Pt(4)
         r = p.add_run("Priority")
         r.bold = True
         r.font.size = Pt(8)
-        pr = right.add_paragraph()
+        line = right.add_paragraph()
         for opt in PRIORITIES:
-            mark = _tick(selected_priority, opt)
-            run = pr.add_run(f"{mark} {opt}    ")
+            mark = tick(selected_priority, opt)
+            run = line.add_run(f"{mark} {opt}   ")
             run.font.size = Pt(8)
-            if safe(opt) == selected_priority:
+            if mark == "[X]":
                 run.bold = True
 
-        # Status ticks
         p = right.add_paragraph()
-        p.paragraph_format.space_before = Pt(4)
+        p.paragraph_format.space_before = Pt(2)
         r = p.add_run("Status")
         r.bold = True
         r.font.size = Pt(8)
-        st = right.add_paragraph()
+        line = right.add_paragraph()
         for opt in STATUSES:
-            mark = _tick(selected_status, opt)
-            run = st.add_run(f"{mark} {opt}    ")
+            mark = tick(selected_status, opt)
+            run = line.add_run(f"{mark} {opt}   ")
             run.font.size = Pt(7.5)
-            if safe(opt) == selected_status:
+            if mark == "[X]":
                 run.bold = True
 
-        # ========== SIGN-OFF STRIP (full width, stays on same page) ==========
+        # ---- Sign-off strip (top-level only) ----
         sig = doc.add_table(rows=2, cols=3)
-        _set_widths(sig, [3.60, 3.60, 3.60])
+        widths(sig, [3.60, 3.60, 3.60])
         for i, label in enumerate(["Originator / Observer", "Supervisor / Reviewer", "HSE Close-out"]):
             h = sig.rows[0].cells[i]
             b = sig.rows[1].cells[i]
-            _border(h, "17365D", "8")
-            _border(b, "17365D", "8")
-            _shade(h, "17365D")
-            _shade(b, "FFFFFF")
-            _clear_cell(h)
-            _clear_cell(b)
-            _p(h, label, 8, True, True, white=True)
-            _p(b, "Name: ____________________", 8)
-            _p(b, "Sign:  ____________________", 8)
-            _p(b, "Date:  ____________________", 8)
+            border(h, "17365D", "8")
+            border(b, "17365D", "8")
+            shade(h, "17365D")
+            shade(b, "FFFFFF")
+            write_cell(h, label, 8, True, True, True)
+            write_cell(b, "Name: __________________\nSign: __________________\nDate: __________________", 8, False, False)
 
     target = Path(path)
     if target.suffix.lower() != ".docx":
