@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
     QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QTabWidget, QListWidgetItem,
-    QGridLayout, QDateTimeEdit, QInputDialog, QFrame
+    QGridLayout, QDateTimeEdit, QInputDialog, QFrame, QSizePolicy
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
@@ -4072,15 +4072,7 @@ class MainWindow(QMainWindow):
         ])
         fl.addWidget(compare_cb, 2, 3)
 
-        fl.addWidget(QLabel("Manpower (headcount — from Manpower Details)"), 3, 0)
-        manpower_spin = QSpinBox()
-        manpower_spin.setRange(0, 100000)
-        manpower_spin.setValue(int(float(safe(db.setting("dashboard_manpower", "0")) or 0)))
-        manpower_spin.setReadOnly(True)
-        manpower_spin.setToolTip("Automatically calculated from the latest saved Manpower Details snapshot.")
-        fl.addWidget(manpower_spin, 3, 1)
-
-        fl.addWidget(QLabel("Man-Hours (period)"), 3, 2)
+        fl.addWidget(QLabel("Man-Hours (period — from Manpower Details)"), 3, 0)
         manhours_spin = QDoubleSpinBox()
         manhours_spin.setRange(0, 50_000_000)
         manhours_spin.setDecimals(0)
@@ -4088,7 +4080,7 @@ class MainWindow(QMainWindow):
         manhours_spin.setValue(float(safe(db.setting("dashboard_man_hours", "0")) or 0))
         manhours_spin.setReadOnly(True)
         manhours_spin.setToolTip("Automatically calculated from manpower records in the selected dashboard period.")
-        fl.addWidget(manhours_spin, 3, 3)
+        fl.addWidget(manhours_spin, 3, 1)
 
         btn_row = QHBoxLayout()
         apply_btn = QPushButton("Apply Filters")
@@ -4470,7 +4462,6 @@ class MainWindow(QMainWindow):
             aud_where, aud_params = _audit_finding_scope()
             c0, c1 = _comparison_range(d0, d1)
 
-            db.set_setting("dashboard_manpower", str(manpower_spin.value()))
             db.set_setting("dashboard_man_hours", str(int(manhours_spin.value() or 0)))
 
             scope_bits = []
@@ -4524,7 +4515,6 @@ class MainWindow(QMainWindow):
                 manpower_total = sum(int(r["total"] or 0) for r in manpower_breakdown)
             # Keep the main HSE dashboard linked to the Manpower Details register.
             # Headcount is the latest snapshot for the selected project/location.
-            manpower_spin.setValue(manpower_total)
             db.set_setting("dashboard_manpower", str(manpower_total))
 
             # Exposure hours are calculated from all daily manpower snapshots in the
@@ -4659,7 +4649,7 @@ class MainWindow(QMainWindow):
             )
 
             mh = float(manhours_spin.value() or 0)
-            mp = int(manpower_spin.value() or 0)
+            mp = int(manpower_total or 0)
             trir = (recordable * 200000.0 / mh) if mh > 0 else 0.0
             ltifr = (lti * 1_000_000.0 / mh) if mh > 0 else 0.0
             obs_per_100 = (total_obs * 100.0 / mp) if mp > 0 else 0.0
@@ -5359,9 +5349,10 @@ class MainWindow(QMainWindow):
             QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox { min-height: 28px; padding: 2px 6px; border: 1px solid #C9D3DF; border-radius: 5px; background: white; }
             QTableWidget { border: 1px solid #D5DEE8; border-radius: 6px; gridline-color: #E6EBF1; alternate-background-color: #F7F9FC; }
             QHeaderView::section { background: #EAF0F6; color: #17365D; padding: 7px; border: none; border-bottom: 1px solid #CBD5E1; font-weight: 600; }
-            QPushButton { min-height: 30px; padding: 3px 11px; border: 1px solid #CBD5E1; border-radius: 5px; background: #F8FAFC; }
-            QPushButton:hover { background: #EAF1F8; }
-            QPushButton#primary { background: #17365D; color: white; border: 1px solid #17365D; font-weight: 600; }
+            QPushButton { min-height: 36px; padding: 5px 10px; border: 1px solid #CBD5E1; border-radius: 5px; background: #F8FAFC; color: #17365D; font-weight: 600; }
+            QPushButton:hover { background: #EAF1F8; color: #102A43; }
+            QPushButton#primary { background: #17365D; color: white; border: 1px solid #17365D; font-weight: 700; }
+            QPushButton#primary:hover { background: #245184; color: white; }
             QPushButton#primary:hover { background: #245184; }
         """)
 
@@ -5373,10 +5364,11 @@ class MainWindow(QMainWindow):
         tabs = QTabWidget()
         tabs.setDocumentMode(True)
         tabs.setStyleSheet("QTabBar::tab{padding:9px 18px;font-weight:600;} QTabBar::tab:selected{color:#17365D;border-bottom:3px solid #2F75B5;}")
-        entry_page, register_page, dashboard_page = QWidget(), QWidget(), QWidget()
+        entry_page, register_page, dashboard_page, report_page = QWidget(), QWidget(), QWidget(), QWidget()
         tabs.addTab(entry_page, "Daily Entry")
         tabs.addTab(register_page, "Manpower Register")
         tabs.addTab(dashboard_page, "Manpower Dashboard & HSE Rates")
+        tabs.addTab(report_page, "Project & Location Report")
         layout.addWidget(tabs, 1)
 
         def style_primary(button):
@@ -5547,11 +5539,14 @@ class MainWindow(QMainWindow):
             card,val=make_card(title,accent); reg_card_values[key]=val; reg_cards.addWidget(card)
         register_root.addLayout(reg_cards)
 
-        reg_toolbar=QHBoxLayout()
+        reg_toolbar=QGridLayout()
+        reg_toolbar.setHorizontalSpacing(8); reg_toolbar.setVerticalSpacing(6)
         reg_refresh=QPushButton("Refresh"); reg_add=QPushButton("Add Daily Entry"); reg_edit=QPushButton("Edit Selected")
         reg_rename=QPushButton("Rename Value"); reg_delete=QPushButton("Delete Selected"); reg_export=style_primary(QPushButton("Export Excel")); reg_clear=QPushButton("Clear Filters")
-        for b in (reg_refresh,reg_add,reg_edit,reg_rename,reg_delete,reg_export,reg_clear): reg_toolbar.addWidget(b)
-        reg_toolbar.addStretch(); register_root.addLayout(reg_toolbar)
+        for i,b in enumerate((reg_refresh,reg_add,reg_edit,reg_rename,reg_delete,reg_export,reg_clear)):
+            b.setMinimumWidth(125); b.setMinimumHeight(38); b.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed)
+            reg_toolbar.addWidget(b,i//4,i%4)
+        register_root.addLayout(reg_toolbar)
         reg_table=QTableWidget(0,8)
         reg_table.setHorizontalHeaderLabels(["ID","Date","Project","Location","Department","Headcount","Remarks","Last Updated"])
         reg_table.setColumnHidden(0,True); reg_table.setAlternatingRowColors(True)
@@ -5669,9 +5664,12 @@ class MainWindow(QMainWindow):
                 logging.exception("Manpower register export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
 
         # ================================================================
-        # TAB 3 — LIVE DASHBOARD + HSE RATES
+        # TAB 3 — LIVE DASHBOARD + HSE RATES (scrollable for all screen sizes)
         # ================================================================
-        dash_root=QVBoxLayout(dashboard_page); dash_root.setContentsMargins(8,8,8,8); dash_root.setSpacing(8)
+        dashboard_outer=QVBoxLayout(dashboard_page); dashboard_outer.setContentsMargins(0,0,0,0)
+        dash_scroll=QScrollArea(); dash_scroll.setWidgetResizable(True); dash_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        dash_content=QWidget(); dash_scroll.setWidget(dash_content); dashboard_outer.addWidget(dash_scroll)
+        dash_root=QVBoxLayout(dash_content); dash_root.setContentsMargins(8,8,8,8); dash_root.setSpacing(8)
         dash_filter_box=QGroupBox("Dashboard slicers")
         dash_filters=QGridLayout(dash_filter_box); dash_filters.setHorizontalSpacing(10); dash_filters.setVerticalSpacing(7)
         dash_from=QDateEdit(); dash_from.setCalendarPopup(True); dash_from.setDisplayFormat("dd-MMM-yyyy"); dash_from.setDate(QDate(2000,1,1))
@@ -5698,14 +5696,6 @@ class MainWindow(QMainWindow):
         dash_info=QLabel("Rates are calculated from incident records and estimated exposure hours from saved manpower snapshots.")
         dash_info.setWordWrap(True); dash_info.setStyleSheet("color:#667085;padding:4px;")
         dash_root.addWidget(dash_info)
-        breakdown_title=QLabel("Manpower breakdown by project, location and department")
-        breakdown_title.setStyleSheet("font-size:12pt;font-weight:700;color:#17365D;padding:4px 0;")
-        dash_root.addWidget(breakdown_title)
-        dash_breakdown=QTableWidget(0,7)
-        dash_breakdown.setHorizontalHeaderLabels(["Project","Location","Department","Latest Headcount","Person-Days","Man-Hours","Latest Record Date"])
-        dash_breakdown.setAlternatingRowColors(True); dash_breakdown.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        dash_breakdown.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); dash_breakdown.horizontalHeader().setStretchLastSection(True)
-        dash_root.addWidget(dash_breakdown,1)
         dash_footer=QLabel(""); dash_footer.setWordWrap(True); dash_footer.setStyleSheet("color:#667085;padding:4px;background:#F1F5F9;border-radius:5px;")
         dash_root.addWidget(dash_footer)
         dash_actions=QHBoxLayout(); dash_refresh=QPushButton("Refresh Dashboard"); dash_export=style_primary(QPushButton("Export Dashboard to Excel")); dash_actions.addStretch(); dash_actions.addWidget(dash_refresh); dash_actions.addWidget(dash_export)
@@ -5753,10 +5743,6 @@ class MainWindow(QMainWindow):
             trir=recordable*200_000.0/exposure if exposure else None
             vals={"headcount":f"{latest_headcount:,}","persondays":f"{person_days:,}","hours":f"{exposure:,.0f}","incidents":f"{incidents:,}","lti":f"{lti:,}","recordable":f"{recordable:,}","fatalities":f"{fatalities:,}","ltifr":f"{ltifr:.2f}" if ltifr is not None else "N/A","trir":f"{trir:.2f}" if trir is not None else "N/A"}
             for key,value in vals.items(): dash_card_values[key].setText(value)
-            dash_breakdown.setRowCount(len(grouped))
-            for r,(key,g) in enumerate(sorted(grouped.items(),key=lambda x:(x[0][0].casefold(),x[0][1].casefold(),x[0][2].casefold()))):
-                vals=[key[0],key[1],key[2],f"{g['latest']:,}",f"{g['person_days']:,}",f"{g['person_days']*hours:,.0f}",g["latest_date"]]
-                for c,value in enumerate(vals): dash_breakdown.setItem(r,c,QTableWidgetItem(safe(value)))
             dash_footer.setText(f"Period: {start} to {end}  •  Latest snapshot date: {latest_date or 'No records'}  •  Locations: {len({k[1] for k in grouped})}  •  Exposure hours: {exposure:,.0f}. LTIFR = LTI × 1,000,000 ÷ man-hours; TRIR = recordable cases × 200,000 ÷ man-hours.")
             db.set_setting("manpower_shift_hours",str(hours))
             self._last_manpower_analytics={"period_start":start,"period_end":end,"latest_date":latest_date,"latest_headcount":latest_headcount,"person_days":person_days,"manhours":exposure,"incidents":incidents,"lti":lti,"recordable":recordable,"fatalities":fatalities,"ltifr":ltifr,"trir":trir}
@@ -5772,10 +5758,7 @@ class MainWindow(QMainWindow):
                 for key,title,_accent in dash_card_specs: sh.append([title,dash_card_values[key].text()])
                 sh.append(["Period",f"{dash_from.date().toString('yyyy-MM-dd')} to {dash_to.date().toString('yyyy-MM-dd')}"])
                 sh.append(["Project",dash_project.currentText()]); sh.append(["Location",dash_location.currentText()]); sh.append(["Department",dash_department.currentText()]); sh.append(["Hours per person per day",shift_hours.value()])
-                detail=wb.create_sheet("Location Breakdown")
-                detail.append([dash_breakdown.horizontalHeaderItem(c).text() for c in range(dash_breakdown.columnCount())])
-                for r in range(dash_breakdown.rowCount()): detail.append([dash_breakdown.item(r,c).text() if dash_breakdown.item(r,c) else "" for c in range(dash_breakdown.columnCount())])
-                for sheet in (sh,detail):
+                for sheet in (sh,):
                     for cell in sheet[1]: cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D")
                     sheet.freeze_panes="A2"; sheet.auto_filter.ref=sheet.dimensions
                     for col in sheet.columns:
@@ -5785,8 +5768,108 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logging.exception("Manpower dashboard export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
 
+        # ================================================================
+        # TAB 4 — PROJECT & LOCATION REPORT
+        # ================================================================
+        report_root=QVBoxLayout(report_page); report_root.setContentsMargins(8,8,8,8); report_root.setSpacing(8)
+        report_heading=QLabel("MANPOWER PROJECT & LOCATION PERFORMANCE REPORT")
+        report_heading.setStyleSheet("font-size:15pt;font-weight:700;color:#17365D;padding:5px 2px;")
+        report_root.addWidget(report_heading)
+        report_subtitle=QLabel("Detailed daily manpower distribution with project, location, department and date filters. Export the filtered report to Excel for formal reporting.")
+        report_subtitle.setWordWrap(True); report_subtitle.setStyleSheet("color:#667085;padding:2px 2px 6px 2px;")
+        report_root.addWidget(report_subtitle)
+        report_filter_box=QGroupBox("Report filters")
+        report_filter_grid=QGridLayout(report_filter_box); report_filter_grid.setHorizontalSpacing(10); report_filter_grid.setVerticalSpacing(7)
+        report_from=QDateEdit(); report_from.setCalendarPopup(True); report_from.setDisplayFormat("dd-MMM-yyyy"); report_from.setDate(QDate(2000,1,1))
+        report_to=QDateEdit(); report_to.setCalendarPopup(True); report_to.setDisplayFormat("dd-MMM-yyyy"); report_to.setDate(QDate.currentDate().addDays(1))
+        report_project=QComboBox(); report_location=QComboBox(); report_department=QComboBox()
+        report_search=QLineEdit(); report_search.setPlaceholderText("Search project, location, department or remarks"); report_search.setClearButtonEnabled(True)
+        for c,(label,widget) in enumerate((("From",report_from),("To",report_to),("Project",report_project))):
+            report_filter_grid.addWidget(QLabel(label),0,c*2); report_filter_grid.addWidget(widget,0,c*2+1)
+        for c,(label,widget) in enumerate((("Location",report_location),("Department",report_department),("Search",report_search))):
+            report_filter_grid.addWidget(QLabel(label),1,c*2); report_filter_grid.addWidget(widget,1,c*2+1)
+        report_root.addWidget(report_filter_box)
+        report_summary=QLabel("No report generated")
+        report_summary.setWordWrap(True); report_summary.setStyleSheet("font-weight:600;color:#17365D;background:#EEF3F8;border:1px solid #D8E1EB;border-radius:6px;padding:9px;")
+        report_root.addWidget(report_summary)
+        report_table=QTableWidget(0,9)
+        report_table.setHorizontalHeaderLabels(["Date","Project","Location","Department","Headcount","Person-Days","Man-Hours","Remarks","Last Updated"])
+        report_table.setAlternatingRowColors(True); report_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        report_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        report_table.horizontalHeader().setStretchLastSection(True)
+        report_root.addWidget(report_table,1)
+        report_actions=QHBoxLayout(); report_refresh=QPushButton("Refresh Report"); report_export=style_primary(QPushButton("Export Professional Report to Excel"))
+        report_actions.addStretch(); report_actions.addWidget(report_refresh); report_actions.addWidget(report_export); report_root.addLayout(report_actions)
+
+        def refresh_report_filter_lists():
+            combo_fill(report_project,"project","All Projects")
+            combo_fill(report_location,"location","All Locations")
+            combo_fill(report_department,"department","All Departments")
+
+        def report_where():
+            clauses=["record_date>=?","record_date<=?"]
+            params=[report_from.date().toString("yyyy-MM-dd"),report_to.date().toString("yyyy-MM-dd")]
+            for widget,col in ((report_project,"project"),(report_location,"location"),(report_department,"department")):
+                value=widget.currentData()
+                if value: clauses.append(f"COALESCE({col},'')=?"); params.append(value)
+            needle=report_search.text().strip()
+            if needle:
+                clauses.append("(COALESCE(project,'') LIKE ? OR COALESCE(location,'') LIKE ? OR COALESCE(department,'') LIKE ? OR COALESCE(remarks,'') LIKE ?)")
+                params.extend([f"%{needle}%"]*4)
+            return " AND ".join(clauses),params
+
+        def refresh_manpower_report():
+            where,params=report_where()
+            rows=db.fetchall("SELECT record_date,project,location,department,COALESCE(manpower,0) manpower,COALESCE(remarks,'') remarks,COALESCE(updated_at,'') updated_at FROM manpower_records WHERE "+where+" ORDER BY record_date DESC,project COLLATE NOCASE,location COLLATE NOCASE,department COLLATE NOCASE",tuple(params))
+            hours_per_person=float(safe(db.setting("manpower_shift_hours","8")) or 8)
+            report_table.setRowCount(len(rows))
+            total_headcount_days=0
+            for r,row in enumerate(rows):
+                count=int(row["manpower"] or 0); total_headcount_days+=count
+                values=[row["record_date"],row["project"],row["location"],row["department"],f"{count:,}",f"{count:,}",f"{count*hours_per_person:,.1f}",row["remarks"],row["updated_at"]]
+                for c,value in enumerate(values):
+                    item=QTableWidgetItem(safe(value)); item.setToolTip(safe(value)); report_table.setItem(r,c,item)
+            total_hours=total_headcount_days*hours_per_person
+            report_summary.setText(f"Records: {len(rows):,}    |    Person-Days: {total_headcount_days:,}    |    Estimated Man-Hours: {total_hours:,.1f}    |    Hours per Person / Day: {hours_per_person:g}    |    Period: {params[0]} to {params[1]}")
+            self._last_manpower_report={"rows":len(rows),"person_days":total_headcount_days,"manhours":total_hours,"period_start":params[0],"period_end":params[1]}
+
+        def export_manpower_report():
+            path,_=QFileDialog.getSaveFileName(self,"Export Project & Location Report","Manpower_Project_Location_Report.xlsx","Excel Workbook (*.xlsx)")
+            if not path: return
+            if not path.lower().endswith(".xlsx"): path+=".xlsx"
+            try:
+                refresh_manpower_report()
+                wb=Workbook(); sh=wb.active; sh.title="Manpower Detail Report"
+                sh.append(["MANPOWER PROJECT & LOCATION PERFORMANCE REPORT"]); sh.merge_cells(start_row=1,start_column=1,end_row=1,end_column=9)
+                sh["A1"].font=Font(bold=True,size=16,color="FFFFFF"); sh["A1"].fill=PatternFill("solid",fgColor="17365D"); sh["A1"].alignment=Alignment(horizontal="center",vertical="center")
+                sh.row_dimensions[1].height=30
+                sh.append(["Period",f"{report_from.date().toString('yyyy-MM-dd')} to {report_to.date().toString('yyyy-MM-dd')}","Project",report_project.currentText(),"Location",report_location.currentText(),"Department",report_department.currentText(),"Search",report_search.text()])
+                sh.append(["Date","Project","Location","Department","Headcount","Person-Days","Man-Hours","Remarks","Last Updated"])
+                where,params=report_where(); rows=db.fetchall("SELECT record_date,project,location,department,COALESCE(manpower,0) manpower,COALESCE(remarks,'') remarks,COALESCE(updated_at,'') updated_at FROM manpower_records WHERE "+where+" ORDER BY record_date DESC,project COLLATE NOCASE,location COLLATE NOCASE,department COLLATE NOCASE",tuple(params))
+                shift=float(safe(db.setting("manpower_shift_hours","8")) or 8); total_days=0
+                for row in rows:
+                    count=int(row["manpower"] or 0); total_days+=count
+                    sh.append([row["record_date"],row["project"],row["location"],row["department"],count,count,count*shift,row["remarks"],row["updated_at"]])
+                sh.append(["TOTAL","","","", "",total_days,total_days*shift,"",""])
+                header_row=3
+                for cell in sh[header_row]:
+                    cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="2F75B5"); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                for row in sh.iter_rows(min_row=4):
+                    for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
+                for cell in sh[sh.max_row]: cell.font=Font(bold=True,color="17365D"); cell.fill=PatternFill("solid",fgColor="EAF0F6")
+                sh.freeze_panes="A4"; sh.auto_filter.ref=f"A3:I{max(3,sh.max_row-1)}"
+                from openpyxl.utils import get_column_letter
+                widths=[14,24,24,22,13,14,14,40,22]
+                for i,width in enumerate(widths,1): sh.column_dimensions[get_column_letter(i)].width=width
+                wb.save(path)
+                if not Path(path).is_file() or Path(path).stat().st_size==0: raise OSError("The report workbook was not created successfully.")
+                QMessageBox.information(self,"Report Exported",f"Professional project and location manpower report exported.\n{path}")
+            except Exception as exc:
+                logging.exception("Manpower project/location report export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
         def refresh_all_manpower_views():
-            refresh_register_filter_lists(); refresh_register(); refresh_dashboard_filters(); refresh_manpower_dashboard()
+            refresh_register_filter_lists(); refresh_register(); refresh_dashboard_filters(); refresh_manpower_dashboard(); refresh_report_filter_lists(); refresh_manpower_report()
 
         # Wire slicers only after their initial values are populated.
         for widget in (reg_from,reg_to): widget.dateChanged.connect(refresh_register)
@@ -5802,6 +5885,10 @@ class MainWindow(QMainWindow):
         for widget in (dash_project,dash_location,dash_department): widget.currentIndexChanged.connect(refresh_manpower_dashboard)
         shift_hours.valueChanged.connect(refresh_manpower_dashboard)
         dash_refresh.clicked.connect(refresh_manpower_dashboard); dash_export.clicked.connect(export_manpower_dashboard)
+        for widget in (report_from,report_to): widget.dateChanged.connect(refresh_manpower_report)
+        for widget in (report_project,report_location,report_department): widget.currentIndexChanged.connect(refresh_manpower_report)
+        report_search.textChanged.connect(refresh_manpower_report)
+        report_refresh.clicked.connect(refresh_manpower_report); report_export.clicked.connect(export_manpower_report)
         refresh_all_manpower_views()
         entry_count_label.setText(f"{entry_table.rowCount()} rows ready")
         if not hasattr(self,"_module_cache"): self._module_cache={}
@@ -14870,7 +14957,7 @@ def main():
 
     window = MainWindow()
 
-    window.show()
+    window.showMaximized()
 
     sys.exit(
         app.exec()
