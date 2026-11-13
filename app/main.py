@@ -10348,12 +10348,53 @@ class MainWindow(QMainWindow):
         frozen_training_names.setFixedWidth(370)
         frozen_training_names.setColumnWidth(0, 260)
         frozen_training_names.setColumnWidth(1, 110)
+        # Both halves must use identical vertical scrolling behaviour.  The
+        # frozen pane has no visible scrollbar, but its internal scrollbar is
+        # kept in lock-step with the horizontally-scrollable matrix pane.
+        frozen_training_names.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        frozen_training_names.verticalHeader().setDefaultSectionSize(30)
+        matrix_grid.verticalHeader().setDefaultSectionSize(30)
+        frozen_training_names.horizontalHeader().setFixedHeight(matrix_grid.horizontalHeader().sizeHint().height())
         matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         matrix_container_layout.addWidget(frozen_training_names, 0)
         matrix_container_layout.addWidget(matrix_grid, 1)
         grid_layout.addWidget(matrix_container, 1)
-        matrix_grid.verticalScrollBar().valueChanged.connect(frozen_training_names.verticalScrollBar().setValue)
-        frozen_training_names.verticalScrollBar().valueChanged.connect(matrix_grid.verticalScrollBar().setValue)
+        def _align_matrix_headers(*_args):
+            header_height = matrix_grid.horizontalHeader().height()
+            if header_height > 0 and frozen_training_names.horizontalHeader().height() != header_height:
+                frozen_training_names.horizontalHeader().setFixedHeight(header_height)
+        matrix_grid.horizontalHeader().geometriesChanged.connect(_align_matrix_headers)
+
+        # Synchronise both scrollbars in both directions.  A guard prevents
+        # recursive valueChanged emissions and handles wheel, keyboard,
+        # scrollbar-thumb and programmatic scrolling consistently.
+        _matrix_scroll_sync = {"busy": False}
+        def _sync_matrix_vertical_scroll(source_bar, target_bar):
+            if _matrix_scroll_sync["busy"]:
+                return
+            _matrix_scroll_sync["busy"] = True
+            try:
+                target_bar.setValue(source_bar.value())
+            finally:
+                _matrix_scroll_sync["busy"] = False
+
+        matrix_grid.verticalScrollBar().valueChanged.connect(
+            lambda _value: _sync_matrix_vertical_scroll(
+                matrix_grid.verticalScrollBar(), frozen_training_names.verticalScrollBar()))
+        frozen_training_names.verticalScrollBar().valueChanged.connect(
+            lambda _value: _sync_matrix_vertical_scroll(
+                frozen_training_names.verticalScrollBar(), matrix_grid.verticalScrollBar()))
+
+        def _sync_matrix_row_heights(row, height):
+            if row < 0:
+                return
+            if matrix_grid.rowHeight(row) != height:
+                matrix_grid.setRowHeight(row, height)
+            if frozen_training_names.rowHeight(row) != height:
+                frozen_training_names.setRowHeight(row, height)
+
+        matrix_grid.verticalHeader().sectionResized.connect(_sync_matrix_row_heights)
+        frozen_training_names.verticalHeader().sectionResized.connect(_sync_matrix_row_heights)
 
         def render_matrix_grid():
             designations = list(MATRIX_DESIGNATIONS)
