@@ -88,6 +88,22 @@ class Database:
             value TEXT
         );
 
+        -- Manpower Details is a separate additive register; no existing module tables are changed.
+        CREATE TABLE IF NOT EXISTS manpower_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_date TEXT NOT NULL,
+            project TEXT DEFAULT '',
+            location TEXT NOT NULL,
+            department TEXT DEFAULT '',
+            manpower INTEGER NOT NULL DEFAULT 0,
+            remarks TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_manpower_records_date ON manpower_records(record_date);
+        CREATE INDEX IF NOT EXISTS idx_manpower_records_project_location ON manpower_records(project, location);
+
+
         CREATE TABLE IF NOT EXISTS employees (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             employee_id TEXT,
@@ -3625,7 +3641,8 @@ class MainWindow(QMainWindow):
             "Training",
             "Reports",
             "Master Data",
-            "Settings"
+            "Settings",
+            "Manpower Details"
         ]
 
         self.nav.addItems(modules)
@@ -3697,6 +3714,8 @@ class MainWindow(QMainWindow):
                 self.master_data()
             elif row == 9:
                 self.settings_page()
+            elif row == 10:
+                self.manpower_details()
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -4003,6 +4022,7 @@ class MainWindow(QMainWindow):
             "SELECT DISTINCT project AS project FROM observations WHERE COALESCE(trim(project),'')<>'' "
             "UNION SELECT DISTINCT project FROM incidents WHERE COALESCE(trim(project),'')<>'' "
             "UNION SELECT DISTINCT project FROM audits WHERE COALESCE(trim(project),'')<>'' "
+            "UNION SELECT DISTINCT project FROM manpower_records WHERE COALESCE(trim(project),'')<>'' "
             "ORDER BY project COLLATE NOCASE"
         ):
             val = safe(pr["project"])
@@ -4017,6 +4037,7 @@ class MainWindow(QMainWindow):
             "SELECT DISTINCT location AS location FROM observations WHERE COALESCE(trim(location),'')<>'' "
             "UNION SELECT DISTINCT location FROM incidents WHERE COALESCE(trim(location),'')<>'' "
             "UNION SELECT DISTINCT location FROM audits WHERE COALESCE(trim(location),'')<>'' "
+            "UNION SELECT DISTINCT location FROM manpower_records WHERE COALESCE(trim(location),'')<>'' "
             "ORDER BY location COLLATE NOCASE"
         ):
             location_cb.addItem(safe(loc["location"]), safe(loc["location"]))
@@ -4051,7 +4072,7 @@ class MainWindow(QMainWindow):
         ])
         fl.addWidget(compare_cb, 2, 3)
 
-        fl.addWidget(QLabel("Manpower (headcount)"), 3, 0)
+        fl.addWidget(QLabel("Manpower (headcount — from Manpower Details)"), 3, 0)
         manpower_spin = QSpinBox()
         manpower_spin.setRange(0, 100000)
         manpower_spin.setValue(int(float(safe(db.setting("dashboard_manpower", "0")) or 0)))
@@ -4456,6 +4477,47 @@ class MainWindow(QMainWindow):
                 scope_bits.append(f"Compared to: {c0} → {c1}")
             header.setText("  |  ".join(scope_bits))
 
+            # Training man-hours are derived from verified Training Register records and course hours.
+            training_sql = """SELECT COALESCE(SUM(COALESCE(c.training_hours,0)),0) AS hours
+                              FROM training_records tr
+                              JOIN training_courses c ON c.id=tr.course_id
+                              JOIN employees e ON e.id=tr.employee_db_id
+                              WHERE COALESCE(e.active,1)=1"""
+            training_params = []
+            if d0 and d1:
+                training_sql += " AND tr.training_date >= ? AND tr.training_date <= ?"
+                training_params.extend([d0, d1])
+            training_hours_row = db.fetchone(training_sql, tuple(training_params))
+            dashboard_training_hours = float(training_hours_row["hours"] if training_hours_row else 0)
+
+            # Latest recorded manpower snapshot (all locations/departments for that date).
+            manpower_filters = []
+            manpower_params = []
+            if proj:
+                manpower_filters.append("COALESCE(project,'')=?"); manpower_params.append(proj)
+            if loc:
+                manpower_filters.append("COALESCE(location,'')=?"); manpower_params.append(loc)
+            latest_mp_sql = "SELECT MAX(record_date) AS latest_date FROM manpower_records"
+            if manpower_filters:
+                latest_mp_sql += " WHERE " + " AND ".join(manpower_filters)
+            latest_mp = db.fetchone(latest_mp_sql, tuple(manpower_params))
+            latest_mp_date = safe(latest_mp["latest_date"]) if latest_mp else ""
+            manpower_total = 0
+            manpower_breakdown = []
+            if latest_mp_date:
+                mp_sql = "SELECT COALESCE(project,'') project, COALESCE(location,'') location, COALESCE(department,'') department, SUM(manpower) total FROM manpower_records WHERE record_date=?"
+                mp_params = [latest_mp_date]
+                if proj:
+                    mp_sql += " AND COALESCE(project,'')=?"; mp_params.append(proj)
+                if loc:
+                    mp_sql += " AND COALESCE(location,'')=?"; mp_params.append(loc)
+                mp_sql += " GROUP BY project, location, department ORDER BY project, location, department"
+                manpower_breakdown = db.fetchall(mp_sql, tuple(mp_params))
+                manpower_total = sum(int(r["total"] or 0) for r in manpower_breakdown)
+                # Use the latest saved Manpower Details snapshot for dashboard rates and KPIs.
+                manpower_spin.setValue(manpower_total)
+                db.set_setting("dashboard_manpower", str(manpower_total))
+
             # ---- Core counts ----
             total_obs = _cnt(f"SELECT COUNT(*) c FROM observations WHERE {obs_where}", obs_params)
             open_obs = _cnt(
@@ -4643,6 +4705,11 @@ class MainWindow(QMainWindow):
                 f"Open: {open_findings} · Major-type: {major_nc} · Minor-type: {minor_nc}",
                 "#6C3483"
             ))
+            lead_row.addWidget(_kpi_card(
+                "Training Man-Hours", f"{dashboard_training_hours:,.0f}",
+                "From Training Register records" + (f" · {d0} to {d1}" if d0 and d1 else " · All dates"),
+                "#117864"
+            ))
             kpi_root.addLayout(lead_row)
 
             lead_row2 = QHBoxLayout()
@@ -4660,7 +4727,19 @@ class MainWindow(QMainWindow):
             lead_row2.addWidget(_kpi_card(
                 "CAPA from Observations", capa_from_obs, "Open CAPA sourced from inspections", "#1F4E79"
             ))
+            lead_row2.addWidget(_kpi_card(
+                "Recorded Manpower", f"{manpower_total:,}",
+                f"Latest snapshot: {latest_mp_date or 'No records yet'}", "#2874A6"
+            ))
             kpi_root.addLayout(lead_row2)
+            if manpower_breakdown:
+                mp_lines = [f"{safe(r['project']) or 'No project'} / {safe(r['location']) or 'No location'} / {safe(r['department']) or 'No department'}: {int(r['total'] or 0):,}" for r in manpower_breakdown]
+                mp_summary = QLabel("Manpower breakdown (latest recorded date): " + "  |  ".join(mp_lines))
+            else:
+                mp_summary = QLabel("Manpower breakdown: no manpower records are available for the selected project/location.")
+            mp_summary.setWordWrap(True)
+            mp_summary.setStyleSheet("color:#475467;padding:6px;background:#F2F4F7;border-radius:5px;")
+            kpi_root.addWidget(mp_summary)
 
             lag_title = QLabel("Lagging Indicators (outcomes already realised)")
             lag_title.setStyleSheet("font-size:14px;font-weight:bold;color:#17365D;margin-top:8px;")
@@ -5237,6 +5316,198 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_module_cache"):
             self._module_cache = {}
         self._module_cache[0] = w
+
+    def manpower_details(self):
+        """Date-wise, project/location/department-wise manpower register.
+        This module owns only manpower_records and does not modify employee or other HSE registers.
+        """
+        w, layout = self.page("Manpower Details")
+        tabs = QTabWidget()
+        entry_page = QWidget(); entry_layout = QVBoxLayout(entry_page)
+        register_page = QWidget(); register_layout = QVBoxLayout(register_page)
+        tabs.addTab(entry_page, "1. Manpower Entry")
+        tabs.addTab(register_page, "2. Manpower Register")
+        layout.addWidget(tabs, 1)
+
+        entry_box = QGroupBox("Manpower Entry — add multiple locations for the same date/project")
+        form = QGridLayout(entry_box)
+        date_in = QDateEdit(); date_in.setCalendarPopup(True); date_in.setDisplayFormat("yyyy-MM-dd"); date_in.setDate(QDate.currentDate())
+        project_in = QComboBox(); project_in.setEditable(True); project_in.addItem("")
+        for row in db.fetchall("SELECT project FROM projects WHERE COALESCE(active,1)=1 ORDER BY project COLLATE NOCASE"):
+            val = safe(row["project"])
+            if val and project_in.findText(val) < 0: project_in.addItem(val)
+        location_in = QComboBox(); location_in.setEditable(True); location_in.addItem("")
+        for row in db.fetchall("SELECT DISTINCT location FROM projects WHERE COALESCE(trim(location),'')<>'' UNION SELECT DISTINCT location FROM manpower_records WHERE COALESCE(trim(location),'')<>'' ORDER BY location COLLATE NOCASE"):
+            val = safe(row["location"])
+            if val and location_in.findText(val) < 0: location_in.addItem(val)
+        department_in = QComboBox(); department_in.setEditable(True); department_in.addItems(["", "HSE", "Construction", "Operations", "Maintenance", "Engineering", "QA/QC", "Logistics", "Administration", "Other"])
+        manpower_in = QSpinBox(); manpower_in.setRange(0, 100000); manpower_in.setValue(0)
+        remarks_in = QLineEdit(); remarks_in.setPlaceholderText("Optional remarks / shift / contractor details")
+        form.addWidget(QLabel("Date *"),0,0); form.addWidget(date_in,0,1)
+        form.addWidget(QLabel("Project"),0,2); form.addWidget(project_in,0,3)
+        form.addWidget(QLabel("Location *"),1,0); form.addWidget(location_in,1,1)
+        form.addWidget(QLabel("Department"),1,2); form.addWidget(department_in,1,3)
+        form.addWidget(QLabel("Manpower *"),2,0); form.addWidget(manpower_in,2,1)
+        form.addWidget(QLabel("Remarks"),2,2); form.addWidget(remarks_in,2,3)
+        entry_layout.addWidget(entry_box)
+
+        batch_table = QTableWidget(0,6)
+        batch_table.setHorizontalHeaderLabels(["Date","Project","Location","Department","Manpower","Remarks"])
+        batch_table.setAlternatingRowColors(True); batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        batch_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        batch_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        entry_layout.addWidget(QLabel("Pending entries — add as many locations/departments as required, then save the batch."))
+        entry_layout.addWidget(batch_table,1)
+        batch_buttons=QHBoxLayout(); add_batch=QPushButton("Add Location / Department"); edit_batch=QPushButton("Edit Selected Batch Row"); remove_batch=QPushButton("Remove Selected Batch Row"); save_batch=QPushButton("Save All Entries")
+        for b in (add_batch,edit_batch,remove_batch,save_batch): batch_buttons.addWidget(b)
+        batch_buttons.addStretch(); entry_layout.addLayout(batch_buttons)
+        batch_rows=[]
+
+        def clear_entry_location_fields():
+            location_in.setCurrentText(""); department_in.setCurrentText(""); manpower_in.setValue(0); remarks_in.clear()
+
+        def add_batch_row():
+            loc=location_in.currentText().strip()
+            if not loc: return QMessageBox.warning(self,"Location Required","Enter or select a location.")
+            row={"date":date_in.date().toString("yyyy-MM-dd"),"project":project_in.currentText().strip(),"location":loc,"department":department_in.currentText().strip(),"manpower":int(manpower_in.value()),"remarks":remarks_in.text().strip()}
+            batch_rows.append(row); idx=batch_table.rowCount(); batch_table.insertRow(idx)
+            for c,k in enumerate(("date","project","location","department","manpower","remarks")):
+                batch_table.setItem(idx,c,QTableWidgetItem(str(row[k])))
+            clear_entry_location_fields()
+
+        def edit_batch_row():
+            idx=batch_table.currentRow()
+            if idx<0 or idx>=len(batch_rows): return QMessageBox.information(self,"Edit Entry","Select a pending row first.")
+            row=batch_rows[idx]
+            date_in.setDate(QDate.fromString(row["date"],"yyyy-MM-dd")); project_in.setCurrentText(row["project"]); location_in.setCurrentText(row["location"]); department_in.setCurrentText(row["department"]); manpower_in.setValue(int(row["manpower"])); remarks_in.setText(row["remarks"])
+            batch_rows.pop(idx); batch_table.removeRow(idx)
+
+        def remove_batch_row():
+            idx=batch_table.currentRow()
+            if idx<0 or idx>=len(batch_rows): return QMessageBox.information(self,"Remove Entry","Select a pending row first.")
+            batch_rows.pop(idx); batch_table.removeRow(idx)
+
+        def save_batch():
+            if not batch_rows: return QMessageBox.information(self,"No Entries","Add at least one location/department row before saving.")
+            try:
+                db.conn.executemany("INSERT INTO manpower_records(record_date,project,location,department,manpower,remarks,updated_at) VALUES(?,?,?,?,?,?,?)",[(r["date"],r["project"],r["location"],r["department"],r["manpower"],r["remarks"],datetime.now().strftime("%Y-%m-%d %H:%M:%S")) for r in batch_rows]); db.conn.commit()
+                count=len(batch_rows); batch_rows.clear(); batch_table.setRowCount(0); refresh_register()
+                QMessageBox.information(self,"Manpower Saved",f"{count} manpower entries saved successfully.")
+            except Exception as exc:
+                db.conn.rollback(); logging.exception("Manpower batch save failed"); QMessageBox.critical(self,"Save Failed",str(exc))
+
+        add_batch.clicked.connect(add_batch_row); edit_batch.clicked.connect(edit_batch_row); remove_batch.clicked.connect(remove_batch_row); save_batch.clicked.connect(save_batch)
+
+        # Register filters and CRUD tools.
+        filters=QGridLayout(); from_filter=QDateEdit(); from_filter.setCalendarPopup(True); from_filter.setDisplayFormat("yyyy-MM-dd"); from_filter.setDate(QDate.currentDate().addMonths(-1))
+        to_filter=QDateEdit(); to_filter.setCalendarPopup(True); to_filter.setDisplayFormat("yyyy-MM-dd"); to_filter.setDate(QDate.currentDate())
+        project_filter=QComboBox(); project_filter.addItem("All Projects","")
+        location_filter=QComboBox(); location_filter.addItem("All Locations","")
+        department_filter=QComboBox(); department_filter.addItem("All Departments","")
+        for widget, query, field in [(project_filter,"SELECT DISTINCT project v FROM manpower_records WHERE COALESCE(trim(project),'')<>'' ORDER BY v COLLATE NOCASE","v"),(location_filter,"SELECT DISTINCT location v FROM manpower_records WHERE COALESCE(trim(location),'')<>'' ORDER BY v COLLATE NOCASE","v"),(department_filter,"SELECT DISTINCT department v FROM manpower_records WHERE COALESCE(trim(department),'')<>'' ORDER BY v COLLATE NOCASE","v")]:
+            for row in db.fetchall(query): widget.addItem(safe(row[field]),safe(row[field]))
+        search=QLineEdit(); search.setPlaceholderText("Search project, location, department or remarks…"); search.setClearButtonEnabled(True)
+        filters.addWidget(QLabel("From"),0,0); filters.addWidget(from_filter,0,1); filters.addWidget(QLabel("To"),0,2); filters.addWidget(to_filter,0,3)
+        filters.addWidget(QLabel("Project"),1,0); filters.addWidget(project_filter,1,1); filters.addWidget(QLabel("Location"),1,2); filters.addWidget(location_filter,1,3)
+        filters.addWidget(QLabel("Department"),2,0); filters.addWidget(department_filter,2,1); filters.addWidget(search,2,2,1,2)
+        register_layout.addLayout(filters)
+        tools=QHBoxLayout(); refresh_btn=QPushButton("Refresh"); add_btn=QPushButton("Add New"); edit_btn=QPushButton("Edit Selected"); rename_btn=QPushButton("Rename Location / Department / Project"); delete_btn=QPushButton("Delete Selected"); export_btn=QPushButton("Export Excel")
+        for b in (refresh_btn,add_btn,edit_btn,rename_btn,delete_btn,export_btn): tools.addWidget(b)
+        tools.addStretch(); register_layout.addLayout(tools)
+        summary=QLabel(""); summary.setWordWrap(True); summary.setStyleSheet("font-weight:bold;color:#17365D;padding:6px;background:#EAF1F8;border-radius:5px;"); register_layout.addWidget(summary)
+        register_table=QTableWidget(0,8); register_table.setHorizontalHeaderLabels(["ID","Date","Project","Location","Department","Manpower","Remarks","Last Updated"]); register_table.setAlternatingRowColors(True); register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); register_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); register_table.horizontalHeader().setStretchLastSection(True); register_layout.addWidget(register_table,1)
+
+        def refill_filters():
+            for widget, query, default in [(project_filter,"SELECT DISTINCT project v FROM manpower_records WHERE COALESCE(trim(project),'')<>'' ORDER BY v COLLATE NOCASE","All Projects"),(location_filter,"SELECT DISTINCT location v FROM manpower_records WHERE COALESCE(trim(location),'')<>'' ORDER BY v COLLATE NOCASE","All Locations"),(department_filter,"SELECT DISTINCT department v FROM manpower_records WHERE COALESCE(trim(department),'')<>'' ORDER BY v COLLATE NOCASE","All Departments")]:
+                old=widget.currentData(); widget.blockSignals(True); widget.clear(); widget.addItem(default,"")
+                for rec in db.fetchall(query):
+                    v=safe(rec["v"])
+                    if v: widget.addItem(v,v)
+                ix=widget.findData(old)
+                if ix>=0: widget.setCurrentIndex(ix)
+                widget.blockSignals(False)
+
+        def refresh_register(*_):
+            where=["record_date>=?","record_date<=?"]; params=[from_filter.date().toString("yyyy-MM-dd"),to_filter.date().toString("yyyy-MM-dd")]
+            for widget,col in ((project_filter,"project"),(location_filter,"location"),(department_filter,"department")):
+                val=widget.currentData()
+                if val: where.append(f"COALESCE({col},'')=?"); params.append(val)
+            needle=search.text().strip().casefold()
+            if needle:
+                where.append("lower(COALESCE(project,'')||' '||COALESCE(location,'')||' '||COALESCE(department,'')||' '||COALESCE(remarks,'')) LIKE ?"); params.append("%"+needle+"%")
+            rows=db.fetchall("SELECT * FROM manpower_records WHERE "+" AND ".join(where)+" ORDER BY record_date DESC, project, location, department",tuple(params))
+            register_table.setRowCount(len(rows)); total=0; groups={}
+            for i,r in enumerate(rows):
+                total+=int(r["manpower"] or 0); key=(safe(r["project"]) or "No project",safe(r["location"]) or "No location",safe(r["department"]) or "No department"); groups[key]=groups.get(key,0)+int(r["manpower"] or 0)
+                vals=[str(r["id"]),safe(r["record_date"]),safe(r["project"]),safe(r["location"]),safe(r["department"]),str(int(r["manpower"] or 0)),safe(r["remarks"]),safe(r["updated_at"] or r["created_at"])]
+                for c,v in enumerate(vals):
+                    item=QTableWidgetItem(v)
+                    if c==0: item.setData(Qt.ItemDataRole.UserRole,int(r["id"]))
+                    register_table.setItem(i,c,item)
+            breakdown=" | ".join(f"{p} / {l} / {d}: {n:,}" for (p,l,d),n in sorted(groups.items()))
+            summary.setText(f"Filtered entries: {len(rows)}   |   Total manpower entries (sum): {total:,}   |   Project / location breakdown: {breakdown or 'No records'}")
+
+        def selected_record_id():
+            row=register_table.currentRow(); item=register_table.item(row,0) if row>=0 else None
+            return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+        def edit_record(record_id=None):
+            rid=record_id or selected_record_id()
+            if not rid: return QMessageBox.information(self,"Edit Manpower","Select a register row first.")
+            rec=db.fetchone("SELECT * FROM manpower_records WHERE id=?",(rid,))
+            if not rec:return
+            dlg=QDialog(self); dlg.setWindowTitle("Edit Manpower Record"); dlg.resize(520,300); fl=QFormLayout(dlg)
+            d=QDateEdit(); d.setCalendarPopup(True); d.setDisplayFormat("yyyy-MM-dd"); d.setDate(QDate.fromString(safe(rec["record_date"]),"yyyy-MM-dd"))
+            pr=QLineEdit(safe(rec["project"])); lo=QLineEdit(safe(rec["location"])); de=QLineEdit(safe(rec["department"])); mp=QSpinBox(); mp.setRange(0,100000); mp.setValue(int(rec["manpower"] or 0)); rm=QLineEdit(safe(rec["remarks"]))
+            fl.addRow("Date",d); fl.addRow("Project",pr); fl.addRow("Location",lo); fl.addRow("Department",de); fl.addRow("Manpower",mp); fl.addRow("Remarks",rm)
+            buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); fl.addRow(buttons); buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+            if dlg.exec()!=QDialog.DialogCode.Accepted:return
+            if not lo.text().strip():return QMessageBox.warning(self,"Location Required","Location cannot be empty.")
+            db.execute("UPDATE manpower_records SET record_date=?,project=?,location=?,department=?,manpower=?,remarks=?,updated_at=? WHERE id=?",(d.date().toString("yyyy-MM-dd"),pr.text().strip(),lo.text().strip(),de.text().strip(),mp.value(),rm.text().strip(),datetime.now().strftime("%Y-%m-%d %H:%M:%S"),rid)); refill_filters(); refresh_register()
+
+        def add_register_record():
+            tabs.setCurrentWidget(entry_page); location_in.setFocus()
+
+        def rename_dimension():
+            rid=selected_record_id()
+            if not rid:return QMessageBox.information(self,"Rename","Select a register row first.")
+            rec=db.fetchone("SELECT project,location,department FROM manpower_records WHERE id=?",(rid,))
+            choices=["Location","Department","Project"]; choice,ok=QInputDialog.getItem(self,"Rename Manpower Value","Choose which value to rename throughout the manpower register:",choices,0,False)
+            if not ok:return
+            col={"Location":"location","Department":"department","Project":"project"}[choice]; old=safe(rec[col])
+            if not old:return QMessageBox.information(self,"Rename","The selected record has no value in that field.")
+            new,ok=QInputDialog.getText(self,"Rename Manpower Value",f"Rename '{old}' to:",text=old)
+            new=safe(new).strip()
+            if not ok or not new or new==old:return
+            if QMessageBox.question(self,"Confirm Rename",f"Rename '{old}' to '{new}' in all manpower records?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            db.execute(f"UPDATE manpower_records SET {col}=?,updated_at=? WHERE {col}=?",(new,datetime.now().strftime("%Y-%m-%d %H:%M:%S"),old)); refill_filters(); refresh_register()
+
+        def delete_record():
+            rid=selected_record_id()
+            if not rid:return QMessageBox.information(self,"Delete Manpower","Select a register row first.")
+            if QMessageBox.question(self,"Delete Manpower Record","Delete the selected manpower entry? This cannot be undone.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:return
+            db.execute("DELETE FROM manpower_records WHERE id=?",(rid,)); refill_filters(); refresh_register()
+
+        def export_register():
+            path,_=QFileDialog.getSaveFileName(self,"Export Manpower Register","Manpower_Register.xlsx","Excel Workbook (*.xlsx)")
+            if not path:return
+            if not path.lower().endswith(".xlsx"):path+=".xlsx"
+            try:
+                wb=Workbook(); ws=wb.active; ws.title="Manpower Register"; ws.append([register_table.horizontalHeaderItem(c).text() for c in range(register_table.columnCount())])
+                for r in range(register_table.rowCount()):ws.append([register_table.item(r,c).text() if register_table.item(r,c) else "" for c in range(register_table.columnCount())])
+                for cell in ws[1]:cell.font=Font(bold=True,color="FFFFFF");cell.fill=PatternFill("solid",fgColor="17365D");cell.alignment=Alignment(wrap_text=True)
+                ws.freeze_panes="A2";ws.auto_filter.ref=ws.dimensions
+                for col in ws.columns:
+                    from openpyxl.utils import get_column_letter
+                    letter=get_column_letter(col[0].column);ws.column_dimensions[letter].width=min(max(max(len(str(c.value or "")) for c in col)+2,12),36)
+                wb.save(path);QMessageBox.information(self,"Exported",f"Manpower register exported.\\n{path}")
+            except Exception as exc:logging.exception("Manpower export failed");QMessageBox.critical(self,"Export Failed",str(exc))
+
+        for widget in (from_filter,to_filter,project_filter,location_filter,department_filter):
+            if isinstance(widget,QDateEdit): widget.dateChanged.connect(refresh_register)
+            else: widget.currentIndexChanged.connect(refresh_register)
+        search.textChanged.connect(refresh_register); refresh_btn.clicked.connect(refresh_register); add_btn.clicked.connect(add_register_record); edit_btn.clicked.connect(edit_record); register_table.cellDoubleClicked.connect(lambda *_:edit_record()); rename_btn.clicked.connect(rename_dimension); delete_btn.clicked.connect(delete_record); export_btn.clicked.connect(export_register)
+        refill_filters(); refresh_register()
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
@@ -9673,10 +9944,30 @@ class MainWindow(QMainWindow):
         matrix_grid.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         matrix_grid.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # Single table: Training Name + Validity + Hours + trades stay on the SAME rows when scrolling
-        grid_layout.addWidget(matrix_grid, 1)
-        # Dummy alias so any leftover frozen_* references do not crash
-        frozen_training_names = matrix_grid
+        # True frozen columns: Training Name + Validity remain visible while Hours/trades scroll.
+        matrix_container = QWidget()
+        matrix_container_layout = QHBoxLayout(matrix_container)
+        matrix_container_layout.setContentsMargins(0, 0, 0, 0)
+        matrix_container_layout.setSpacing(0)
+        frozen_training_names = QTableWidget()
+        frozen_training_names.setColumnCount(2)
+        frozen_training_names.setHorizontalHeaderLabels(["Training Name", "Validity (months)"])
+        frozen_training_names.setAlternatingRowColors(True)
+        frozen_training_names.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        frozen_training_names.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        frozen_training_names.verticalHeader().setVisible(False)
+        frozen_training_names.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen_training_names.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        frozen_training_names.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        frozen_training_names.setFixedWidth(370)
+        frozen_training_names.setColumnWidth(0, 260)
+        frozen_training_names.setColumnWidth(1, 110)
+        matrix_grid.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        matrix_container_layout.addWidget(frozen_training_names, 0)
+        matrix_container_layout.addWidget(matrix_grid, 1)
+        grid_layout.addWidget(matrix_container, 1)
+        matrix_grid.verticalScrollBar().valueChanged.connect(frozen_training_names.verticalScrollBar().setValue)
+        frozen_training_names.verticalScrollBar().valueChanged.connect(matrix_grid.verticalScrollBar().setValue)
 
         def render_matrix_grid():
             designations = list(MATRIX_DESIGNATIONS)
@@ -9684,7 +9975,10 @@ class MainWindow(QMainWindow):
             matrix_grid.setUpdatesEnabled(False)
             try:
                 matrix_grid.clear()
+                frozen_training_names.clear()
+                frozen_training_names.setHorizontalHeaderLabels(["Training Name", "Validity (months)"])
                 matrix_grid.setRowCount(len(courses))
+                frozen_training_names.setRowCount(len(courses))
                 matrix_grid.setColumnCount(3 + len(designations))
                 matrix_grid.setHorizontalHeaderLabels(["Training Name", "Validity (months)", "Hours"] + designations)
                 for r, cname in enumerate(courses):
@@ -9693,12 +9987,22 @@ class MainWindow(QMainWindow):
                     f = name_item.font(); f.setBold(True); name_item.setFont(f)
                     name_item.setToolTip("Double-click to rename this training course")
                     matrix_grid.setItem(r, 0, name_item)
+                    frozen_name = QTableWidgetItem(cname)
+                    frozen_name.setBackground(QBrush(QColor("#EEF4FB")))
+                    frozen_font = frozen_name.font(); frozen_font.setBold(True); frozen_name.setFont(frozen_font)
+                    frozen_name.setToolTip("Double-click to rename this training course")
+                    frozen_training_names.setItem(r, 0, frozen_name)
                     months = int(grid_state["validity"].get(cname, 0) or 0)
                     val_item = QTableWidgetItem(str(months))
                     val_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     val_item.setBackground(QBrush(QColor("#F7FAFC")))
                     val_item.setToolTip("Double-click to change validity (months)")
                     matrix_grid.setItem(r, 1, val_item)
+                    frozen_val = QTableWidgetItem(str(months))
+                    frozen_val.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    frozen_val.setBackground(QBrush(QColor("#F7FAFC")))
+                    frozen_val.setToolTip("Double-click to change validity (months)")
+                    frozen_training_names.setItem(r, 1, frozen_val)
                     hours = float(grid_state["hours"].get(cname, 0) or 0)
                     hrs_item = QTableWidgetItem(str(int(hours) if hours == int(hours) else hours))
                     hrs_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -9714,15 +10018,22 @@ class MainWindow(QMainWindow):
                             it.setText(f"{marker}-{MATRIX_REQ_SHORT.get(req, '—')}")
                         matrix_grid.setItem(r, c + 3, it)
                     matrix_grid.setRowHeight(r, 30)
+                    frozen_training_names.setRowHeight(r, 30)
+                frozen_training_names.setColumnWidth(0, 260)
+                frozen_training_names.setColumnWidth(1, 110)
                 matrix_grid.setColumnWidth(0, 260)
                 matrix_grid.setColumnWidth(1, 110)
+                matrix_grid.setColumnHidden(0, True)
+                matrix_grid.setColumnHidden(1, True)
                 matrix_grid.setColumnWidth(2, 70)
                 for col in range(3, matrix_grid.columnCount()):
                     matrix_grid.setColumnWidth(col, 90)
                 course_needle = matrix_course_filter.text().strip().casefold()
                 selected_trade = matrix_trade_filter.currentData() or "__ALL__"
                 for rr, course_name in enumerate(courses):
-                    matrix_grid.setRowHidden(rr, bool(course_needle and course_needle not in course_name.casefold()))
+                    hidden_row = bool(course_needle and course_needle not in course_name.casefold())
+                    matrix_grid.setRowHidden(rr, hidden_row)
+                    frozen_training_names.setRowHidden(rr, hidden_row)
                 for cc, designation in enumerate(designations, start=3):
                     matrix_grid.setColumnHidden(cc, bool(selected_trade != "__ALL__" and designation != selected_trade))
                 grid_status.setText(f"{len(courses)} courses × {len(designations)} trades" + (" · Unsaved" if grid_state["dirty"] else ""))
@@ -9891,7 +10202,9 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Matrix Grid", "Matrix saved. Internal/External registers updated for training type changes.")
 
         matrix_grid.cellDoubleClicked.connect(on_grid_dbl)
-        frozen_training_names.cellDoubleClicked.connect(lambda row, _col: on_grid_dbl(row, 0))
+        frozen_training_names.cellDoubleClicked.connect(lambda row, col: on_grid_dbl(row, col))
+        matrix_grid.currentCellChanged.connect(lambda row, *_: frozen_training_names.selectRow(row) if row >= 0 else None)
+        frozen_training_names.currentCellChanged.connect(lambda row, *_: matrix_grid.selectRow(row) if row >= 0 else None)
         matrix_course_filter.textChanged.connect(render_matrix_grid)
         matrix_trade_filter.currentIndexChanged.connect(render_matrix_grid)
         btn_load_ready.clicked.connect(do_load_ready)
