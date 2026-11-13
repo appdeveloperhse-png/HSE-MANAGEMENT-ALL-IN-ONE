@@ -5312,308 +5312,137 @@ class MainWindow(QMainWindow):
 
         _apply_preset()
         rebuild()
+        # Manpower Details calls this after every save/edit/rename/delete to keep the main dashboard live.
+        self._refresh_hse_dashboard = rebuild
 
         if not hasattr(self, "_module_cache"):
             self._module_cache = {}
         self._module_cache[0] = w
 
     def manpower_details(self):
-        """Simple date-wise manpower entry and register; isolated to manpower_records."""
+        """Manpower entry, searchable register and filtered HSE manpower analytics."""
         w, layout = self.page("Manpower Details")
         tabs = QTabWidget()
-        entry_page = QWidget()
-        entry_layout = QVBoxLayout(entry_page)
-        register_page = QWidget()
-        register_layout = QVBoxLayout(register_page)
-        tabs.addTab(entry_page, "1. Quick Manpower Entry")
+        entry_page = QWidget(); entry_layout = QVBoxLayout(entry_page)
+        register_page = QWidget(); register_layout = QVBoxLayout(register_page)
+        analytics_page = QWidget(); analytics_layout = QVBoxLayout(analytics_page)
+        tabs.addTab(entry_page, "1. Quick Entry")
         tabs.addTab(register_page, "2. Manpower Register")
+        tabs.addTab(analytics_page, "3. Manpower Dashboard & HSE Rates")
         layout.addWidget(tabs, 1)
 
-        # Shared details are entered once; each table row represents one location/department.
-        shared_box = QGroupBox("Step 1 — Common Details")
-        shared = QGridLayout(shared_box)
-        date_in = QDateEdit()
-        date_in.setCalendarPopup(True)
-        date_in.setDisplayFormat("yyyy-MM-dd")
-        date_in.setDate(QDate.currentDate())
-        project_in = QLineEdit()
-        project_in.setPlaceholderText("Enter project name (optional)")
-        try:
-            projects = [safe(r["project"]) for r in db.fetchall(
-                "SELECT DISTINCT project FROM projects WHERE COALESCE(trim(project),'')<>'' ORDER BY project COLLATE NOCASE"
-            )]
-            if projects:
-                project_in.setPlaceholderText("Project (optional) — e.g. " + projects[0])
-        except Exception:
-            logging.exception("Unable to load project suggestions for manpower entry")
-        shared.addWidget(QLabel("Date *"), 0, 0)
-        shared.addWidget(date_in, 0, 1)
-        shared.addWidget(QLabel("Project"), 0, 2)
-        shared.addWidget(project_in, 0, 3)
-        entry_layout.addWidget(shared_box)
+        def notify_main_dashboard():
+            """Refresh the existing HSE dashboard immediately after manpower changes."""
+            callback = getattr(self, "_refresh_hse_dashboard", None)
+            if callable(callback):
+                try:
+                    callback()
+                except Exception:
+                    logging.exception("Unable to refresh HSE dashboard after manpower update")
 
+        def set_combo_values(widget, values, all_label):
+            previous = widget.currentData()
+            widget.blockSignals(True)
+            widget.clear(); widget.addItem(all_label, "")
+            for value in values:
+                value = safe(value).strip()
+                if value and widget.findData(value) < 0:
+                    widget.addItem(value, value)
+            index = widget.findData(previous)
+            widget.setCurrentIndex(index if index >= 0 else 0)
+            widget.blockSignals(False)
+
+        # ---------------------- QUICK ENTRY ----------------------
+        common_box = QGroupBox("Common details — enter once for all locations")
+        common = QGridLayout(common_box)
+        date_in = QDateEdit(); date_in.setCalendarPopup(True); date_in.setDisplayFormat("yyyy-MM-dd")
+        date_in.setDate(QDate.currentDate())
+        project_in = QLineEdit(); project_in.setPlaceholderText("Type project name")
+        common.addWidget(QLabel("Date *"), 0, 0); common.addWidget(date_in, 0, 1)
+        common.addWidget(QLabel("Project"), 0, 2); common.addWidget(project_in, 0, 3)
+        entry_layout.addWidget(common_box)
         entry_layout.addWidget(QLabel(
-            "Step 2 — Enter one row for each location. You can type directly into the table, add many rows, then save everything once."
+            "Enter one line per location (and department if needed). Use Tab to move between cells. "
+            "Add rows as required, then save all locations together."
         ))
         batch_table = QTableWidget(0, 4)
         batch_table.setHorizontalHeaderLabels(["Location *", "Department", "Manpower *", "Remarks (optional)"])
         batch_table.setAlternatingRowColors(True)
         batch_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         batch_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        batch_table.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked |
-            QAbstractItemView.EditTrigger.EditKeyPressed |
-            QAbstractItemView.EditTrigger.AnyKeyPressed
-        )
+        batch_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.AnyKeyPressed)
         batch_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         batch_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         batch_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         batch_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         entry_layout.addWidget(batch_table, 1)
-
         entry_buttons = QHBoxLayout()
-        add_rows_btn = QPushButton("+ Add 5 Rows")
-        remove_rows_btn = QPushButton("Remove Selected Rows")
-        clear_rows_btn = QPushButton("Clear Entry Table")
-        save_all_btn = QPushButton("Save All Manpower Entries")
-        save_all_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;padding:8px 14px;")
-        entry_buttons.addWidget(add_rows_btn)
-        entry_buttons.addWidget(remove_rows_btn)
-        entry_buttons.addWidget(clear_rows_btn)
-        entry_buttons.addStretch()
-        entry_buttons.addWidget(save_all_btn)
+        add_rows_btn = QPushButton("+ Add 5 Locations")
+        remove_rows_btn = QPushButton("Remove Selected")
+        clear_rows_btn = QPushButton("Clear Unsaved Rows")
+        save_all_btn = QPushButton("Save All Entries")
+        save_all_btn.setStyleSheet("font-weight:bold;background:#17365D;color:white;padding:8px 16px;")
+        for b in (add_rows_btn, remove_rows_btn, clear_rows_btn): entry_buttons.addWidget(b)
+        entry_buttons.addStretch(); entry_buttons.addWidget(save_all_btn)
         entry_layout.addLayout(entry_buttons)
 
         def add_blank_rows(count=5):
-            start_row = batch_table.rowCount()
-            batch_table.setRowCount(start_row + count)
-            for row in range(start_row, start_row + count):
-                batch_table.setItem(row, 0, QTableWidgetItem(""))
-                batch_table.setItem(row, 1, QTableWidgetItem(""))
-                batch_table.setItem(row, 2, QTableWidgetItem("0"))
-                batch_table.setItem(row, 3, QTableWidgetItem(""))
+            first = batch_table.rowCount(); batch_table.setRowCount(first + count)
+            for row in range(first, first + count):
+                for col, value in enumerate(("", "", "0", "")):
+                    batch_table.setItem(row, col, QTableWidgetItem(value))
             if count:
-                batch_table.setCurrentCell(start_row, 0)
-                batch_table.editItem(batch_table.item(start_row, 0))
+                batch_table.setCurrentCell(first, 0)
 
-        def add_entry_rows():
-            add_blank_rows(5)
+        def add_entry_rows(): add_blank_rows(5)
 
         def remove_entry_rows():
-            selected = sorted({idx.row() for idx in batch_table.selectionModel().selectedRows()}, reverse=True)
-            if not selected and batch_table.currentRow() >= 0:
-                selected = [batch_table.currentRow()]
+            selected = sorted({x.row() for x in batch_table.selectionModel().selectedRows()}, reverse=True)
+            if not selected and batch_table.currentRow() >= 0: selected = [batch_table.currentRow()]
             if not selected:
-                QMessageBox.information(self, "Remove Rows", "Select one or more rows to remove.")
-                return
-            for row in selected:
-                batch_table.removeRow(row)
+                QMessageBox.information(self, "Remove Rows", "Select one or more rows first."); return
+            for row in selected: batch_table.removeRow(row)
 
         def clear_entry_rows():
             if batch_table.rowCount() and QMessageBox.question(
-                self, "Clear Entry Table", "Clear all unsaved rows?",
+                self, "Clear Unsaved Rows", "Clear all unsaved entries?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
-            ) != QMessageBox.StandardButton.Yes:
-                return
-            batch_table.setRowCount(0)
-            add_blank_rows(5)
+            ) != QMessageBox.StandardButton.Yes: return
+            batch_table.setRowCount(0); add_blank_rows(5)
 
-        def refill_register_filters():
-            filter_specs = (
-                (project_filter, "project", "All Projects"),
-                (location_filter, "location", "All Locations"),
-                (department_filter, "department", "All Departments"),
-            )
-            for widget, column, label in filter_specs:
-                previous = widget.currentData()
-                widget.blockSignals(True)
-                widget.clear()
-                widget.addItem(label, "")
-                rows = db.fetchall(
-                    f"SELECT DISTINCT {column} AS value FROM manpower_records "
-                    f"WHERE COALESCE(trim({column}),'')<>'' ORDER BY value COLLATE NOCASE"
-                )
-                for rec in rows:
-                    value = safe(rec["value"])
-                    if value:
-                        widget.addItem(value, value)
-                index = widget.findData(previous)
-                widget.setCurrentIndex(index if index >= 0 else 0)
-                widget.blockSignals(False)
-
-        def refresh_register(*_):
-            clauses = ["record_date>=?", "record_date<=?"]
-            params = [from_filter.date().toString("yyyy-MM-dd"), to_filter.date().toString("yyyy-MM-dd")]
-            for widget, column in (
-                (project_filter, "project"),
-                (location_filter, "location"),
-                (department_filter, "department"),
-            ):
-                value = widget.currentData()
-                if value:
-                    clauses.append(f"COALESCE({column},'')=?")
-                    params.append(value)
-            term = search.text().strip().casefold()
-            if term:
-                clauses.append(
-                    "lower(COALESCE(project,'')||' '||COALESCE(location,'')||' '||"
-                    "COALESCE(department,'')||' '||COALESCE(remarks,'')) LIKE ?"
-                )
-                params.append("%" + term + "%")
-            rows = db.fetchall(
-                "SELECT * FROM manpower_records WHERE " + " AND ".join(clauses) +
-                " ORDER BY record_date DESC, project COLLATE NOCASE, location COLLATE NOCASE, department COLLATE NOCASE",
-                tuple(params)
-            )
-            register_table.setRowCount(len(rows))
-            total = 0
-            grouped = {}
-            for row_index, record in enumerate(rows):
-                manpower_value = int(record["manpower"] or 0)
-                total += manpower_value
-                key = (
-                    safe(record["project"]) or "No project",
-                    safe(record["location"]) or "No location",
-                    safe(record["department"]) or "No department",
-                )
-                grouped[key] = grouped.get(key, 0) + manpower_value
-                values = [
-                    str(record["id"]), safe(record["record_date"]), safe(record["project"]),
-                    safe(record["location"]), safe(record["department"]), str(manpower_value),
-                    safe(record["remarks"]), safe(record["updated_at"] or record["created_at"]),
-                ]
-                for col, value in enumerate(values):
-                    item = QTableWidgetItem(value)
-                    if col == 0:
-                        item.setData(Qt.ItemDataRole.UserRole, int(record["id"]))
-                    register_table.setItem(row_index, col, item)
-            breakdown = " | ".join(
-                f"{project} / {location} / {department}: {amount:,}"
-                for (project, location, department), amount in sorted(grouped.items())
-            )
-            summary.setText(
-                f"Records: {len(rows):,}    |    Total manpower: {total:,}\n"
-                f"Breakdown — Project / Location / Department: {breakdown or 'No matching records'}"
-            )
-
-        def save_all_entries():
-            common_date = date_in.date().toString("yyyy-MM-dd")
-            common_project = project_in.text().strip()
-            records = []
-            for row in range(batch_table.rowCount()):
-                location_item = batch_table.item(row, 0)
-                department_item = batch_table.item(row, 1)
-                manpower_item = batch_table.item(row, 2)
-                remarks_item = batch_table.item(row, 3)
-                location = location_item.text().strip() if location_item else ""
-                department = department_item.text().strip() if department_item else ""
-                manpower_text = manpower_item.text().strip() if manpower_item else ""
-                remarks = remarks_item.text().strip() if remarks_item else ""
-                # Completely blank rows are ignored so users can keep spare entry rows ready.
-                if not location and not department and (not manpower_text or manpower_text == "0") and not remarks:
-                    continue
-                if not location:
-                    QMessageBox.warning(self, "Location Required", f"Please enter a location in row {row + 1}.")
-                    batch_table.setCurrentCell(row, 0)
-                    return
-                try:
-                    manpower_value = int(manpower_text or "0")
-                    if manpower_value < 0:
-                        raise ValueError
-                except (TypeError, ValueError):
-                    QMessageBox.warning(self, "Invalid Manpower", f"Enter a whole number of 0 or more in row {row + 1}.")
-                    batch_table.setCurrentCell(row, 2)
-                    return
-                records.append((
-                    common_date, common_project, location, department, manpower_value, remarks,
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                ))
-            if not records:
-                QMessageBox.information(self, "No Entries", "Enter at least one location and manpower value before saving.")
-                return
-            try:
-                db.conn.executemany(
-                    "INSERT INTO manpower_records(record_date,project,location,department,manpower,remarks,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?)", records
-                )
-                db.conn.commit()
-                # Make the saved records immediately visible, regardless of the previous filters.
-                from_filter.setDate(QDate(2000, 1, 1))
-                to_filter.setDate(QDate.currentDate().addYears(10))
-                for widget in (project_filter, location_filter, department_filter):
-                    widget.setCurrentIndex(0)
-                search.clear()
-                refill_register_filters()
-                refresh_register()
-                batch_table.setRowCount(0)
-                add_blank_rows(5)
-                tabs.setCurrentWidget(register_page)
-                QMessageBox.information(self, "Manpower Saved", f"{len(records)} manpower location/department entries saved successfully and added to the register.")
-            except Exception as exc:
-                db.conn.rollback()
-                logging.exception("Manpower batch save failed")
-                QMessageBox.critical(self, "Save Failed", f"Unable to save manpower entries.\n\n{exc}")
-
-        add_rows_btn.clicked.connect(add_entry_rows)
-        remove_rows_btn.clicked.connect(remove_entry_rows)
-        clear_rows_btn.clicked.connect(clear_entry_rows)
-        save_all_btn.clicked.connect(save_all_entries)
-        add_blank_rows(5)
-
-        # Register tab — filters, summary, editing, deletion, renaming and Excel export.
-        filter_box = QGroupBox("Filter Manpower Register")
-        filters = QGridLayout(filter_box)
-        from_filter = QDateEdit()
-        from_filter.setCalendarPopup(True)
-        from_filter.setDisplayFormat("yyyy-MM-dd")
-        from_filter.setDate(QDate(2000, 1, 1))
-        to_filter = QDateEdit()
-        to_filter.setCalendarPopup(True)
-        to_filter.setDisplayFormat("yyyy-MM-dd")
-        to_filter.setDate(QDate.currentDate().addYears(10))
-        project_filter = QComboBox()
-        location_filter = QComboBox()
-        department_filter = QComboBox()
-        search = QLineEdit()
-        search.setPlaceholderText("Search project, location, department or remarks")
-        search.setClearButtonEnabled(True)
-        filters.addWidget(QLabel("From"), 0, 0)
-        filters.addWidget(from_filter, 0, 1)
-        filters.addWidget(QLabel("To"), 0, 2)
-        filters.addWidget(to_filter, 0, 3)
-        filters.addWidget(QLabel("Project"), 1, 0)
-        filters.addWidget(project_filter, 1, 1)
-        filters.addWidget(QLabel("Location"), 1, 2)
-        filters.addWidget(location_filter, 1, 3)
-        filters.addWidget(QLabel("Department"), 2, 0)
-        filters.addWidget(department_filter, 2, 1)
-        filters.addWidget(search, 2, 2, 1, 2)
-        register_layout.addWidget(filter_box)
-
-        tools = QHBoxLayout()
+        # ---------------------- REGISTER FILTERS ----------------------
+        register_filter_box = QGroupBox("Register filters — combine date, project, location and department")
+        rf = QGridLayout(register_filter_box)
+        from_filter = QDateEdit(); from_filter.setCalendarPopup(True); from_filter.setDisplayFormat("yyyy-MM-dd"); from_filter.setDate(QDate(2000, 1, 1))
+        to_filter = QDateEdit(); to_filter.setCalendarPopup(True); to_filter.setDisplayFormat("yyyy-MM-dd"); to_filter.setDate(QDate.currentDate().addYears(10))
+        project_filter = QComboBox(); location_filter = QComboBox(); department_filter = QComboBox()
+        search = QLineEdit(); search.setPlaceholderText("Search remarks or any manpower detail..."); search.setClearButtonEnabled(True)
+        for row, label, widget in ((0,"From",from_filter),(0,"To",to_filter),(1,"Project",project_filter),(1,"Location",location_filter),(2,"Department",department_filter),(2,"Search",search)):
+            pass
+        rf.addWidget(QLabel("From"),0,0); rf.addWidget(from_filter,0,1)
+        rf.addWidget(QLabel("To"),0,2); rf.addWidget(to_filter,0,3)
+        rf.addWidget(QLabel("Project"),1,0); rf.addWidget(project_filter,1,1)
+        rf.addWidget(QLabel("Location"),1,2); rf.addWidget(location_filter,1,3)
+        rf.addWidget(QLabel("Department"),2,0); rf.addWidget(department_filter,2,1)
+        rf.addWidget(search,2,2,1,2)
+        register_layout.addWidget(register_filter_box)
+        register_tools = QHBoxLayout()
         refresh_btn = QPushButton("Refresh")
         add_btn = QPushButton("Add New Entries")
         edit_btn = QPushButton("Edit Selected")
-        rename_btn = QPushButton("Rename Location / Department / Project")
+        rename_btn = QPushButton("Rename Project / Location / Department")
         delete_btn = QPushButton("Delete Selected")
         export_btn = QPushButton("Export Excel")
-        for button in (refresh_btn, add_btn, edit_btn, rename_btn, delete_btn, export_btn):
-            tools.addWidget(button)
-        tools.addStretch()
-        register_layout.addLayout(tools)
-
-        summary = QLabel("No records loaded")
-        summary.setWordWrap(True)
+        clear_filter_btn = QPushButton("Clear Filters")
+        for b in (refresh_btn, add_btn, edit_btn, rename_btn, delete_btn, export_btn, clear_filter_btn): register_tools.addWidget(b)
+        register_tools.addStretch(); register_layout.addLayout(register_tools)
+        summary = QLabel("No records loaded"); summary.setWordWrap(True)
         summary.setStyleSheet("font-weight:bold;color:#17365D;padding:7px;background:#EAF1F8;border-radius:5px;")
         register_layout.addWidget(summary)
-
         register_table = QTableWidget(0, 8)
-        register_table.setHorizontalHeaderLabels([
-            "ID", "Date", "Project", "Location", "Department", "Manpower", "Remarks", "Last Updated"
-        ])
-        register_table.setColumnHidden(0, True)
-        register_table.setAlternatingRowColors(True)
+        register_table.setHorizontalHeaderLabels(["ID", "Date", "Project", "Location", "Department", "Manpower", "Remarks", "Last Updated"])
+        register_table.setColumnHidden(0, True); register_table.setAlternatingRowColors(True)
         register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         register_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -5621,173 +5450,276 @@ class MainWindow(QMainWindow):
         register_table.horizontalHeader().setStretchLastSection(True)
         register_layout.addWidget(register_table, 1)
 
+        def refill_register_filters():
+            for widget, column, label in ((project_filter,"project","All Projects"),(location_filter,"location","All Locations"),(department_filter,"department","All Departments")):
+                vals = [r["value"] for r in db.fetchall(
+                    f"SELECT DISTINCT {column} AS value FROM manpower_records WHERE COALESCE(trim({column}),'')<>'' ORDER BY value COLLATE NOCASE"
+                )]
+                set_combo_values(widget, vals, label)
+
+        def register_query():
+            clauses = ["record_date>=?", "record_date<=?"]
+            params = [from_filter.date().toString("yyyy-MM-dd"), to_filter.date().toString("yyyy-MM-dd")]
+            for widget, col in ((project_filter,"project"),(location_filter,"location"),(department_filter,"department")):
+                val = widget.currentData()
+                if val: clauses.append(f"COALESCE({col},'')=?"); params.append(val)
+            term = search.text().strip().casefold()
+            if term:
+                clauses.append("lower(COALESCE(project,'')||' '||COALESCE(location,'')||' '||COALESCE(department,'')||' '||COALESCE(remarks,'')) LIKE ?")
+                params.append("%" + term + "%")
+            return " AND ".join(clauses), tuple(params)
+
+        def refresh_register(*_):
+            where, params = register_query()
+            rows = db.fetchall("SELECT * FROM manpower_records WHERE " + where +
+                " ORDER BY record_date DESC, project COLLATE NOCASE, location COLLATE NOCASE, department COLLATE NOCASE", params)
+            register_table.setRowCount(len(rows)); total = 0; grouped = {}
+            for i, rec in enumerate(rows):
+                headcount = int(rec["manpower"] or 0); total += headcount
+                key = (safe(rec["project"]) or "No project", safe(rec["location"]) or "No location", safe(rec["department"]) or "No department")
+                grouped[key] = grouped.get(key, 0) + headcount
+                vals = [str(rec["id"]),safe(rec["record_date"]),safe(rec["project"]),safe(rec["location"]),safe(rec["department"]),str(headcount),safe(rec["remarks"]),safe(rec["updated_at"] or rec["created_at"])]
+                for col, val in enumerate(vals):
+                    item = QTableWidgetItem(val)
+                    if col == 0: item.setData(Qt.ItemDataRole.UserRole, int(rec["id"]))
+                    register_table.setItem(i,col,item)
+            breakdown = " | ".join(f"{pr} / {loc} / {dep}: {num:,}" for (pr,loc,dep),num in sorted(grouped.items()))
+            summary.setText(f"Matching entries: {len(rows):,}    |    Sum of recorded manpower entries: {total:,}\nBreakdown — Project / Location / Department: {breakdown or 'No matching records'}")
+
         def selected_record_id():
-            row = register_table.currentRow()
-            item = register_table.item(row, 0) if row >= 0 else None
+            row = register_table.currentRow(); item = register_table.item(row,0) if row >= 0 else None
             return item.data(Qt.ItemDataRole.UserRole) if item else None
 
         def edit_record(record_id=None):
             record_id = record_id or selected_record_id()
             if not record_id:
-                QMessageBox.information(self, "Edit Manpower", "Select a register row first.")
-                return
-            record = db.fetchone("SELECT * FROM manpower_records WHERE id=?", (record_id,))
-            if not record:
-                QMessageBox.warning(self, "Edit Manpower", "The selected record could not be found.")
-                return
-            dialog = QDialog(self)
-            dialog.setWindowTitle("Edit Manpower Record")
-            dialog.resize(540, 330)
-            form = QFormLayout(dialog)
-            edit_date = QDateEdit()
-            edit_date.setCalendarPopup(True)
-            edit_date.setDisplayFormat("yyyy-MM-dd")
-            edit_date.setDate(QDate.fromString(safe(record["record_date"]), "yyyy-MM-dd"))
-            edit_project = QLineEdit(safe(record["project"]))
-            edit_location = QLineEdit(safe(record["location"]))
-            edit_department = QLineEdit(safe(record["department"]))
-            edit_manpower = QSpinBox()
-            edit_manpower.setRange(0, 1000000)
-            edit_manpower.setValue(int(record["manpower"] or 0))
-            edit_remarks = QLineEdit(safe(record["remarks"]))
-            form.addRow("Date", edit_date)
-            form.addRow("Project", edit_project)
-            form.addRow("Location", edit_location)
-            form.addRow("Department", edit_department)
-            form.addRow("Manpower", edit_manpower)
-            form.addRow("Remarks", edit_remarks)
-            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
-            form.addRow(buttons)
-            buttons.accepted.connect(dialog.accept)
-            buttons.rejected.connect(dialog.reject)
-            if dialog.exec() != QDialog.DialogCode.Accepted:
-                return
-            if not edit_location.text().strip():
-                QMessageBox.warning(self, "Location Required", "Location cannot be empty.")
-                return
-            db.execute(
-                "UPDATE manpower_records SET record_date=?,project=?,location=?,department=?,manpower=?,remarks=?,updated_at=? WHERE id=?",
-                (
-                    edit_date.date().toString("yyyy-MM-dd"), edit_project.text().strip(),
-                    edit_location.text().strip(), edit_department.text().strip(), edit_manpower.value(),
-                    edit_remarks.text().strip(), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), record_id
-                )
-            )
-            refill_register_filters()
-            refresh_register()
+                QMessageBox.information(self,"Edit Manpower","Select a register row first."); return
+            rec = db.fetchone("SELECT * FROM manpower_records WHERE id=?",(record_id,))
+            if not rec: QMessageBox.warning(self,"Edit Manpower","Selected record not found."); return
+            dlg = QDialog(self); dlg.setWindowTitle("Edit Manpower Record"); dlg.resize(520,320); form = QFormLayout(dlg)
+            ed_date = QDateEdit(); ed_date.setCalendarPopup(True); ed_date.setDisplayFormat("yyyy-MM-dd"); ed_date.setDate(QDate.fromString(safe(rec["record_date"]),"yyyy-MM-dd"))
+            ed_project = QLineEdit(safe(rec["project"])); ed_location = QLineEdit(safe(rec["location"])); ed_department = QLineEdit(safe(rec["department"]))
+            ed_count = QSpinBox(); ed_count.setRange(0,1000000); ed_count.setValue(int(rec["manpower"] or 0)); ed_remarks = QLineEdit(safe(rec["remarks"]))
+            for label, widget in (("Date",ed_date),("Project",ed_project),("Location",ed_location),("Department",ed_department),("Manpower",ed_count),("Remarks",ed_remarks)): form.addRow(label,widget)
+            buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel); form.addRow(buttons)
+            buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+            if dlg.exec() != QDialog.DialogCode.Accepted: return
+            if not ed_location.text().strip(): QMessageBox.warning(self,"Location Required","Location cannot be empty."); return
+            db.execute("UPDATE manpower_records SET record_date=?,project=?,location=?,department=?,manpower=?,remarks=?,updated_at=? WHERE id=?",(
+                ed_date.date().toString("yyyy-MM-dd"),ed_project.text().strip(),ed_location.text().strip(),ed_department.text().strip(),ed_count.value(),ed_remarks.text().strip(),datetime.now().strftime("%Y-%m-%d %H:%M:%S"),record_id))
+            refill_register_filters(); refresh_register(); refresh_analytics(); notify_main_dashboard()
 
         def add_register_entries():
             tabs.setCurrentWidget(entry_page)
-            if batch_table.rowCount() == 0:
-                add_blank_rows(5)
-            batch_table.setFocus()
-            batch_table.setCurrentCell(0, 0)
+            if batch_table.rowCount() == 0: add_blank_rows(5)
+            batch_table.setFocus(); batch_table.setCurrentCell(0,0)
 
         def rename_dimension():
             record_id = selected_record_id()
-            if not record_id:
-                QMessageBox.information(self, "Rename", "Select a register row first.")
-                return
-            record = db.fetchone("SELECT project,location,department FROM manpower_records WHERE id=?", (record_id,))
-            if not record:
-                return
-            choice, ok = QInputDialog.getItem(
-                self, "Rename Manpower Value", "Choose the value to rename throughout this manpower register:",
-                ["Location", "Department", "Project"], 0, False
-            )
-            if not ok:
-                return
-            column = {"Location": "location", "Department": "department", "Project": "project"}[choice]
-            old_value = safe(record[column])
-            if not old_value:
-                QMessageBox.information(self, "Rename", "The selected record has no value in that field.")
-                return
-            new_value, ok = QInputDialog.getText(self, "Rename Manpower Value", f"Rename '{old_value}' to:", text=old_value)
+            if not record_id: QMessageBox.information(self,"Rename","Select a register row first."); return
+            rec = db.fetchone("SELECT project,location,department FROM manpower_records WHERE id=?",(record_id,))
+            if not rec: return
+            choice, ok = QInputDialog.getItem(self,"Rename Manpower Value","Choose the field to rename throughout the manpower register:",["Project","Location","Department"],0,False)
+            if not ok: return
+            col = {"Project":"project","Location":"location","Department":"department"}[choice]
+            old = safe(rec[col])
+            if not old: QMessageBox.information(self,"Rename","Selected record has no value in this field."); return
+            new_value, ok = QInputDialog.getText(self,"Rename Manpower Value",f"Rename '{old}' to:",text=old)
             new_value = safe(new_value).strip()
-            if not ok or not new_value or new_value == old_value:
-                return
-            answer = QMessageBox.question(
-                self, "Confirm Rename", f"Rename '{old_value}' to '{new_value}' in all manpower records?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            db.execute(
-                f"UPDATE manpower_records SET {column}=?,updated_at=? WHERE {column}=?",
-                (new_value, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), old_value)
-            )
-            refill_register_filters()
-            refresh_register()
+            if not ok or not new_value or new_value == old: return
+            if QMessageBox.question(self,"Confirm Rename",f"Rename '{old}' to '{new_value}' in all manpower records?",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+            db.execute(f"UPDATE manpower_records SET {col}=?,updated_at=? WHERE {col}=?",(new_value,datetime.now().strftime("%Y-%m-%d %H:%M:%S"),old))
+            refill_register_filters(); refresh_register(); refill_analytics_filters(); refresh_analytics(); notify_main_dashboard()
 
         def delete_record():
-            record_id = selected_record_id()
-            if not record_id:
-                QMessageBox.information(self, "Delete Manpower", "Select a register row first.")
-                return
-            answer = QMessageBox.question(
-                self, "Delete Manpower Record", "Delete the selected manpower entry? This cannot be undone.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-            db.execute("DELETE FROM manpower_records WHERE id=?", (record_id,))
-            refill_register_filters()
-            refresh_register()
+            ids = sorted({register_table.item(idx.row(),0).data(Qt.ItemDataRole.UserRole) for idx in register_table.selectionModel().selectedRows() if register_table.item(idx.row(),0)})
+            if not ids and selected_record_id(): ids = [selected_record_id()]
+            if not ids: QMessageBox.information(self,"Delete Manpower","Select one or more register rows first."); return
+            if QMessageBox.question(self,"Delete Manpower",f"Delete {len(ids)} selected manpower record(s)? This cannot be undone.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+            db.conn.executemany("DELETE FROM manpower_records WHERE id=?",[(x,) for x in ids]); db.conn.commit()
+            refill_register_filters(); refresh_register(); refill_analytics_filters(); refresh_analytics(); notify_main_dashboard()
 
         def export_register():
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Manpower Register", "Manpower_Register.xlsx", "Excel Workbook (*.xlsx)"
-            )
-            if not path:
-                return
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
+            path, _ = QFileDialog.getSaveFileName(self,"Export Manpower Register","Manpower_Register.xlsx","Excel Workbook (*.xlsx)")
+            if not path: return
+            if not path.lower().endswith(".xlsx"): path += ".xlsx"
             try:
-                workbook = Workbook()
-                sheet = workbook.active
-                sheet.title = "Manpower Register"
-                headers = [register_table.horizontalHeaderItem(col).text() for col in range(register_table.columnCount())]
-                sheet.append(headers)
-                for row in range(register_table.rowCount()):
-                    sheet.append([
-                        register_table.item(row, col).text() if register_table.item(row, col) else ""
-                        for col in range(register_table.columnCount())
-                    ])
-                for cell in sheet[1]:
-                    cell.font = Font(bold=True, color="FFFFFF")
-                    cell.fill = PatternFill("solid", fgColor="17365D")
-                    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                sheet.freeze_panes = "A2"
-                sheet.auto_filter.ref = sheet.dimensions
+                wb = Workbook(); sh = wb.active; sh.title = "Manpower Register"
+                headers = [register_table.horizontalHeaderItem(c).text() for c in range(register_table.columnCount())]
+                sh.append(headers)
+                for r in range(register_table.rowCount()): sh.append([register_table.item(r,c).text() if register_table.item(r,c) else "" for c in range(register_table.columnCount())])
+                for cell in sh[1]:
+                    cell.font = Font(bold=True,color="FFFFFF"); cell.fill = PatternFill("solid",fgColor="17365D"); cell.alignment = Alignment(horizontal="center",vertical="center",wrap_text=True)
+                sh.freeze_panes = "A2"; sh.auto_filter.ref = sh.dimensions
                 from openpyxl.utils import get_column_letter
-                for column_cells in sheet.columns:
-                    letter = get_column_letter(column_cells[0].column)
-                    width = max(len(str(cell.value or "")) for cell in column_cells) + 2
-                    sheet.column_dimensions[letter].width = min(max(width, 12), 36)
-                workbook.save(path)
-                QMessageBox.information(self, "Exported", f"Manpower register exported successfully.\n{path}")
+                for cells in sh.columns:
+                    letter = get_column_letter(cells[0].column); width = max(len(str(c.value or "")) for c in cells)+2
+                    sh.column_dimensions[letter].width = min(max(width,12),36)
+                wb.save(path); QMessageBox.information(self,"Exported",f"Manpower register exported successfully.\n{path}")
             except Exception as exc:
-                logging.exception("Manpower export failed")
-                QMessageBox.critical(self, "Export Failed", str(exc))
+                logging.exception("Manpower register export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
 
-        from_filter.dateChanged.connect(refresh_register)
-        to_filter.dateChanged.connect(refresh_register)
-        project_filter.currentIndexChanged.connect(refresh_register)
-        location_filter.currentIndexChanged.connect(refresh_register)
-        department_filter.currentIndexChanged.connect(refresh_register)
-        search.textChanged.connect(refresh_register)
-        refresh_btn.clicked.connect(refresh_register)
-        add_btn.clicked.connect(add_register_entries)
-        edit_btn.clicked.connect(edit_record)
-        register_table.cellDoubleClicked.connect(lambda *_: edit_record())
-        rename_btn.clicked.connect(rename_dimension)
-        delete_btn.clicked.connect(delete_record)
-        export_btn.clicked.connect(export_register)
+        # ---------------------- MANPOWER DASHBOARD / HSE RATES ----------------------
+        analytics_filter_box = QGroupBox("Dashboard slicers — choose a period, project, location and department")
+        af = QGridLayout(analytics_filter_box)
+        ana_from = QDateEdit(); ana_from.setCalendarPopup(True); ana_from.setDisplayFormat("yyyy-MM-dd"); ana_from.setDate(QDate(QDate.currentDate().year(),1,1))
+        ana_to = QDateEdit(); ana_to.setCalendarPopup(True); ana_to.setDisplayFormat("yyyy-MM-dd"); ana_to.setDate(QDate.currentDate())
+        ana_project = QComboBox(); ana_location = QComboBox(); ana_department = QComboBox()
+        shift_hours = QDoubleSpinBox(); shift_hours.setRange(0.5,24); shift_hours.setDecimals(1); shift_hours.setSingleStep(0.5); shift_hours.setValue(8.0); shift_hours.setSuffix(" hrs/person/day")
+        af.addWidget(QLabel("From"),0,0); af.addWidget(ana_from,0,1)
+        af.addWidget(QLabel("To"),0,2); af.addWidget(ana_to,0,3)
+        af.addWidget(QLabel("Project"),1,0); af.addWidget(ana_project,1,1)
+        af.addWidget(QLabel("Location"),1,2); af.addWidget(ana_location,1,3)
+        af.addWidget(QLabel("Department"),2,0); af.addWidget(ana_department,2,1)
+        af.addWidget(QLabel("Shift hours"),2,2); af.addWidget(shift_hours,2,3)
+        ana_refresh_btn = QPushButton("Refresh Dashboard")
+        ana_export_btn = QPushButton("Export Dashboard Excel")
+        af.addWidget(ana_refresh_btn,3,2); af.addWidget(ana_export_btn,3,3)
+        analytics_layout.addWidget(analytics_filter_box)
+        method_note = QLabel("Exposure-hour method: daily manpower records are treated as daily headcount snapshots. Estimated man-hours = sum of recorded headcount for each date × shift hours/person/day. Enter a manpower record for every working day to obtain a reliable cumulative exposure figure. LTIFR = LTI × 1,000,000 ÷ man-hours; TRIR = recordable cases × 200,000 ÷ man-hours.")
+        method_note.setWordWrap(True); method_note.setStyleSheet("color:#475467;padding:7px;background:#F2F4F7;border-radius:5px;")
+        analytics_layout.addWidget(method_note)
+        cards_grid = QGridLayout(); analytics_layout.addLayout(cards_grid)
+        card_specs = [
+            ("latest_headcount","Latest Manpower"),("person_days","Recorded Person-Days"),("manhours","Estimated Man-Hours"),
+            ("incidents","Total Incidents"),("lti","Lost Time Injuries"),("recordable","Recordable Cases"),
+            ("fatalities","Fatalities"),("ltifr","LTIFR / 1M hrs"),("trir","TRIR / 200k hrs")]
+        analytics_cards = {}
+        for index,(key,title) in enumerate(card_specs):
+            card = QGroupBox(title); box = QVBoxLayout(card); val = QLabel("0")
+            val.setAlignment(Qt.AlignmentFlag.AlignCenter); val.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:8px;")
+            box.addWidget(val); analytics_cards[key] = val; cards_grid.addWidget(card,index//3,index%3)
+        analytics_summary = QLabel("Select filters and refresh to calculate manpower and HSE rates."); analytics_summary.setWordWrap(True)
+        analytics_summary.setStyleSheet("font-weight:bold;color:#17365D;padding:7px;background:#EAF1F8;border-radius:5px;")
+        analytics_layout.addWidget(analytics_summary)
+        breakdown_table = QTableWidget(0,6)
+        breakdown_table.setHorizontalHeaderLabels(["Project","Location","Department","Latest Headcount","Recorded Person-Days","Estimated Man-Hours"])
+        breakdown_table.setAlternatingRowColors(True); breakdown_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        breakdown_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); breakdown_table.horizontalHeader().setStretchLastSection(True)
+        analytics_layout.addWidget(breakdown_table,1)
 
-        refill_register_filters()
-        refresh_register()
+        def refill_analytics_filters():
+            for widget,col,label in ((ana_project,"project","All Projects"),(ana_location,"location","All Locations"),(ana_department,"department","All Departments")):
+                vals = [r["value"] for r in db.fetchall(f"SELECT DISTINCT {col} AS value FROM manpower_records WHERE COALESCE(trim({col}),'')<>'' ORDER BY value COLLATE NOCASE")]
+                set_combo_values(widget,vals,label)
+
+        def analytics_scope():
+            clauses = ["record_date>=?","record_date<=?"]
+            params = [ana_from.date().toString("yyyy-MM-dd"),ana_to.date().toString("yyyy-MM-dd")]
+            for widget,col in ((ana_project,"project"),(ana_location,"location"),(ana_department,"department")):
+                val = widget.currentData()
+                if val: clauses.append(f"COALESCE({col},'')=?"); params.append(val)
+            return " AND ".join(clauses),params
+
+        def refresh_analytics(*_):
+            where, params = analytics_scope()
+            records = db.fetchall("SELECT record_date,project,location,department,COALESCE(manpower,0) manpower FROM manpower_records WHERE " + where + " ORDER BY record_date",tuple(params))
+            person_days = sum(int(r["manpower"] or 0) for r in records)
+            exposure_hours = person_days * float(shift_hours.value())
+            latest_date = max((safe(r["record_date"]) for r in records),default="")
+            latest_headcount = sum(int(r["manpower"] or 0) for r in records if safe(r["record_date"]) == latest_date) if latest_date else 0
+            grouped = {}
+            for rec in records:
+                key = (safe(rec["project"]) or "No project",safe(rec["location"]) or "No location",safe(rec["department"]) or "No department")
+                g = grouped.setdefault(key,{"person_days":0,"latest_date":"","latest":0})
+                count = int(rec["manpower"] or 0); date_value = safe(rec["record_date"])
+                g["person_days"] += count
+                if date_value > g["latest_date"]: g["latest_date"] = date_value; g["latest"] = count
+                elif date_value == g["latest_date"]: g["latest"] += count
+
+            inc_clauses = ["COALESCE(incident_date,'')>=?","COALESCE(incident_date,'')<=?"]
+            inc_params = [ana_from.date().toString("yyyy-MM-dd"),ana_to.date().toString("yyyy-MM-dd")]
+            for widget,col in ((ana_project,"project"),(ana_location,"location"),(ana_department,"department")):
+                val = widget.currentData()
+                if val: inc_clauses.append(f"COALESCE({col},'')=?"); inc_params.append(val)
+            inc_where = " AND ".join(inc_clauses)
+            incident_count = int((db.fetchone(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where}",tuple(inc_params)) or {"c":0})["c"] or 0)
+            lti_count = int((db.fetchone(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) LIKE '%lost time%'",tuple(inc_params)) or {"c":0})["c"] or 0)
+            recordable_count = int((db.fetchone(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) IN ('lost time injury','medical treatment case','restricted work case','fatality')",tuple(inc_params)) or {"c":0})["c"] or 0)
+            fatality_count = int((db.fetchone(f"SELECT COUNT(*) c FROM incidents WHERE {inc_where} AND lower(COALESCE(incident_type,'')) LIKE '%fatal%'",tuple(inc_params)) or {"c":0})["c"] or 0)
+            ltifr_value = (lti_count * 1_000_000.0 / exposure_hours) if exposure_hours else 0.0
+            trir_value = (recordable_count * 200_000.0 / exposure_hours) if exposure_hours else 0.0
+            values = {"latest_headcount":f"{latest_headcount:,}","person_days":f"{person_days:,}","manhours":f"{exposure_hours:,.1f}","incidents":f"{incident_count:,}","lti":f"{lti_count:,}","recordable":f"{recordable_count:,}","fatalities":f"{fatality_count:,}","ltifr":f"{ltifr_value:.2f}" if exposure_hours else "N/A","trir":f"{trir_value:.2f}" if exposure_hours else "N/A"}
+            for key,val in values.items(): analytics_cards[key].setText(val)
+            breakdown_table.setRowCount(len(grouped))
+            for i,(key,g) in enumerate(sorted(grouped.items())):
+                vals = [key[0],key[1],key[2],f"{g['latest']:,}",f"{g['person_days']:,}",f"{g['person_days']*float(shift_hours.value()):,.1f}"]
+                for c,val in enumerate(vals): breakdown_table.setItem(i,c,QTableWidgetItem(val))
+            analytics_summary.setText(
+                f"Period: {ana_from.date().toString('yyyy-MM-dd')} to {ana_to.date().toString('yyyy-MM-dd')}  |  "
+                f"Latest manpower date: {latest_date or 'No manpower records'}  |  "
+                f"Locations covered: {len({k[1] for k in grouped})}  |  Departments covered: {len({k[2] for k in grouped})}  |  "
+                f"Exposure hours: {exposure_hours:,.1f}. Rates show N/A when no exposure hours are available."
+            )
+            self._last_manpower_analytics = {"period_start":ana_from.date().toString("yyyy-MM-dd"),"period_end":ana_to.date().toString("yyyy-MM-dd"),"latest_date":latest_date,"latest_headcount":latest_headcount,"person_days":person_days,"manhours":exposure_hours,"incidents":incident_count,"lti":lti_count,"recordable":recordable_count,"fatalities":fatality_count,"ltifr":ltifr_value if exposure_hours else None,"trir":trir_value if exposure_hours else None}
+
+        def export_analytics():
+            path,_ = QFileDialog.getSaveFileName(self,"Export Manpower Dashboard","Manpower_Dashboard.xlsx","Excel Workbook (*.xlsx)")
+            if not path: return
+            if not path.lower().endswith(".xlsx"): path += ".xlsx"
+            try:
+                refresh_analytics()
+                wb = Workbook(); sh = wb.active; sh.title = "HSE Manpower KPIs"
+                sh.append(["Metric","Value"])
+                for key,title in card_specs: sh.append([title,analytics_cards[key].text()])
+                sh.append(["Period",f"{ana_from.date().toString('yyyy-MM-dd')} to {ana_to.date().toString('yyyy-MM-dd')}"])
+                sh.append(["Shift hours per person per recorded day",shift_hours.value()])
+                for cell in sh[1]: cell.font = Font(bold=True,color="FFFFFF"); cell.fill = PatternFill("solid",fgColor="17365D")
+                detail = wb.create_sheet("Location Breakdown")
+                detail.append([breakdown_table.horizontalHeaderItem(c).text() for c in range(breakdown_table.columnCount())])
+                for r in range(breakdown_table.rowCount()): detail.append([breakdown_table.item(r,c).text() if breakdown_table.item(r,c) else "" for c in range(breakdown_table.columnCount())])
+                for sheet in (sh,detail):
+                    for cell in sheet[1]: cell.font = Font(bold=True,color="FFFFFF"); cell.fill = PatternFill("solid",fgColor="17365D")
+                    sheet.freeze_panes = "A2"; sheet.auto_filter.ref = sheet.dimensions
+                    for col in sheet.columns:
+                        from openpyxl.utils import get_column_letter
+                        letter = get_column_letter(col[0].column); width = max(len(str(x.value or "")) for x in col)+2
+                        sheet.column_dimensions[letter].width = min(max(width,14),38)
+                wb.save(path); QMessageBox.information(self,"Exported",f"Manpower dashboard exported.\n{path}")
+            except Exception as exc:
+                logging.exception("Manpower dashboard export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
+        def save_all_entries():
+            common_date = date_in.date().toString("yyyy-MM-dd"); common_project = project_in.text().strip(); records = []
+            for row in range(batch_table.rowCount()):
+                vals = [batch_table.item(row,col).text().strip() if batch_table.item(row,col) else "" for col in range(4)]
+                location,department,manpower_text,remarks = vals
+                if not location and not department and (not manpower_text or manpower_text == "0") and not remarks: continue
+                if not location:
+                    QMessageBox.warning(self,"Location Required",f"Please enter a location in row {row+1}."); batch_table.setCurrentCell(row,0); return
+                try: manpower = int(manpower_text or "0")
+                except ValueError:
+                    QMessageBox.warning(self,"Invalid Manpower",f"Manpower in row {row+1} must be a whole number."); batch_table.setCurrentCell(row,2); return
+                if manpower < 0:
+                    QMessageBox.warning(self,"Invalid Manpower",f"Manpower in row {row+1} cannot be negative."); batch_table.setCurrentCell(row,2); return
+                records.append((common_date,common_project,location,department,manpower,remarks,datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+            if not records:
+                QMessageBox.information(self,"No Entries","Enter at least one location and manpower value before saving."); return
+            try:
+                db.conn.executemany("INSERT INTO manpower_records(record_date,project,location,department,manpower,remarks,updated_at) VALUES(?,?,?,?,?,?,?)",records)
+                db.conn.commit()
+                from_filter.setDate(QDate(2000,1,1)); to_filter.setDate(QDate.currentDate().addYears(10))
+                for widget in (project_filter,location_filter,department_filter): widget.setCurrentIndex(0)
+                search.clear(); refill_register_filters(); refresh_register()
+                refill_analytics_filters(); refresh_analytics(); notify_main_dashboard()
+                batch_table.setRowCount(0); add_blank_rows(5); tabs.setCurrentWidget(register_page)
+                QMessageBox.information(self,"Manpower Saved",f"{len(records)} location/department entries saved and the register and dashboards refreshed.")
+            except Exception as exc:
+                db.conn.rollback(); logging.exception("Manpower batch save failed"); QMessageBox.critical(self,"Save Failed",f"Unable to save manpower entries.\n\n{exc}")
+
+        add_rows_btn.clicked.connect(add_entry_rows); remove_rows_btn.clicked.connect(remove_entry_rows)
+        clear_rows_btn.clicked.connect(clear_entry_rows); save_all_btn.clicked.connect(save_all_entries)
+        add_blank_rows(5)
+        for widget in (from_filter,to_filter): widget.dateChanged.connect(refresh_register)
+        for widget in (project_filter,location_filter,department_filter): widget.currentIndexChanged.connect(refresh_register)
+        search.textChanged.connect(refresh_register); refresh_btn.clicked.connect(refresh_register)
+        clear_filter_btn.clicked.connect(lambda: (from_filter.setDate(QDate(2000,1,1)),to_filter.setDate(QDate.currentDate().addYears(10)),project_filter.setCurrentIndex(0),location_filter.setCurrentIndex(0),department_filter.setCurrentIndex(0),search.clear()))
+        add_btn.clicked.connect(add_register_entries); edit_btn.clicked.connect(edit_record); register_table.cellDoubleClicked.connect(lambda *_: edit_record())
+        rename_btn.clicked.connect(rename_dimension); delete_btn.clicked.connect(delete_record); export_btn.clicked.connect(export_register)
+        for widget in (ana_from,ana_to): widget.dateChanged.connect(refresh_analytics)
+        for widget in (ana_project,ana_location,ana_department): widget.currentIndexChanged.connect(refresh_analytics)
+        shift_hours.valueChanged.connect(refresh_analytics); ana_refresh_btn.clicked.connect(refresh_analytics); ana_export_btn.clicked.connect(export_analytics)
+        refill_register_filters(); refresh_register(); refill_analytics_filters(); refresh_analytics()
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
