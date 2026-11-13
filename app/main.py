@@ -7,6 +7,7 @@ import zipfile
 import logging
 import json
 import re
+import html
 import calendar
 from copy import copy
 from datetime import datetime, date, timedelta
@@ -2266,7 +2267,7 @@ def generate_table_docx(table_name, path, record_ids=None):
         if record_ids:
             wanted=set(record_ids); incident_rows=[r for r in incident_rows if r["id"] in wanted]
         attach_col=columns.index("Attachments")
-        for r in incident_rows[:1000]:
+        for r in incident_rows:
             cells=table.add_row().cells
             # Populate the same register fields as table_data_static, but replace the
             # attachment-count/text cell with the actual evidence files.
@@ -2293,7 +2294,7 @@ def generate_table_docx(table_name, path, record_ids=None):
                     else:
                         cells[attach_col].add_paragraph(fp.name + (f" | {remark}" if remark else ""))
     else:
-        for row in data[:1000]:
+        for row in data:
             cells = table.add_row().cells
             for i, value in enumerate(row):
                 cells[i].text = xml_safe(value)
@@ -3371,9 +3372,13 @@ def aud_export_pdf(audit_id, path):
         raise ValueError("Audit record not found.")
     headers, rows = aud_register_table(audit_id)
     styles = getSampleStyleSheet()
+    def pdf_text(value):
+        """Escape untrusted database text before passing it to ReportLab Paragraph."""
+        return html.escape(xml_safe(value), quote=False).replace("\n", "<br/>").replace("\r", "")
+
     story = [
-        Paragraph(f"<b>{xml_safe(company_name())}</b>", styles["Title"]),
-        Paragraph(f"<b>DETAILED AUDIT REGISTER — {xml_safe(audit['number'])}</b>", styles["Heading2"]),
+        Paragraph(f"<b>{pdf_text(company_name())}</b>", styles["Title"]),
+        Paragraph(f"<b>DETAILED AUDIT REGISTER — {pdf_text(audit['number'])}</b>", styles["Heading2"]),
         Spacer(1, 8),
     ]
     metadata = [
@@ -3402,10 +3407,10 @@ def aud_export_pdf(audit_id, path):
         f"&nbsp;&nbsp; Closed: {closed} &nbsp;&nbsp; CAPA linked: {sum(1 for row in rows if row[10]=='Yes')}",
         styles["Normal"]))
     story.append(Spacer(1, 6))
-    wrapped_headers = [Paragraph(f"<b>{xml_safe(h)}</b>", styles["BodyText"]) for h in headers]
+    wrapped_headers = [Paragraph(f"<b>{pdf_text(h)}</b>", styles["BodyText"]) for h in headers]
     data = [wrapped_headers]
     for row in rows:
-        data.append([Paragraph(xml_safe(value).replace("\\n", "<br/>"), styles["BodyText"]) for value in row])
+        data.append([Paragraph(pdf_text(value), styles["BodyText"]) for value in row])
     if len(data) == 1:
         data.append([Paragraph("No checklist findings have been saved.", styles["BodyText"])] + [""] * (len(headers)-1))
     widths = [72, 82, 55, 40, 58, 125, 95, 105, 58, 48, 42, 48, 70, 72]
@@ -3932,12 +3937,15 @@ class MainWindow(QMainWindow):
                 Paragraph(xml_safe(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"), styles["Normal"]),
                 Spacer(1, 10),
             ]
-            # Limit columns for readability
-            use_cols = columns[:10]
+            # Export the complete register.  Use equal-width columns so every field
+            # is retained; long values wrap within cells instead of being truncated.
+            use_cols = list(columns)
             table_data = [use_cols]
-            for row in data[:500]:
-                table_data.append([xml_safe(row[i] if i < len(row) else "")[:80] for i in range(len(use_cols))])
-            t = Table(table_data, repeatRows=1)
+            for row in data:
+                table_data.append([xml_safe(row[i] if i < len(row) else "") for i in range(len(use_cols))])
+            available_width = landscape(A4)[0] - doc.leftMargin - doc.rightMargin
+            col_width = available_width / max(len(use_cols), 1)
+            t = Table(table_data, colWidths=[col_width] * len(use_cols), repeatRows=1, splitByRow=1)
             t.setStyle(TableStyle([
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -6734,6 +6742,8 @@ class MainWindow(QMainWindow):
                                                   "Excel Workbook (*.xlsx)")
             if not path:
                 return
+            if not path.lower().endswith(".xlsx"):
+                path += ".xlsx"
             try:
                 aud_export_excel(audit_id, path)
                 self.show_export_success(path)
@@ -6747,6 +6757,8 @@ class MainWindow(QMainWindow):
                                                   "Word Document (*.docx)")
             if not path:
                 return
+            if not path.lower().endswith(".docx"):
+                path += ".docx"
             try:
                 aud_export_word(audit_id, path)
                 self.show_export_success(path)
@@ -6760,6 +6772,8 @@ class MainWindow(QMainWindow):
                                                   "PDF Document (*.pdf)")
             if not path:
                 return
+            if not path.lower().endswith(".pdf"):
+                path += ".pdf"
             try:
                 aud_export_pdf(audit_id, path)
                 self.show_export_success(path)
@@ -11774,167 +11788,182 @@ class MainWindow(QMainWindow):
 
 
     def backup(self):
+        """Create a ZIP backup containing the database and all attachments.
 
+        Attachment paths are stored relative to ATTACH_DIR so subfolders (for
+        example employee_photos) survive a backup/restore cycle.
+        """
         destination, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save HSE Backup",
-            f"HSE_Backup_{today()}.zip",
-            "ZIP (*.zip)"
+            self, "Save HSE Backup", f"HSE_Backup_{today()}.zip", "ZIP (*.zip)"
         )
-
         if not destination:
             return
-
+        if not destination.lower().endswith(".zip"):
+            destination += ".zip"
         try:
-
-            with zipfile.ZipFile(
-                destination,
-                "w",
-                zipfile.ZIP_DEFLATED
-            ) as z:
-
-                if DB_FILE.exists():
-
-                    z.write(
-                        DB_FILE,
-                        "database/hse.db"
-                    )
-
-                for file in ATTACH_DIR.rglob("*"):
-
-                    if file.is_file():
-
-                        z.write(
-                            file,
-                            f"attachments/{file.name}"
-                        )
-
-            QMessageBox.information(
-                self,
-                "Backup Complete",
-                "HSE backup created successfully."
-            )
-
+            if not DB_FILE.exists():
+                raise FileNotFoundError("The HSE database file was not found.")
+            with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(DB_FILE, "database/hse.db")
+                if ATTACH_DIR.exists():
+                    for file in ATTACH_DIR.rglob("*"):
+                        if file.is_file():
+                            relative = file.relative_to(ATTACH_DIR).as_posix()
+                            z.write(file, f"attachments/{relative}")
+            # Verify that the archive can be reopened and contains its database.
+            with zipfile.ZipFile(destination, "r") as check:
+                if check.testzip() is not None or "database/hse.db" not in check.namelist():
+                    raise ValueError("The backup archive failed its integrity check.")
+            QMessageBox.information(self, "Backup Complete", "HSE backup created and verified successfully.")
         except Exception as e:
-
-            logging.exception(
-                "Backup failed"
-            )
-
-            QMessageBox.critical(
-                self,
-                "Backup Error",
-                str(e)
-            )
+            logging.exception("Backup failed")
+            QMessageBox.critical(self, "Backup Error", str(e))
 
     # --------------------------------------------------------
 
     def restore(self):
+        """Safely validate and restore an HSE ZIP backup.
 
-        source, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select HSE Backup",
-            "",
-            "ZIP (*.zip)"
-        )
-
+        Rejects path traversal and unexpected archive entries, validates the
+        SQLite database before replacement, and stages attachments before swap.
+        Also accepts older backups that stored attachments as flat filenames.
+        """
+        source, _ = QFileDialog.getOpenFileName(self, "Select HSE Backup", "", "ZIP (*.zip)")
         if not source:
             return
-
         answer = QMessageBox.question(
-            self,
-            "Restore Backup",
-            "Restoring will replace the current database.\n\n"
+            self, "Restore Backup",
+            "Restoring will replace the current database and attachment files.\n\n"
+            "A temporary rollback copy will be kept until the restore succeeds.\n\n"
             "Do you want to continue?"
         )
-
         if answer != QMessageBox.Yes:
             return
 
+        restore_root = APP_DIR / "restore_staging"
+        staged_db = restore_root / "database" / "hse.db"
+        staged_attach = restore_root / "attachments"
+        rollback_db = APP_DIR / "restore_previous.db"
+        rollback_attach = APP_DIR / "restore_previous_attachments"
+        db_replaced = False
+        attach_moved = False
+        attach_replaced = False
+        old_conn = db.conn
         try:
+            if restore_root.exists():
+                shutil.rmtree(restore_root)
+            if rollback_attach.exists():
+                shutil.rmtree(rollback_attach)
+            rollback_db.unlink(missing_ok=True)
+            staged_db.parent.mkdir(parents=True, exist_ok=True)
+            staged_attach.mkdir(parents=True, exist_ok=True)
 
-            # Close current database connection.
-            db.conn.close()
+            with zipfile.ZipFile(source, "r") as archive:
+                members = archive.infolist()
+                if len(members) > 20000:
+                    raise ValueError("The backup contains too many files and was rejected.")
+                total_uncompressed = sum(item.file_size for item in members)
+                if total_uncompressed > 2 * 1024 * 1024 * 1024:
+                    raise ValueError("The backup is larger than the 2 GB restore safety limit.")
+                found_db = False
+                for item in members:
+                    name = item.filename.replace("\\", "/")
+                    parts = Path(name).parts
+                    if not name or name.startswith("/") or ".." in parts or (parts and ":" in parts[0]):
+                        raise ValueError(f"Unsafe path in backup archive: {item.filename}")
+                    # Reject symbolic links and anything outside the backup layout.
+                    mode = (item.external_attr >> 16) & 0o170000
+                    if mode == 0o120000:
+                        raise ValueError(f"Symbolic link found in backup: {item.filename}")
+                    if item.is_dir():
+                        continue
+                    if name == "database/hse.db":
+                        target = staged_db
+                        found_db = True
+                    elif name.startswith("attachments/"):
+                        rel = name[len("attachments/"):]
+                        if not rel:
+                            continue
+                        target = staged_attach.joinpath(*Path(rel).parts)
+                    else:
+                        raise ValueError(f"Unexpected file in backup archive: {item.filename}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(item, "r") as src, open(target, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+                if not found_db or not staged_db.is_file():
+                    raise ValueError("Backup database not found.")
 
-            with zipfile.ZipFile(
-                source,
-                "r"
-            ) as z:
+            # Validate the staged database before touching the live database.
+            test_conn = sqlite3.connect(str(staged_db))
+            try:
+                result = test_conn.execute("PRAGMA quick_check").fetchone()
+                if not result or result[0] != "ok":
+                    raise ValueError("The backup database failed SQLite integrity validation.")
+            finally:
+                test_conn.close()
 
-                temp = APP_DIR / "restore_temp"
+            # Close the application connection only after all archive validation succeeds.
+            old_conn.commit()
+            old_conn.close()
+            if DB_FILE.exists():
+                shutil.copy2(DB_FILE, rollback_db)
+            if ATTACH_DIR.exists():
+                os.replace(ATTACH_DIR, rollback_attach)
+                attach_moved = True
+            os.replace(staged_attach, ATTACH_DIR)
+            attach_replaced = True
+            os.replace(staged_db, DB_FILE)
+            db_replaced = True
 
-                if temp.exists():
-                    shutil.rmtree(temp)
-
-                temp.mkdir()
-
-                z.extractall(temp)
-
-                restored_db = (
-                    temp /
-                    "database" /
-                    "hse.db"
-                )
-
-                if not restored_db.exists():
-                    raise Exception(
-                        "Backup database not found."
-                    )
-
-                shutil.copy2(
-                    restored_db,
-                    DB_FILE
-                )
-
-                restored_attach = (
-                    temp /
-                    "attachments"
-                )
-
-                if restored_attach.exists():
-
-                    for file in restored_attach.iterdir():
-
-                        if file.is_file():
-
-                            shutil.copy2(
-                                file,
-                                ATTACH_DIR /
-                                file.name
-                            )
-
-                shutil.rmtree(temp)
-
-            QMessageBox.information(
-                self,
-                "Restore Complete",
-                "Backup restored successfully.\n"
-                "Please restart the application."
-            )
-
-        except Exception as e:
-
-            logging.exception(
-                "Restore failed"
-            )
-
-            QMessageBox.critical(
-                self,
-                "Restore Error",
-                str(e)
-            )
-
-        finally:
-
-            # Reopen database.
-            db.conn = sqlite3.connect(
-                DB_FILE
-            )
-
+            # Re-open and validate the live restored database.
+            db.conn = sqlite3.connect(str(DB_FILE))
             db.conn.row_factory = sqlite3.Row
-            db.conn.execute(
-                "PRAGMA foreign_keys = ON"
+            db.conn.execute("PRAGMA foreign_keys = ON")
+            check = db.conn.execute("PRAGMA quick_check").fetchone()
+            if not check or check[0] != "ok":
+                raise ValueError("Restored database failed the final integrity check.")
+
+            shutil.rmtree(rollback_attach, ignore_errors=True)
+            rollback_db.unlink(missing_ok=True)
+            shutil.rmtree(restore_root, ignore_errors=True)
+            QMessageBox.information(
+                self, "Restore Complete",
+                "Backup restored successfully. Please restart the application."
             )
+        except Exception as e:
+            logging.exception("Restore failed")
+            # Roll back the file-system swap if any part of replacement failed.
+            try:
+                try:
+                    if getattr(db, "conn", None) is not old_conn:
+                        db.conn.close()
+                except Exception:
+                    pass
+                if db_replaced and rollback_db.exists():
+                    os.replace(rollback_db, DB_FILE)
+                if attach_replaced or attach_moved:
+                    failed_attach = APP_DIR / "restore_failed_attachments"
+                    if ATTACH_DIR.exists():
+                        os.replace(ATTACH_DIR, failed_attach)
+                    if rollback_attach.exists():
+                        os.replace(rollback_attach, ATTACH_DIR)
+                    shutil.rmtree(failed_attach, ignore_errors=True)
+                db.conn = sqlite3.connect(str(DB_FILE))
+                db.conn.row_factory = sqlite3.Row
+                db.conn.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                logging.exception("Restore rollback/reconnect failed")
+            QMessageBox.critical(self, "Restore Error", str(e))
+        finally:
+            shutil.rmtree(restore_root, ignore_errors=True)
+            # If failure occurred before closing the original connection, keep it.
+            try:
+                if getattr(db, "conn", None) is None or db.conn is old_conn:
+                    db.conn = sqlite3.connect(str(DB_FILE))
+                    db.conn.row_factory = sqlite3.Row
+                    db.conn.execute("PRAGMA foreign_keys = ON")
+            except Exception:
+                logging.exception("Database reconnect after restore failed")
 
     # ========================================================
     # CLOSE
