@@ -12698,7 +12698,7 @@ PERMIT_TYPES = [
     "Blasting Permit", "Other"
 ]
 WORKFLOWS = ["PTW", "CPW", "e-PTW / EPTW"]
-PTW_STATUSES = ["Draft", "Awaiting Documents", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
+PTW_STATUSES = ["Draft", "Safety Documents Pending", "Supporting Certificates Pending", "Awaiting Documents", "Submitted", "Under Review", "Returned for Correction", "Approved", "Issued / Active", "Suspended", "On Hold", "Awaiting Revalidation", "Work Completed", "Pending Closure", "Closed", "Cancelled", "Expired"]
 CERT_TYPES = ["ECC / Excavation Clearance", "Confined Space Entry", "Confined Space Entry Certificate", "Electrical / Isolation Certificate", "Electrical Work / Isolation", "Mechanical Isolation / LOTO", "Preparation / Reinstatement", "Sanction for Test", "Gas Test Record", "Lifting Plan", "Lifting Plan / Equipment Certificate", "Work at Height / Rescue", "Radiography Supporting Document", "JSA / JHA", "Approved Method Statement", "Toolbox Talk Attendance", "Drawing / Utility Clearance", "Other"]
 
 
@@ -12831,6 +12831,7 @@ class PTWModule(QWidget):
             "method_statement_number": "TEXT DEFAULT ''",
             "supporting_document_types": "TEXT DEFAULT ''",
             "supporting_document_reference": "TEXT DEFAULT ''",
+            "safety_document_types": "TEXT DEFAULT ''",
             "loto_equipment": "TEXT DEFAULT ''",
             "loto_number": "TEXT DEFAULT ''",
             "renewal_of_permit_id": "INTEGER",
@@ -12876,16 +12877,16 @@ class PTWModule(QWidget):
         heading = QLabel("PERMIT TO WORK (PTW) MANAGEMENT")
         heading.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:7px;")
         root.addWidget(heading)
-        notice = QLabel("Complete each PTW record against the approved client/site procedure. A saved or approved application does not by itself authorize work to start.")
+        notice = QLabel("Applicant sequence: 1) New Permit Application → 2) Safety Documents → 3) Supporting Certificates → 4) Permit Review & Approval. The application cannot reach Permit Approval until the first three stages are submitted. A saved or approved application does not by itself authorize work to start.")
         notice.setWordWrap(True)
         notice.setStyleSheet("padding:8px;background:#FFF4D6;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
         root.addWidget(notice)
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
-        self.application_tab = QWidget(); self.tabs.addTab(self.application_tab, "New Permit Application"); self._build_application()
-        self.documents_tab = QWidget(); self.tabs.addTab(self.documents_tab, "Attachments / Safety Documents"); self._build_documents()
-        self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "Supporting Certificates"); self._build_certificates()
-        self.review_tab = QWidget(); self.tabs.addTab(self.review_tab, "Permit Review & Approval"); self._build_review_approval()
+        self.application_tab = QWidget(); self.tabs.addTab(self.application_tab, "1. New Permit Application"); self._build_application()
+        self.documents_tab = QWidget(); self.tabs.addTab(self.documents_tab, "2. Safety Documents"); self._build_documents()
+        self.cert_tab = QWidget(); self.tabs.addTab(self.cert_tab, "3. Supporting Certificates"); self._build_certificates()
+        self.review_tab = QWidget(); self.tabs.addTab(self.review_tab, "4. Permit Review & Approval"); self._build_review_approval()
         self.issue_tab = QWidget(); self.tabs.addTab(self.issue_tab, "Permit Issue Authority"); self._build_issue_authority()
         self.register_tab = QWidget(); self.tabs.addTab(self.register_tab, "Permit Register"); self._build_register()
         self.revalidation_tab = QWidget(); self.tabs.addTab(self.revalidation_tab, "Daily Revalidation"); self._build_revalidation()
@@ -12946,14 +12947,14 @@ class PTWModule(QWidget):
         outer.setContentsMargins(8, 8, 8, 8)
         outer.setSpacing(8)
         # Compact correction selector — does not steal form space
-        returned_box = QGroupBox("Correction / Resubmit (only if a permit was returned or saved as draft)")
+        returned_box = QGroupBox("Retrieve / Edit Unsubmitted Permit (not yet sent to Permit Review)")
         returned_lay = QHBoxLayout(returned_box)
         returned_lay.setContentsMargins(8, 6, 8, 6)
         self.app_returned_permit = QComboBox()
         self.app_returned_permit.setMinimumWidth(320)
         self.app_returned_permit.setMinimumHeight(32)
         self.app_returned_permit.setSizePolicy(self.app_returned_permit.sizePolicy().horizontalPolicy(), self.app_returned_permit.sizePolicy().verticalPolicy())
-        load_returned_btn = QPushButton("Load for Correction")
+        load_returned_btn = QPushButton("Retrieve / Edit Permit")
         load_returned_btn.setMinimumHeight(34)
         load_returned_btn.clicked.connect(self._load_returned_or_draft_permit)
         refresh_returned_btn = QPushButton("Refresh")
@@ -12994,9 +12995,24 @@ class PTWModule(QWidget):
         line("method_statement_number","Method Statement Number")
         root.addWidget(company_box)
 
-        docs_box=QGroupBox("2. Supporting Documents")
+        safety_box=QGroupBox("2. Safety Documents Required (attach in Stage 2)")
+        safety_layout=QVBoxLayout(safety_box)
+        safety_hint=QLabel("Select the safety documents required for this job. The applicant must attach each selected document in Attachments / Safety Documents before proceeding.")
+        safety_hint.setWordWrap(True); safety_layout.addWidget(safety_hint)
+        self.safety_doc_rows=[]
+        self.safety_doc_container=QWidget(); self.safety_doc_layout=QVBoxLayout(self.safety_doc_container); self.safety_doc_layout.setContentsMargins(0,0,0,0)
+        safety_layout.addWidget(self.safety_doc_container)
+        self.add_safety_doc_button=QPushButton("+ Add Required Safety Document")
+        self.add_safety_doc_button.setMinimumHeight(34); self.add_safety_doc_button.setAutoDefault(False)
+        self.add_safety_doc_button.clicked.connect(lambda _checked=False: self._add_safety_doc_row())
+        safety_layout.addWidget(self.add_safety_doc_button)
+        self.form_fields["safety_document_types"] = self.safety_doc_container
+        self._add_safety_doc_row()
+        root.addWidget(safety_box)
+
+        docs_box=QGroupBox("3. Supporting Certificates Required (complete in Stage 3)")
         docs_layout=QVBoxLayout(docs_box)
-        docs_hint=QLabel("Add each applicable certificate/document separately. Select Other to enter its document name.")
+        docs_hint=QLabel("List the supporting certificates required for this job (for example training, inspection, ECC / excavation clearance, confined space, isolation / LOTO). These will be completed and attached in the Supporting Certificates stage after Safety Documents are submitted.")
         docs_hint.setWordWrap(True); docs_layout.addWidget(docs_hint)
         self.support_doc_rows=[]
         self.support_doc_container=QWidget(); self.support_doc_layout=QVBoxLayout(self.support_doc_container); self.support_doc_layout.setContentsMargins(0,0,0,0)
@@ -13011,7 +13027,7 @@ class PTWModule(QWidget):
         self._add_support_doc_row()
         root.addWidget(docs_box)
 
-        loto_box=QGroupBox("3. LOTO Details")
+        loto_box=QGroupBox("4. LOTO Details")
         loto=QVBoxLayout(loto_box)
         loto.addWidget(QLabel("Add a separate row for every isolation / LOTO point."))
         self.loto_rows=[]
@@ -13026,7 +13042,7 @@ class PTWModule(QWidget):
         self._add_loto_row()
         root.addWidget(loto_box)
 
-        work_box=QGroupBox("4. Work Details and Permit Holder")
+        work_box=QGroupBox("5. Work Details and Permit Holder")
         work=QFormLayout(work_box); work.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.form_fields["work_scope"]=QTextEdit(); self.form_fields["work_scope"].setMinimumHeight(110); self.form_fields["work_scope"].setPlaceholderText("Describe the work activity and scope clearly")
         work.addRow("Work Details / Scope *",self.form_fields["work_scope"])
@@ -13043,7 +13059,7 @@ class PTWModule(QWidget):
         work.addRow("Additional Work Description",self.form_fields["work_description"])
         root.addWidget(work_box)
 
-        renewal_box=QGroupBox("5. Renewal (if applicable)")
+        renewal_box=QGroupBox("6. Renewal (if applicable)")
         renewal=QFormLayout(renewal_box)
         self.renewal_check=QCheckBox("This permit is a renewal of an earlier permit")
         renewal.addRow(self.renewal_check)
@@ -13052,10 +13068,10 @@ class PTWModule(QWidget):
         self.renewal_check.toggled.connect(self.renewal_previous.setEnabled); self.renewal_previous.setEnabled(False)
         root.addWidget(renewal_box)
 
-        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Draft"); submit=QPushButton("Submit for Review"); clear=QPushButton("Clear Form")
+        btns=QHBoxLayout(); self.save_draft_btn=QPushButton("Save Draft"); submit=QPushButton("Submit Application – Next: Safety Documents"); clear=QPushButton("Clear Form")
         self.save_draft_btn.clicked.connect(lambda:self._save_permit("Draft")); submit.clicked.connect(self._submit_permit); clear.clicked.connect(self._clear_form)
         btns.addWidget(self.save_draft_btn); btns.addWidget(submit); btns.addWidget(clear); btns.addStretch(); root.addLayout(btns)
-        self.application_permit_summary=QLabel("Save a draft or submit the application for review.")
+        self.application_permit_summary=QLabel("Stage 1: complete the permit details and both document checklists, then submit to Safety Documents.")
         self.application_permit_summary.setWordWrap(True)
         self.application_permit_summary.setStyleSheet("padding:10px;background:#F2F6FA;border:1px solid #C8D5E3;border-radius:4px;")
         root.addWidget(self.application_permit_summary)
@@ -13173,9 +13189,9 @@ class PTWModule(QWidget):
         lay.setSpacing(14)
 
         intro = QLabel(
-            "Required supporting documents come from the Application form.\n"
-            "1) Select a permit  2) Click a listed document  3) Fill details and attach the file  4) Save\n"
-            "Submit for Review becomes available only when every listed document has an attachment."
+            "STAGE 3 — SUPPORTING CERTIFICATES\n"
+            "This stage opens only after the Safety Documents stage is submitted. Required certificates are listed from the New Permit Application.\n"
+            "Select each certificate, complete its details, attach its evidence, and save. Submit to Permit Approval only after every listed certificate has a valid attachment."
         )
         intro.setWordWrap(True)
         intro.setMinimumHeight(56)
@@ -13290,7 +13306,7 @@ class PTWModule(QWidget):
         lay.addWidget(self.cert_attach_status)
 
         action_row2 = QHBoxLayout()
-        self.submit_certs_btn = QPushButton("Submit Permit for Review")
+        self.submit_certs_btn = QPushButton("Submit Supporting Certificates – Next: Permit Approval")
         self.submit_certs_btn.setMinimumHeight(44)
         self.submit_certs_btn.setMinimumWidth(260)
         self.submit_certs_btn.setStyleSheet("font-weight:bold;font-size:14px;")
@@ -13352,12 +13368,12 @@ class PTWModule(QWidget):
         self.doc_permit=QComboBox(); self.doc_permit.currentIndexChanged.connect(self._refresh_documents_for_selected_permit); self.doc_type=QComboBox(); self.doc_type.addItems(["JSA / JHA","Method Statement","Drawing","Risk Assessment","Gas Test Record","Isolation / LOTO","Lifting Plan","Rescue Plan","Toolbox Talk","Other"]); self.doc_desc=QLineEdit(); self.doc_path=QLineEdit(); browse=QPushButton("Choose File"); browse.clicked.connect(lambda:self._choose_into(self.doc_path)); form.addRow("Permit",self.doc_permit); form.addRow("Document Type",self.doc_type); form.addRow("Description",self.doc_desc); row=QHBoxLayout(); row.addWidget(self.doc_path); row.addWidget(browse); form.addRow("File",row)
         btn_row=QHBoxLayout()
         btn=QPushButton("Attach Document"); btn.clicked.connect(self._add_document)
-        submit_docs=QPushButton("Submit Permit for Review")
+        submit_docs=QPushButton("Submit Safety Documents – Next: Supporting Certificates")
         submit_docs.setMinimumHeight(36)
         submit_docs.setStyleSheet("font-weight:bold;")
         submit_docs.clicked.connect(self._submit_from_documents_tab)
         btn_row.addWidget(btn); btn_row.addWidget(submit_docs); btn_row.addStretch(); lay.addLayout(btn_row)
-        docs_note=QLabel("Attach required safety documents for a Draft or Returned permit, then click Submit Permit for Review so it appears in Permit Review & Approval.")
+        docs_note=QLabel("STAGE 2 — SAFETY DOCUMENTS. After submitting the New Permit Application, select the permit here and attach the required safety documents (JSA / JHA, method statement, risk assessment, drawings, gas test, isolation / LOTO, toolbox talk and other applicable site documents). Click Submit Safety Documents to proceed to Supporting Certificates. This does NOT send the permit to approval yet.")
         docs_note.setWordWrap(True); lay.addWidget(docs_note)
         self.doc_table=self._table(["Permit","Document Type","Filename","Description","Uploaded By","Uploaded At","Path"],lay)
         openrow=QHBoxLayout(); openb=QPushButton("Open Selected Document"); load_doc=QPushButton("Load Selected for Edit"); update_doc=QPushButton("Update Selected Document"); deldoc=QPushButton("Delete Selected Document"); openb.clicked.connect(self._open_document); load_doc.clicked.connect(self._load_selected_document); update_doc.clicked.connect(self._update_selected_document); deldoc.clicked.connect(self._delete_document); openrow.addWidget(openb); openrow.addWidget(load_doc); openrow.addWidget(update_doc); openrow.addWidget(deldoc); lay.addLayout(openrow)
@@ -13374,15 +13390,30 @@ class PTWModule(QWidget):
         btn=QPushButton("Save / Update Permit Type and Configuration"); btn.clicked.connect(self._save_config); lay.addWidget(btn)
         self.config_table=self._table(["Permit Type","Active","Workflow","Validity Hours","Procedure","Number","Revision","Effective Date"],lay)
 
+    def _add_safety_doc_row(self, selected="", other_name=""):
+        row_widget = QWidget(self.safety_doc_container)
+        row = QHBoxLayout(row_widget); row.setContentsMargins(0, 2, 0, 2)
+        typ = QComboBox(row_widget); typ.setMinimumWidth(240)
+        typ.addItems(["Select safety document", "JSA / JHA", "Method Statement", "Risk Assessment", "Drawing", "Gas Test Record", "Isolation / LOTO", "Lifting Plan", "Rescue Plan", "Toolbox Talk", "Other"])
+        ix=typ.findText(selected); typ.setCurrentIndex(ix if ix >= 0 else 0)
+        other=QLineEdit(row_widget); other.setPlaceholderText("Enter safety document name (Other)"); other.setText(other_name)
+        other.setVisible(typ.currentText()=="Other")
+        typ.currentTextChanged.connect(lambda value,w=other:w.setVisible(value=="Other"))
+        remove=QPushButton("Remove",row_widget); remove.setAutoDefault(False)
+        remove.clicked.connect(lambda _checked=False,rw=row_widget:self._remove_dynamic_row(rw,self.safety_doc_rows,self.safety_doc_layout,self._add_safety_doc_row))
+        row.addWidget(typ,2); row.addWidget(other,2); row.addWidget(remove)
+        self.safety_doc_layout.addWidget(row_widget); row_widget.setVisible(True)
+        self.safety_doc_rows.append((typ,other,row_widget))
+
     def _add_support_doc_row(self, selected="", other_name="", reference=""):
         row_widget = QWidget(self.support_doc_container)
         row = QHBoxLayout(row_widget)
         row.setContentsMargins(0, 2, 0, 2)
         typ = QComboBox(row_widget)
         typ.setMinimumWidth(220)
-        typ.addItems(["Select document", "ECC / Excavation Clearance", "Confined Space Entry",
-                      "Electrical / Isolation Certificate", "Mechanical Isolation / LOTO",
-                      "Gas Test Record", "Lifting Plan", "Work at Height / Rescue",
+        typ.addItems(["Select document", "Training Certificate", "Inspection Certificate", "Equipment Inspection Certificate",
+                      "ECC / Excavation Clearance", "Confined Space Entry", "Electrical / Isolation Certificate",
+                      "Mechanical Isolation / LOTO", "Gas Test Record", "Lifting Plan", "Work at Height / Rescue",
                       "Radiography Supporting Document", "Other"])
         ix = typ.findText(selected)
         typ.setCurrentIndex(ix if ix >= 0 else 0)
@@ -13434,7 +13465,17 @@ class PTWModule(QWidget):
             add_empty_callback()
 
     def _set_dynamic_values(self, key, value, refs=""):
-        if key=="supporting_document_types":
+        if key=="safety_document_types":
+            while self.safety_doc_layout.count():
+                item=self.safety_doc_layout.takeAt(0)
+                if item.widget(): item.widget().deleteLater()
+            self.safety_doc_rows=[]
+            known=["JSA / JHA","Method Statement","Risk Assessment","Drawing","Gas Test Record","Isolation / LOTO","Lifting Plan","Rescue Plan","Toolbox Talk"]
+            for name in [x.strip() for x in _s(value).split(";") if x.strip()]:
+                is_other=name not in known
+                self._add_safety_doc_row("Other" if is_other else name,name if is_other else "")
+            if not self.safety_doc_rows:self._add_safety_doc_row()
+        elif key=="supporting_document_types":
             while self.support_doc_layout.count():
                 item=self.support_doc_layout.takeAt(0)
                 child=item.layout()
@@ -13446,7 +13487,7 @@ class PTWModule(QWidget):
             self.support_doc_rows=[]
             names=[x.strip() for x in _s(value).split(";") if x.strip()]
             refs_list=[x.strip() for x in _s(refs).split(";")]
-            known=["ECC / Excavation Clearance","Confined Space Entry","Electrical / Isolation Certificate","Mechanical Isolation / LOTO","Gas Test Record","Lifting Plan","Work at Height / Rescue","Radiography Supporting Document","Other"]
+            known=["Training Certificate","Inspection Certificate","Equipment Inspection Certificate","ECC / Excavation Clearance","Confined Space Entry","Electrical / Isolation Certificate","Mechanical Isolation / LOTO","Gas Test Record","Lifting Plan","Work at Height / Rescue","Radiography Supporting Document","Other"]
             for i,name in enumerate(names):
                 is_other=name not in known
                 self._add_support_doc_row("Other" if is_other else name,name if is_other else "",refs_list[i] if i<len(refs_list) else "")
@@ -13476,7 +13517,8 @@ class PTWModule(QWidget):
             f"Permit: {permit['permit_number']} | Status: {permit['status']}\n"
             f"Company: {permit['performing_company']} | Location: {permit['location']}\n"
             f"Permit Holder: {permit['permit_holder']} | Planned: {permit['planned_start']} to {permit['planned_end']}\n"
-            f"Supporting Documents: {permit['supporting_document_types'] or 'None'}")
+            f"Safety Documents: {permit['safety_document_types'] or 'None'}\n"
+            f"Supporting Certificates: {permit['supporting_document_types'] or 'None'}")
 
     def _refresh_authority_evidence(self, permit_id, stage):
         document_table=getattr(self,f"{stage}_documents_table",None)
@@ -13699,6 +13741,12 @@ class PTWModule(QWidget):
         if isinstance(w,QComboBox):
             if key == "permit_holder_employee_id": return safe(w.currentData()).strip()
             return w.currentText().strip()
+        if key == "safety_document_types":
+            names=[]
+            for typ,other,_row_widget in self.safety_doc_rows:
+                name=other.text().strip() if typ.currentText()=="Other" else typ.currentText()
+                if name and name!="Select safety document": names.append(name)
+            return "; ".join(names)
         if key in ("supporting_document_types", "supporting_document_reference"):
             docs=[]
             for typ,other,ref,_row_widget in self.support_doc_rows:
@@ -13720,6 +13768,7 @@ class PTWModule(QWidget):
             elif isinstance(w,QTextEdit): w.clear()
             elif isinstance(w,QComboBox): w.setCurrentIndex(0)
             elif isinstance(w,QSpinBox): w.setValue(0)
+        self._set_dynamic_values("safety_document_types", "")
         self._set_dynamic_values("supporting_document_types", "", "")
         self._set_dynamic_values("loto_equipment", "", "")
         self.form_fields["planned_start"].setDateTime(QDateTime.currentDateTime())
@@ -13849,6 +13898,10 @@ class PTWModule(QWidget):
             QMessageBox.warning(self,"Document Name Required","When Other is selected, enter the supporting document name."); return
         if not values.get("performing_company") or not values.get("location") or not values.get("work_scope"):
             QMessageBox.warning(self,"Required Information","Enter the company / contractor, facility location and work details / scope."); return
+        if status != "Draft" and not values.get("safety_document_types"):
+            QMessageBox.warning(self,"Safety Document Checklist Required","List the safety documents required for this job before submitting the application."); return
+        if status != "Draft" and not values.get("supporting_document_types"):
+            QMessageBox.warning(self,"Supporting Certificate Checklist Required","List the applicable supporting certificates (for example training, inspection, ECC / excavation clearance) before submitting the application."); return
         if values["planned_end"] <= values["planned_start"]:
             QMessageBox.warning(self,"Invalid Validity","Planned end must be later than planned start."); return
         if status != "Draft":
@@ -13882,7 +13935,7 @@ class PTWModule(QWidget):
         if self.selected_permit_id:
             old=self.db.fetchone("SELECT status FROM ptw_permits WHERE id=?",(self.selected_permit_id,))
             if not old: self.selected_permit_id=None
-            elif old["status"] not in ("Draft","Returned for Correction","Awaiting Documents"):
+            elif old["status"] not in ("Draft","Returned for Correction","Awaiting Documents","Safety Documents Pending","Supporting Certificates Pending"):
                 QMessageBox.warning(self,"Editing Restricted","Only draft or returned permits can be edited. Use the revision/reissue process configured by your site procedure."); return
         if self.selected_permit_id:
             cols=list(values.keys()); sql="UPDATE ptw_permits SET "+", ".join(f"{c}=?" for c in cols)+" WHERE id=?"
@@ -13897,34 +13950,30 @@ class PTWModule(QWidget):
         self.db.conn.commit()
         self.refresh_all()
         self._update_application_permit_summary()
-        if status == "Awaiting Documents":
-            if hasattr(self, "cert_tab"):
-                self.tabs.setCurrentWidget(self.cert_tab)
-            if hasattr(self, "cert_permit"):
-                idx = self.cert_permit.findData(pid)
-                if idx < 0:
-                    self._refresh_combo_lists()
-                    idx = self.cert_permit.findData(pid)
+        if status == "Safety Documents Pending":
+            if hasattr(self, "documents_tab"):
+                self.tabs.setCurrentWidget(self.documents_tab)
+            if hasattr(self, "doc_permit"):
+                self._refresh_combo_lists()
+                idx = self.doc_permit.findData(pid)
                 if idx >= 0:
-                    self.cert_permit.setCurrentIndex(idx)
-                self._refresh_certificates_for_selected_permit()
+                    self.doc_permit.setCurrentIndex(idx)
+                self._refresh_documents_for_selected_permit()
             QMessageBox.information(
-                self, "Application Saved — Attach Required Documents",
-                (
-                    f"Permit {number} work details and required document list are saved.\n\n"
-                    "Status: Awaiting Documents.\n"
-                    "On Supporting Certificates, complete each listed document (details + file),\n"
-                    "then Submit Permit for Review when every listed item has an attachment."
-                )
+                self, "Stage 1 Complete — Safety Documents Required",
+                f"Permit {number} application details are saved.\n\n"
+                "The permit is now at STAGE 2 — SAFETY DOCUMENTS.\n"
+                "Attach the required safety documents, then click 'Submit Safety Documents'. "
+                "The permit will move to Supporting Certificates, NOT directly to Permit Approval."
             )
         else:
             self.tabs.setCurrentWidget(self.application_tab)
             QMessageBox.information(self,"Permit Saved",f"Permit {number} saved with status {status}. Work is not authorized until the permit is approved and issued.")
 
     def _submit_permit(self):
-        # Application form: work details + required document list only.
-        # Review only after all listed supporting certificates are attached.
-        self._save_permit("Awaiting Documents")
+        # Stage 1: save the application and route to Safety Documents.
+        # Approval is blocked until Safety Documents and Supporting Certificates are separately submitted.
+        self._save_permit("Safety Documents Pending")
 
     def _selected_id(self, table=None):
         t=table or self.permit_table; row=t.currentRow()
@@ -13946,8 +13995,8 @@ class PTWModule(QWidget):
         elif combo is getattr(self, "cert_permit", None) or combo is getattr(self, "doc_permit", None):
             rows = self.db.fetchall(
                 "SELECT id,permit_number,permit_type,status FROM ptw_permits "
-                "WHERE trim(COALESCE(status,'')) IN ('Draft','Awaiting Documents','Returned for Correction','Submitted','Under Review','Approved','Issued / Active') "
-                "ORDER BY CASE trim(COALESCE(status,'')) WHEN 'Awaiting Documents' THEN 0 WHEN 'Returned for Correction' THEN 1 WHEN 'Draft' THEN 2 ELSE 3 END, id DESC"
+                "WHERE trim(COALESCE(status,'')) IN ('Draft','Safety Documents Pending','Supporting Certificates Pending','Awaiting Documents','Returned for Correction','Submitted','Under Review','Approved','Issued / Active') "
+                "ORDER BY CASE trim(COALESCE(status,'')) WHEN 'Safety Documents Pending' THEN 0 WHEN 'Awaiting Documents' THEN 0 WHEN 'Supporting Certificates Pending' THEN 1 WHEN 'Returned for Correction' THEN 2 WHEN 'Draft' THEN 3 ELSE 4 END, id DESC"
             )
         else:
             rows = self.db.fetchall("SELECT id,permit_number,permit_type,status FROM ptw_permits ORDER BY id DESC")
@@ -14018,12 +14067,12 @@ class PTWModule(QWidget):
             if total == 0:
                 self.cert_attach_status.setText("No required documents listed on the application. List them on New Permit Application, then return here.")
             elif missing == 0:
-                self.cert_attach_status.setText("All listed supporting documents have attachments. You can Submit Permit for Review.")
+                self.cert_attach_status.setText("All listed supporting certificates have attachments. You can now submit the complete package to Permit Review & Approval.")
             else:
                 self.cert_attach_status.setText(f"{missing} listed document(s) still need a file attachment before Submit for Review is allowed.")
         if hasattr(self, "submit_certs_btn"):
             status = _s(permit["status"]).strip() if permit else ""
-            self.submit_certs_btn.setEnabled(total > 0 and missing == 0 and status in ("Draft", "Awaiting Documents", "Returned for Correction"))
+            self.submit_certs_btn.setEnabled(total > 0 and missing == 0 and status == "Supporting Certificates Pending")
 
     def _refresh_documents_for_selected_permit(self, *_args):
         if not hasattr(self, "doc_table"):
@@ -14032,6 +14081,16 @@ class PTWModule(QWidget):
         if not permit_id:
             self.doc_table.setRowCount(0)
             return
+        permit = self._permit_row(permit_id)
+        required = [x.strip() for x in _s(permit["safety_document_types"] if permit and "safety_document_types" in permit.keys() else "").split(";") if x.strip()]
+        if hasattr(self, "doc_type"):
+            current_type = self.doc_type.currentText()
+            self.doc_type.blockSignals(True)
+            self.doc_type.clear()
+            self.doc_type.addItems(required if required else ["JSA / JHA", "Method Statement", "Drawing", "Risk Assessment", "Gas Test Record", "Isolation / LOTO", "Lifting Plan", "Rescue Plan", "Toolbox Talk", "Other"])
+            idx = self.doc_type.findText(current_type)
+            self.doc_type.setCurrentIndex(idx if idx >= 0 else 0)
+            self.doc_type.blockSignals(False)
         rows = self.db.fetchall(
             "SELECT d.*,p.permit_number FROM ptw_documents d JOIN ptw_permits p ON p.id=d.permit_id WHERE d.permit_id=? ORDER BY d.id DESC",
             (permit_id,)
@@ -14302,10 +14361,10 @@ class PTWModule(QWidget):
         current = self.app_returned_permit.currentData()
         self.app_returned_permit.blockSignals(True)
         self.app_returned_permit.clear()
-        self.app_returned_permit.addItem("Select returned or draft permit", None)
+        self.app_returned_permit.addItem("Select an unsubmitted permit", None)
         rows = self.db.fetchall(
             "SELECT id,permit_number,permit_type,performing_company,location,status,updated_at FROM ptw_permits "
-            "WHERE trim(COALESCE(status,'')) IN ('Draft','Awaiting Documents','Returned for Correction') ORDER BY id DESC"
+            "WHERE trim(COALESCE(status,'')) IN ('Draft','Safety Documents Pending','Supporting Certificates Pending','Awaiting Documents','Returned for Correction') ORDER BY id DESC"
         )
         for r in rows:
             self.app_returned_permit.addItem(
@@ -14322,8 +14381,8 @@ class PTWModule(QWidget):
         r = self._permit_row(pid)
         if not r:
             return QMessageBox.information(self, "Select Permit", "Select a returned or draft permit from the list.")
-        if _s(r["status"]).strip() not in ("Draft", "Awaiting Documents", "Returned for Correction"):
-            return QMessageBox.warning(self, "Not Editable Here", "Only Draft, Awaiting Documents or Returned for Correction permits can be loaded here.")
+        if _s(r["status"]).strip() not in ("Draft", "Safety Documents Pending", "Supporting Certificates Pending", "Awaiting Documents", "Returned for Correction"):
+            return QMessageBox.warning(self, "Not Editable Here", "This permit has already been submitted for permit review and can no longer be edited from New Permit Application.")
         # Reuse register load path by temporarily selecting via selected_permit_id
         self.selected_permit_id = pid
         # Populate form fields the same way as _load_selected
@@ -14349,6 +14408,7 @@ class PTWModule(QWidget):
                     w.setDateTime(dt)
         if holder_id_widget is not None:
             holder_id_widget.blockSignals(False)
+        self._set_dynamic_values("safety_document_types", r["safety_document_types"] if "safety_document_types" in r.keys() else "")
         self._set_dynamic_values("supporting_document_types", r["supporting_document_types"], r["supporting_document_reference"])
         self._set_dynamic_values("loto_equipment", r["loto_equipment"], r["loto_number"])
         linked_id = r["renewal_of_permit_id"] if "renewal_of_permit_id" in r.keys() else None
@@ -14360,9 +14420,9 @@ class PTWModule(QWidget):
             self.save_draft_btn.setText("Update Permit")
         self._update_application_permit_summary()
         QMessageBox.information(
-            self, "Permit Loaded",
-            f"Permit {r['permit_number']} ({r['status']}) is loaded.\n"
-            "Update the application as needed, attach documents/certificates, then click Submit for Review."
+            self, "Permit Retrieved",
+            f"Permit {r['permit_number']} ({r['status']}) is loaded for editing.\n"
+            "This permit has not yet been sent to Permit Review. Update the details and check both document lists, then follow the staged submission process: Safety Documents → Supporting Certificates → Permit Approval."
         )
 
     def _required_certificates_attachment_status(self, pid):
@@ -14378,20 +14438,36 @@ class PTWModule(QWidget):
                 missing.append(_s(c["certificate_type"]) or "Document")
         return total, attached, missing
 
-    def _resubmit_permit_for_review(self, pid, source_label="Application"):
+    def _resubmit_permit_for_review(self, pid, source_label="Supporting Certificates"):
+        """Final applicant submission: only after Safety Documents and Certificates are complete."""
         r = self._permit_row(pid)
         if not r:
             return QMessageBox.warning(self, "Permit Required", "Select a permit first.")
         status = _s(r["status"]).strip()
-        if status not in ("Draft", "Awaiting Documents", "Returned for Correction"):
+        if status != "Supporting Certificates Pending":
             return QMessageBox.warning(
-                self, "Cannot Submit",
-                f"Only Draft, Awaiting Documents, or Returned for Correction permits can be submitted for review.\nCurrent status: {status}"
+                self, "Wrong Workflow Stage",
+                f"Permit {r['permit_number']} is not at the Supporting Certificates stage.\nCurrent status: {status}\n\n"
+                "Complete and submit Safety Documents first, then complete Supporting Certificates."
             )
         if not _s(r["performing_company"]).strip() or not _s(r["location"]).strip() or not _s(r["work_scope"]).strip():
-            return QMessageBox.warning(self, "Incomplete Application", "Company, location and work scope are required before submit.")
+            return QMessageBox.warning(self, "Incomplete Application", "Company, location and work scope are required before final submission.")
         if not _s(r["permit_holder_employee_id"]).strip():
-            return QMessageBox.warning(self, "Permit Holder Required", "A PTW-trained permit holder ID is required before submit.")
+            return QMessageBox.warning(self, "Permit Holder Required", "A PTW-trained permit holder ID is required before submission.")
+
+        required_safety = [x.strip() for x in _s(r["safety_document_types"] if "safety_document_types" in r.keys() else "").split(";") if x.strip()]
+        safety_docs = self.db.fetchall(
+            "SELECT document_type,file_path FROM ptw_documents WHERE permit_id=? ORDER BY id", (pid,)
+        )
+        attached_safety = {_s(d["document_type"]).strip().casefold() for d in safety_docs if _s(d["file_path"]).strip() and Path(_s(d["file_path"])).is_file()}
+        missing_safety = [name for name in required_safety if name.casefold() not in attached_safety]
+        if not required_safety or missing_safety:
+            return QMessageBox.warning(
+                self, "Safety Documents Not Complete",
+                "The safety document checklist must be completed and submitted first.\n\nMissing: " + (", ".join(missing_safety) if missing_safety else "No safety documents were listed on the application.")
+            )
+        valid_safety_docs = [d for d in safety_docs if _s(d["file_path"]).strip() and Path(_s(d["file_path"])).is_file()]
+
         self._sync_application_supporting_certificates(
             pid,
             r["supporting_document_types"] if "supporting_document_types" in r.keys() else "",
@@ -14401,28 +14477,56 @@ class PTWModule(QWidget):
         total, attached, missing = self._required_certificates_attachment_status(pid)
         if total == 0:
             return QMessageBox.warning(
-                self, "No Supporting Documents Listed",
-                "List the required supporting documents on the Application form first, then attach each file here."
+                self, "Supporting Certificates Required",
+                "No supporting certificates are listed. Return to New Permit Application and list the applicable training, inspection, ECC / excavation clearance or other certificates before continuing."
             )
         if missing:
             return QMessageBox.warning(
-                self, "Attachments Incomplete",
-                "Every document listed on the application must have a file attached before review.\n\nStill missing:\n- " + "\n- ".join(missing)
+                self, "Certificates Incomplete",
+                "Every listed supporting certificate must have a valid file attachment before Permit Approval.\n\nStill missing:\n- " + "\n- ".join(missing)
             )
         old = status
         self.db.execute("UPDATE ptw_permits SET status='Submitted', updated_at=? WHERE id=?", (_now(), pid))
-        self._event(pid, f"Submitted for review from {source_label}", old, "Submitted", f"All {total} listed supporting documents attached. Submitted from {source_label}.")
+        self._event(pid, "Applicant submitted complete PTW package for permit approval", old, "Submitted",
+                    f"Safety documents: {len(valid_safety_docs)} attached; supporting certificates: {attached}/{total}. Submitted from {source_label}.")
         self.db.conn.commit()
         self.refresh_all()
+        self.tabs.setCurrentWidget(self.review_tab)
         QMessageBox.information(
-            self, "Submitted for Review",
-            f"Permit {r['permit_number']} is now Submitted with all supporting documents attached.\nIt will appear in Permit Review & Approval."
+            self, "All Applicant Stages Submitted",
+            f"Permit {r['permit_number']} has completed all applicant stages:\n"
+            "1. New Permit Application\n2. Safety Documents\n3. Supporting Certificates\n\n"
+            "The complete permit package has now been sent to Permit Review & Approval."
         )
 
 
     def _submit_from_documents_tab(self):
         pid = self.doc_permit.currentData() if hasattr(self, "doc_permit") else None
-        self._resubmit_permit_for_review(pid, "Attachments / Safety Documents")
+        r = self._permit_row(pid)
+        if not r:
+            return QMessageBox.warning(self, "Permit Required", "Select a permit in Attachments / Safety Documents first.")
+        status = _s(r["status"]).strip()
+        if status not in ("Safety Documents Pending", "Returned for Correction", "Awaiting Documents"):
+            return QMessageBox.warning(self, "Wrong Workflow Stage", f"Submit the New Permit Application first. Safety Documents cannot be submitted at the current stage: {status}.")
+        required = [x.strip() for x in _s(r["safety_document_types"] if "safety_document_types" in r.keys() else "").split(";") if x.strip()]
+        if not required:
+            return QMessageBox.warning(self, "Safety Document Checklist Required", "Return to New Permit Application and list the safety documents required for this job before submitting this stage.")
+        rows = self.db.fetchall("SELECT document_type,file_path FROM ptw_documents WHERE permit_id=? ORDER BY id", (pid,))
+        attached_types = {_s(d["document_type"]).strip().casefold() for d in rows if _s(d["file_path"]).strip() and Path(_s(d["file_path"])).is_file()}
+        missing = [name for name in required if name.casefold() not in attached_types]
+        if missing:
+            return QMessageBox.warning(self, "Safety Documents Incomplete", "Attach every safety document listed on the application before proceeding.\n\nStill missing:\n- " + "\n- ".join(missing))
+        self.db.execute("UPDATE ptw_permits SET status='Supporting Certificates Pending', updated_at=? WHERE id=?", (_now(), pid))
+        self._event(pid, "Safety documents stage submitted", status, "Supporting Certificates Pending", f"Safety document checklist complete: {len(required)} of {len(required)} attached.")
+        self.db.conn.commit()
+        self.refresh_all()
+        self.tabs.setCurrentWidget(self.cert_tab)
+        self._refresh_combo_lists()
+        idx = self.cert_permit.findData(pid)
+        if idx >= 0:
+            self.cert_permit.setCurrentIndex(idx)
+        self._refresh_certificates_for_selected_permit()
+        QMessageBox.information(self, "Safety Documents Submitted", f"Safety Documents for {r['permit_number']} have been submitted ({len(required)} required items verified).\n\nNext: complete and submit Supporting Certificates. The permit has NOT yet gone to Permit Approval.")
 
     def _submit_from_certificates_tab(self):
         if not hasattr(self, "cert_permit"):
@@ -14457,6 +14561,8 @@ class PTWModule(QWidget):
                 dt=QDateTime.fromString(_s(val),"yyyy-MM-dd HH:mm")
                 if dt.isValid(): w.setDateTime(dt)
         if holder_id_widget is not None: holder_id_widget.blockSignals(False)
+        self._set_dynamic_values("safety_document_types", r["safety_document_types"] if "safety_document_types" in r.keys() else "")
+        self._set_dynamic_values("safety_document_types", r["safety_document_types"] if "safety_document_types" in r.keys() else "")
         self._set_dynamic_values("supporting_document_types", r["supporting_document_types"], r["supporting_document_reference"])
         self._set_dynamic_values("loto_equipment", r["loto_equipment"], r["loto_number"])
         linked_id = r["renewal_of_permit_id"] if "renewal_of_permit_id" in r.keys() else None
@@ -14468,23 +14574,31 @@ class PTWModule(QWidget):
     def _edit_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
         if not r: return QMessageBox.information(self,"Select Permit","Select a permit row first.")
-        if r["status"] not in ("Draft","Returned for Correction","Awaiting Documents"):
-            return QMessageBox.warning(self,"Editing Restricted","Only draft, awaiting-documents or returned permits can be edited. Issued history is retained.")
+        if r["status"] not in ("Draft","Returned for Correction","Awaiting Documents","Safety Documents Pending","Supporting Certificates Pending"):
+            return QMessageBox.warning(self,"Editing Restricted","Only permits not yet submitted to Permit Review can be edited. Submitted / reviewed permit history is retained.")
         self._load_selected()
 
     def _submit_selected(self):
         pid=self._selected_id(); r=self._permit_row(pid)
         if not r: return QMessageBox.information(self,"Select Permit","Select a permit row first.")
-        if r["status"] not in ("Draft","Returned for Correction"): return QMessageBox.warning(self,"Invalid State","Only draft or returned permits can be submitted.")
+        if r["status"] not in ("Draft","Returned for Correction","Awaiting Documents"):
+            return QMessageBox.warning(self,"Invalid State",f"This permit cannot start the applicant workflow from its current status: {r['status']}.")
         if not r["permit_holder_employee_id"]:
-            return QMessageBox.warning(self,"Permit Holder ID Required","A permit holder ID number linked to a valid PTW / Permit to Work training record is required before submission.")
+            return QMessageBox.warning(self,"Permit Holder ID Required","A permit holder ID linked to valid PTW / Permit to Work training is required before submission.")
+        required_safety=[x.strip() for x in _s(r["safety_document_types"] if "safety_document_types" in r.keys() else "").split(";") if x.strip()]
+        required_certificates=[x.strip() for x in _s(r["supporting_document_types"] if "supporting_document_types" in r.keys() else "").split(";") if x.strip()]
+        if not required_safety:
+            return QMessageBox.warning(self,"Safety Document Checklist Required","Edit the application and list the safety documents required for this job before submitting.")
+        if not required_certificates:
+            return QMessageBox.warning(self,"Supporting Certificate Checklist Required","Edit the application and list applicable supporting certificates before submitting.")
+        if not r["location"] or not r["work_scope"] or not r["work_description"]:
+            return QMessageBox.warning(self,"Incomplete Application","Exact location, work scope and additional work description are required.")
         training_record=self.db.fetchone(
             """SELECT e.name,e.designation FROM employees e
                JOIN training_records tr ON tr.employee_db_id=e.id
                JOIN training_courses c ON c.id=tr.course_id
                WHERE lower(trim(COALESCE(e.employee_id,'')))=lower(trim(?))
-                 AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%'
-                      OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
+                 AND (lower(COALESCE(c.course_name,'')) LIKE '%ptw%' OR lower(COALESCE(c.course_name,'')) LIKE '%permit to work%')
                  AND (COALESCE(trim(tr.expiry_date),'')='' OR trim(tr.expiry_date)>=?)
                  AND lower(COALESCE(tr.verification_status,'Verified')) IN ('verified','approved','')
                  AND lower(COALESCE(tr.assessment_result,'Not Required')) IN ('pass','not required','')
@@ -14492,13 +14606,15 @@ class PTWModule(QWidget):
             (r["permit_holder_employee_id"],today())
         )
         if not training_record:
-            return QMessageBox.warning(self,"PTW Training Record Not Found",
-                f"PTW record for the user with ID {r['permit_holder_employee_id']} not found.\n\n"
-                "The permit application cannot be submitted without a valid PTW / Permit to Work training record.")
-        if not r["location"] or not r["work_scope"] or not r["work_description"]: return QMessageBox.warning(self,"Incomplete Application","Permit holder, exact location, scope and description are required.")
-        self.db.execute("UPDATE ptw_permits SET permit_holder=?,permit_holder_designation=? WHERE id=?",
-                        (safe(training_record["name"]),safe(training_record["designation"]),pid))
-        self._change_status(pid,"Submitted","Permit submitted for review. Permit holder verified against the Training Register PTW record. Work is not authorized.")
+            return QMessageBox.warning(self,"PTW Training Record Not Found",f"PTW record for the user with ID {r['permit_holder_employee_id']} not found.")
+        self.db.execute("UPDATE ptw_permits SET permit_holder=?,permit_holder_designation=?,status='Safety Documents Pending',updated_at=? WHERE id=?",
+                        (safe(training_record["name"]),safe(training_record["designation"]),_now(),pid))
+        self._event(pid,"Application submitted to Safety Documents stage",r["status"],"Safety Documents Pending","Permit holder training record verified; awaiting safety document attachments.")
+        self.db.conn.commit(); self.refresh_all(); self.tabs.setCurrentWidget(self.documents_tab)
+        self._refresh_combo_lists(); idx=self.doc_permit.findData(pid)
+        if idx>=0:self.doc_permit.setCurrentIndex(idx)
+        self._refresh_documents_for_selected_permit()
+        QMessageBox.information(self,"Safety Documents Stage",f"Permit {r['permit_number']} has moved to Safety Documents. Complete and submit that stage, then Supporting Certificates, before Permit Approval.")
 
     def _approval_dialog(self):
         pid=self._selected_id(); r=self._permit_row(pid)
@@ -14536,9 +14652,23 @@ class PTWModule(QWidget):
         self._event(pid,details.split(".")[0] or "Status changed",old,status,details)
         self.refresh_all()
 
+    def _certificate_stage_ready(self, permit_id):
+        permit = self._permit_row(permit_id)
+        if not permit:
+            QMessageBox.warning(self, "Permit Required", "Select a permit first.")
+            return False
+        if _s(permit["status"]).strip() != "Supporting Certificates Pending":
+            QMessageBox.warning(
+                self, "Previous Stage Required",
+                "Supporting Certificates can be completed only after the Safety Documents stage has been submitted."
+            )
+            return False
+        return True
+
     def _add_certificate(self):
         pid=self.cert_permit.currentData()
         if pid is None:return QMessageBox.warning(self,"Permit Required","Create a permit before adding a supporting certificate.")
+        if not self._certificate_stage_ready(pid): return
         number=self._permit_row(pid)["permit_number"]
         ref=f"{number}-CERT-{self.db.fetchone('SELECT COUNT(*) n FROM ptw_certificates WHERE permit_id=?',(pid,))['n']+1:02d}"
         now=_now(); self.db.execute("INSERT INTO ptw_certificates(certificate_ref,permit_id,certificate_type,status,responsible_person,valid_until,verification_status,comments,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",(ref,pid,self.cert_type.currentText(),self.cert_status.currentText(),self.cert_responsible.text().strip(),self.cert_valid_until.dateTime().toString("yyyy-MM-dd HH:mm"),self.cert_verification.currentText(),self.cert_comments.text().strip(),now,now))
@@ -14554,6 +14684,7 @@ class PTWModule(QWidget):
         cert = self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?", (cid,))
         if not cert:
             return
+        if not self._certificate_stage_ready(self.cert_permit.currentData() or cert["permit_id"]): return
         chosen_type = self.cert_type.currentText().strip() or _s(cert["certificate_type"])
         self.db.execute(
             "UPDATE ptw_certificates SET permit_id=?,certificate_type=?,status=?,responsible_person=?,valid_until=?,verification_status=?,comments=?,updated_at=? WHERE id=?",
@@ -14659,6 +14790,7 @@ class PTWModule(QWidget):
         cert = self.db.fetchone("SELECT * FROM ptw_certificates WHERE id=?", (cid,))
         if not cert:
             return
+        if not self._certificate_stage_ready(cert["permit_id"]): return
         path = self.cert_file_path.text().strip() if hasattr(self, "cert_file_path") else ""
         if not path:
             path, _ = QFileDialog.getOpenFileName(self, "Select Certificate / Document File")
@@ -14808,6 +14940,9 @@ class PTWModule(QWidget):
     def _add_document(self):
         pid=self.doc_permit.currentData(); path=self.doc_path.text().strip()
         if not pid:return QMessageBox.warning(self,"Permit Required","Select a permit.")
+        permit=self._permit_row(pid)
+        if not permit or _s(permit["status"]).strip() not in ("Safety Documents Pending", "Returned for Correction", "Awaiting Documents"):
+            return QMessageBox.warning(self,"Application Stage Required","Safety document attachments can be added after the New Permit Application has been submitted to this stage.")
         if not path or not Path(path).is_file():return QMessageBox.warning(self,"File Required","Choose an existing file.")
         dest=self._copy_attachment(path,pid); self.db.execute("INSERT INTO ptw_documents(permit_id,document_type,file_path,description,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",(pid,self.doc_type.currentText(),str(dest),self.doc_desc.text().strip(),self._actor(),_now())); self._event(pid,"Safety document attached",details=self.doc_type.currentText()+": "+Path(path).name,attachment=str(dest)); self.doc_path.clear(); self.refresh_all()
 
