@@ -1877,6 +1877,16 @@ def generate_observation_card_docx(observation_ids, path):
     Visible ticks on selected type/category/priority/status, logo, document no.,
     embedded evidence. Strict Word-safe OOXML.
     """
+    def card_xml_safe(value):
+        text = safe(value)
+        return "".join(
+            ch for ch in text
+            if ch in "\\t\\n\\r"
+            or 0x20 <= ord(ch) <= 0xD7FF
+            or 0xE000 <= ord(ch) <= 0xFFFD
+            or 0x10000 <= ord(ch) <= 0x10FFFF
+        )
+
     if isinstance(observation_ids, (int, str)):
         observation_ids = [int(observation_ids)]
     ids = []
@@ -1923,13 +1933,17 @@ def generate_observation_card_docx(observation_ids, path):
 
     def widths(table, inch_list):
         table.autofit = False
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for col_index, width in enumerate(inch_list):
+            if col_index < len(table.columns):
+                table.columns[col_index].width = Inches(width)
         for row in table.rows:
             for i, cell in enumerate(row.cells):
                 if i < len(inch_list):
                     cell.width = Inches(inch_list[i])
 
     def tick(selected, value):
-        return "[X]" if safe(selected).strip().casefold() == safe(value).strip().casefold() else "[ ]"
+        return "✓" if safe(selected).strip().casefold() == safe(value).strip().casefold() else "□"
 
     def write_cell(cell, text, size=8, bold=False, center=False, white=False):
         cell.text = ""
@@ -1938,7 +1952,7 @@ def generate_observation_card_docx(observation_ids, path):
         p.paragraph_format.space_before = Pt(0)
         if center:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        run = p.add_run(xml_safe(text) if text is not None else "")
+        run = p.add_run(card_xml_safe(text) if text is not None else "")
         run.font.size = Pt(size)
         run.bold = bold
         if white:
@@ -1961,9 +1975,10 @@ def generate_observation_card_docx(observation_ids, path):
 
         # ---- Header: logo | title | document number (full width ~10.8") ----
         header = doc.add_table(rows=1, cols=3)
-        widths(header, [1.50, 7.40, 1.90])
+        widths(header, [1.45, 7.45, 1.89])
         for c in header.rows[0].cells:
             border(c, "17365D", "12")
+            _set_docx_cell_margins(c, 35, 45, 35, 45)
             c.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
 
         logo_cell = header.rows[0].cells[0]
@@ -1997,7 +2012,7 @@ def generate_observation_card_docx(observation_ids, path):
             pass
         p2 = title_cell.add_paragraph()
         p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r2 = p2.add_run(xml_safe(company_name()))
+        r2 = p2.add_run(card_xml_safe(company_name()))
         r2.bold = True
         r2.font.size = Pt(9)
         try:
@@ -2008,7 +2023,7 @@ def generate_observation_card_docx(observation_ids, path):
         if project_name:
             p3 = title_cell.add_paragraph()
             p3.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            r3 = p3.add_run("Project: " + xml_safe(project_name))
+            r3 = p3.add_run("Project: " + card_xml_safe(project_name))
             r3.font.size = Pt(8)
             try:
                 r3.font.color.rgb = RGBColor(190, 205, 220)
@@ -2030,7 +2045,7 @@ def generate_observation_card_docx(observation_ids, path):
             pass
         p2 = doc_cell.add_paragraph()
         p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r2 = p2.add_run(xml_safe(row["number"]))
+        r2 = p2.add_run(card_xml_safe(row["number"]))
         r2.bold = True
         r2.font.size = Pt(11)
         try:
@@ -2040,7 +2055,7 @@ def generate_observation_card_docx(observation_ids, path):
 
         # ---- Equal two-column body (NO nested tables) ----
         body = doc.add_table(rows=1, cols=2)
-        widths(body, [5.35, 5.35])
+        widths(body, [5.395, 5.395])
         left = body.rows[0].cells[0]
         right = body.rows[0].cells[1]
         for cell in (left, right):
@@ -2072,10 +2087,10 @@ def generate_observation_card_docx(observation_ids, path):
         for label, value in left_fields:
             p = left.add_paragraph()
             p.paragraph_format.space_after = Pt(1)
-            r1 = p.add_run(xml_safe(label) + ": ")
+            r1 = p.add_run(card_xml_safe(label) + ": ")
             r1.bold = True
             r1.font.size = Pt(8)
-            r2 = p.add_run(xml_safe(value))
+            r2 = p.add_run(card_xml_safe(value))
             r2.font.size = Pt(8)
 
         p = left.add_paragraph()
@@ -2084,7 +2099,7 @@ def generate_observation_card_docx(observation_ids, path):
         r.bold = True
         r.font.size = Pt(8)
         p = left.add_paragraph()
-        r = p.add_run(xml_safe(row["observation"]) or "No observation detail recorded.")
+        r = p.add_run(card_xml_safe(row["observation"]) or "No observation detail recorded.")
         r.font.size = Pt(8)
 
         p = left.add_paragraph()
@@ -2093,7 +2108,7 @@ def generate_observation_card_docx(observation_ids, path):
         r.bold = True
         r.font.size = Pt(8)
         p = left.add_paragraph()
-        r = p.add_run(xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
+        r = p.add_run(card_xml_safe(format_corrective_actions_display(row)) or "No action recorded.")
         r.font.size = Pt(8)
 
         p = left.add_paragraph()
@@ -2116,13 +2131,13 @@ def generate_observation_card_docx(observation_ids, path):
                 names.append(fp.name)
                 if shown < 3 and fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
                     try:
-                        img_p.add_run().add_picture(str(fp), width=Inches(1.10))
+                        img_p.add_run().add_picture(str(fp), width=Inches(0.92))
                         img_p.add_run("  ")
                         shown += 1
                     except Exception:
                         pass
             np = left.add_paragraph()
-            r = np.add_run("Files: " + "; ".join(xml_safe(n) for n in names))
+            r = np.add_run("Files: " + "; ".join(card_xml_safe(n) for n in names))
             r.font.size = Pt(7)
 
         # RIGHT content as paragraphs only (ticks visible with [X]/[ ])
@@ -2150,9 +2165,10 @@ def generate_observation_card_docx(observation_ids, path):
                 for j, part in enumerate(buf):
                     run = line.add_run(part + ("    " if j == 0 and len(buf) > 1 else ""))
                     run.font.size = Pt(7)
-                    # bold selected
-                    if part.startswith("[X]"):
+                    run.font.name = "Arial"
+                    if part.startswith("✓"):
                         run.bold = True
+                        run.font.color.rgb = __import__("docx").shared.RGBColor(0, 100, 55)
                 buf = []
 
         p = right.add_paragraph()
@@ -2165,7 +2181,7 @@ def generate_observation_card_docx(observation_ids, path):
         for i, cat in enumerate(CATEGORIES):
             mark = tick(selected_cat, cat)
             buf.append(f"{mark} {cat}")
-            if len(buf) == 3 or i == len(CATEGORIES) - 1:
+            if len(buf) == 2 or i == len(CATEGORIES) - 1:
                 line = right.add_paragraph()
                 line.paragraph_format.space_after = Pt(0)
                 text_line = "   ".join(buf)
@@ -2174,7 +2190,7 @@ def generate_observation_card_docx(observation_ids, path):
                 buf = []
         if selected_sub:
             p = right.add_paragraph()
-            r = p.add_run("Subcategory: " + xml_safe(selected_sub))
+            r = p.add_run("Subcategory: " + card_xml_safe(selected_sub))
             r.bold = True
             r.font.size = Pt(8)
 
@@ -2188,7 +2204,7 @@ def generate_observation_card_docx(observation_ids, path):
             mark = tick(selected_priority, opt)
             run = line.add_run(f"{mark} {opt}   ")
             run.font.size = Pt(8)
-            if mark == "[X]":
+            if mark == "✓":
                 run.bold = True
 
         p = right.add_paragraph()
@@ -2196,17 +2212,25 @@ def generate_observation_card_docx(observation_ids, path):
         r = p.add_run("Status")
         r.bold = True
         r.font.size = Pt(8)
-        line = right.add_paragraph()
-        for opt in STATUSES:
+        status_buf = []
+        for i, opt in enumerate(STATUSES):
             mark = tick(selected_status, opt)
-            run = line.add_run(f"{mark} {opt}   ")
-            run.font.size = Pt(7.5)
-            if mark == "[X]":
-                run.bold = True
+            status_buf.append((mark, opt))
+            if len(status_buf) == 2 or i == len(STATUSES) - 1:
+                line = right.add_paragraph()
+                line.paragraph_format.space_after = Pt(0)
+                for mark, label in status_buf:
+                    run = line.add_run(f"{mark} {label}    ")
+                    run.font.size = Pt(7.5)
+                    run.font.name = "Arial"
+                    if mark == "✓":
+                        run.bold = True
+                        run.font.color.rgb = __import__("docx").shared.RGBColor(0, 100, 55)
+                status_buf = []
 
         # ---- Sign-off strip (top-level only) ----
         sig = doc.add_table(rows=2, cols=3)
-        widths(sig, [3.60, 3.60, 3.60])
+        widths(sig, [3.596, 3.596, 3.598])
         for i, label in enumerate(["Originator / Observer", "Supervisor / Reviewer", "HSE Close-out"]):
             h = sig.rows[0].cells[i]
             b = sig.rows[1].cells[i]
