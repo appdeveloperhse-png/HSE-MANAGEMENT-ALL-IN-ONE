@@ -13263,6 +13263,10 @@ class AspectImpactModule(QWidget):
             residual_probability INTEGER DEFAULT 0,
             residual_score INTEGER DEFAULT 0,
             residual_significance TEXT DEFAULT '',
+            operating_condition TEXT DEFAULT 'Normal',
+            environmental_category TEXT DEFAULT 'Other',
+            legal_obligation TEXT DEFAULT 'No',
+            evidence TEXT DEFAULT '',
             responsible TEXT DEFAULT '',
             target_date TEXT DEFAULT '',
             status TEXT DEFAULT 'Open',
@@ -13272,6 +13276,17 @@ class AspectImpactModule(QWidget):
         CREATE INDEX IF NOT EXISTS idx_aspect_items_register
             ON aspect_register_items(register_id);
         """)
+        # Additive migration: only the Aspect & Impact module's own table is changed.
+        existing_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(aspect_register_items)").fetchall()}
+        aspect_migrations = {
+            "operating_condition": "TEXT DEFAULT 'Normal'",
+            "environmental_category": "TEXT DEFAULT 'Other'",
+            "legal_obligation": "TEXT DEFAULT 'No'",
+            "evidence": "TEXT DEFAULT ''",
+        }
+        for col, definition in aspect_migrations.items():
+            if col not in existing_cols:
+                self.db.conn.execute(f"ALTER TABLE aspect_register_items ADD COLUMN {col} {definition}")
         self.db.conn.commit()
 
     # ------------------------------------------------------------------ UI
@@ -13282,7 +13297,7 @@ class AspectImpactModule(QWidget):
         intro = QLabel(
             "Select the organisation / project activities below. The Aspect & Impact Register is generated "
             "automatically from the ISO 14001 activity library (aspect, impact, regulatory reference, "
-            "severity, probability, existing controls). Add any site-specific additional controls, then save."
+            "initial/residual assessment, operating condition, legal obligations and evidence. Review every generated row for site relevance before approval."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#334; padding:4px 2px 8px 2px;")
@@ -13390,11 +13405,14 @@ class AspectImpactModule(QWidget):
         self.register_summary.setStyleSheet("color:#17365D; font-weight:bold; padding:4px;")
         layout.addWidget(self.register_summary)
 
-        self.items_table = QTableWidget(0, 12)
+        self.items_table = QTableWidget(0, 18)
         self.items_table.setHorizontalHeaderLabels([
             "Activity", "Environmental Aspect", "Impact", "Regulatory / Other Requirements",
-            "Sev", "Prob", "Score", "Significance",
-            "Existing Controls", "Additional Controls (user)", "Responsible", "Status"
+            "Condition (Normal/Abnormal/Emergency)", "Environmental Category",
+            "Initial Sev", "Initial Prob", "Initial Score", "Initial Significance",
+            "Legal / Other Obligation?", "Existing Controls", "Additional Controls",
+            "Residual Sev", "Residual Prob", "Residual Score / Significance",
+            "Responsible", "Target Date / Evidence / Status"
         ])
         self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.items_table.horizontalHeader().setStretchLastSection(True)
@@ -13427,9 +13445,9 @@ class AspectImpactModule(QWidget):
         layout.addLayout(actions)
 
         legend = QLabel(
-            "Significance: Score = Severity × Probability.  "
-            "≥12 Significant (red) · 6–11 Moderate (amber) · <6 Low (green).  "
-            "Severity 1–5 · Probability 1–5. Additional Controls are editable by the user."
+            "Initial and residual scores = Severity × Probability (1–25). Initial score: ≥12 Significant, 6–11 Moderate, <6 Low. "
+            "A legal/other compliance obligation is flagged Significant for management attention regardless of score. "
+            "Use residual severity/probability after controls; verify the organisation's documented criteria before approval."
         )
         legend.setWordWrap(True)
         legend.setStyleSheet("color:#555; padding-top:4px;")
@@ -13484,174 +13502,133 @@ class AspectImpactModule(QWidget):
         for i in range(self.activity_list.count()):
             self.activity_list.item(i).setCheckState(Qt.CheckState.Unchecked)
 
-    def _set_significance_cell(self, row, score):
-        sig = _aspect_significance(score)
+    def _set_significance_cell(self, row, score, legal="No", residual=False):
+        sig = "Significant" if str(legal).strip().lower() in ("yes", "y", "true", "1") else _aspect_significance(score)
+        col = 15 if residual else 9
         item = QTableWidgetItem(sig)
         item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
         item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if sig == "Significant":
-            item.setBackground(QColor("#F8D7DA"))
-            item.setForeground(QColor("#721C24"))
+            item.setBackground(QColor("#F8D7DA")); item.setForeground(QColor("#721C24"))
         elif sig == "Moderate":
-            item.setBackground(QColor("#FFF3CD"))
-            item.setForeground(QColor("#856404"))
+            item.setBackground(QColor("#FFF3CD")); item.setForeground(QColor("#856404"))
         else:
-            item.setBackground(QColor("#D4EDDA"))
-            item.setForeground(QColor("#155724"))
-        self.items_table.setItem(row, 7, item)
+            item.setBackground(QColor("#D4EDDA")); item.setForeground(QColor("#155724"))
+        self.items_table.setItem(row, col, item)
 
     def _recalc_row_score(self, row):
-        try:
-            sev = int(self.items_table.item(row, 4).text()) if self.items_table.item(row, 4) else 1
-            prob = int(self.items_table.item(row, 5).text()) if self.items_table.item(row, 5) else 1
-        except Exception:
-            sev, prob = 1, 1
-        sev = max(1, min(5, sev))
-        prob = max(1, min(5, prob))
+        def number(col, default=1):
+            try: return max(1, min(5, int(self.items_table.item(row, col).text())))
+            except Exception: return default
+        sev, prob = number(6), number(7)
         score = sev * prob
-        for col, val in ((4, sev), (5, prob), (6, score)):
-            it = QTableWidgetItem(str(val))
-            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.items_table.setItem(row, col, it)
-        self._set_significance_cell(row, score)
+        for col, val in ((6, sev), (7, prob), (8, score)):
+            self.items_table.setItem(row, col, QTableWidgetItem(str(val)))
+        legal = self.items_table.item(row, 10).text() if self.items_table.item(row, 10) else "No"
+        self._set_significance_cell(row, score, legal)
+        rsev, rprob = number(13), number(14)
+        rscore = rsev * rprob
+        self.items_table.setItem(row, 15, QTableWidgetItem(str(rscore)))
+        # Residual significance is a separate cell label in the same column text.
+        residual_sig = "Significant" if legal.strip().lower() in ("yes", "y", "true", "1") else _aspect_significance(rscore)
+        self.items_table.item(row, 15).setText(f"{rscore} / {residual_sig}")
 
     def _append_item_row(self, data):
-        r = self.items_table.rowCount()
-        self.items_table.insertRow(r)
-        sev = int(data.get("severity") or 1)
-        prob = int(data.get("probability") or 1)
-        score = _aspect_risk_score(sev, prob)
+        r = self.items_table.rowCount(); self.items_table.insertRow(r)
+        sev = max(1, min(5, int(data.get("severity") or 1)))
+        prob = max(1, min(5, int(data.get("probability") or 1)))
+        score = sev * prob
+        legal = data.get("legal_obligation", "No") or "No"
+        rsev = max(1, min(5, int(data.get("residual_severity") or sev)))
+        rprob = max(1, min(5, int(data.get("residual_probability") or prob)))
+        rscore = rsev * rprob
         values = [
-            data.get("activity", ""),
-            data.get("aspect", ""),
-            data.get("impact", ""),
-            data.get("regulatory", ""),
-            str(sev),
-            str(prob),
-            str(score),
-            _aspect_significance(score),
-            data.get("existing_controls") or data.get("controls") or "",
-            data.get("additional_controls", ""),
-            data.get("responsible", ""),
-            data.get("status", "Open"),
+            data.get("activity", ""), data.get("aspect", ""), data.get("impact", ""), data.get("regulatory", ""),
+            data.get("operating_condition", "Normal"), data.get("environmental_category", "Other"),
+            str(sev), str(prob), str(score), ("Significant" if str(legal).lower() == "yes" else _aspect_significance(score)),
+            legal, data.get("existing_controls") or data.get("controls") or "", data.get("additional_controls", ""),
+            str(rsev), str(rprob), f"{rscore} / {'Significant' if str(legal).lower() == 'yes' else _aspect_significance(rscore)}",
+            data.get("responsible", ""), data.get("target_date", ""),
         ]
+        # Evidence and Status are kept as dedicated extra fields in the last column using clear labels.
+        values[17] = f"Target: {data.get('target_date','')} | Evidence: {data.get('evidence','')} | Status: {data.get('status','Open')}"
         for c, v in enumerate(values):
             item = QTableWidgetItem(str(v))
-            if c in (4, 5, 6, 7):
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if c in (6, 7):
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.items_table.setItem(r, c, item)
-        self._set_significance_cell(r, score)
-        self.items_table.setRowHeight(r, 56)
+            if c in (6,7,8,9,13,14,15): item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if c in (8,9,15): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(r,c,item)
+        self._set_significance_cell(r, score, legal)
+        self.items_table.setRowHeight(r, 64)
 
     def _generate_from_activities(self):
         activities = self._selected_activities()
         if not activities:
-            QMessageBox.warning(self, "Activities Required", "Select at least one activity from the list.")
-            return
+            QMessageBox.warning(self, "Activities Required", "Select at least one activity from the list."); return
         if not self.reg_name.text().strip():
-            self.reg_name.setText(
-                f"Aspect & Impact Register — {', '.join(activities[:2])}"
-                + ("…" if len(activities) > 2 else "")
-            )
-        self.items_table.setRowCount(0)
-        count = 0
+            self.reg_name.setText(f"Aspect & Impact Register — {', '.join(activities[:2])}" + ("…" if len(activities)>2 else ""))
+        self.items_table.setRowCount(0); count = 0
+        category_map = {
+            "emission": "Air", "dust": "Air", "fume": "Air", "voc": "Air", "exhaust": "Air",
+            "noise": "Noise", "vibration": "Noise", "waste": "Waste", "slag": "Waste", "scrap": "Waste",
+            "water": "Water", "runoff": "Water", "wash water": "Water", "spill": "Soil / Water",
+            "leak": "Soil / Water", "soil": "Soil", "fuel": "Resources", "energy": "Resources",
+            "electricity": "Resources", "consumption": "Resources"
+        }
         for activity in activities:
             for it in ASPECT_ACTIVITIES.get(activity, []):
-                self._append_item_row({
-                    "activity": activity,
-                    "aspect": it["aspect"],
-                    "impact": it["impact"],
-                    "regulatory": it["regulatory"],
-                    "severity": it["severity"],
-                    "probability": it["probability"],
-                    "existing_controls": it["controls"],
-                    "additional_controls": "",
-                    "responsible": "",
-                    "status": "Open",
-                })
+                aspect = it["aspect"]
+                low = aspect.lower()
+                category = next((v for k,v in category_map.items() if k in low), "Other")
+                condition = "Emergency" if any(x in low for x in ("spill", "leak", "release", "rupture")) else "Normal"
+                self._append_item_row({"activity":activity,"aspect":aspect,"impact":it["impact"],"regulatory":it["regulatory"],
+                    "severity":it["severity"],"probability":it["probability"],"existing_controls":it["controls"],
+                    "operating_condition":condition,"environmental_category":category,"residual_severity":it["severity"],
+                    "residual_probability":it["probability"],"status":"Open"})
                 count += 1
-        self.current_register_id = None
-        self._update_summary_label(count, activities)
-        self.tabs.setCurrentIndex(1)
-        QMessageBox.information(
-            self, "Register Generated",
-            f"Generated {count} aspect/impact rows from {len(activities)} activit"
-            f"{'y' if len(activities) == 1 else 'ies'}.\n\n"
-            "Review the register, enter any Additional Controls, then click Save Register."
-        )
+        self.current_register_id = None; self._update_summary_label(count, activities); self.tabs.setCurrentIndex(1)
+        QMessageBox.information(self,"Register Generated",f"Generated {count} rows from {len(activities)} activities. Review operating condition/category, legal obligations, residual scores, controls and evidence before saving.")
 
     def _update_summary_label(self, count=None, activities=None):
-        if count is None:
-            count = self.items_table.rowCount()
+        if count is None: count = self.items_table.rowCount()
         name = self.reg_name.text().strip() or "(unnamed)"
-        sig = 0
-        for r in range(self.items_table.rowCount()):
-            it = self.items_table.item(r, 7)
-            if it and it.text() == "Significant":
-                sig += 1
-        act_txt = ""
-        if activities:
-            act_txt = f" | Activities: {', '.join(activities)}"
-        self.register_summary.setText(
-            f"{name}  |  Rows: {count}  |  Significant aspects: {sig}{act_txt}"
-        )
+        sig = sum(1 for r in range(self.items_table.rowCount()) if self.items_table.item(r,9) and self.items_table.item(r,9).text()=="Significant")
+        act_txt = f" | Activities: {', '.join(activities)}" if activities else ""
+        self.register_summary.setText(f"{name} | Rows: {count} | Significant aspects: {sig}{act_txt}")
 
     def _add_custom_row(self):
-        self._append_item_row({
-            "activity": "Custom",
-            "aspect": "",
-            "impact": "",
-            "regulatory": "",
-            "severity": 3,
-            "probability": 3,
-            "existing_controls": "",
-            "additional_controls": "",
-            "responsible": "",
-            "status": "Open",
-        })
+        self._append_item_row({"activity":"Custom","severity":3,"probability":3,"residual_severity":3,"residual_probability":3})
         self._update_summary_label()
 
     def _delete_selected_row(self):
         rows = sorted({i.row() for i in self.items_table.selectedIndexes()}, reverse=True)
-        if not rows:
-            QMessageBox.information(self, "Select Row", "Select one or more rows to delete.")
-            return
-        for r in rows:
-            self.items_table.removeRow(r)
+        if not rows: QMessageBox.information(self,"Select Row","Select one or more rows to delete."); return
+        for r in rows: self.items_table.removeRow(r)
         self._update_summary_label()
 
     def _collect_items_from_table(self):
-        items = []
+        items=[]
         for r in range(self.items_table.rowCount()):
             def cell(c):
-                it = self.items_table.item(r, c)
-                return it.text().strip() if it else ""
-            try:
-                sev = max(1, min(5, int(cell(4) or 1)))
-            except Exception:
-                sev = 1
-            try:
-                prob = max(1, min(5, int(cell(5) or 1)))
-            except Exception:
-                prob = 1
-            score = sev * prob
-            items.append({
-                "activity": cell(0),
-                "aspect": cell(1),
-                "impact": cell(2),
-                "regulatory": cell(3),
-                "severity": sev,
-                "probability": prob,
-                "risk_score": score,
-                "significance": _aspect_significance(score),
-                "existing_controls": cell(8),
-                "additional_controls": cell(9),
-                "responsible": cell(10),
-                "status": cell(11) or "Open",
-                "sort_order": r,
-            })
+                it=self.items_table.item(r,c); return it.text().strip() if it else ""
+            def num(c,default=1):
+                try: return max(1,min(5,int(cell(c))))
+                except Exception: return default
+            tail=cell(17)
+            def tail_value(label):
+                marker=label+":"
+                if marker not in tail: return ""
+                return tail.split(marker,1)[1].split("|",1)[0].strip()
+            sev,prob=num(6),num(7); rsev,rprob=num(13),num(14)
+            legal=cell(10) or "No"
+            items.append({"activity":cell(0),"aspect":cell(1),"impact":cell(2),"regulatory":cell(3),
+                "operating_condition":cell(4) or "Normal","environmental_category":cell(5) or "Other",
+                "severity":sev,"probability":prob,"risk_score":sev*prob,
+                "significance":"Significant" if legal.lower()=="yes" else _aspect_significance(sev*prob),
+                "legal_obligation":legal,"existing_controls":cell(11),"additional_controls":cell(12),
+                "residual_severity":rsev,"residual_probability":rprob,"residual_score":rsev*rprob,
+                "residual_significance":"Significant" if legal.lower()=="yes" else _aspect_significance(rsev*rprob),
+                "responsible":cell(16),"target_date":tail_value("Target"),"evidence":tail_value("Evidence"),
+                "status":tail_value("Status") or "Open","sort_order":r})
         return items
 
     def _save_register(self):
@@ -13702,13 +13679,17 @@ class AspectImpactModule(QWidget):
                 """INSERT INTO aspect_register_items(
                     register_id, activity, aspect, impact, regulatory, severity, probability,
                     risk_score, significance, existing_controls, additional_controls,
-                    responsible, status, sort_order
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    residual_severity, residual_probability, residual_score, residual_significance,
+                    operating_condition, environmental_category, legal_obligation, evidence,
+                    responsible, target_date, status, sort_order
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     rid, it["activity"], it["aspect"], it["impact"], it["regulatory"],
                     it["severity"], it["probability"], it["risk_score"], it["significance"],
-                    it["existing_controls"], it["additional_controls"], it["responsible"],
-                    it["status"], it["sort_order"],
+                    it["existing_controls"], it["additional_controls"], it["residual_severity"],
+                    it["residual_probability"], it["residual_score"], it["residual_significance"],
+                    it["operating_condition"], it["environmental_category"], it["legal_obligation"],
+                    it["evidence"], it["responsible"], it["target_date"], it["status"], it["sort_order"],
                 ),
             )
         self.db.conn.commit()
@@ -13771,12 +13752,12 @@ class AspectImpactModule(QWidget):
                 "aspect": it["aspect"],
                 "impact": it["impact"],
                 "regulatory": it["regulatory"],
-                "severity": it["severity"],
-                "probability": it["probability"],
-                "existing_controls": it["existing_controls"],
-                "additional_controls": it["additional_controls"],
-                "responsible": it["responsible"],
-                "status": it["status"],
+                "severity": it["severity"], "probability": it["probability"],
+                "existing_controls": it["existing_controls"], "additional_controls": it["additional_controls"],
+                "residual_severity": it["residual_severity"], "residual_probability": it["residual_probability"],
+                "operating_condition": it["operating_condition"], "environmental_category": it["environmental_category"],
+                "legal_obligation": it["legal_obligation"], "evidence": it["evidence"],
+                "target_date": it["target_date"], "responsible": it["responsible"], "status": it["status"],
             })
         # Sync activity checkboxes to loaded activities
         loaded_acts = {safe(it["activity"]) for it in items}
@@ -13848,7 +13829,7 @@ class AspectImpactModule(QWidget):
             ws.title = "Aspect & Impact Register"
             title = self.reg_name.text().strip() or "Aspect & Impact Register"
             ws.append([title])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=12)
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=22)
             ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
             ws["A1"].fill = PatternFill("solid", fgColor="17365D")
             ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
@@ -13865,9 +13846,10 @@ class AspectImpactModule(QWidget):
             ])
             ws.append([])
             headers = [
-                "S.No.", "Activity", "Environmental Aspect", "Impact",
-                "Regulatory / Other Requirements", "Severity", "Probability", "Risk Score",
-                "Significance", "Existing Controls", "Additional Controls", "Responsible", "Status"
+                "S.No.", "Activity", "Environmental Aspect", "Impact", "Regulatory / Other Requirements",
+                "Operating Condition", "Environmental Category", "Initial Severity", "Initial Probability", "Initial Score",
+                "Initial Significance", "Legal / Other Obligation", "Existing Controls", "Additional Controls",
+                "Residual Severity", "Residual Probability", "Residual Score", "Residual Significance", "Responsible", "Target Date", "Evidence", "Status"
             ]
             ws.append(headers)
             headfill = PatternFill("solid", fgColor="D9EAF7")
@@ -13879,19 +13861,20 @@ class AspectImpactModule(QWidget):
                 cell.border = Border(bottom=thin)
             for i, it in enumerate(items, 1):
                 ws.append([
-                    i, it["activity"], it["aspect"], it["impact"], it["regulatory"],
-                    it["severity"], it["probability"], it["risk_score"], it["significance"],
-                    it["existing_controls"], it["additional_controls"], it["responsible"], it["status"],
+                    i, it["activity"], it["aspect"], it["impact"], it["regulatory"], it["operating_condition"],
+                    it["environmental_category"], it["severity"], it["probability"], it["risk_score"], it["significance"],
+                    it["legal_obligation"], it["existing_controls"], it["additional_controls"], it["residual_severity"],
+                    it["residual_probability"], it["residual_score"], it["residual_significance"], it["responsible"],
+                    it["target_date"], it["evidence"], it["status"],
                 ])
                 sig = it["significance"]
                 fill = "F8D7DA" if sig == "Significant" else ("FFF3CD" if sig == "Moderate" else "D4EDDA")
                 for cell in ws[ws.max_row]:
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
-                    if cell.column == 9:
-                        cell.fill = PatternFill("solid", fgColor=fill)
+                    if cell.column in (11,18): cell.fill = PatternFill("solid", fgColor=fill)
             ws.freeze_panes = "A5"
             from openpyxl.utils import get_column_letter
-            widths = [6, 22, 36, 36, 32, 8, 8, 10, 12, 36, 28, 16, 10]
+            widths = [6,22,36,36,32,16,20,12,12,12,16,18,34,30,12,12,12,18,18,14,30,12]
             for i, w in enumerate(widths, 1):
                 ws.column_dimensions[get_column_letter(i)].width = w
             # Summary sheet
@@ -13949,20 +13932,16 @@ class AspectImpactModule(QWidget):
                 add_docx_boxed_section(doc, "Scope / Notes", self.reg_notes.toPlainText().strip(), 8)
 
             doc.add_heading("Aspect & Impact Register", level=2)
-            headers = [
-                "S.No.", "Activity", "Aspect", "Impact", "Regulatory",
-                "Sev", "Prob", "Score", "Sig.", "Existing Controls", "Additional Controls"
-            ]
+            headers = ["S.No.","Activity","Aspect","Impact","Regulatory","Condition","Category","Initial S","Initial P","Initial Score","Initial Sig.","Legal?","Existing Controls","Additional Controls","Residual S","Residual P","Residual Score","Residual Sig.","Responsible","Target Date","Evidence","Status"]
             table = doc.add_table(rows=1, cols=len(headers))
             for i, h in enumerate(headers):
                 table.rows[0].cells[i].text = h
             for i, it in enumerate(items, 1):
                 cells = table.add_row().cells
-                vals = [
-                    str(i), it["activity"], it["aspect"], it["impact"], it["regulatory"],
-                    str(it["severity"]), str(it["probability"]), str(it["risk_score"]),
-                    it["significance"], it["existing_controls"], it["additional_controls"],
-                ]
+                vals = [str(i),it["activity"],it["aspect"],it["impact"],it["regulatory"],it["operating_condition"],it["environmental_category"],
+                    str(it["severity"]),str(it["probability"]),str(it["risk_score"]),it["significance"],it["legal_obligation"],
+                    it["existing_controls"],it["additional_controls"],str(it["residual_severity"]),str(it["residual_probability"]),
+                    str(it["residual_score"]),it["residual_significance"],it["responsible"],it["target_date"],it["evidence"],it["status"]]
                 for c, v in enumerate(vals):
                     cells[c].text = xml_safe(v)
             style_docx_table(table, header=True, font_size=7)
