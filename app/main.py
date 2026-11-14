@@ -7,6 +7,9 @@ import zipfile
 import logging
 import json
 import re
+import hashlib
+import hmac
+import secrets
 import html
 import calendar
 from copy import copy
@@ -772,6 +775,180 @@ class Database:
 
 
 db = Database()
+
+
+# ============================================================
+# AUTHENTICATION AND ROLE-BASED ACCESS CONTROL
+# ============================================================
+ACCESS_MODULES = ["Dashboard", "HSE Inspection Register", "Incident Investigation", "Audit Register",
+                  "CAPA Tracking Register", "Permit to Work (PTW)", "Training", "Manpower Details",
+                  "ISO 14001 Aspect & Impact", "Reports", "Master Data", "Settings"]
+ACCESS_ACTIONS = ["view", "create", "edit", "review", "approve", "delete", "export", "manage"]
+ACCESS_ROLES = ["Admin", "HSE Manager", "HSE Supervisor", "HSE Lead", "HSE Officer", "Trained Auditor",
+                "HSE Trainer", "Environmental Officer", "PTW Holder", "PTW Reviewer", "PTW Approver",
+                "Manpower Data Entry"]
+
+def empty_permissions():
+    return {m: {a: False for a in ACCESS_ACTIONS} for m in ACCESS_MODULES}
+
+def role_permissions(role):
+    p = empty_permissions()
+    def grant(modules, *actions):
+        for m in modules:
+            for a in actions: p[m][a] = True
+    grant(["Dashboard"], "view")
+    if role == "Admin": return {m: {a: True for a in ACCESS_ACTIONS} for m in ACCESS_MODULES}
+    if role == "HSE Manager":
+        grant(ACCESS_MODULES, "view", "export")
+        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register",
+               "Permit to Work (PTW)", "Training", "Manpower Details", "ISO 14001 Aspect & Impact"], "review", "approve")
+    elif role in ("HSE Supervisor", "HSE Lead"):
+        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register",
+               "Permit to Work (PTW)", "Manpower Details", "Reports"], "view", "export")
+        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register"], "edit", "review")
+        grant(["Permit to Work (PTW)"], "review")
+    elif role == "HSE Officer":
+        grant(["HSE Inspection Register", "Incident Investigation", "CAPA Tracking Register", "Permit to Work (PTW)",
+               "Manpower Details", "Reports"], "view", "export")
+        grant(["HSE Inspection Register", "Incident Investigation", "CAPA Tracking Register"], "create", "edit")
+        grant(["Training"], "view")
+    elif role == "Trained Auditor":
+        grant(["Audit Register"], "view", "create", "edit", "review", "export")
+        grant(["Reports"], "view", "export")
+    elif role == "HSE Trainer":
+        grant(["Training"], "view", "create", "edit", "export")
+        grant(["Reports"], "view", "export")
+    elif role == "Environmental Officer":
+        grant(["ISO 14001 Aspect & Impact"], "view", "create", "edit", "export")
+        grant(["Reports"], "view", "export")
+    elif role == "PTW Holder": grant(["Permit to Work (PTW)"], "view", "create", "edit")
+    elif role == "PTW Reviewer": grant(["Permit to Work (PTW)"], "view", "review")
+    elif role == "PTW Approver": grant(["Permit to Work (PTW)"], "view", "review", "approve")
+    elif role == "Manpower Data Entry": grant(["Manpower Details"], "view", "create", "edit")
+    return p
+
+def make_password_hash(password, salt=None):
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
+    return salt.hex(), digest.hex()
+
+def ensure_access_schema():
+    db.conn.executescript("""
+    CREATE TABLE IF NOT EXISTS app_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      full_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'HSE Officer', salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1,
+      active INTEGER NOT NULL DEFAULT 1, permissions_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_login TEXT NOT NULL DEFAULT '');
+    CREATE TABLE IF NOT EXISTS user_activity_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, action TEXT NOT NULL,
+      details TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+    """)
+    if not db.fetchone("SELECT id FROM app_users WHERE username='HSEADMIN'"):
+        salt, digest = make_password_hash("1234567890")
+        db.execute("INSERT INTO app_users(username,full_name,role,salt,password_hash,must_change_password,permissions_json) VALUES(?,?,?,?,?,1,?)",
+                   ("HSEADMIN", "System Administrator", "Admin", salt, digest,
+                    json.dumps(role_permissions("Admin"))))
+    db.conn.commit()
+
+ensure_access_schema()
+
+def log_user_action(username, action, details=""):
+    try: db.execute("INSERT INTO user_activity_log(username,action,details) VALUES(?,?,?)", (username, action, details))
+    except Exception: logging.exception("User activity log failed")
+
+class LoginDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent); self.setWindowTitle("HSE Management System - Sign In"); self.setFixedWidth(420); self.user = None
+        layout = QVBoxLayout(self)
+        title = QLabel("HSE MANAGEMENT SYSTEM"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:8px;")
+        layout.addWidget(title); layout.addWidget(QLabel("Enter your administrator- or company-issued account details."))
+        form = QFormLayout(); self.username = QLineEdit(); self.username.setPlaceholderText("User ID")
+        self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.Password); self.password.setPlaceholderText("Password")
+        form.addRow("User ID", self.username); form.addRow("Password", self.password); layout.addLayout(form)
+        self.message = QLabel(""); self.message.setStyleSheet("color:#B42318;"); layout.addWidget(self.message)
+        buttons = QHBoxLayout(); sign = QPushButton("Sign In"); exit_btn = QPushButton("Exit")
+        sign.clicked.connect(self.authenticate); exit_btn.clicked.connect(self.reject); self.password.returnPressed.connect(self.authenticate)
+        buttons.addWidget(sign); buttons.addWidget(exit_btn); layout.addLayout(buttons)
+    def authenticate(self):
+        row = db.fetchone("SELECT * FROM app_users WHERE username=? COLLATE NOCASE AND active=1", (self.username.text().strip(),))
+        if not row: self.message.setText("Invalid credentials or inactive account."); return
+        try:
+            digest = hashlib.pbkdf2_hmac("sha256", self.password.text().encode(), bytes.fromhex(row["salt"]), 310000).hex()
+        except Exception: self.message.setText("Unable to verify this account."); return
+        if not hmac.compare_digest(digest, row["password_hash"]):
+            self.message.setText("Invalid user ID or password."); log_user_action(row["username"], "Failed login", "Invalid password"); return
+        self.user = dict(row); now = datetime.now().isoformat(timespec="seconds")
+        db.execute("UPDATE app_users SET last_login=?,updated_at=? WHERE id=?", (now, now, row["id"]))
+        log_user_action(row["username"], "Login", "Successful login"); self.accept()
+
+class ChangePasswordDialog(QDialog):
+    def __init__(self, username, force=False, parent=None):
+        super().__init__(parent); self.username = username; self.setWindowTitle("Change Password"); self.setMinimumWidth(390)
+        layout = QVBoxLayout(self)
+        if force: layout.addWidget(QLabel("You must replace the initial password before entering the application."))
+        form = QFormLayout(); self.old = QLineEdit(); self.new = QLineEdit(); self.confirm = QLineEdit()
+        for e in (self.old, self.new, self.confirm): e.setEchoMode(QLineEdit.Password)
+        self.new.setPlaceholderText("At least 10 characters")
+        form.addRow("Current password", self.old); form.addRow("New password", self.new); form.addRow("Confirm password", self.confirm); layout.addLayout(form)
+        self.msg = QLabel(""); self.msg.setStyleSheet("color:#B42318;"); layout.addWidget(self.msg)
+        buttons = QHBoxLayout(); save = QPushButton("Update Password"); cancel = QPushButton("Cancel")
+        save.clicked.connect(self.save); cancel.clicked.connect(self.reject); buttons.addWidget(save); buttons.addWidget(cancel); layout.addLayout(buttons)
+    def save(self):
+        row = db.fetchone("SELECT * FROM app_users WHERE username=? COLLATE NOCASE", (self.username,))
+        old = hashlib.pbkdf2_hmac("sha256", self.old.text().encode(), bytes.fromhex(row["salt"]), 310000).hex()
+        if not hmac.compare_digest(old, row["password_hash"]): self.msg.setText("Current password is incorrect."); return
+        if len(self.new.text()) < 10: self.msg.setText("New password must contain at least 10 characters."); return
+        if self.new.text() != self.confirm.text(): self.msg.setText("New passwords do not match."); return
+        salt, digest = make_password_hash(self.new.text()); now = datetime.now().isoformat(timespec="seconds")
+        db.execute("UPDATE app_users SET salt=?,password_hash=?,must_change_password=0,updated_at=? WHERE id=?", (salt,digest,now,row["id"]))
+        log_user_action(self.username, "Password changed", "Password updated by user"); self.accept()
+
+class UserAccessDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent); self.setWindowTitle("Create User Account"); self.setMinimumWidth(430)
+        layout = QVBoxLayout(self); form = QFormLayout()
+        self.username = QLineEdit(); self.full_name = QLineEdit(); self.role = QComboBox(); self.role.addItems([r for r in ACCESS_ROLES if r != "Admin"])
+        self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.Password); self.password.setPlaceholderText("Temporary password, minimum 10 characters")
+        form.addRow("User ID", self.username); form.addRow("Full name", self.full_name); form.addRow("Role", self.role); form.addRow("Temporary password", self.password); layout.addLayout(form)
+        layout.addWidget(QLabel("The user will be required to change this password at first sign-in."))
+        self.msg = QLabel(""); self.msg.setStyleSheet("color:#B42318;"); layout.addWidget(self.msg)
+        buttons = QHBoxLayout(); create = QPushButton("Create User"); cancel = QPushButton("Cancel")
+        create.clicked.connect(self.create_user); cancel.clicked.connect(self.reject); buttons.addWidget(create); buttons.addWidget(cancel); layout.addLayout(buttons)
+    def create_user(self):
+        username = self.username.text().strip(); name = self.full_name.text().strip(); password = self.password.text()
+        if not username or not name: self.msg.setText("Enter a User ID and full name."); return
+        if len(password) < 10: self.msg.setText("Temporary password must contain at least 10 characters."); return
+        salt, digest = make_password_hash(password); role = self.role.currentText(); now = datetime.now().isoformat(timespec="seconds")
+        try:
+            db.execute("INSERT INTO app_users(username,full_name,role,salt,password_hash,must_change_password,permissions_json,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
+                       (username,name,role,salt,digest,json.dumps(role_permissions(role)),now,now))
+            log_user_action("HSEADMIN", "User created", f"Created {username} with role {role}"); self.accept()
+        except sqlite3.IntegrityError: self.msg.setText("That User ID already exists.")
+
+class PermissionMatrixDialog(QDialog):
+    def __init__(self, username, permissions, parent=None):
+        super().__init__(parent); self.setWindowTitle(f"Permissions - {username}"); self.resize(1080,650); self.checks = {}
+        layout = QVBoxLayout(self); layout.addWidget(QLabel("Set permissions for each module. Dashboard view is always enabled."))
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); grid = QGridLayout(body)
+        for c, label in enumerate(["Module"] + [a.title() for a in ACCESS_ACTIONS]):
+            lab = QLabel(label); lab.setStyleSheet("font-weight:bold;color:#17365D;"); grid.addWidget(lab,0,c)
+        for r,m in enumerate(ACCESS_MODULES,1):
+            grid.addWidget(QLabel(m),r,0)
+            for c,a in enumerate(ACCESS_ACTIONS,1):
+                cb=QCheckBox(); cb.setChecked(bool(permissions.get(m,{}).get(a,False))); self.checks[(m,a)]=cb; grid.addWidget(cb,r,c,alignment=Qt.AlignCenter)
+        scroll.setWidget(body); layout.addWidget(scroll)
+        buttons=QHBoxLayout(); view=QPushButton("View All"); clear=QPushButton("Clear All"); save=QPushButton("Save"); cancel=QPushButton("Cancel")
+        view.clicked.connect(lambda: [cb.setChecked(a=="view") for (m,a),cb in self.checks.items()])
+        clear.clicked.connect(lambda: [cb.setChecked(False) for cb in self.checks.values()]); save.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
+        for b in (view,clear,save,cancel): buttons.addWidget(b)
+        layout.addLayout(buttons)
+    def result_permissions(self):
+        p=empty_permissions()
+        for (m,a),cb in self.checks.items(): p[m][a]=cb.isChecked()
+        p["Dashboard"]["view"]=True
+        return p
 
 
 # ============================================================
@@ -3544,8 +3721,15 @@ def aud_export_notification_word(audit_id, path):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self):
+    def __init__(self, authenticated_user):
         super().__init__()
+        self.current_user = authenticated_user
+        try:
+            self.current_permissions = json.loads(authenticated_user.get("permissions_json") or "{}")
+        except Exception:
+            self.current_permissions = role_permissions(authenticated_user.get("role", "HSE Officer"))
+        if authenticated_user.get("role") == "Admin":
+            self.current_permissions = role_permissions("Admin")
 
         self.setWindowTitle(
             f"{APP_NAME} - {APP_VERSION}"
@@ -3617,7 +3801,15 @@ class MainWindow(QMainWindow):
         """)
 
         self.build_ui()
+        account_menu = self.menuBar().addMenu("Account")
+        change_action = QAction("Change My Password", self)
+        change_action.triggered.connect(self.change_my_password)
+        account_menu.addAction(change_action)
+        account_menu.addSeparator()
+        who = QAction(f"Signed in: {authenticated_user.get('username')} ({authenticated_user.get('role')})", self)
+        who.setEnabled(False); account_menu.addAction(who)
         self.dashboard()
+        self.apply_navigation_permissions()
 
     # --------------------------------------------------------
 
@@ -3643,7 +3835,8 @@ class MainWindow(QMainWindow):
             "ISO 14001 Aspect & Impact",
             "Reports",
             "Master Data",
-            "Settings"
+            "Settings",
+            "User & Access Control"
         ]
 
         self.nav.addItems(modules)
@@ -3660,6 +3853,17 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------
 
     def navigation_changed(self, row):
+        if row < 0: return
+        if row == 12:
+            if self.current_user.get("role") != "Admin":
+                QMessageBox.warning(self, "Access Denied", "Only Admin can manage user accounts and permissions.")
+                self.nav.setCurrentRow(0); return
+            self.user_access_control()
+            return
+        module = ACCESS_MODULES[row] if row < len(ACCESS_MODULES) else None
+        if module and not self.has_permission(module, "view"):
+            QMessageBox.warning(self, "Access Denied", f"You do not have permission to view {module}.")
+            self.nav.setCurrentRow(0); return
         # Cache each module page so switching is instant and stack widgets do not pile up.
         # Dashboard (row 0) is always rebuilt so KPIs and trends stay live after data changes.
         if not hasattr(self, "_module_cache"):
@@ -3721,12 +3925,139 @@ class MainWindow(QMainWindow):
             elif row == 11:
                 self.settings_page()
             self._module_cache[row] = self.stack.currentWidget()
+            self.apply_page_permissions(row)
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
             try:
                 QMessageBox.critical(self, "Module Error", f"Unable to open this module.\n\n{exc}")
             except Exception:
                 pass
+
+    def has_permission(self, module, action):
+        if self.current_user.get("role") == "Admin": return True
+        return bool(self.current_permissions.get(module, {}).get(action, False))
+
+    def apply_navigation_permissions(self):
+        for row, module in enumerate(ACCESS_MODULES):
+            item = self.nav.item(row)
+            if item: item.setHidden(not self.has_permission(module, "view"))
+        if self.nav.count() > 12:
+            self.nav.item(12).setHidden(self.current_user.get("role") != "Admin")
+
+    def change_my_password(self):
+        dlg = ChangePasswordDialog(self.current_user.get("username"), parent=self)
+        dlg.exec()
+
+    def apply_page_permissions(self, row):
+        if self.current_user.get("role") == "Admin" or row == 0: return
+        if row < 0 or row >= len(ACCESS_MODULES): return
+        module = ACCESS_MODULES[row]
+        can_write = self.has_permission(module, "create") or self.has_permission(module, "edit")
+        can_review = self.has_permission(module, "review")
+        can_approve = self.has_permission(module, "approve")
+        can_export = self.has_permission(module, "export")
+        page = self.stack.currentWidget()
+        if page is None: return
+        for widget in page.findChildren(QWidget):
+            if isinstance(widget, (QLineEdit, QTextEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QCheckBox)) and not can_write:
+                widget.setEnabled(False)
+            elif isinstance(widget, QTableWidget) and not can_write:
+                widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            elif isinstance(widget, QPushButton):
+                label = widget.text().strip().lower()
+                if any(k in label for k in ("approve", "reject", "approval")):
+                    widget.setEnabled(can_approve)
+                elif any(k in label for k in ("review", "return", "submit", "verify", "revalidate")):
+                    widget.setEnabled(can_review or can_approve)
+                elif any(k in label for k in ("export", "excel", "pdf", "word", "print")):
+                    widget.setEnabled(can_export)
+                elif any(k in label for k in ("delete", "remove")):
+                    widget.setEnabled(self.has_permission(module, "delete"))
+                elif any(k in label for k in ("add", "new", "save", "update", "edit", "close permit", "issue permit")):
+                    widget.setEnabled(can_write or can_review or can_approve)
+                elif not (can_write or can_review or can_approve):
+                    widget.setEnabled(any(k in label for k in ("refresh", "search", "filter", "clear filter", "view", "history")))
+
+    def user_access_control(self):
+        old_page = getattr(self, "_user_access_page", None)
+        if old_page is not None:
+            try:
+                self.stack.removeWidget(old_page)
+                old_page.deleteLater()
+            except Exception:
+                pass
+        w, layout = self.page("User & Access Control")
+        self._user_access_page = w
+        intro = QLabel("Admin-only user directory. Create accounts, assign roles, customise module permissions, reset passwords and deactivate accounts.")
+        intro.setWordWrap(True); layout.addWidget(intro)
+        table = QTableWidget(); table.setColumnCount(6); table.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Status", "Must Change Password", "Last Login"])
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers); table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.SingleSelection)
+        rows = db.fetchall("SELECT * FROM app_users ORDER BY username COLLATE NOCASE")
+        table.setRowCount(len(rows))
+        for r, rec in enumerate(rows):
+            vals = [rec["username"], rec["full_name"], rec["role"], "Active" if rec["active"] else "Inactive", "Yes" if rec["must_change_password"] else "No", rec["last_login"]]
+            for c, val in enumerate(vals): table.setItem(r,c,QTableWidgetItem(str(val or "")))
+        table.resizeColumnsToContents(); layout.addWidget(table,1)
+        def selected():
+            r=table.currentRow()
+            if r < 0: QMessageBox.warning(self,"Select User","Select a user first."); return None
+            return table.item(r,0).text()
+        buttons=QHBoxLayout(); create=QPushButton("Create User"); role_btn=QPushButton("Change Role"); perms=QPushButton("Edit Permissions"); reset=QPushButton("Reset Password"); toggle=QPushButton("Activate / Deactivate"); refresh=QPushButton("Refresh")
+        create.clicked.connect(lambda: (UserAccessDialog(self).exec(), self.user_access_control()))
+        def change_role():
+            username=selected()
+            if not username:return
+            rec=db.fetchone("SELECT * FROM app_users WHERE username=?",(username,))
+            if rec["role"]=="Admin": QMessageBox.warning(self,"Protected Account","The primary Admin role cannot be changed here."); return
+            role,ok=QInputDialog.getItem(self,"Assign Role",f"Select role for {username}:",[r for r in ACCESS_ROLES if r!="Admin"],ACCESS_ROLES.index(rec["role"]) if rec["role"] in ACCESS_ROLES else 0,False)
+            if not ok:return
+            current=json.loads(rec["permissions_json"] or "{}")
+            defaults=role_permissions(role)
+            # Role change resets permissions to the selected role template; Admin may customise afterwards.
+            db.execute("UPDATE app_users SET role=?,permissions_json=?,updated_at=? WHERE id=?",(role,json.dumps(defaults),datetime.now().isoformat(timespec="seconds"),rec["id"]))
+            log_user_action(self.current_user["username"],"Role changed",f"{username}: {role}")
+            self.user_access_control()
+        def edit_permissions():
+            username=selected()
+            if not username:return
+            rec=db.fetchone("SELECT * FROM app_users WHERE username=?",(username,))
+            if rec["role"]=="Admin": QMessageBox.information(self,"Admin Rights","Admin always has full access; this account cannot be restricted here."); return
+            try: p=json.loads(rec["permissions_json"] or "{}")
+            except Exception: p=role_permissions(rec["role"])
+            dlg=PermissionMatrixDialog(username,p,self)
+            if dlg.exec():
+                db.execute("UPDATE app_users SET permissions_json=?,updated_at=? WHERE id=?",(json.dumps(dlg.result_permissions()),datetime.now().isoformat(timespec="seconds"),rec["id"]))
+                log_user_action(self.current_user["username"],"Permissions updated",f"Updated permissions for {username}")
+                self.user_access_control()
+        def reset_password():
+            username=selected()
+            if not username:return
+            temp,ok=QInputDialog.getText(self,"Reset Password",f"Enter temporary password for {username}:",QLineEdit.Password)
+            if not ok:return
+            if len(temp)<10: QMessageBox.warning(self,"Weak Password","Use at least 10 characters."); return
+            rec=db.fetchone("SELECT id FROM app_users WHERE username=?",(username,)); salt,digest=make_password_hash(temp)
+            db.execute("UPDATE app_users SET salt=?,password_hash=?,must_change_password=1,updated_at=? WHERE id=?",(salt,digest,datetime.now().isoformat(timespec="seconds"),rec["id"]))
+            log_user_action(self.current_user["username"],"Password reset",f"Reset password for {username}")
+            QMessageBox.information(self,"Password Reset","Temporary password saved. User must change it at next sign-in.")
+            self.user_access_control()
+        def toggle_user():
+            username=selected()
+            if not username:return
+            if username.upper()=="HSEADMIN": QMessageBox.warning(self,"Protected Account","The primary HSEADMIN account cannot be deactivated."); return
+            rec=db.fetchone("SELECT id,active FROM app_users WHERE username=?",(username,)); active=0 if rec["active"] else 1
+            db.execute("UPDATE app_users SET active=?,updated_at=? WHERE id=?",(active,datetime.now().isoformat(timespec="seconds"),rec["id"]))
+            log_user_action(self.current_user["username"],"User status changed",f"{username}: {'Active' if active else 'Inactive'}")
+            self.user_access_control()
+        role_btn.clicked.connect(change_role); perms.clicked.connect(edit_permissions); reset.clicked.connect(reset_password); toggle.clicked.connect(toggle_user); refresh.clicked.connect(self.user_access_control)
+        for b in (create,role_btn,perms,reset,toggle,refresh): buttons.addWidget(b)
+        layout.addLayout(buttons)
+        logbox=QGroupBox("Recent User Activity")
+        loglayout=QVBoxLayout(logbox); logs=QTableWidget(); logs.setColumnCount(4); logs.setHorizontalHeaderLabels(["User", "Action", "Details", "Date / Time"])
+        activity=db.fetchall("SELECT username,action,details,created_at FROM user_activity_log ORDER BY id DESC LIMIT 100")
+        logs.setRowCount(len(activity))
+        for r,rec in enumerate(activity):
+            for c,key in enumerate(("username","action","details","created_at")): logs.setItem(r,c,QTableWidgetItem(str(rec[key] or "")))
+        logs.setEditTriggers(QAbstractItemView.NoEditTriggers); logs.resizeColumnsToContents(); loglayout.addWidget(logs); layout.addWidget(logbox)
 
     def page(self, title):
 
@@ -16859,7 +17190,16 @@ def main():
         "HSE"
     )
 
-    window = MainWindow()
+    login = LoginDialog()
+    if login.exec() != QDialog.Accepted or not login.user:
+        return
+    user = login.user
+    if user.get("must_change_password"):
+        change = ChangePasswordDialog(user["username"], force=True)
+        if change.exec() != QDialog.Accepted:
+            return
+        user = dict(db.fetchone("SELECT * FROM app_users WHERE id=?", (user["id"],)))
+    window = MainWindow(user)
 
     window.showMaximized()
 
