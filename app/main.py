@@ -13430,7 +13430,18 @@ ASPECT_QATAR_LEGAL_SEED = [
     ("QA-ENV-030-WASTE", "Qatar Law No. 30 of 2002 — Waste and hazardous materials", "Regulation", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 24–27 and 32", "Check hazardous material precautions, hazardous waste authorisations, approved handling/disposal routes and waste records.", "Waste"),
     ("QA-ENV-030-WATER", "Qatar Law No. 30 of 2002 — Water and marine environment", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Parts 3 and relevant Articles 40–61", "Assess water abstraction, effluent and marine discharges against applicable approvals, limits and receiving-environment requirements.", "Water / Effluent"),
     ("QA-ENV-030-OIL", "Qatar Law No. 30 of 2002 — Oil and marine pollution prevention", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, marine pollution provisions", "Prevent oil and harmful-substance pollution from vessels, platforms, terminals, pipelines and land-based sources; apply approved contingency plans.", "Water / Effluent"),
-    ("QA-ENV-030-NOISE", "Qatar Law No. 30 of 2002 — Environmental noise", "Regulation / Project", "Qatar", "Al Meezan — Law No. 30 of 2002, Article 36", "Control noise from machinery, equipment and operations against applicable limits and project conditions.", "Noise / Vibration"),
+    ("QA-ENV-030-NOISE", "Qatar Law No. 30 of 2002 — Environmental noise", "Regulation / Project", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 28 and 36", "Control noise from machinery, equipment and operations against applicable limits and project conditions.", "Noise / Vibration"),
+    ("QA-ENV-030-EIA", "Qatar environmental impact assessment and project approval", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 11–20", "Confirm whether the activity requires an environmental assessment, approval or conditions before construction, modification or operation; retain approvals and implement mitigation commitments.", "Other"),
+    ("QA-ENV-030-EMERGENCY", "Qatar environmental emergency and contingency planning", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 21–23", "Identify credible environmental emergencies and maintain applicable contingency, notification, response, equipment, training and drill arrangements.", "Other"),
+    ("QA-ENV-030-AIR-FUEL", "Qatar combustion sources, fuel burning and vehicle exhaust", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 31 and 33", "Maintain engines, vehicles, boilers, heaters and generators; verify applicable exhaust and combustion emission limits and retain monitoring or maintenance evidence.", "Air Emissions"),
+    ("QA-ENV-030-WATER-GROUND", "Qatar surface water and groundwater protection", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 40–41", "Prevent contamination and unauthorised abstraction or discharge; assess runoff, dewatering, groundwater interaction and wastewater routes against applicable approvals.", "Water / Effluent"),
+    ("QA-ENV-030-MARINE-VESSEL", "Qatar vessel oil pollution prevention and response", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 43–50", "For vessel and offshore activities, prevent prohibited oil discharges, maintain applicable pollution-prevention and response arrangements, and retain transfer, inspection and incident records.", "Water / Effluent"),
+    ("QA-ENV-030-MARINE-WASTE", "Qatar vessel hazardous substances, sewage and garbage controls", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 51–54", "Manage hazardous substances, sewage and garbage from vessels through approved reception, storage, transfer and disposal arrangements; prevent unauthorised discharge to sea.", "Water / Effluent"),
+    ("QA-ENV-030-LAND-DISCHARGE", "Qatar land-based sources of aquatic pollution", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 55–61", "Assess land-based releases and discharges that may affect the aquatic environment; apply applicable treatment, monitoring, permit and incident-response conditions.", "Water / Effluent"),
+    ("QA-ENV-030-HAZ-RECORD", "Qatar hazardous waste producer records and authorised contractors", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 25–27", "Classify hazardous waste, use authorised handling, transport, treatment and disposal routes where required, and maintain waste descriptions, quantities, transfer records and contractor evidence.", "Waste"),
+    ("QA-MECC-IND-GUIDE", "Qatar MECC industrial environmental assessment technical guidance", "Guideline / Permit", "Qatar", "MECC Environmental Assessment & Permits Department — Technical Guideline EAPD-TG-EA-0002-19-V.04", "Where applicable to an industrial project assessment, document liquid waste and discharge routes, gaseous emission sources, solid waste handling/disposal, and hazardous waste/material transport, handling and storage.", "Other"),
+    ("ISO14001-6.1.3", "ISO 14001 environmental compliance obligations register", "ISO / Other", "International / Organisation", "ISO 14001:2015 clause 6.1.3", "Determine, access and maintain compliance obligations related to environmental aspects; identify how obligations apply and keep them current. Verify the organisation's controlled standard edition.", "Other"),
+    ("ISO14001-8.1", "ISO 14001 operational control and life-cycle perspective", "ISO / Other", "International / Organisation", "ISO 14001:2015 clause 8.1", "Establish operational criteria and controls for significant environmental aspects, outsourced processes, procurement and relevant life-cycle stages; communicate applicable requirements to contractors.", "Other"),
 ]
 
 
@@ -13451,24 +13462,39 @@ def _aspect_significance(score):
 
 
 class CheckableComboBox(QComboBox):
-    """Compact multi-select dropdown used only by the Aspect & Impact module."""
+    """Compact multi-select dropdown; ticking an item never clears earlier choices."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setModel(QStandardItemModel(self))
         self.setEditable(True)
         self.lineEdit().setReadOnly(True)
         self.lineEdit().setPlaceholderText("Select one or more activities…")
-        self.setMinimumHeight(34)
+        self.setMinimumHeight(27)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._selection_pending = False
         self.model().itemChanged.connect(self._refresh_text)
         self.view().pressed.connect(self._toggle_pressed_item)
+        self.view().setUniformItemSizes(True)
+
+    def hidePopup(self):
+        # QComboBox normally closes after each pressed row. Suppress that close
+        # only during a checkbox click so the user can tick multiple activities.
+        if self._selection_pending:
+            return
+        super().hidePopup()
 
     def _toggle_pressed_item(self, index):
         item = self.model().itemFromIndex(index)
-        if item is not None:
-            item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
-            # Re-open the popup after the current click so users can tick several activities in one pass.
-            QTimer.singleShot(0, self.showPopup)
+        if item is None:
+            return
+        self._selection_pending = True
+        item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
+        QTimer.singleShot(100, self._finish_checkbox_click)
+
+    def _finish_checkbox_click(self):
+        self._selection_pending = False
+        if self.isVisible():
+            self.showPopup()
 
     def add_check_item(self, text):
         item = QStandardItem(text)
@@ -13488,15 +13514,20 @@ class CheckableComboBox(QComboBox):
                 break
 
     def set_all_checked(self, checked):
-        for i in range(self.model().rowCount()):
-            self.model().item(i).setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self.model().blockSignals(True)
+        try:
+            for i in range(self.model().rowCount()):
+                self.model().item(i).setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        finally:
+            self.model().blockSignals(False)
+        self._refresh_text()
 
     def _refresh_text(self, *_):
         chosen = self.checked_items()
         if not chosen:
             text = "Select one or more activities…"
-        elif len(chosen) <= 2:
-            text = "; ".join(chosen)
+        elif len(chosen) == 1:
+            text = chosen[0]
         else:
             text = f"{len(chosen)} activities selected"
         self.lineEdit().setText(text)
@@ -13650,7 +13681,7 @@ class AspectImpactModule(QWidget):
             "initial/residual assessment, operating condition, legal obligations and evidence. Review every generated row for site relevance before approval."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color:#334; padding:4px 2px 8px 2px;")
+        intro.setStyleSheet("color:#176B78; font-weight:600; padding:3px 2px 5px 2px;")
         root.addWidget(intro)
 
         self.tabs = QTabWidget()
@@ -13667,17 +13698,20 @@ class AspectImpactModule(QWidget):
         self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
         self.tabs.setDocumentMode(True)
         self.setStyleSheet(self.styleSheet() + """
-            QGroupBox { font-weight: 600; margin-top: 10px; padding-top: 8px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+            QWidget { font-size: 9pt; }
+            QLabel { color: #34465A; }
+            QGroupBox { color: #176B78; font-weight: 700; margin-top: 7px; padding-top: 5px; border: 1px solid #D5E0E8; border-radius: 6px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 5px; color: #176B78; }
             QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QTextEdit {
-                min-height: 30px; padding: 4px 7px; border: 1px solid #C7D2DE;
-                border-radius: 5px; background: #FFFFFF; color: #203040;
+                min-height: 25px; padding: 2px 6px; border: 1px solid #C7D2DE;
+                border-radius: 4px; background: #FFFFFF; color: #203040; font-size: 9pt;
             }
-            QTextEdit { padding: 6px; }
-            QPushButton { min-height: 30px; padding: 5px 10px; border-radius: 5px; }
-            QTabBar::tab { min-height: 28px; padding: 6px 10px; }
-            QTableWidget { gridline-color: #D8E0E8; alternate-background-color: #F5F8FB; }
-            QHeaderView::section { padding: 6px; font-weight: 600; background: #EAF1F7; }
+            QTextEdit { padding: 4px; }
+            QPushButton { min-height: 25px; max-height: 27px; padding: 2px 7px; border-radius: 4px; font-size: 8.5pt; font-weight: 600; }
+            QPushButton:hover { background-color: #E5F2F4; border: 1px solid #4B9AA5; }
+            QTabBar::tab { min-height: 25px; padding: 4px 8px; font-size: 8.5pt; }
+            QTableWidget { gridline-color: #D8E0E8; alternate-background-color: #F5F8FB; font-size: 8.5pt; }
+            QHeaderView::section { padding: 4px; font-size: 8.5pt; font-weight: 700; color: #FFFFFF; background: #176B78; }
         """)
 
     def _add_scroll_tab(self, page, title):
@@ -13740,7 +13774,7 @@ class AspectImpactModule(QWidget):
         select_all = QPushButton("Select all")
         clear_all = QPushButton("Clear all")
         generate_btn = QPushButton("Generate Aspect & Impact Register")
-        generate_btn.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:8px 14px;")
+        generate_btn.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
         select_all.clicked.connect(self._select_all_activities)
         clear_all.clicked.connect(self._clear_all_activities)
         generate_btn.clicked.connect(self._generate_from_activities)
@@ -13770,10 +13804,14 @@ class AspectImpactModule(QWidget):
         top = QHBoxLayout()
         top.addWidget(QLabel("Saved registers:"))
         self.register_combo = QComboBox()
-        self.register_combo.setMinimumWidth(320)
+        self.register_combo.setMinimumWidth(190)
         self.register_combo.currentIndexChanged.connect(self._on_register_selected)
         top.addWidget(self.register_combo, 1)
-        load_btn = QPushButton("Refresh list")
+        edit_btn = QPushButton("Open / Edit")
+        edit_btn.setToolTip("Open the selected saved register and edit its header and aspect rows.")
+        edit_btn.clicked.connect(self._open_selected_register)
+        top.addWidget(edit_btn)
+        load_btn = QPushButton("Refresh")
         load_btn.clicked.connect(self._load_register_list)
         top.addWidget(load_btn)
         new_btn = QPushButton("New blank")
@@ -13782,7 +13820,7 @@ class AspectImpactModule(QWidget):
         layout.addLayout(top)
 
         self.register_summary = QLabel("No register loaded. Generate from activities or open a saved register.")
-        self.register_summary.setStyleSheet("color:#17365D; font-weight:bold; padding:4px;")
+        self.register_summary.setStyleSheet("color:#176B78; font-weight:700; padding:3px 4px; background:#EAF5F5; border-radius:4px;")
         layout.addWidget(self.register_summary)
 
         self.items_table = QTableWidget(0, 18)
@@ -13798,7 +13836,9 @@ class AspectImpactModule(QWidget):
         self.items_table.horizontalHeader().setStretchLastSection(False)
         self.items_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.items_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.items_table.setMinimumHeight(300)
+        self.items_table.setMinimumHeight(240)
+        self.items_table.verticalHeader().setDefaultSectionSize(54)
+        self.items_table.verticalHeader().setMinimumSectionSize(38)
         self.items_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         for col, width in enumerate([190,230,250,230,155,145,75,75,80,115,135,230,230,75,75,155,145,230]):
             self.items_table.setColumnWidth(col, width)
@@ -13813,7 +13853,7 @@ class AspectImpactModule(QWidget):
         actions.setHorizontalSpacing(7)
         actions.setVerticalSpacing(6)
         save_btn = QPushButton("Save Register")
-        save_btn.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:8px 14px;")
+        save_btn.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
         save_btn.clicked.connect(self._save_register)
         add_row_btn = QPushButton("Add custom row")
         add_row_btn.clicked.connect(self._add_custom_row)
@@ -13834,6 +13874,7 @@ class AspectImpactModule(QWidget):
                           view_legal_btn, export_xlsx, export_docx, delete_reg]
         for index, button in enumerate(action_buttons):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setFixedHeight(27)
             actions.addWidget(button, index // 4, index % 4)
         layout.addWidget(actions_widget)
 
@@ -13892,7 +13933,7 @@ class AspectImpactModule(QWidget):
             "This library is not linked to CAPA in this version."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("color:#334; padding:4px;")
+        info.setStyleSheet("color:#176B78; font-weight:600; padding:3px 2px;")
         layout.addWidget(info)
 
         form_box = QGroupBox("Add / Edit legal requirement")
@@ -13940,7 +13981,7 @@ class AspectImpactModule(QWidget):
         btn_row.setHorizontalSpacing(7)
         btn_row.setVerticalSpacing(6)
         save_l = QPushButton("Save Legal Requirement")
-        save_l.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:6px 12px;")
+        save_l.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
         save_l.clicked.connect(self._save_legal_requirement)
         clear_l = QPushButton("Clear Form")
         clear_l.clicked.connect(self._clear_legal_form)
@@ -13950,12 +13991,15 @@ class AspectImpactModule(QWidget):
         refresh_l.clicked.connect(self._refresh_legal_table)
         for i, button in enumerate((save_l, clear_l, del_l, refresh_l)):
             button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            button.setFixedHeight(27)
             btn_row.addWidget(button, i // 2, i % 2)
         layout.addWidget(btn_widget)
 
         self.legal_table = QTableWidget(0, 9)
         self.legal_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.legal_table.setMinimumHeight(260)
+        self.legal_table.setMinimumHeight(220)
+        self.legal_table.verticalHeader().setDefaultSectionSize(28)
+        self.legal_table.verticalHeader().setVisible(False)
         self.legal_table.setHorizontalHeaderLabels([
             "Ref.", "Title", "Type", "Jurisdiction", "Category", "Status", "Owner", "Next Review", "ISO Ref."
         ])
@@ -14250,7 +14294,7 @@ class AspectImpactModule(QWidget):
             item.setTextAlignment(item.textAlignment() | Qt.AlignmentFlag.AlignVCenter)
             self.items_table.setItem(r,c,item)
         self._set_significance_cell(r, score, legal)
-        self.items_table.setRowHeight(r, 78)
+        self.items_table.setRowHeight(r, 54)
 
     def _generate_from_activities(self):
         activities = self._selected_activities()
@@ -14389,13 +14433,19 @@ class AspectImpactModule(QWidget):
             )
         # Automatically attach relevant Qatar compliance references to generated rows by category.
         # Existing/manual legal links are retained where possible; links are specific to this register row.
-        qatar_refs = self.db.fetchall("SELECT id, default_category, ref_code FROM legal_requirements WHERE active=1 AND ref_code LIKE 'QA-ENV-030-%'")
+        qatar_refs = self.db.fetchall("SELECT id, default_category, ref_code FROM legal_requirements WHERE active=1 AND (ref_code LIKE 'QA-ENV-030-%' OR ref_code IN ('ISO14001-6.1.3','ISO14001-8.1','QA-MECC-IND-GUIDE'))")
         category_map = {
-            "Air": {"QA-ENV-030-AIR"}, "Air Emissions": {"QA-ENV-030-AIR"},
-            "Waste": {"QA-ENV-030-WASTE"}, "Water": {"QA-ENV-030-WATER", "QA-ENV-030-OIL"},
-            "Soil / Water": {"QA-ENV-030-WASTE", "QA-ENV-030-WATER", "QA-ENV-030-OIL"},
-            "Soil": {"QA-ENV-030-WASTE"}, "Noise": {"QA-ENV-030-NOISE"},
-            "Resources": set(), "Other": set(),
+            "Air": {"QA-ENV-030-AIR", "QA-ENV-030-AIR-FUEL", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Air Emissions": {"QA-ENV-030-AIR", "QA-ENV-030-AIR-FUEL", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Waste": {"QA-ENV-030-WASTE", "QA-ENV-030-HAZ-RECORD", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Water": {"QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-MARINE-VESSEL", "QA-ENV-030-MARINE-WASTE", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Water / Effluent": {"QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-MARINE-VESSEL", "QA-ENV-030-MARINE-WASTE", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Soil / Water": {"QA-ENV-030-WASTE", "QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Soil": {"QA-ENV-030-WASTE", "QA-ENV-030-HAZ-RECORD", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Noise": {"QA-ENV-030-NOISE", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Noise / Vibration": {"QA-ENV-030-NOISE", "ISO14001-6.1.3", "ISO14001-8.1"},
+            "Resources": {"ISO14001-6.1.3", "ISO14001-8.1"},
+            "Other": {"QA-ENV-030-EIA", "QA-ENV-030-EMERGENCY", "QA-MECC-IND-GUIDE", "ISO14001-6.1.3", "ISO14001-8.1"},
         }
         for row_index, it in enumerate(items):
             cat = it.get("environmental_category", "Other")
@@ -14439,6 +14489,14 @@ class AspectImpactModule(QWidget):
         if not rid:
             return
         self._load_register(rid)
+
+    def _open_selected_register(self):
+        rid = self.register_combo.currentData()
+        if not rid:
+            QMessageBox.information(self, "Select Register", "Choose a saved register from the dropdown first.")
+            return
+        self._load_register(rid)
+        self.tabs.setCurrentIndex(1)
 
     def _load_register(self, rid):
         header = self.db.fetchone("SELECT * FROM aspect_registers WHERE id=?", (rid,))
