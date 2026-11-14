@@ -3640,6 +3640,7 @@ class MainWindow(QMainWindow):
             "Permit to Work (PTW)",
             "Training",
             "Manpower Details",
+            "ISO 14001 Aspect & Impact",
             "Reports",
             "Master Data",
             "Settings"
@@ -3711,10 +3712,13 @@ class MainWindow(QMainWindow):
             elif row == 7:
                 self.manpower_details()
             elif row == 8:
-                self.reports()
+                w, layout = self.page("ISO 14001 — Aspect & Impact Register")
+                layout.addWidget(AspectImpactModule(self, db), 1)
             elif row == 9:
-                self.master_data()
+                self.reports()
             elif row == 10:
+                self.master_data()
+            elif row == 11:
                 self.settings_page()
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
@@ -12165,7 +12169,7 @@ class MainWindow(QMainWindow):
             ("Audit Register (Excel)", lambda: export_table("audits", "Audit Register")),
             ("CAPA Register (Excel)", lambda: export_table("capa", "CAPA Register")),
             ("Open Training Module Exports", lambda: self.nav.setCurrentRow(6)),
-            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(10)),
+            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(11)),
         ]
         for i, (label, fn) in enumerate(buttons):
             b = QPushButton(label)
@@ -12753,6 +12757,1235 @@ def _now():
 
 def _stamp():
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+# ============================================================
+# ISO 14001 — ASPECT & IMPACT REGISTER MODULE
+# Additive, self-contained. Does not alter existing HSE tables.
+# ============================================================
+
+# Severity / Probability scales (ISO 14001 style risk matrix)
+# Severity: 1 Negligible … 5 Catastrophic
+# Probability: 1 Rare … 5 Almost Certain
+# Risk Score = Severity × Probability
+# Significance: score >= 12 Significant; 6–11 Moderate; <6 Low
+
+ASPECT_ACTIVITIES = {
+    "Welding / Hot Work": [
+        {
+            "aspect": "Emission of welding fumes and metal oxides",
+            "impact": "Local air quality deterioration; potential respiratory harm to workers and nearby receptors",
+            "regulatory": "Air Pollution Control / Local emission limits; ISO 14001 6.1.2; OHS welding fume exposure limits",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Local exhaust ventilation (LEV); fume extraction; suitable respiratory protection; hot-work permit; positioning of work away from sensitive receptors",
+        },
+        {
+            "aspect": "Generation of welding slag, consumable waste and electrode stubs",
+            "impact": "Solid waste generation; potential contamination if disposed incorrectly",
+            "regulatory": "Waste management regulations; hazardous waste rules where applicable",
+            "severity": 2,
+            "probability": 4,
+            "controls": "Segregated scrap bins; licensed waste contractor; return of unused consumables; housekeeping at work front",
+        },
+        {
+            "aspect": "Use of energy (electricity / gas) for welding equipment",
+            "impact": "Contribution to energy consumption and associated indirect GHG emissions",
+            "regulatory": "Energy efficiency expectations; ISO 14001 6.1.2; company energy policy",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Switch off idle machines; efficient welding processes; planned work sequences to reduce rework",
+        },
+        {
+            "aspect": "UV / IR radiation and hot surfaces during welding",
+            "impact": "Potential secondary fires affecting vegetation or materials; environmental incident risk",
+            "regulatory": "Fire prevention requirements; hot-work controls",
+            "severity": 3,
+            "probability": 2,
+            "controls": "Fire watch; remove combustibles; fire extinguisher at point of work; post-work fire watch duration as procedure",
+        },
+    ],
+    "Chemical Handling & Storage": [
+        {
+            "aspect": "Storage and handling of hazardous chemicals (solvents, acids, reagents)",
+            "impact": "Soil and groundwater contamination risk from spills/leaks; harm to aquatic life",
+            "regulatory": "Hazardous substances storage rules; spill containment; SDS requirements; ISO 14001 8.1",
+            "severity": 4,
+            "probability": 3,
+            "controls": "Bunded storage; secondary containment (≥110%); compatible segregation; SDS available; spill kits; trained handlers; inventory control",
+        },
+        {
+            "aspect": "Emission of volatile organic compounds (VOCs) from solvents",
+            "impact": "Air pollution; contribution to photochemical smog; odour nuisance",
+            "regulatory": "VOC emission limits; air quality regulations",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Closed containers; low-VOC alternatives where practicable; ventilation; minimise open transfer",
+        },
+        {
+            "aspect": "Generation of chemical waste and empty containers",
+            "impact": "Hazardous waste requiring controlled disposal",
+            "regulatory": "Hazardous waste regulations; cradle-to-grave tracking",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Labelled hazardous waste streams; licensed disposal; empty drums managed as per residual content; waste manifests",
+        },
+    ],
+    "Painting / Coating": [
+        {
+            "aspect": "Emission of paint fumes, solvents and overspray",
+            "impact": "Air quality impact; odour; potential deposition on surrounding surfaces/vegetation",
+            "regulatory": "Air emission / VOC controls; local environmental permits where required",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Enclosed or controlled spray areas; extract ventilation; low-VOC coatings; wind consideration for outdoor spraying; PPE",
+        },
+        {
+            "aspect": "Paint sludge, waste paint and contaminated consumables",
+            "impact": "Hazardous solid/liquid waste generation",
+            "regulatory": "Hazardous waste rules; waste hierarchy",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Segregated waste; lids on containers; licensed disposal; minimise over-ordering",
+        },
+        {
+            "aspect": "Spill of paint or thinner to ground / drains",
+            "impact": "Soil and water contamination",
+            "regulatory": "Pollution prevention; drainage protection requirements",
+            "severity": 4,
+            "probability": 2,
+            "controls": "Spill trays; drain covers; immediate spill response; no washing into drains",
+        },
+    ],
+    "Vehicle Operation / Driving": [
+        {
+            "aspect": "Exhaust emissions (NOx, CO, PM, CO₂) from vehicles and mobile plant",
+            "impact": "Air pollution and contribution to climate change",
+            "regulatory": "Vehicle emission standards; company fleet policy; ISO 14001 energy/GHG aspects",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Well-maintained fleet; no idling policy; route planning; prefer efficient vehicles; emissions inspection",
+        },
+        {
+            "aspect": "Fuel spills during refuelling",
+            "impact": "Soil and groundwater contamination",
+            "regulatory": "Pollution control; spill prevention requirements",
+            "severity": 4,
+            "probability": 2,
+            "controls": "Spill kits at refuel points; drip trays; trained operators; report and clean spills immediately",
+        },
+        {
+            "aspect": "Noise from vehicle movements",
+            "impact": "Noise nuisance to neighbours and wildlife disturbance",
+            "regulatory": "Noise limits; local authority / project noise conditions",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Speed limits; restricted night movements; well-maintained exhausts; designated haul routes",
+        },
+    ],
+    "Blasting / Abrasive Blasting": [
+        {
+            "aspect": "Release of abrasive dust and spent grit",
+            "impact": "Airborne particulate pollution; deposition on land and water; respiratory risk",
+            "regulatory": "Air quality / particulate controls; abrasive blasting controls; waste rules",
+            "severity": 4,
+            "probability": 4,
+            "controls": "Containment / tenting; dust extraction; wet methods where suitable; PPE; barrier zones; grit recovery",
+        },
+        {
+            "aspect": "Noise and vibration from blasting operations",
+            "impact": "Noise nuisance; potential structural/environmental disturbance",
+            "regulatory": "Noise and vibration limits; project environmental conditions",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Scheduled blasting windows; barriers; monitoring; community notification where required",
+        },
+        {
+            "aspect": "Contaminated blast media (heavy metals, coatings)",
+            "impact": "Hazardous waste; soil contamination if uncontrolled",
+            "regulatory": "Hazardous waste classification and disposal",
+            "severity": 4,
+            "probability": 3,
+            "controls": "Test spent media; sealed storage; licensed disposal; no open dumping",
+        },
+    ],
+    "Concreting / Concrete Works": [
+        {
+            "aspect": "Cementitious wash water and alkaline runoff",
+            "impact": "High pH discharge to drains/watercourses; harm to aquatic organisms",
+            "regulatory": "Water discharge controls; prohibition on uncontrolled discharge to environment",
+            "severity": 4,
+            "probability": 3,
+            "controls": "Wash-out bays; settlement; pH treatment before disposal; never discharge untreated wash water to storm drains",
+        },
+        {
+            "aspect": "Cement dust emissions during mixing and pouring",
+            "impact": "Airborne particulate; local deposition",
+            "regulatory": "Dust control expectations; air quality",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Enclosed mixers where practicable; dust suppression; covered storage of cement; PPE",
+        },
+        {
+            "aspect": "Waste concrete and packaging",
+            "impact": "Inert waste volume; resource use",
+            "regulatory": "Construction waste rules; waste hierarchy",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Order optimisation; reuse surplus where suitable; segregated skips; licensed disposal/recycling",
+        },
+    ],
+    "Civil Works / Earthworks": [
+        {
+            "aspect": "Soil excavation, stockpiling and potential erosion",
+            "impact": "Sediment runoff to watercourses; loss of topsoil; habitat disturbance",
+            "regulatory": "Erosion and sediment control; water quality; project environmental conditions",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Silt fences / bunds; covered stockpiles; phased excavation; drainage design; reinstatement plans",
+        },
+        {
+            "aspect": "Dust from earthmoving and haul roads",
+            "impact": "Air quality impact; nuisance to neighbours",
+            "regulatory": "Dust management plans; local air quality expectations",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Water spraying; speed limits; covered loads; stabilised haul roads",
+        },
+        {
+            "aspect": "Fuel and oil use by earthmoving plant",
+            "impact": "Spill risk to soil and water; resource consumption",
+            "regulatory": "Pollution prevention; plant maintenance standards",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Plant nappies / drip trays; daily checks; spill response; refuel in designated areas",
+        },
+    ],
+    "Mechanical Works / Installation": [
+        {
+            "aspect": "Cutting, grinding and machining of metals — noise, sparks and swarf",
+            "impact": "Noise; particulate; hot-work related fire risk to surroundings",
+            "regulatory": "Noise and hot-work controls; waste management for metal scrap",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Guarding; local extraction; hot-work controls; metal recycling bins; hearing protection zones",
+        },
+        {
+            "aspect": "Use of lubricants, hydraulic oils and greases",
+            "impact": "Potential soil/water contamination from leaks",
+            "regulatory": "Pollution prevention; hazardous substance storage",
+            "severity": 3,
+            "probability": 2,
+            "controls": "Spill trays; leak inspections; proper storage; used oil recovery by licensed contractor",
+        },
+        {
+            "aspect": "Packaging and installation waste",
+            "impact": "General and recyclable waste generation",
+            "regulatory": "Waste hierarchy; segregation requirements",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Segregated waste streams; return packaging to suppliers where possible; avoid over-packaging",
+        },
+    ],
+    "Excavation & Trenching": [
+        {
+            "aspect": "Disturbance of soil and potential contaminated ground",
+            "impact": "Mobilisation of contaminants; sediment runoff; damage to buried services with pollution risk",
+            "regulatory": "Contaminated land protocols; excavation permits; utility protection",
+            "severity": 4,
+            "probability": 3,
+            "controls": "Desktop and ground investigation review; excavation permit; stockpile management; unexpected finds procedure",
+        },
+        {
+            "aspect": "Dewatering discharge from excavations",
+            "impact": "Sediment and potentially contaminated water discharged to environment",
+            "regulatory": "Discharge consents / permits; water quality limits",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Settlement tanks; filtration; test before discharge; no uncontrolled pumping to storm system",
+        },
+    ],
+    "Scaffolding & Temporary Works": [
+        {
+            "aspect": "Transport, storage and eventual disposal of scaffold materials",
+            "impact": "Resource use; waste at demobilisation; potential ground damage from storage",
+            "regulatory": "Waste and materials management expectations",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Reuse scaffold components; designated storage areas; protect ground surfaces; orderly demobilisation",
+        },
+        {
+            "aspect": "Paint / coating debris from scaffold near coated structures",
+            "impact": "Local contamination of ground if debris not collected",
+            "regulatory": "Housekeeping and pollution prevention",
+            "severity": 2,
+            "probability": 2,
+            "controls": "Debris nets / sheeting; daily clean-up; designated collection points",
+        },
+    ],
+    "Electrical Works": [
+        {
+            "aspect": "Disposal of electrical waste, cables and batteries",
+            "impact": "WEEE / hazardous components if not properly recycled",
+            "regulatory": "WEEE / electrical waste regulations; battery rules",
+            "severity": 3,
+            "probability": 2,
+            "controls": "Segregated WEEE stream; licensed recyclers; no landfill of batteries",
+        },
+        {
+            "aspect": "SF₆ or other insulating gases (where applicable)",
+            "impact": "High global-warming-potential GHG release if leaked",
+            "regulatory": "F-gas / GHG handling rules where applicable",
+            "severity": 4,
+            "probability": 1,
+            "controls": "Certified handlers only; leak checks; recovery equipment; record quantities",
+        },
+    ],
+    "Housekeeping & Waste Management": [
+        {
+            "aspect": "Generation and segregation of general, recyclable and hazardous waste",
+            "impact": "Landfill burden; pollution if mixed or illegally dumped",
+            "regulatory": "Waste duty of care; hazardous waste rules; ISO 14001 operational control",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Colour-coded bins; clear labelling; staff awareness; licensed carriers; waste transfer notes; audits of segregation",
+        },
+        {
+            "aspect": "Litter and wind-blown waste from site",
+            "impact": "Visual impact; pollution of surrounding land and drains",
+            "regulatory": "Site environmental rules; local cleanliness expectations",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Covered skips; daily housekeeping; perimeter checks; secure storage",
+        },
+    ],
+    "Fuel Storage & Refuelling": [
+        {
+            "aspect": "Bulk or intermediate fuel storage",
+            "impact": "Major soil and groundwater contamination risk from tank failure or overfill",
+            "regulatory": "Oil storage regulations; bunding requirements; spill response planning",
+            "severity": 5,
+            "probability": 2,
+            "controls": "Double-skinned or bunded tanks; overfill protection; inspection regime; spill response plan and drills; inventory reconciliation",
+        },
+        {
+            "aspect": "Mobile refuelling of plant",
+            "impact": "Localised spills to soil",
+            "regulatory": "Pollution prevention good practice",
+            "severity": 3,
+            "probability": 3,
+            "controls": "Designated refuel points; drip trays; spill kits; trained operators; no refuel near drains or water",
+        },
+    ],
+    "Water Use & Discharge": [
+        {
+            "aspect": "Consumption of potable / process water",
+            "impact": "Resource depletion; associated energy for treatment and supply",
+            "regulatory": "Water efficiency expectations; company sustainability policy",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Metering; leak repair; reuse of non-potable water where suitable; awareness campaigns",
+        },
+        {
+            "aspect": "Trade effluent / process water discharge",
+            "impact": "Watercourse pollution if untreated or outside consent limits",
+            "regulatory": "Discharge consents; trade effluent agreements",
+            "severity": 4,
+            "probability": 2,
+            "controls": "Consent compliance monitoring; treatment systems; diversion of incompatible streams; emergency shut-off",
+        },
+    ],
+    "Office / Admin Activities": [
+        {
+            "aspect": "Paper, toner and general office consumables",
+            "impact": "Resource use and waste generation",
+            "regulatory": "Waste hierarchy; company green office policy",
+            "severity": 1,
+            "probability": 4,
+            "controls": "Digital workflows; duplex printing; recycled paper; toner recycling",
+        },
+        {
+            "aspect": "Energy use for lighting, HVAC and IT",
+            "impact": "Indirect GHG emissions",
+            "regulatory": "Energy management expectations; ISO 14001",
+            "severity": 2,
+            "probability": 4,
+            "controls": "LED lighting; set-back temperatures; switch-off policy; efficient IT equipment",
+        },
+    ],
+    "Emergency Response / Spill Response": [
+        {
+            "aspect": "Deployment of absorbents and response materials during incidents",
+            "impact": "Generation of contaminated waste; residual environmental impact of the original spill",
+            "regulatory": "Emergency preparedness ISO 14001 8.2; pollution incident response duties",
+            "severity": 4,
+            "probability": 2,
+            "controls": "Trained response teams; stocked spill kits; contaminated waste labelled and disposed as hazardous; post-incident review",
+        },
+    ],
+    "Catering / Welfare Facilities": [
+        {
+            "aspect": "Food waste and packaging from canteens",
+            "impact": "Organic waste; attraction of pests; landfill methane if not managed",
+            "regulatory": "Food waste rules where applicable; pest control",
+            "severity": 2,
+            "probability": 3,
+            "controls": "Segregated food waste; covered bins; frequent collection; minimise single-use packaging",
+        },
+        {
+            "aspect": "Wastewater from welfare and ablutions",
+            "impact": "Sanitary pollution if systems fail",
+            "regulatory": "Sanitation and sewage rules",
+            "severity": 3,
+            "probability": 1,
+            "controls": "Maintained septic / connection systems; no discharge of chemicals to toilets; inspection regime",
+        },
+    ],
+    "Demolition Works": [
+        {
+            "aspect": "Dust, noise and vibration from demolition",
+            "impact": "Air quality, noise nuisance, potential structural effects on surroundings",
+            "regulatory": "Demolition notifications; noise/dust conditions; asbestos rules where relevant",
+            "severity": 4,
+            "probability": 4,
+            "controls": "Method statements; water suppression; screening; monitoring; sequential soft-strip; licensed asbestos removal if present",
+        },
+        {
+            "aspect": "Construction and demolition waste streams including potential hazardous materials",
+            "impact": "Large waste volumes; contamination risk if mixed",
+            "regulatory": "C&D waste regulations; hazardous waste identification",
+            "severity": 3,
+            "probability": 4,
+            "controls": "Pre-demolition audit; segregation; recycling targets; licensed carriers; hazardous materials survey",
+        },
+    ],
+    "Lifting & Crane Operations": [
+        {
+            "aspect": "Hydraulic oil leaks from mobile cranes and lifting plant",
+            "impact": "Soil contamination",
+            "regulatory": "Pollution prevention; plant integrity",
+            "severity": 3,
+            "probability": 2,
+            "controls": "Pre-use inspections; drip trays under stationary plant; spill kits; prompt repair of leaks",
+        },
+        {
+            "aspect": "Energy use and exhaust from mobile cranes",
+            "impact": "Air emissions and fuel consumption",
+            "regulatory": "Fleet / emissions expectations",
+            "severity": 2,
+            "probability": 3,
+            "controls": "No unnecessary idling; planned lifts to minimise running time; maintained engines",
+        },
+    ],
+    "Confined Space Entry": [
+        {
+            "aspect": "Use of forced ventilation and potential release of displaced atmospheres",
+            "impact": "Local air quality effects; possible release of hazardous gases",
+            "regulatory": "Confined space and atmospheric controls; environmental incident reporting if releases occur",
+            "severity": 3,
+            "probability": 2,
+            "controls": "Gas testing; controlled ventilation direction; monitoring; emergency plans",
+        },
+    ],
+    "Landscaping / Reinstatement": [
+        {
+            "aspect": "Import and placement of soils and landscaping materials",
+            "impact": "Potential introduction of invasive species or contaminated soils; positive habitat creation if done well",
+            "regulatory": "Soil movement controls; invasive species rules",
+            "severity": 2,
+            "probability": 2,
+            "controls": "Source-verified materials; inspection for invasives; appropriate native planting where specified",
+        },
+    ],
+}
+
+
+def _aspect_risk_score(severity, probability):
+    try:
+        return int(severity) * int(probability)
+    except Exception:
+        return 0
+
+
+def _aspect_significance(score):
+    score = int(score or 0)
+    if score >= 12:
+        return "Significant"
+    if score >= 6:
+        return "Moderate"
+    return "Low"
+
+
+class AspectImpactModule(QWidget):
+    """ISO 14001 Aspect & Impact Register — dynamic by selected activities."""
+
+    def __init__(self, parent_window, db):
+        super().__init__(parent_window)
+        self.host = parent_window
+        self.db = db
+        self.current_register_id = None
+        self._ensure_schema()
+        self._build_ui()
+        self._load_register_list()
+
+    # ------------------------------------------------------------------ schema
+    def _ensure_schema(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS aspect_registers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            register_name TEXT NOT NULL,
+            project TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            review_date TEXT DEFAULT '',
+            next_review_date TEXT DEFAULT '',
+            prepared_by TEXT DEFAULT '',
+            approved_by TEXT DEFAULT '',
+            status TEXT DEFAULT 'Draft',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS aspect_register_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            register_id INTEGER NOT NULL,
+            activity TEXT NOT NULL,
+            aspect TEXT NOT NULL,
+            impact TEXT DEFAULT '',
+            regulatory TEXT DEFAULT '',
+            severity INTEGER DEFAULT 1,
+            probability INTEGER DEFAULT 1,
+            risk_score INTEGER DEFAULT 1,
+            significance TEXT DEFAULT 'Low',
+            existing_controls TEXT DEFAULT '',
+            additional_controls TEXT DEFAULT '',
+            residual_severity INTEGER DEFAULT 0,
+            residual_probability INTEGER DEFAULT 0,
+            residual_score INTEGER DEFAULT 0,
+            residual_significance TEXT DEFAULT '',
+            responsible TEXT DEFAULT '',
+            target_date TEXT DEFAULT '',
+            status TEXT DEFAULT 'Open',
+            sort_order INTEGER DEFAULT 0,
+            FOREIGN KEY(register_id) REFERENCES aspect_registers(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_items_register
+            ON aspect_register_items(register_id);
+        """)
+        self.db.conn.commit()
+
+    # ------------------------------------------------------------------ UI
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 4, 8, 8)
+
+        intro = QLabel(
+            "Select the organisation / project activities below. The Aspect & Impact Register is generated "
+            "automatically from the ISO 14001 activity library (aspect, impact, regulatory reference, "
+            "severity, probability, existing controls). Add any site-specific additional controls, then save."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#334; padding:4px 2px 8px 2px;")
+        root.addWidget(intro)
+
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+
+        self._build_generator_tab()
+        self._build_register_tab()
+        self._build_library_tab()
+
+    def _build_generator_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        meta = QGroupBox("Register header")
+        form = QFormLayout(meta)
+        self.reg_name = QLineEdit()
+        self.reg_name.setPlaceholderText("e.g. Site Aspect & Impact Register — 2026")
+        self.reg_project = QLineEdit()
+        self.reg_location = QLineEdit()
+        self.reg_department = QLineEdit()
+        self.reg_prepared = QLineEdit()
+        self.reg_approved = QLineEdit()
+        self.reg_review = QDateEdit()
+        self.reg_review.setCalendarPopup(True)
+        self.reg_review.setDate(QDate.currentDate())
+        self.reg_next = QDateEdit()
+        self.reg_next.setCalendarPopup(True)
+        self.reg_next.setDate(QDate.currentDate().addMonths(12))
+        self.reg_status = QComboBox()
+        self.reg_status.addItems(["Draft", "Under Review", "Approved", "Superseded"])
+        form.addRow("Register name *", self.reg_name)
+        form.addRow("Project", self.reg_project)
+        form.addRow("Location / Site", self.reg_location)
+        form.addRow("Department", self.reg_department)
+        form.addRow("Prepared by", self.reg_prepared)
+        form.addRow("Approved by", self.reg_approved)
+        form.addRow("Review date", self.reg_review)
+        form.addRow("Next review", self.reg_next)
+        form.addRow("Status", self.reg_status)
+        layout.addWidget(meta)
+
+        act_box = QGroupBox("Step 1 — Select activities performed by the organisation")
+        act_layout = QVBoxLayout(act_box)
+        hint = QLabel("Tick all applicable activities. You can multi-select. The register rows are built from the library for each tick.")
+        hint.setWordWrap(True)
+        act_layout.addWidget(hint)
+
+        self.activity_list = QListWidget()
+        self.activity_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        for name in sorted(ASPECT_ACTIVITIES.keys()):
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.activity_list.addItem(item)
+        self.activity_list.setMinimumHeight(220)
+        act_layout.addWidget(self.activity_list)
+
+        btn_row = QHBoxLayout()
+        select_all = QPushButton("Select all")
+        clear_all = QPushButton("Clear all")
+        generate_btn = QPushButton("Generate Aspect & Impact Register")
+        generate_btn.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:8px 14px;")
+        select_all.clicked.connect(self._select_all_activities)
+        clear_all.clicked.connect(self._clear_all_activities)
+        generate_btn.clicked.connect(self._generate_from_activities)
+        btn_row.addWidget(select_all)
+        btn_row.addWidget(clear_all)
+        btn_row.addStretch(1)
+        btn_row.addWidget(generate_btn)
+        act_layout.addLayout(btn_row)
+        layout.addWidget(act_box)
+
+        notes_box = QGroupBox("Notes")
+        notes_layout = QVBoxLayout(notes_box)
+        self.reg_notes = QTextEdit()
+        self.reg_notes.setPlaceholderText("Scope notes, exclusions, assumptions…")
+        self.reg_notes.setMaximumHeight(80)
+        notes_layout.addWidget(self.reg_notes)
+        layout.addWidget(notes_box)
+
+        self.tabs.addTab(page, "1. Select Activities & Generate")
+
+    def _build_register_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel("Saved registers:"))
+        self.register_combo = QComboBox()
+        self.register_combo.setMinimumWidth(320)
+        self.register_combo.currentIndexChanged.connect(self._on_register_selected)
+        top.addWidget(self.register_combo, 1)
+        load_btn = QPushButton("Refresh list")
+        load_btn.clicked.connect(self._load_register_list)
+        top.addWidget(load_btn)
+        new_btn = QPushButton("New blank")
+        new_btn.clicked.connect(self._new_register)
+        top.addWidget(new_btn)
+        layout.addLayout(top)
+
+        self.register_summary = QLabel("No register loaded. Generate from activities or open a saved register.")
+        self.register_summary.setStyleSheet("color:#17365D; font-weight:bold; padding:4px;")
+        layout.addWidget(self.register_summary)
+
+        self.items_table = QTableWidget(0, 12)
+        self.items_table.setHorizontalHeaderLabels([
+            "Activity", "Environmental Aspect", "Impact", "Regulatory / Other Requirements",
+            "Sev", "Prob", "Score", "Significance",
+            "Existing Controls", "Additional Controls (user)", "Responsible", "Status"
+        ])
+        self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.items_table.horizontalHeader().setStretchLastSection(True)
+        self.items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.items_table.setAlternatingRowColors(True)
+        self.items_table.setWordWrap(True)
+        layout.addWidget(self.items_table, 1)
+
+        actions = QHBoxLayout()
+        save_btn = QPushButton("Save Register")
+        save_btn.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:8px 14px;")
+        save_btn.clicked.connect(self._save_register)
+        add_row_btn = QPushButton("Add custom row")
+        add_row_btn.clicked.connect(self._add_custom_row)
+        del_row_btn = QPushButton("Delete selected row")
+        del_row_btn.clicked.connect(self._delete_selected_row)
+        export_xlsx = QPushButton("Export Excel")
+        export_xlsx.clicked.connect(self._export_excel)
+        export_docx = QPushButton("Export Word")
+        export_docx.clicked.connect(self._export_word)
+        delete_reg = QPushButton("Delete register")
+        delete_reg.clicked.connect(self._delete_register)
+        actions.addWidget(save_btn)
+        actions.addWidget(add_row_btn)
+        actions.addWidget(del_row_btn)
+        actions.addStretch(1)
+        actions.addWidget(export_xlsx)
+        actions.addWidget(export_docx)
+        actions.addWidget(delete_reg)
+        layout.addLayout(actions)
+
+        legend = QLabel(
+            "Significance: Score = Severity × Probability.  "
+            "≥12 Significant (red) · 6–11 Moderate (amber) · <6 Low (green).  "
+            "Severity 1–5 · Probability 1–5. Additional Controls are editable by the user."
+        )
+        legend.setWordWrap(True)
+        legend.setStyleSheet("color:#555; padding-top:4px;")
+        layout.addWidget(legend)
+
+        self.tabs.addTab(page, "2. Aspect & Impact Register")
+
+    def _build_library_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.addWidget(QLabel(
+            "Built-in ISO 14001 activity library used to populate the register. "
+            "This is a reference list — generation always pulls the latest mapping for selected activities."
+        ))
+        table = QTableWidget(0, 7)
+        table.setHorizontalHeaderLabels([
+            "Activity", "Aspect", "Impact", "Regulatory", "Sev", "Prob", "Existing Controls"
+        ])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(True)
+        rows = []
+        for activity, items in sorted(ASPECT_ACTIVITIES.items()):
+            for it in items:
+                rows.append(it | {"activity": activity})
+        table.setRowCount(len(rows))
+        for i, it in enumerate(rows):
+            vals = [
+                it["activity"], it["aspect"], it["impact"], it["regulatory"],
+                str(it["severity"]), str(it["probability"]), it["controls"]
+            ]
+            for j, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(i, j, item)
+        layout.addWidget(table, 1)
+        self.tabs.addTab(page, "3. Activity Library (reference)")
+
+    # ------------------------------------------------------------------ helpers
+    def _selected_activities(self):
+        names = []
+        for i in range(self.activity_list.count()):
+            item = self.activity_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                names.append(item.text())
+        return names
+
+    def _select_all_activities(self):
+        for i in range(self.activity_list.count()):
+            self.activity_list.item(i).setCheckState(Qt.CheckState.Checked)
+
+    def _clear_all_activities(self):
+        for i in range(self.activity_list.count()):
+            self.activity_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+
+    def _set_significance_cell(self, row, score):
+        sig = _aspect_significance(score)
+        item = QTableWidgetItem(sig)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if sig == "Significant":
+            item.setBackground(QColor("#F8D7DA"))
+            item.setForeground(QColor("#721C24"))
+        elif sig == "Moderate":
+            item.setBackground(QColor("#FFF3CD"))
+            item.setForeground(QColor("#856404"))
+        else:
+            item.setBackground(QColor("#D4EDDA"))
+            item.setForeground(QColor("#155724"))
+        self.items_table.setItem(row, 7, item)
+
+    def _recalc_row_score(self, row):
+        try:
+            sev = int(self.items_table.item(row, 4).text()) if self.items_table.item(row, 4) else 1
+            prob = int(self.items_table.item(row, 5).text()) if self.items_table.item(row, 5) else 1
+        except Exception:
+            sev, prob = 1, 1
+        sev = max(1, min(5, sev))
+        prob = max(1, min(5, prob))
+        score = sev * prob
+        for col, val in ((4, sev), (5, prob), (6, score)):
+            it = QTableWidgetItem(str(val))
+            it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.items_table.setItem(row, col, it)
+        self._set_significance_cell(row, score)
+
+    def _append_item_row(self, data):
+        r = self.items_table.rowCount()
+        self.items_table.insertRow(r)
+        sev = int(data.get("severity") or 1)
+        prob = int(data.get("probability") or 1)
+        score = _aspect_risk_score(sev, prob)
+        values = [
+            data.get("activity", ""),
+            data.get("aspect", ""),
+            data.get("impact", ""),
+            data.get("regulatory", ""),
+            str(sev),
+            str(prob),
+            str(score),
+            _aspect_significance(score),
+            data.get("existing_controls") or data.get("controls") or "",
+            data.get("additional_controls", ""),
+            data.get("responsible", ""),
+            data.get("status", "Open"),
+        ]
+        for c, v in enumerate(values):
+            item = QTableWidgetItem(str(v))
+            if c in (4, 5, 6, 7):
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if c in (6, 7):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.items_table.setItem(r, c, item)
+        self._set_significance_cell(r, score)
+        self.items_table.setRowHeight(r, 56)
+
+    def _generate_from_activities(self):
+        activities = self._selected_activities()
+        if not activities:
+            QMessageBox.warning(self, "Activities Required", "Select at least one activity from the list.")
+            return
+        if not self.reg_name.text().strip():
+            self.reg_name.setText(
+                f"Aspect & Impact Register — {', '.join(activities[:2])}"
+                + ("…" if len(activities) > 2 else "")
+            )
+        self.items_table.setRowCount(0)
+        count = 0
+        for activity in activities:
+            for it in ASPECT_ACTIVITIES.get(activity, []):
+                self._append_item_row({
+                    "activity": activity,
+                    "aspect": it["aspect"],
+                    "impact": it["impact"],
+                    "regulatory": it["regulatory"],
+                    "severity": it["severity"],
+                    "probability": it["probability"],
+                    "existing_controls": it["controls"],
+                    "additional_controls": "",
+                    "responsible": "",
+                    "status": "Open",
+                })
+                count += 1
+        self.current_register_id = None
+        self._update_summary_label(count, activities)
+        self.tabs.setCurrentIndex(1)
+        QMessageBox.information(
+            self, "Register Generated",
+            f"Generated {count} aspect/impact rows from {len(activities)} activit"
+            f"{'y' if len(activities) == 1 else 'ies'}.\n\n"
+            "Review the register, enter any Additional Controls, then click Save Register."
+        )
+
+    def _update_summary_label(self, count=None, activities=None):
+        if count is None:
+            count = self.items_table.rowCount()
+        name = self.reg_name.text().strip() or "(unnamed)"
+        sig = 0
+        for r in range(self.items_table.rowCount()):
+            it = self.items_table.item(r, 7)
+            if it and it.text() == "Significant":
+                sig += 1
+        act_txt = ""
+        if activities:
+            act_txt = f" | Activities: {', '.join(activities)}"
+        self.register_summary.setText(
+            f"{name}  |  Rows: {count}  |  Significant aspects: {sig}{act_txt}"
+        )
+
+    def _add_custom_row(self):
+        self._append_item_row({
+            "activity": "Custom",
+            "aspect": "",
+            "impact": "",
+            "regulatory": "",
+            "severity": 3,
+            "probability": 3,
+            "existing_controls": "",
+            "additional_controls": "",
+            "responsible": "",
+            "status": "Open",
+        })
+        self._update_summary_label()
+
+    def _delete_selected_row(self):
+        rows = sorted({i.row() for i in self.items_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            QMessageBox.information(self, "Select Row", "Select one or more rows to delete.")
+            return
+        for r in rows:
+            self.items_table.removeRow(r)
+        self._update_summary_label()
+
+    def _collect_items_from_table(self):
+        items = []
+        for r in range(self.items_table.rowCount()):
+            def cell(c):
+                it = self.items_table.item(r, c)
+                return it.text().strip() if it else ""
+            try:
+                sev = max(1, min(5, int(cell(4) or 1)))
+            except Exception:
+                sev = 1
+            try:
+                prob = max(1, min(5, int(cell(5) or 1)))
+            except Exception:
+                prob = 1
+            score = sev * prob
+            items.append({
+                "activity": cell(0),
+                "aspect": cell(1),
+                "impact": cell(2),
+                "regulatory": cell(3),
+                "severity": sev,
+                "probability": prob,
+                "risk_score": score,
+                "significance": _aspect_significance(score),
+                "existing_controls": cell(8),
+                "additional_controls": cell(9),
+                "responsible": cell(10),
+                "status": cell(11) or "Open",
+                "sort_order": r,
+            })
+        return items
+
+    def _save_register(self):
+        name = self.reg_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Name Required", "Enter a register name before saving.")
+            self.tabs.setCurrentIndex(0)
+            return
+        items = self._collect_items_from_table()
+        if not items:
+            QMessageBox.warning(self, "No Rows", "Generate or add at least one aspect/impact row.")
+            return
+        # Recalc displayed scores before save
+        for r in range(self.items_table.rowCount()):
+            self._recalc_row_score(r)
+        items = self._collect_items_from_table()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        header = {
+            "register_name": name,
+            "project": self.reg_project.text().strip(),
+            "location": self.reg_location.text().strip(),
+            "department": self.reg_department.text().strip(),
+            "review_date": self.reg_review.date().toString("yyyy-MM-dd"),
+            "next_review_date": self.reg_next.date().toString("yyyy-MM-dd"),
+            "prepared_by": self.reg_prepared.text().strip(),
+            "approved_by": self.reg_approved.text().strip(),
+            "status": self.reg_status.currentText(),
+            "notes": self.reg_notes.toPlainText().strip(),
+            "updated_at": now,
+        }
+        if self.current_register_id:
+            cols = list(header.keys())
+            sql = "UPDATE aspect_registers SET " + ", ".join(f"{c}=?" for c in cols) + " WHERE id=?"
+            self.db.execute(sql, [header[c] for c in cols] + [self.current_register_id])
+            self.db.execute("DELETE FROM aspect_register_items WHERE register_id=?", (self.current_register_id,))
+            rid = self.current_register_id
+        else:
+            header["created_at"] = now
+            cols = list(header.keys())
+            cur = self.db.execute(
+                "INSERT INTO aspect_registers(" + ",".join(cols) + ") VALUES(" + ",".join("?" for _ in cols) + ")",
+                [header[c] for c in cols],
+            )
+            rid = cur.lastrowid
+            self.current_register_id = rid
+        for it in items:
+            self.db.execute(
+                """INSERT INTO aspect_register_items(
+                    register_id, activity, aspect, impact, regulatory, severity, probability,
+                    risk_score, significance, existing_controls, additional_controls,
+                    responsible, status, sort_order
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    rid, it["activity"], it["aspect"], it["impact"], it["regulatory"],
+                    it["severity"], it["probability"], it["risk_score"], it["significance"],
+                    it["existing_controls"], it["additional_controls"], it["responsible"],
+                    it["status"], it["sort_order"],
+                ),
+            )
+        self.db.conn.commit()
+        self._load_register_list(select_id=rid)
+        self._update_summary_label(len(items))
+        QMessageBox.information(self, "Saved", f"Aspect & Impact Register saved ({len(items)} rows).")
+
+    def _load_register_list(self, select_id=None):
+        self.register_combo.blockSignals(True)
+        self.register_combo.clear()
+        self.register_combo.addItem("— Select a saved register —", None)
+        rows = self.db.fetchall(
+            "SELECT id, register_name, project, status, review_date FROM aspect_registers ORDER BY id DESC"
+        )
+        for r in rows:
+            label = f"{r['register_name']}  [{r['status']}]"
+            if r["project"]:
+                label += f" — {r['project']}"
+            self.register_combo.addItem(label, r["id"])
+        if select_id is not None:
+            idx = self.register_combo.findData(select_id)
+            if idx >= 0:
+                self.register_combo.setCurrentIndex(idx)
+        self.register_combo.blockSignals(False)
+
+    def _on_register_selected(self, _index=0):
+        rid = self.register_combo.currentData()
+        if not rid:
+            return
+        self._load_register(rid)
+
+    def _load_register(self, rid):
+        header = self.db.fetchone("SELECT * FROM aspect_registers WHERE id=?", (rid,))
+        if not header:
+            return
+        self.current_register_id = rid
+        self.reg_name.setText(safe(header["register_name"]))
+        self.reg_project.setText(safe(header["project"]))
+        self.reg_location.setText(safe(header["location"]))
+        self.reg_department.setText(safe(header["department"]))
+        self.reg_prepared.setText(safe(header["prepared_by"]))
+        self.reg_approved.setText(safe(header["approved_by"]))
+        self.reg_notes.setPlainText(safe(header["notes"]))
+        idx = self.reg_status.findText(safe(header["status"]) or "Draft")
+        self.reg_status.setCurrentIndex(idx if idx >= 0 else 0)
+        for widget, key in ((self.reg_review, "review_date"), (self.reg_next, "next_review_date")):
+            try:
+                d = QDate.fromString(safe(header[key]), "yyyy-MM-dd")
+                if d.isValid():
+                    widget.setDate(d)
+            except Exception:
+                pass
+        items = self.db.fetchall(
+            "SELECT * FROM aspect_register_items WHERE register_id=? ORDER BY sort_order, id", (rid,)
+        )
+        self.items_table.setRowCount(0)
+        for it in items:
+            self._append_item_row({
+                "activity": it["activity"],
+                "aspect": it["aspect"],
+                "impact": it["impact"],
+                "regulatory": it["regulatory"],
+                "severity": it["severity"],
+                "probability": it["probability"],
+                "existing_controls": it["existing_controls"],
+                "additional_controls": it["additional_controls"],
+                "responsible": it["responsible"],
+                "status": it["status"],
+            })
+        # Sync activity checkboxes to loaded activities
+        loaded_acts = {safe(it["activity"]) for it in items}
+        for i in range(self.activity_list.count()):
+            item = self.activity_list.item(i)
+            item.setCheckState(
+                Qt.CheckState.Checked if item.text() in loaded_acts else Qt.CheckState.Unchecked
+            )
+        self._update_summary_label(len(items), sorted(loaded_acts))
+        self.tabs.setCurrentIndex(1)
+
+    def _new_register(self):
+        self.current_register_id = None
+        self.reg_name.clear()
+        self.reg_project.clear()
+        self.reg_location.clear()
+        self.reg_department.clear()
+        self.reg_prepared.clear()
+        self.reg_approved.clear()
+        self.reg_notes.clear()
+        self.reg_status.setCurrentIndex(0)
+        self.reg_review.setDate(QDate.currentDate())
+        self.reg_next.setDate(QDate.currentDate().addMonths(12))
+        self.items_table.setRowCount(0)
+        self._clear_all_activities()
+        self.register_combo.setCurrentIndex(0)
+        self.register_summary.setText("New register — select activities and generate.")
+        self.tabs.setCurrentIndex(0)
+
+    def _delete_register(self):
+        rid = self.current_register_id or self.register_combo.currentData()
+        if not rid:
+            QMessageBox.information(self, "Select Register", "Open a saved register first.")
+            return
+        header = self.db.fetchone("SELECT register_name FROM aspect_registers WHERE id=?", (rid,))
+        name = safe(header["register_name"]) if header else str(rid)
+        if QMessageBox.question(
+            self, "Delete Register",
+            f"Delete register “{name}” and all its rows? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute("DELETE FROM aspect_register_items WHERE register_id=?", (rid,))
+        self.db.execute("DELETE FROM aspect_registers WHERE id=?", (rid,))
+        self.db.conn.commit()
+        self._new_register()
+        self._load_register_list()
+        QMessageBox.information(self, "Deleted", "Register deleted.")
+
+    # ------------------------------------------------------------------ export
+    def _export_excel(self):
+        items = self._collect_items_from_table()
+        if not items:
+            QMessageBox.warning(self, "No Data", "There is nothing to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Aspect & Impact Register",
+            f"Aspect_Impact_Register_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            "Excel Workbook (*.xlsx)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Aspect & Impact Register"
+            title = self.reg_name.text().strip() or "Aspect & Impact Register"
+            ws.append([title])
+            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=12)
+            ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
+            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+            ws.row_dimensions[1].height = 28
+            ws.append([
+                f"Project: {self.reg_project.text().strip()}",
+                f"Location: {self.reg_location.text().strip()}",
+                f"Department: {self.reg_department.text().strip()}",
+                f"Status: {self.reg_status.currentText()}",
+                f"Review: {self.reg_review.date().toString('yyyy-MM-dd')}",
+                f"Next review: {self.reg_next.date().toString('yyyy-MM-dd')}",
+                f"Prepared by: {self.reg_prepared.text().strip()}",
+                f"Approved by: {self.reg_approved.text().strip()}",
+            ])
+            ws.append([])
+            headers = [
+                "S.No.", "Activity", "Environmental Aspect", "Impact",
+                "Regulatory / Other Requirements", "Severity", "Probability", "Risk Score",
+                "Significance", "Existing Controls", "Additional Controls", "Responsible", "Status"
+            ]
+            ws.append(headers)
+            headfill = PatternFill("solid", fgColor="D9EAF7")
+            thin = Side(style="thin", color="B7C9D6")
+            for cell in ws[ws.max_row]:
+                cell.font = Font(bold=True, color="17365D")
+                cell.fill = headfill
+                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                cell.border = Border(bottom=thin)
+            for i, it in enumerate(items, 1):
+                ws.append([
+                    i, it["activity"], it["aspect"], it["impact"], it["regulatory"],
+                    it["severity"], it["probability"], it["risk_score"], it["significance"],
+                    it["existing_controls"], it["additional_controls"], it["responsible"], it["status"],
+                ])
+                sig = it["significance"]
+                fill = "F8D7DA" if sig == "Significant" else ("FFF3CD" if sig == "Moderate" else "D4EDDA")
+                for cell in ws[ws.max_row]:
+                    cell.alignment = Alignment(vertical="top", wrap_text=True)
+                    if cell.column == 9:
+                        cell.fill = PatternFill("solid", fgColor=fill)
+            ws.freeze_panes = "A5"
+            from openpyxl.utils import get_column_letter
+            widths = [6, 22, 36, 36, 32, 8, 8, 10, 12, 36, 28, 16, 10]
+            for i, w in enumerate(widths, 1):
+                ws.column_dimensions[get_column_letter(i)].width = w
+            # Summary sheet
+            summary = wb.create_sheet("Significance Summary")
+            summary.append(["Significance", "Count"])
+            from collections import Counter
+            counts = Counter(it["significance"] for it in items)
+            for key in ("Significant", "Moderate", "Low"):
+                summary.append([key, counts.get(key, 0)])
+            summary.append([])
+            summary.append(["Activity", "Rows"])
+            act_counts = Counter(it["activity"] for it in items)
+            for act, n in sorted(act_counts.items()):
+                summary.append([act, n])
+            wb.save(path)
+            QMessageBox.information(self, "Exported", f"Excel register saved:\n{path}")
+        except Exception as exc:
+            logging.exception("Aspect impact Excel export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _export_word(self):
+        items = self._collect_items_from_table()
+        if not items:
+            QMessageBox.warning(self, "No Data", "There is nothing to export.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Aspect & Impact Register",
+            f"Aspect_Impact_Register_{datetime.now().strftime('%Y%m%d')}.docx",
+            "Word Document (*.docx)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        try:
+            doc = Document()
+            set_docx_landscape(doc)
+            title = self.reg_name.text().strip() or "ISO 14001 Aspect & Impact Register"
+            add_docx_report_header(
+                doc, "ISO 14001 ASPECT & IMPACT REGISTER", "ENV",
+                f"{document_prefix()}-ENV-AI-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            )
+            add_docx_kv_table(doc, [
+                ("Register Name", title),
+                ("Project", self.reg_project.text().strip()),
+                ("Location / Site", self.reg_location.text().strip()),
+                ("Department", self.reg_department.text().strip()),
+                ("Status", self.reg_status.currentText()),
+                ("Review Date", self.reg_review.date().toString("yyyy-MM-dd")),
+                ("Next Review", self.reg_next.date().toString("yyyy-MM-dd")),
+                ("Prepared By", self.reg_prepared.text().strip()),
+                ("Approved By", self.reg_approved.text().strip()),
+            ])
+            if self.reg_notes.toPlainText().strip():
+                add_docx_boxed_section(doc, "Scope / Notes", self.reg_notes.toPlainText().strip(), 8)
+
+            doc.add_heading("Aspect & Impact Register", level=2)
+            headers = [
+                "S.No.", "Activity", "Aspect", "Impact", "Regulatory",
+                "Sev", "Prob", "Score", "Sig.", "Existing Controls", "Additional Controls"
+            ]
+            table = doc.add_table(rows=1, cols=len(headers))
+            for i, h in enumerate(headers):
+                table.rows[0].cells[i].text = h
+            for i, it in enumerate(items, 1):
+                cells = table.add_row().cells
+                vals = [
+                    str(i), it["activity"], it["aspect"], it["impact"], it["regulatory"],
+                    str(it["severity"]), str(it["probability"]), str(it["risk_score"]),
+                    it["significance"], it["existing_controls"], it["additional_controls"],
+                ]
+                for c, v in enumerate(vals):
+                    cells[c].text = xml_safe(v)
+            style_docx_table(table, header=True, font_size=7)
+
+            doc.add_heading("Significance Summary", level=2)
+            from collections import Counter
+            counts = Counter(it["significance"] for it in items)
+            st = doc.add_table(rows=1, cols=2)
+            st.rows[0].cells[0].text = "Significance"
+            st.rows[0].cells[1].text = "Count"
+            for key in ("Significant", "Moderate", "Low"):
+                c = st.add_row().cells
+                c[0].text = key
+                c[1].text = str(counts.get(key, 0))
+            style_docx_table(st, header=True, font_size=9)
+
+            add_docx_signatures(doc)
+            add_docx_footer(doc)
+            save_docx_validated(doc, path)
+            QMessageBox.information(self, "Exported", f"Word register saved:\n{path}")
+        except Exception as exc:
+            logging.exception("Aspect impact Word export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
 
 
 class PTWModule(QWidget):
