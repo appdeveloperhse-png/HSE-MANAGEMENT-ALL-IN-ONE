@@ -13200,6 +13200,164 @@ ASPECT_ACTIVITIES = {
 }
 
 
+
+# Master Environmental Legal / Other Requirements library (seed).
+# Users can add site-specific obligations in the Legal Compliance Library tab.
+# This is environment-focused and does NOT link to CAPA in this version.
+LEGAL_LIBRARY_SEED = [
+    {
+        "ref_code": "ENV-AIR-001",
+        "title": "Air emission / ambient air quality controls",
+        "requirement_type": "Regulation",
+        "jurisdiction": "National / Local",
+        "source": "Air pollution control regulations",
+        "description": "Control of emissions from combustion, welding, coating, dust-generating activities; comply with applicable emission limits and nuisance rules.",
+        "iso_reference": "ISO 14001 6.1.2 / 8.1",
+        "default_category": "Air Emissions",
+    },
+    {
+        "ref_code": "ENV-WASTE-001",
+        "title": "Waste duty of care and segregation",
+        "requirement_type": "Regulation",
+        "jurisdiction": "National / Local",
+        "source": "Waste management regulations",
+        "description": "Segregate waste streams, use licensed carriers, retain transfer notes, and prevent illegal dumping or mixing of hazardous with non-hazardous waste.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Waste",
+    },
+    {
+        "ref_code": "ENV-WASTE-002",
+        "title": "Hazardous waste storage and disposal",
+        "requirement_type": "Regulation",
+        "jurisdiction": "National / Local",
+        "source": "Hazardous waste rules",
+        "description": "Label, contain, and dispose of hazardous waste (oils, chemicals, contaminated absorbents, batteries, WEEE) via authorised facilities only.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Waste",
+    },
+    {
+        "ref_code": "ENV-WATER-001",
+        "title": "Controlled water / trade effluent discharge",
+        "requirement_type": "Permit / Regulation",
+        "jurisdiction": "National / Local",
+        "source": "Water discharge / trade effluent rules",
+        "description": "No uncontrolled discharge of process water, cement wash water, or contaminated runoff to drains or watercourses without consent and treatment as required.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Water / Effluent",
+    },
+    {
+        "ref_code": "ENV-SPILL-001",
+        "title": "Spill prevention and response",
+        "requirement_type": "Regulation / Company",
+        "jurisdiction": "Site / Company",
+        "source": "Pollution prevention good practice / company procedure",
+        "description": "Provide secondary containment, spill kits, trained responders, and immediate reporting/cleanup of fuel, oil, and chemical spills.",
+        "iso_reference": "ISO 14001 8.2",
+        "default_category": "Land / Soil",
+    },
+    {
+        "ref_code": "ENV-FUEL-001",
+        "title": "Oil and fuel storage requirements",
+        "requirement_type": "Regulation",
+        "jurisdiction": "National / Local",
+        "source": "Oil storage regulations / good practice",
+        "description": "Bunded or double-skinned tanks, overfill protection, inspection, and refuelling controls to prevent land and water pollution.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Land / Soil",
+    },
+    {
+        "ref_code": "ENV-NOISE-001",
+        "title": "Environmental noise and vibration",
+        "requirement_type": "Regulation / Client",
+        "jurisdiction": "Local / Project",
+        "source": "Noise limits / project environmental conditions",
+        "description": "Comply with applicable noise limits, restricted hours, and monitoring where required for construction or industrial activities.",
+        "iso_reference": "ISO 14001 6.1.2",
+        "default_category": "Noise / Vibration",
+    },
+    {
+        "ref_code": "ENV-DUST-001",
+        "title": "Dust and particulate control",
+        "requirement_type": "Regulation / Client",
+        "jurisdiction": "Local / Project",
+        "source": "Air quality / project dust management",
+        "description": "Suppress and contain dust from earthworks, traffic, cutting, and abrasive blasting; protect neighbours and sensitive receptors.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Air Emissions",
+    },
+    {
+        "ref_code": "ENV-CHEM-001",
+        "title": "Hazardous substance storage and SDS",
+        "requirement_type": "Regulation",
+        "jurisdiction": "National / Site",
+        "source": "Chemical / hazardous substance rules",
+        "description": "Maintain SDS, compatible segregation, labelled containers, secondary containment, and controlled access for chemicals used on site.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Materials / Chemicals",
+    },
+    {
+        "ref_code": "ENV-ENERGY-001",
+        "title": "Energy use and efficiency expectations",
+        "requirement_type": "Company / Other",
+        "jurisdiction": "Company",
+        "source": "Company energy / sustainability policy",
+        "description": "Monitor significant energy uses, reduce idle running, and consider efficiency in plant and equipment selection.",
+        "iso_reference": "ISO 14001 6.1.2",
+        "default_category": "Energy / Resource",
+    },
+    {
+        "ref_code": "ENV-ISO-001",
+        "title": "ISO 14001 environmental aspects determination",
+        "requirement_type": "ISO / Other",
+        "jurisdiction": "Organisation",
+        "source": "ISO 14001 clause 6.1.2",
+        "description": "Determine environmental aspects, associated impacts, and significant aspects considering normal, abnormal, and emergency conditions and a life-cycle perspective as applicable.",
+        "iso_reference": "ISO 14001 6.1.2",
+        "default_category": "Other",
+    },
+    {
+        "ref_code": "ENV-ISO-002",
+        "title": "ISO 14001 compliance obligations",
+        "requirement_type": "ISO / Other",
+        "jurisdiction": "Organisation",
+        "source": "ISO 14001 clause 6.1.3",
+        "description": "Identify and have access to compliance obligations related to environmental aspects; take them into account in the EMS.",
+        "iso_reference": "ISO 14001 6.1.3",
+        "default_category": "Other",
+    },
+    {
+        "ref_code": "ENV-ISO-003",
+        "title": "ISO 14001 operational planning and control",
+        "requirement_type": "ISO / Other",
+        "jurisdiction": "Organisation",
+        "source": "ISO 14001 clause 8.1",
+        "description": "Implement operational controls for significant environmental aspects, including staged processes and outsourced processes as applicable.",
+        "iso_reference": "ISO 14001 8.1",
+        "default_category": "Other",
+    },
+    {
+        "ref_code": "ENV-ISO-004",
+        "title": "ISO 14001 emergency preparedness and response",
+        "requirement_type": "ISO / Other",
+        "jurisdiction": "Organisation",
+        "source": "ISO 14001 clause 8.2",
+        "description": "Prepare for and respond to potential environmental emergency situations; test and review response processes.",
+        "iso_reference": "ISO 14001 8.2",
+        "default_category": "Other",
+    },
+    {
+        "ref_code": "ENV-CLIENT-001",
+        "title": "Client / project environmental conditions",
+        "requirement_type": "Client",
+        "jurisdiction": "Project",
+        "source": "Contract / project environmental requirements",
+        "description": "Comply with project-specific environmental constraints (working hours, protected areas, waste targets, discharge limits) stated in the contract or EMP.",
+        "iso_reference": "ISO 14001 6.1.3",
+        "default_category": "Other",
+    },
+]
+
+
 def _aspect_risk_score(severity, probability):
     try:
         return int(severity) * int(probability)
@@ -13287,6 +13445,58 @@ class AspectImpactModule(QWidget):
         for col, definition in aspect_migrations.items():
             if col not in existing_cols:
                 self.db.conn.execute(f"ALTER TABLE aspect_register_items ADD COLUMN {col} {definition}")
+        # Legal Compliance Library — Aspect module only (not linked to CAPA).
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS legal_requirements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ref_code TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            requirement_type TEXT DEFAULT 'Regulation',
+            jurisdiction TEXT DEFAULT '',
+            source TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            iso_reference TEXT DEFAULT '',
+            default_category TEXT DEFAULT 'Other',
+            compliance_status TEXT DEFAULT 'Not Assessed',
+            owner TEXT DEFAULT '',
+            next_review_date TEXT DEFAULT '',
+            evidence_summary TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS aspect_item_legal_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            register_id INTEGER NOT NULL,
+            item_sort_order INTEGER NOT NULL DEFAULT 0,
+            activity TEXT DEFAULT '',
+            aspect TEXT DEFAULT '',
+            legal_id INTEGER NOT NULL,
+            linked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(legal_id) REFERENCES legal_requirements(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_aspect_legal_links_reg
+            ON aspect_item_legal_links(register_id);
+        """)
+        # Seed master library once (skip if any user/library rows already exist).
+        count_row = self.db.conn.execute("SELECT COUNT(*) AS n FROM legal_requirements").fetchone()
+        if int(count_row[0] if count_row else 0) == 0:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for seed in LEGAL_LIBRARY_SEED:
+                self.db.conn.execute(
+                    """INSERT OR IGNORE INTO legal_requirements(
+                        ref_code, title, requirement_type, jurisdiction, source, description,
+                        iso_reference, default_category, compliance_status, active, created_at, updated_at
+                    ) VALUES (?,?,?,?,?,?,?,?, 'Not Assessed', 1, ?, ?)""",
+                    (
+                        seed["ref_code"], seed["title"], seed["requirement_type"], seed["jurisdiction"],
+                        seed["source"], seed["description"], seed["iso_reference"], seed["default_category"],
+                        now, now,
+                    ),
+                )
+        item_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(aspect_register_items)").fetchall()}
+        if "linked_legal_refs" not in item_cols:
+            self.db.conn.execute("ALTER TABLE aspect_register_items ADD COLUMN linked_legal_refs TEXT DEFAULT ''")
         self.db.conn.commit()
 
     # ------------------------------------------------------------------ UI
@@ -13309,6 +13519,7 @@ class AspectImpactModule(QWidget):
         self._build_generator_tab()
         self._build_register_tab()
         self._build_library_tab()
+        self._build_legal_tab()
 
     def _build_generator_tab(self):
         page = QWidget()
@@ -13435,9 +13646,16 @@ class AspectImpactModule(QWidget):
         export_docx.clicked.connect(self._export_word)
         delete_reg = QPushButton("Delete register")
         delete_reg.clicked.connect(self._delete_register)
+        link_legal_btn = QPushButton("Link Legal to Selected Row")
+        link_legal_btn.setToolTip("Link one or more Legal Compliance Library entries to the selected aspect row.")
+        link_legal_btn.clicked.connect(self._link_legal_to_selected_row)
+        view_legal_btn = QPushButton("View Linked Legal")
+        view_legal_btn.clicked.connect(self._view_linked_legal_for_row)
         actions.addWidget(save_btn)
         actions.addWidget(add_row_btn)
         actions.addWidget(del_row_btn)
+        actions.addWidget(link_legal_btn)
+        actions.addWidget(view_legal_btn)
         actions.addStretch(1)
         actions.addWidget(export_xlsx)
         actions.addWidget(export_docx)
@@ -13486,6 +13704,302 @@ class AspectImpactModule(QWidget):
         self.tabs.addTab(page, "3. Activity Library (reference)")
 
     # ------------------------------------------------------------------ helpers
+
+    def _build_legal_tab(self):
+        """Master Environmental Legal / Other Requirements library (Aspect module only)."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        info = QLabel(
+            "Master Legal Compliance Library for environmental and other requirements (ISO 14001 6.1.3). "
+            "Maintain obligations here, then link them to Aspect & Impact register rows. "
+            "This library is not linked to CAPA in this version."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#334; padding:4px;")
+        layout.addWidget(info)
+
+        form_box = QGroupBox("Add / Edit legal requirement")
+        form = QFormLayout(form_box)
+        self.legal_id = None
+        self.legal_ref = QLineEdit(); self.legal_ref.setPlaceholderText("e.g. ENV-WASTE-001")
+        self.legal_title = QLineEdit()
+        self.legal_type = QComboBox(); self.legal_type.addItems(
+            ["Regulation", "Permit", "Client", "ISO / Other", "Company", "Other"]
+        )
+        self.legal_jurisdiction = QLineEdit(); self.legal_jurisdiction.setPlaceholderText("National / Local / Project / Company")
+        self.legal_source = QLineEdit()
+        self.legal_iso = QLineEdit(); self.legal_iso.setPlaceholderText("e.g. ISO 14001 6.1.3")
+        self.legal_category = QComboBox(); self.legal_category.addItems(
+            ["Air Emissions", "Water / Effluent", "Waste", "Land / Soil", "Noise / Vibration",
+             "Energy / Resource", "Materials / Chemicals", "Biodiversity", "Other"]
+        )
+        self.legal_status = QComboBox(); self.legal_status.addItems(
+            ["Not Assessed", "Compliant", "Partial", "Non-compliant"]
+        )
+        self.legal_owner = QLineEdit()
+        self.legal_next_review = QDateEdit(); self.legal_next_review.setCalendarPopup(True)
+        self.legal_next_review.setDate(QDate.currentDate().addMonths(12))
+        self.legal_desc = QTextEdit(); self.legal_desc.setMaximumHeight(70)
+        self.legal_evidence = QTextEdit(); self.legal_evidence.setMaximumHeight(50)
+        form.addRow("Ref. code *", self.legal_ref)
+        form.addRow("Title *", self.legal_title)
+        form.addRow("Type", self.legal_type)
+        form.addRow("Jurisdiction", self.legal_jurisdiction)
+        form.addRow("Source", self.legal_source)
+        form.addRow("ISO / clause ref.", self.legal_iso)
+        form.addRow("Env. category", self.legal_category)
+        form.addRow("Compliance status", self.legal_status)
+        form.addRow("Owner", self.legal_owner)
+        form.addRow("Next review", self.legal_next_review)
+        form.addRow("Description", self.legal_desc)
+        form.addRow("Evidence summary", self.legal_evidence)
+        layout.addWidget(form_box)
+
+        btn_row = QHBoxLayout()
+        save_l = QPushButton("Save Legal Requirement")
+        save_l.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:6px 12px;")
+        save_l.clicked.connect(self._save_legal_requirement)
+        clear_l = QPushButton("Clear Form")
+        clear_l.clicked.connect(self._clear_legal_form)
+        del_l = QPushButton("Deactivate Selected")
+        del_l.clicked.connect(self._deactivate_legal_requirement)
+        refresh_l = QPushButton("Refresh List")
+        refresh_l.clicked.connect(self._refresh_legal_table)
+        btn_row.addWidget(save_l)
+        btn_row.addWidget(clear_l)
+        btn_row.addWidget(del_l)
+        btn_row.addStretch(1)
+        btn_row.addWidget(refresh_l)
+        layout.addLayout(btn_row)
+
+        self.legal_table = QTableWidget(0, 9)
+        self.legal_table.setHorizontalHeaderLabels([
+            "Ref.", "Title", "Type", "Jurisdiction", "Category", "Status", "Owner", "Next Review", "ISO Ref."
+        ])
+        self.legal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.legal_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.legal_table.setAlternatingRowColors(True)
+        self.legal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.legal_table.horizontalHeader().setStretchLastSection(True)
+        self.legal_table.doubleClicked.connect(self._load_legal_from_table)
+        layout.addWidget(self.legal_table, 1)
+        self.tabs.addTab(page, "4. Legal Compliance Library")
+        self._refresh_legal_table()
+
+    def _clear_legal_form(self):
+        self.legal_id = None
+        self.legal_ref.clear()
+        self.legal_title.clear()
+        self.legal_type.setCurrentIndex(0)
+        self.legal_jurisdiction.clear()
+        self.legal_source.clear()
+        self.legal_iso.clear()
+        self.legal_category.setCurrentIndex(0)
+        self.legal_status.setCurrentIndex(0)
+        self.legal_owner.clear()
+        self.legal_next_review.setDate(QDate.currentDate().addMonths(12))
+        self.legal_desc.clear()
+        self.legal_evidence.clear()
+
+    def _refresh_legal_table(self):
+        rows = self.db.fetchall(
+            "SELECT * FROM legal_requirements WHERE COALESCE(active,1)=1 ORDER BY ref_code"
+        )
+        self.legal_table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            vals = [
+                safe(r["ref_code"]), safe(r["title"]), safe(r["requirement_type"]),
+                safe(r["jurisdiction"]), safe(r["default_category"]), safe(r["compliance_status"]),
+                safe(r["owner"]), safe(r["next_review_date"]), safe(r["iso_reference"]),
+            ]
+            for j, v in enumerate(vals):
+                item = QTableWidgetItem(v)
+                item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                if j == 5:
+                    st = v.strip().lower()
+                    if st == "non-compliant":
+                        item.setBackground(QColor("#F8D7DA"))
+                    elif st == "partial":
+                        item.setBackground(QColor("#FFF3CD"))
+                    elif st == "compliant":
+                        item.setBackground(QColor("#D4EDDA"))
+                self.legal_table.setItem(i, j, item)
+        self.legal_table.resizeRowsToContents()
+
+    def _load_legal_from_table(self, *_args):
+        row = self.legal_table.currentRow()
+        if row < 0:
+            return
+        item = self.legal_table.item(row, 0)
+        if not item:
+            return
+        lid = item.data(Qt.ItemDataRole.UserRole)
+        r = self.db.fetchone("SELECT * FROM legal_requirements WHERE id=?", (lid,))
+        if not r:
+            return
+        self.legal_id = r["id"]
+        self.legal_ref.setText(safe(r["ref_code"]))
+        self.legal_title.setText(safe(r["title"]))
+        ix = self.legal_type.findText(safe(r["requirement_type"]))
+        self.legal_type.setCurrentIndex(ix if ix >= 0 else 0)
+        self.legal_jurisdiction.setText(safe(r["jurisdiction"]))
+        self.legal_source.setText(safe(r["source"]))
+        self.legal_iso.setText(safe(r["iso_reference"]))
+        ix = self.legal_category.findText(safe(r["default_category"]))
+        self.legal_category.setCurrentIndex(ix if ix >= 0 else 0)
+        ix = self.legal_status.findText(safe(r["compliance_status"]))
+        self.legal_status.setCurrentIndex(ix if ix >= 0 else 0)
+        self.legal_owner.setText(safe(r["owner"]))
+        d = QDate.fromString(safe(r["next_review_date"]), "yyyy-MM-dd")
+        if d.isValid():
+            self.legal_next_review.setDate(d)
+        self.legal_desc.setPlainText(safe(r["description"]))
+        self.legal_evidence.setPlainText(safe(r["evidence_summary"]))
+
+    def _save_legal_requirement(self):
+        ref = self.legal_ref.text().strip().upper()
+        title = self.legal_title.text().strip()
+        if not ref or not title:
+            QMessageBox.warning(self, "Required", "Enter reference code and title.")
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        data = dict(
+            ref_code=ref,
+            title=title,
+            requirement_type=self.legal_type.currentText(),
+            jurisdiction=self.legal_jurisdiction.text().strip(),
+            source=self.legal_source.text().strip(),
+            description=self.legal_desc.toPlainText().strip(),
+            iso_reference=self.legal_iso.text().strip(),
+            default_category=self.legal_category.currentText(),
+            compliance_status=self.legal_status.currentText(),
+            owner=self.legal_owner.text().strip(),
+            next_review_date=self.legal_next_review.date().toString("yyyy-MM-dd"),
+            evidence_summary=self.legal_evidence.toPlainText().strip(),
+            updated_at=now,
+            active=1,
+        )
+        try:
+            if self.legal_id:
+                cols = list(data.keys())
+                self.db.execute(
+                    "UPDATE legal_requirements SET " + ", ".join(f"{c}=?" for c in cols) + " WHERE id=?",
+                    [data[c] for c in cols] + [self.legal_id],
+                )
+            else:
+                data["created_at"] = now
+                cols = list(data.keys())
+                self.db.execute(
+                    "INSERT INTO legal_requirements(" + ",".join(cols) + ") VALUES(" + ",".join("?" for _ in cols) + ")",
+                    [data[c] for c in cols],
+                )
+            self.db.conn.commit()
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Failed", f"Could not save legal requirement.\n\n{exc}")
+            return
+        self._clear_legal_form()
+        self._refresh_legal_table()
+        QMessageBox.information(self, "Saved", f"Legal requirement {ref} saved.")
+
+    def _deactivate_legal_requirement(self):
+        row = self.legal_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Select", "Select a legal requirement row first.")
+            return
+        lid = self.legal_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        ref = self.legal_table.item(row, 0).text()
+        if QMessageBox.question(
+            self, "Deactivate",
+            f"Deactivate {ref}? Existing aspect links remain for history but the item is hidden from the active library.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute(
+            "UPDATE legal_requirements SET active=0, updated_at=? WHERE id=?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), lid),
+        )
+        self.db.conn.commit()
+        self._clear_legal_form()
+        self._refresh_legal_table()
+
+    def _link_legal_to_selected_row(self):
+        row = self.items_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Select Aspect Row", "Select an aspect register row first.")
+            return
+        legals = self.db.fetchall(
+            "SELECT id, ref_code, title, compliance_status FROM legal_requirements WHERE COALESCE(active,1)=1 ORDER BY ref_code"
+        )
+        if not legals:
+            QMessageBox.warning(self, "Library Empty", "Add legal requirements in the Legal Compliance Library tab first.")
+            return
+        labels = [f"{r['ref_code']} — {r['title']} [{r['compliance_status']}]" for r in legals]
+        choice, ok = QInputDialog.getItem(self, "Link Legal Requirement", "Select requirement to link:", labels, 0, False)
+        if not ok or not choice:
+            return
+        idx = labels.index(choice)
+        legal = legals[idx]
+        # Append ref into Regulatory column for visibility (keep existing text)
+        reg_item = self.items_table.item(row, 3)
+        existing = reg_item.text().strip() if reg_item else ""
+        tag = legal["ref_code"]
+        if tag not in existing:
+            new_reg = (existing + "; " + tag).strip("; ").strip() if existing else tag
+            self.items_table.setItem(row, 3, QTableWidgetItem(new_reg))
+        # Force legal obligation flag to Yes
+        self.items_table.setItem(row, 10, QTableWidgetItem("Yes"))
+        self._recalc_row_score(row)
+        # Persist link if register already saved
+        activity = self.items_table.item(row, 0).text() if self.items_table.item(row, 0) else ""
+        aspect = self.items_table.item(row, 1).text() if self.items_table.item(row, 1) else ""
+        if self.current_register_id:
+            exists = self.db.fetchone(
+                """SELECT id FROM aspect_item_legal_links
+                   WHERE register_id=? AND item_sort_order=? AND legal_id=?""",
+                (self.current_register_id, row, legal["id"]),
+            )
+            if not exists:
+                self.db.execute(
+                    """INSERT INTO aspect_item_legal_links(register_id, item_sort_order, activity, aspect, legal_id)
+                       VALUES (?,?,?,?,?)""",
+                    (self.current_register_id, row, activity, aspect, legal["id"]),
+                )
+                self.db.conn.commit()
+        QMessageBox.information(
+            self, "Linked",
+            f"Linked {tag} to the selected aspect row.\nLegal obligation set to Yes.\nSave the register to keep changes."
+        )
+
+    def _view_linked_legal_for_row(self):
+        row = self.items_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Select Aspect Row", "Select an aspect register row first.")
+            return
+        reg_item = self.items_table.item(row, 3)
+        refs_text = reg_item.text().strip() if reg_item else ""
+        lines = []
+        if self.current_register_id:
+            links = self.db.fetchall(
+                """SELECT l.ref_code, l.title, l.compliance_status, l.requirement_type, l.iso_reference
+                   FROM aspect_item_legal_links x
+                   JOIN legal_requirements l ON l.id=x.legal_id
+                   WHERE x.register_id=? AND x.item_sort_order=?
+                   ORDER BY l.ref_code""",
+                (self.current_register_id, row),
+            )
+            for l in links:
+                lines.append(
+                    f"{l['ref_code']} | {l['title']} | {l['requirement_type']} | "
+                    f"Status: {l['compliance_status']} | {l['iso_reference']}"
+                )
+        if not lines and refs_text:
+            lines.append("References shown on row: " + refs_text)
+        if not lines:
+            lines.append("No legal requirements linked to this row yet.")
+        QMessageBox.information(self, "Linked Legal Requirements", "\n".join(lines))
+
+
     def _selected_activities(self):
         names = []
         for i in range(self.activity_list.count()):
@@ -13965,6 +14479,8 @@ class AspectImpactModule(QWidget):
         except Exception as exc:
             logging.exception("Aspect impact Word export failed")
             QMessageBox.critical(self, "Export Failed", str(exc))
+
+
 
 
 class PTWModule(QWidget):
