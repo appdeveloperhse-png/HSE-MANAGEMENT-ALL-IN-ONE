@@ -7,16 +7,13 @@ import zipfile
 import logging
 import json
 import re
-import hashlib
-import hmac
-import secrets
 import html
 import calendar
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF, QDate, QDateTime, QUrl
+from PySide6.QtCore import Qt, QRectF, QDate, QDateTime, QUrl, QTimer
 from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QColor, QStandardItem, QStandardItemModel, QTextDocument, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -775,180 +772,6 @@ class Database:
 
 
 db = Database()
-
-
-# ============================================================
-# AUTHENTICATION AND ROLE-BASED ACCESS CONTROL
-# ============================================================
-ACCESS_MODULES = ["Dashboard", "HSE Inspection Register", "Incident Investigation", "Audit Register",
-                  "CAPA Tracking Register", "Permit to Work (PTW)", "Training", "Manpower Details",
-                  "ISO 14001 Aspect & Impact", "Reports", "Master Data", "Settings"]
-ACCESS_ACTIONS = ["view", "create", "edit", "review", "approve", "delete", "export", "manage"]
-ACCESS_ROLES = ["Admin", "HSE Manager", "HSE Supervisor", "HSE Lead", "HSE Officer", "Trained Auditor",
-                "HSE Trainer", "Environmental Officer", "PTW Holder", "PTW Reviewer", "PTW Approver",
-                "Manpower Data Entry"]
-
-def empty_permissions():
-    return {m: {a: False for a in ACCESS_ACTIONS} for m in ACCESS_MODULES}
-
-def role_permissions(role):
-    p = empty_permissions()
-    def grant(modules, *actions):
-        for m in modules:
-            for a in actions: p[m][a] = True
-    grant(["Dashboard"], "view")
-    if role == "Admin": return {m: {a: True for a in ACCESS_ACTIONS} for m in ACCESS_MODULES}
-    if role == "HSE Manager":
-        grant(ACCESS_MODULES, "view", "export")
-        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register",
-               "Permit to Work (PTW)", "Training", "Manpower Details", "ISO 14001 Aspect & Impact"], "review", "approve")
-    elif role in ("HSE Supervisor", "HSE Lead"):
-        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register",
-               "Permit to Work (PTW)", "Manpower Details", "Reports"], "view", "export")
-        grant(["HSE Inspection Register", "Incident Investigation", "Audit Register", "CAPA Tracking Register"], "edit", "review")
-        grant(["Permit to Work (PTW)"], "review")
-    elif role == "HSE Officer":
-        grant(["HSE Inspection Register", "Incident Investigation", "CAPA Tracking Register", "Permit to Work (PTW)",
-               "Manpower Details", "Reports"], "view", "export")
-        grant(["HSE Inspection Register", "Incident Investigation", "CAPA Tracking Register"], "create", "edit")
-        grant(["Training"], "view")
-    elif role == "Trained Auditor":
-        grant(["Audit Register"], "view", "create", "edit", "review", "export")
-        grant(["Reports"], "view", "export")
-    elif role == "HSE Trainer":
-        grant(["Training"], "view", "create", "edit", "export")
-        grant(["Reports"], "view", "export")
-    elif role == "Environmental Officer":
-        grant(["ISO 14001 Aspect & Impact"], "view", "create", "edit", "export")
-        grant(["Reports"], "view", "export")
-    elif role == "PTW Holder": grant(["Permit to Work (PTW)"], "view", "create", "edit")
-    elif role == "PTW Reviewer": grant(["Permit to Work (PTW)"], "view", "review")
-    elif role == "PTW Approver": grant(["Permit to Work (PTW)"], "view", "review", "approve")
-    elif role == "Manpower Data Entry": grant(["Manpower Details"], "view", "create", "edit")
-    return p
-
-def make_password_hash(password, salt=None):
-    salt = salt or secrets.token_bytes(16)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 310000)
-    return salt.hex(), digest.hex()
-
-def ensure_access_schema():
-    db.conn.executescript("""
-    CREATE TABLE IF NOT EXISTS app_users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-      full_name TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'HSE Officer', salt TEXT NOT NULL,
-      password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1,
-      active INTEGER NOT NULL DEFAULT 1, permissions_json TEXT NOT NULL DEFAULT '{}',
-      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      last_login TEXT NOT NULL DEFAULT '');
-    CREATE TABLE IF NOT EXISTS user_activity_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, action TEXT NOT NULL,
-      details TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
-    """)
-    if not db.fetchone("SELECT id FROM app_users WHERE username='HSEADMIN'"):
-        salt, digest = make_password_hash("1234567890")
-        db.execute("INSERT INTO app_users(username,full_name,role,salt,password_hash,must_change_password,permissions_json) VALUES(?,?,?,?,?,1,?)",
-                   ("HSEADMIN", "System Administrator", "Admin", salt, digest,
-                    json.dumps(role_permissions("Admin"))))
-    db.conn.commit()
-
-ensure_access_schema()
-
-def log_user_action(username, action, details=""):
-    try: db.execute("INSERT INTO user_activity_log(username,action,details) VALUES(?,?,?)", (username, action, details))
-    except Exception: logging.exception("User activity log failed")
-
-class LoginDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent); self.setWindowTitle("HSE Management System - Sign In"); self.setFixedWidth(420); self.user = None
-        layout = QVBoxLayout(self)
-        title = QLabel("HSE MANAGEMENT SYSTEM"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:8px;")
-        layout.addWidget(title); layout.addWidget(QLabel("Enter your administrator- or company-issued account details."))
-        form = QFormLayout(); self.username = QLineEdit(); self.username.setPlaceholderText("User ID")
-        self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.Password); self.password.setPlaceholderText("Password")
-        form.addRow("User ID", self.username); form.addRow("Password", self.password); layout.addLayout(form)
-        self.message = QLabel(""); self.message.setStyleSheet("color:#B42318;"); layout.addWidget(self.message)
-        buttons = QHBoxLayout(); sign = QPushButton("Sign In"); exit_btn = QPushButton("Exit")
-        sign.clicked.connect(self.authenticate); exit_btn.clicked.connect(self.reject); self.password.returnPressed.connect(self.authenticate)
-        buttons.addWidget(sign); buttons.addWidget(exit_btn); layout.addLayout(buttons)
-    def authenticate(self):
-        row = db.fetchone("SELECT * FROM app_users WHERE username=? COLLATE NOCASE AND active=1", (self.username.text().strip(),))
-        if not row: self.message.setText("Invalid credentials or inactive account."); return
-        try:
-            digest = hashlib.pbkdf2_hmac("sha256", self.password.text().encode(), bytes.fromhex(row["salt"]), 310000).hex()
-        except Exception: self.message.setText("Unable to verify this account."); return
-        if not hmac.compare_digest(digest, row["password_hash"]):
-            self.message.setText("Invalid user ID or password."); log_user_action(row["username"], "Failed login", "Invalid password"); return
-        self.user = dict(row); now = datetime.now().isoformat(timespec="seconds")
-        db.execute("UPDATE app_users SET last_login=?,updated_at=? WHERE id=?", (now, now, row["id"]))
-        log_user_action(row["username"], "Login", "Successful login"); self.accept()
-
-class ChangePasswordDialog(QDialog):
-    def __init__(self, username, force=False, parent=None):
-        super().__init__(parent); self.username = username; self.setWindowTitle("Change Password"); self.setMinimumWidth(390)
-        layout = QVBoxLayout(self)
-        if force: layout.addWidget(QLabel("You must replace the initial password before entering the application."))
-        form = QFormLayout(); self.old = QLineEdit(); self.new = QLineEdit(); self.confirm = QLineEdit()
-        for e in (self.old, self.new, self.confirm): e.setEchoMode(QLineEdit.Password)
-        self.new.setPlaceholderText("At least 10 characters")
-        form.addRow("Current password", self.old); form.addRow("New password", self.new); form.addRow("Confirm password", self.confirm); layout.addLayout(form)
-        self.msg = QLabel(""); self.msg.setStyleSheet("color:#B42318;"); layout.addWidget(self.msg)
-        buttons = QHBoxLayout(); save = QPushButton("Update Password"); cancel = QPushButton("Cancel")
-        save.clicked.connect(self.save); cancel.clicked.connect(self.reject); buttons.addWidget(save); buttons.addWidget(cancel); layout.addLayout(buttons)
-    def save(self):
-        row = db.fetchone("SELECT * FROM app_users WHERE username=? COLLATE NOCASE", (self.username,))
-        old = hashlib.pbkdf2_hmac("sha256", self.old.text().encode(), bytes.fromhex(row["salt"]), 310000).hex()
-        if not hmac.compare_digest(old, row["password_hash"]): self.msg.setText("Current password is incorrect."); return
-        if len(self.new.text()) < 10: self.msg.setText("New password must contain at least 10 characters."); return
-        if self.new.text() != self.confirm.text(): self.msg.setText("New passwords do not match."); return
-        salt, digest = make_password_hash(self.new.text()); now = datetime.now().isoformat(timespec="seconds")
-        db.execute("UPDATE app_users SET salt=?,password_hash=?,must_change_password=0,updated_at=? WHERE id=?", (salt,digest,now,row["id"]))
-        log_user_action(self.username, "Password changed", "Password updated by user"); self.accept()
-
-class UserAccessDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent); self.setWindowTitle("Create User Account"); self.setMinimumWidth(430)
-        layout = QVBoxLayout(self); form = QFormLayout()
-        self.username = QLineEdit(); self.full_name = QLineEdit(); self.role = QComboBox(); self.role.addItems([r for r in ACCESS_ROLES if r != "Admin"])
-        self.password = QLineEdit(); self.password.setEchoMode(QLineEdit.Password); self.password.setPlaceholderText("Temporary password, minimum 10 characters")
-        form.addRow("User ID", self.username); form.addRow("Full name", self.full_name); form.addRow("Role", self.role); form.addRow("Temporary password", self.password); layout.addLayout(form)
-        layout.addWidget(QLabel("The user will be required to change this password at first sign-in."))
-        self.msg = QLabel(""); self.msg.setStyleSheet("color:#B42318;"); layout.addWidget(self.msg)
-        buttons = QHBoxLayout(); create = QPushButton("Create User"); cancel = QPushButton("Cancel")
-        create.clicked.connect(self.create_user); cancel.clicked.connect(self.reject); buttons.addWidget(create); buttons.addWidget(cancel); layout.addLayout(buttons)
-    def create_user(self):
-        username = self.username.text().strip(); name = self.full_name.text().strip(); password = self.password.text()
-        if not username or not name: self.msg.setText("Enter a User ID and full name."); return
-        if len(password) < 10: self.msg.setText("Temporary password must contain at least 10 characters."); return
-        salt, digest = make_password_hash(password); role = self.role.currentText(); now = datetime.now().isoformat(timespec="seconds")
-        try:
-            db.execute("INSERT INTO app_users(username,full_name,role,salt,password_hash,must_change_password,permissions_json,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?)",
-                       (username,name,role,salt,digest,json.dumps(role_permissions(role)),now,now))
-            log_user_action("HSEADMIN", "User created", f"Created {username} with role {role}"); self.accept()
-        except sqlite3.IntegrityError: self.msg.setText("That User ID already exists.")
-
-class PermissionMatrixDialog(QDialog):
-    def __init__(self, username, permissions, parent=None):
-        super().__init__(parent); self.setWindowTitle(f"Permissions - {username}"); self.resize(1080,650); self.checks = {}
-        layout = QVBoxLayout(self); layout.addWidget(QLabel("Set permissions for each module. Dashboard view is always enabled."))
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); grid = QGridLayout(body)
-        for c, label in enumerate(["Module"] + [a.title() for a in ACCESS_ACTIONS]):
-            lab = QLabel(label); lab.setStyleSheet("font-weight:bold;color:#17365D;"); grid.addWidget(lab,0,c)
-        for r,m in enumerate(ACCESS_MODULES,1):
-            grid.addWidget(QLabel(m),r,0)
-            for c,a in enumerate(ACCESS_ACTIONS,1):
-                cb=QCheckBox(); cb.setChecked(bool(permissions.get(m,{}).get(a,False))); self.checks[(m,a)]=cb; grid.addWidget(cb,r,c,alignment=Qt.AlignCenter)
-        scroll.setWidget(body); layout.addWidget(scroll)
-        buttons=QHBoxLayout(); view=QPushButton("View All"); clear=QPushButton("Clear All"); save=QPushButton("Save"); cancel=QPushButton("Cancel")
-        view.clicked.connect(lambda: [cb.setChecked(a=="view") for (m,a),cb in self.checks.items()])
-        clear.clicked.connect(lambda: [cb.setChecked(False) for cb in self.checks.values()]); save.clicked.connect(self.accept); cancel.clicked.connect(self.reject)
-        for b in (view,clear,save,cancel): buttons.addWidget(b)
-        layout.addLayout(buttons)
-    def result_permissions(self):
-        p=empty_permissions()
-        for (m,a),cb in self.checks.items(): p[m][a]=cb.isChecked()
-        p["Dashboard"]["view"]=True
-        return p
 
 
 # ============================================================
@@ -3721,15 +3544,8 @@ def aud_export_notification_word(audit_id, path):
 
 class MainWindow(QMainWindow):
 
-    def __init__(self, authenticated_user):
+    def __init__(self):
         super().__init__()
-        self.current_user = authenticated_user
-        try:
-            self.current_permissions = json.loads(authenticated_user.get("permissions_json") or "{}")
-        except Exception:
-            self.current_permissions = role_permissions(authenticated_user.get("role", "HSE Officer"))
-        if authenticated_user.get("role") == "Admin":
-            self.current_permissions = role_permissions("Admin")
 
         self.setWindowTitle(
             f"{APP_NAME} - {APP_VERSION}"
@@ -3801,15 +3617,7 @@ class MainWindow(QMainWindow):
         """)
 
         self.build_ui()
-        account_menu = self.menuBar().addMenu("Account")
-        change_action = QAction("Change My Password", self)
-        change_action.triggered.connect(self.change_my_password)
-        account_menu.addAction(change_action)
-        account_menu.addSeparator()
-        who = QAction(f"Signed in: {authenticated_user.get('username')} ({authenticated_user.get('role')})", self)
-        who.setEnabled(False); account_menu.addAction(who)
         self.dashboard()
-        self.apply_navigation_permissions()
 
     # --------------------------------------------------------
 
@@ -3835,8 +3643,7 @@ class MainWindow(QMainWindow):
             "ISO 14001 Aspect & Impact",
             "Reports",
             "Master Data",
-            "Settings",
-            "User & Access Control"
+            "Settings"
         ]
 
         self.nav.addItems(modules)
@@ -3853,17 +3660,6 @@ class MainWindow(QMainWindow):
     # --------------------------------------------------------
 
     def navigation_changed(self, row):
-        if row < 0: return
-        if row == 12:
-            if self.current_user.get("role") != "Admin":
-                QMessageBox.warning(self, "Access Denied", "Only Admin can manage user accounts and permissions.")
-                self.nav.setCurrentRow(0); return
-            self.user_access_control()
-            return
-        module = ACCESS_MODULES[row] if row < len(ACCESS_MODULES) else None
-        if module and not self.has_permission(module, "view"):
-            QMessageBox.warning(self, "Access Denied", f"You do not have permission to view {module}.")
-            self.nav.setCurrentRow(0); return
         # Cache each module page so switching is instant and stack widgets do not pile up.
         # Dashboard (row 0) is always rebuilt so KPIs and trends stay live after data changes.
         if not hasattr(self, "_module_cache"):
@@ -3925,139 +3721,12 @@ class MainWindow(QMainWindow):
             elif row == 11:
                 self.settings_page()
             self._module_cache[row] = self.stack.currentWidget()
-            self.apply_page_permissions(row)
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
             try:
                 QMessageBox.critical(self, "Module Error", f"Unable to open this module.\n\n{exc}")
             except Exception:
                 pass
-
-    def has_permission(self, module, action):
-        if self.current_user.get("role") == "Admin": return True
-        return bool(self.current_permissions.get(module, {}).get(action, False))
-
-    def apply_navigation_permissions(self):
-        for row, module in enumerate(ACCESS_MODULES):
-            item = self.nav.item(row)
-            if item: item.setHidden(not self.has_permission(module, "view"))
-        if self.nav.count() > 12:
-            self.nav.item(12).setHidden(self.current_user.get("role") != "Admin")
-
-    def change_my_password(self):
-        dlg = ChangePasswordDialog(self.current_user.get("username"), parent=self)
-        dlg.exec()
-
-    def apply_page_permissions(self, row):
-        if self.current_user.get("role") == "Admin" or row == 0: return
-        if row < 0 or row >= len(ACCESS_MODULES): return
-        module = ACCESS_MODULES[row]
-        can_write = self.has_permission(module, "create") or self.has_permission(module, "edit")
-        can_review = self.has_permission(module, "review")
-        can_approve = self.has_permission(module, "approve")
-        can_export = self.has_permission(module, "export")
-        page = self.stack.currentWidget()
-        if page is None: return
-        for widget in page.findChildren(QWidget):
-            if isinstance(widget, (QLineEdit, QTextEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QCheckBox)) and not can_write:
-                widget.setEnabled(False)
-            elif isinstance(widget, QTableWidget) and not can_write:
-                widget.setEditTriggers(QAbstractItemView.NoEditTriggers)
-            elif isinstance(widget, QPushButton):
-                label = widget.text().strip().lower()
-                if any(k in label for k in ("approve", "reject", "approval")):
-                    widget.setEnabled(can_approve)
-                elif any(k in label for k in ("review", "return", "submit", "verify", "revalidate")):
-                    widget.setEnabled(can_review or can_approve)
-                elif any(k in label for k in ("export", "excel", "pdf", "word", "print")):
-                    widget.setEnabled(can_export)
-                elif any(k in label for k in ("delete", "remove")):
-                    widget.setEnabled(self.has_permission(module, "delete"))
-                elif any(k in label for k in ("add", "new", "save", "update", "edit", "close permit", "issue permit")):
-                    widget.setEnabled(can_write or can_review or can_approve)
-                elif not (can_write or can_review or can_approve):
-                    widget.setEnabled(any(k in label for k in ("refresh", "search", "filter", "clear filter", "view", "history")))
-
-    def user_access_control(self):
-        old_page = getattr(self, "_user_access_page", None)
-        if old_page is not None:
-            try:
-                self.stack.removeWidget(old_page)
-                old_page.deleteLater()
-            except Exception:
-                pass
-        w, layout = self.page("User & Access Control")
-        self._user_access_page = w
-        intro = QLabel("Admin-only user directory. Create accounts, assign roles, customise module permissions, reset passwords and deactivate accounts.")
-        intro.setWordWrap(True); layout.addWidget(intro)
-        table = QTableWidget(); table.setColumnCount(6); table.setHorizontalHeaderLabels(["User ID", "Full Name", "Role", "Status", "Must Change Password", "Last Login"])
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers); table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.SingleSelection)
-        rows = db.fetchall("SELECT * FROM app_users ORDER BY username COLLATE NOCASE")
-        table.setRowCount(len(rows))
-        for r, rec in enumerate(rows):
-            vals = [rec["username"], rec["full_name"], rec["role"], "Active" if rec["active"] else "Inactive", "Yes" if rec["must_change_password"] else "No", rec["last_login"]]
-            for c, val in enumerate(vals): table.setItem(r,c,QTableWidgetItem(str(val or "")))
-        table.resizeColumnsToContents(); layout.addWidget(table,1)
-        def selected():
-            r=table.currentRow()
-            if r < 0: QMessageBox.warning(self,"Select User","Select a user first."); return None
-            return table.item(r,0).text()
-        buttons=QHBoxLayout(); create=QPushButton("Create User"); role_btn=QPushButton("Change Role"); perms=QPushButton("Edit Permissions"); reset=QPushButton("Reset Password"); toggle=QPushButton("Activate / Deactivate"); refresh=QPushButton("Refresh")
-        create.clicked.connect(lambda: (UserAccessDialog(self).exec(), self.user_access_control()))
-        def change_role():
-            username=selected()
-            if not username:return
-            rec=db.fetchone("SELECT * FROM app_users WHERE username=?",(username,))
-            if rec["role"]=="Admin": QMessageBox.warning(self,"Protected Account","The primary Admin role cannot be changed here."); return
-            role,ok=QInputDialog.getItem(self,"Assign Role",f"Select role for {username}:",[r for r in ACCESS_ROLES if r!="Admin"],ACCESS_ROLES.index(rec["role"]) if rec["role"] in ACCESS_ROLES else 0,False)
-            if not ok:return
-            current=json.loads(rec["permissions_json"] or "{}")
-            defaults=role_permissions(role)
-            # Role change resets permissions to the selected role template; Admin may customise afterwards.
-            db.execute("UPDATE app_users SET role=?,permissions_json=?,updated_at=? WHERE id=?",(role,json.dumps(defaults),datetime.now().isoformat(timespec="seconds"),rec["id"]))
-            log_user_action(self.current_user["username"],"Role changed",f"{username}: {role}")
-            self.user_access_control()
-        def edit_permissions():
-            username=selected()
-            if not username:return
-            rec=db.fetchone("SELECT * FROM app_users WHERE username=?",(username,))
-            if rec["role"]=="Admin": QMessageBox.information(self,"Admin Rights","Admin always has full access; this account cannot be restricted here."); return
-            try: p=json.loads(rec["permissions_json"] or "{}")
-            except Exception: p=role_permissions(rec["role"])
-            dlg=PermissionMatrixDialog(username,p,self)
-            if dlg.exec():
-                db.execute("UPDATE app_users SET permissions_json=?,updated_at=? WHERE id=?",(json.dumps(dlg.result_permissions()),datetime.now().isoformat(timespec="seconds"),rec["id"]))
-                log_user_action(self.current_user["username"],"Permissions updated",f"Updated permissions for {username}")
-                self.user_access_control()
-        def reset_password():
-            username=selected()
-            if not username:return
-            temp,ok=QInputDialog.getText(self,"Reset Password",f"Enter temporary password for {username}:",QLineEdit.Password)
-            if not ok:return
-            if len(temp)<10: QMessageBox.warning(self,"Weak Password","Use at least 10 characters."); return
-            rec=db.fetchone("SELECT id FROM app_users WHERE username=?",(username,)); salt,digest=make_password_hash(temp)
-            db.execute("UPDATE app_users SET salt=?,password_hash=?,must_change_password=1,updated_at=? WHERE id=?",(salt,digest,datetime.now().isoformat(timespec="seconds"),rec["id"]))
-            log_user_action(self.current_user["username"],"Password reset",f"Reset password for {username}")
-            QMessageBox.information(self,"Password Reset","Temporary password saved. User must change it at next sign-in.")
-            self.user_access_control()
-        def toggle_user():
-            username=selected()
-            if not username:return
-            if username.upper()=="HSEADMIN": QMessageBox.warning(self,"Protected Account","The primary HSEADMIN account cannot be deactivated."); return
-            rec=db.fetchone("SELECT id,active FROM app_users WHERE username=?",(username,)); active=0 if rec["active"] else 1
-            db.execute("UPDATE app_users SET active=?,updated_at=? WHERE id=?",(active,datetime.now().isoformat(timespec="seconds"),rec["id"]))
-            log_user_action(self.current_user["username"],"User status changed",f"{username}: {'Active' if active else 'Inactive'}")
-            self.user_access_control()
-        role_btn.clicked.connect(change_role); perms.clicked.connect(edit_permissions); reset.clicked.connect(reset_password); toggle.clicked.connect(toggle_user); refresh.clicked.connect(self.user_access_control)
-        for b in (create,role_btn,perms,reset,toggle,refresh): buttons.addWidget(b)
-        layout.addLayout(buttons)
-        logbox=QGroupBox("Recent User Activity")
-        loglayout=QVBoxLayout(logbox); logs=QTableWidget(); logs.setColumnCount(4); logs.setHorizontalHeaderLabels(["User", "Action", "Details", "Date / Time"])
-        activity=db.fetchall("SELECT username,action,details,created_at FROM user_activity_log ORDER BY id DESC LIMIT 100")
-        logs.setRowCount(len(activity))
-        for r,rec in enumerate(activity):
-            for c,key in enumerate(("username","action","details","created_at")): logs.setItem(r,c,QTableWidgetItem(str(rec[key] or "")))
-        logs.setEditTriggers(QAbstractItemView.NoEditTriggers); logs.resizeColumnsToContents(); loglayout.addWidget(logs); layout.addWidget(logbox)
 
     def page(self, title):
 
@@ -13528,6 +13197,71 @@ ASPECT_ACTIVITIES = {
             "controls": "Source-verified materials; inspection for invasives; appropriate native planting where specified",
         },
     ],
+    "Drilling & Well Operations": [
+        {"aspect":"Drilling muds, cuttings and spent drilling fluids","impact":"Potential soil, groundwater or marine contamination; generation of controlled drilling waste","regulatory":"Qatar Law No. 30 of 2002 (environmental protection); applicable waste and discharge permits; ISO 14001 6.1.3","severity":4,"probability":3,"controls":"Use approved drilling-fluid systems; segregate and characterise cuttings; closed handling; approved treatment/disposal route; retain waste manifests and discharge records"},
+        {"aspect":"Well testing, flaring and venting","impact":"Greenhouse-gas emissions and local air pollutants; light and noise nuisance","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; facility emission limits and permit conditions","severity":4,"probability":3,"controls":"Minimise flaring and venting where technically safe; monitor and record volumes; maintain combustion equipment; follow approved operating and emergency procedures"},
+        {"aspect":"Hydrocarbon release from well control failure","impact":"Potential major soil, groundwater and marine pollution; harm to habitats and wildlife","regulatory":"Qatar Law No. 30 of 2002; approved emergency response and spill contingency plans","severity":5,"probability":2,"controls":"Well integrity barriers; pressure-control maintenance; tested blowout prevention systems; emergency response readiness; spill containment and incident reporting"},
+    ],
+    "Oil & Gas Production / Process Operations": [
+        {"aspect":"Produced water and process wastewater generation/discharge","impact":"Potential marine or groundwater pollution from hydrocarbons, salts and treatment chemicals","regulatory":"Qatar Law No. 30 of 2002; applicable water discharge consent, permit and monitoring limits","severity":5,"probability":3,"controls":"Operate and maintain treatment systems; sample and analyse effluent; monitor discharge limits; segregate off-spec water and retain records"},
+        {"aspect":"Fugitive methane and VOC emissions from valves, flanges and seals","impact":"Greenhouse-gas contribution, photochemical smog and local air quality impacts","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 37; applicable facility permit conditions","severity":4,"probability":3,"controls":"Leak detection and repair programme; preventive maintenance; emissions monitoring; promptly repair leaking components"},
+        {"aspect":"Process chemical use and storage","impact":"Spill or leak may contaminate soil, groundwater and marine environment","regulatory":"Qatar Law No. 30 of 2002, Article 27; hazardous material controls and SDS requirements","severity":4,"probability":3,"controls":"Approved chemical register; compatible segregation; bunding; closed transfer; SDS; inspections and spill kits"},
+        {"aspect":"Process equipment energy and fuel consumption","impact":"Resource depletion and indirect/direct greenhouse-gas emissions","regulatory":"ISO 14001 6.1.2; company energy and emissions objectives","severity":3,"probability":4,"controls":"Energy metering; efficient operating envelope; equipment maintenance; optimise utilities and avoid unnecessary flaring"},
+    ],
+    "Pipeline Operation, Pigging & Integrity Maintenance": [
+        {"aspect":"Hydrocarbon leakage from pipeline corrosion, joints or failure","impact":"Soil and water contamination; potential marine pollution and ecosystem damage","regulatory":"Qatar Law No. 30 of 2002; applicable pipeline and environmental permit conditions","severity":5,"probability":2,"controls":"Integrity management; corrosion monitoring; leak detection; right-of-way patrols; emergency isolation and spill response"},
+        {"aspect":"Pigging waste, wax, scale and contaminated liquids","impact":"Hazardous or controlled waste generation; potential soil and water contamination","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; approved waste handling/disposal requirements","severity":4,"probability":3,"controls":"Closed pig receiver handling; characterise residues; labelled sealed containers; licensed waste contractor and disposal records"},
+    ],
+    "Tank Farm, Terminal & Hydrocarbon Storage": [
+        {"aspect":"Tank overfill, leaks and hydrocarbon spills","impact":"Soil, groundwater and potentially marine contamination; fire-related secondary environmental damage","regulatory":"Qatar Law No. 30 of 2002; facility environmental permit and spill response plan","severity":5,"probability":2,"controls":"Secondary containment; overfill prevention; tank inspection; level alarms; drain isolation; tested emergency response"},
+        {"aspect":"Tank breathing, loading and transfer vapour emissions","impact":"VOC emissions, odour and contribution to air pollution","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; applicable emission conditions","severity":4,"probability":3,"controls":"Vapour recovery where required; closed loading; seal maintenance; emissions inspection and operating controls"},
+        {"aspect":"Oily sludge and tank-cleaning residues","impact":"Hazardous waste generation and contamination risk during handling","regulatory":"Qatar Law No. 30 of 2002, Articles 25–27; authorised waste treatment/disposal requirements","severity":4,"probability":3,"controls":"Waste characterisation; impermeable staging; covered labelled containers; approved transporter and treatment facility"},
+    ],
+    "Offshore Platform & Marine Operations": [
+        {"aspect":"Offshore discharges, drainage and deck runoff","impact":"Marine water contamination and potential effects on aquatic organisms","regulatory":"Qatar Law No. 30 of 2002, Part 3; applicable marine discharge permit conditions","severity":5,"probability":3,"controls":"Segregate clean and contaminated drains; maintain treatment; monitor discharge quality; prohibit unauthorised discharge"},
+        {"aspect":"Vessel exhaust, noise and lighting","impact":"Air emissions, underwater/noise disturbance and light effects on marine wildlife","regulatory":"Qatar Law No. 30 of 2002; applicable vessel, port and project requirements","severity":3,"probability":3,"controls":"Maintain engines; minimise idling; plan vessel movements; use task lighting efficiently; comply with operating limits"},
+        {"aspect":"Marine spill from bunkering, hose failure or vessel collision","impact":"Oil slick, shoreline contamination and harm to marine habitats and wildlife","regulatory":"Qatar Law No. 30 of 2002, marine pollution provisions; approved SOPEP/OSCP and port requirements","severity":5,"probability":2,"controls":"Bunkering checklist; hose inspection; scupper plugs; booms and response equipment; trained responders and drills"},
+    ],
+    "Refinery & Gas Processing": [
+        {"aspect":"Combustion emissions from heaters, boilers and turbines","impact":"NOx, SOx, particulate and greenhouse-gas emissions affecting air quality and climate","regulatory":"Qatar Law No. 30 of 2002, Articles 30–33; applicable stack emission limits","severity":4,"probability":4,"controls":"Combustion tuning; preventive maintenance; stack monitoring; fuel quality control; maintain emissions records"},
+        {"aspect":"Catalyst, spent adsorbent and process residue generation","impact":"Potential hazardous waste and contamination if mishandled","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; authorised hazardous waste handling","severity":4,"probability":3,"controls":"Characterise waste; segregate and label; secure temporary storage; use approved recovery/disposal contractor"},
+        {"aspect":"Cooling water abstraction and blowdown","impact":"Water resource consumption and potential thermal/chemical impact on receiving waters","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; applicable abstraction/discharge conditions","severity":4,"probability":3,"controls":"Optimise cooling cycles; monitor blowdown quality and temperature; maintain treatment; comply with discharge consent"},
+    ],
+    "Gas Compression, Flaring & Utilities": [
+        {"aspect":"Compressor seal leakage and gas venting","impact":"Methane emissions and contribution to climate change","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 37; facility permit conditions","severity":4,"probability":3,"controls":"Seal monitoring; leak detection and repair; maintain compressor packages; record venting events"},
+        {"aspect":"Flare operation and pilot fuel consumption","impact":"Combustion emissions, light and noise; greenhouse-gas emissions","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; approved flare management requirements","severity":4,"probability":3,"controls":"Flare minimisation; maintain flare tips and pilots; monitor flare events; investigate abnormal flaring"},
+    ],
+    "Hydrotesting, Flushing & Chemical Cleaning": [
+        {"aspect":"Hydrotest water withdrawal and discharge","impact":"Water consumption; discharge may carry corrosion inhibitors, solids or contaminants","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; applicable discharge consent","severity":4,"probability":3,"controls":"Use approved water source; assess additives; test water before discharge; collect and treat or dispose through approved route"},
+        {"aspect":"Chemical cleaning fluids and spent solutions","impact":"Potential hazardous liquid waste and soil/water contamination","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; hazardous waste and chemical handling requirements","severity":4,"probability":3,"controls":"Approve chemical method; bund tanks; neutralise only under approved procedure; analyse residues; use authorised waste contractor"},
+    ],
+    "Sandblasting, Coating & Insulation Removal": [
+        {"aspect":"Abrasive dust, paint particles and coating overspray","impact":"Airborne particulate and potential deposition on soil or marine surfaces","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 36; project air/noise conditions","severity":4,"probability":3,"controls":"Contain blasting; use suitable extraction; select approved abrasives; monitor dust; collect spent abrasive"},
+        {"aspect":"Spent abrasive and removed coating waste","impact":"Potential hazardous waste depending on coating composition and contaminants","regulatory":"Qatar Law No. 30 of 2002, Articles 25–27; waste classification requirements","severity":4,"probability":3,"controls":"Test/characterise waste; segregate; covered storage; prevent runoff; authorised disposal"},
+    ],
+    "Wastewater Treatment & Desalination": [
+        {"aspect":"Brine, sludge and treatment residuals","impact":"Potential salinity, temperature or chemical changes in receiving waters; waste generation","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; discharge permit limits","severity":4,"probability":3,"controls":"Monitor discharge quality; optimise treatment; contain sludge; approved disposal; retain laboratory records"},
+        {"aspect":"Treatment chemical storage and dosing","impact":"Chemical release may affect soil, groundwater or marine environment","regulatory":"Qatar Law No. 30 of 2002, Article 27; chemical storage and spill control requirements","severity":4,"probability":2,"controls":"Bunded dosing skids; dosing interlocks; SDS; inspections; emergency isolation and spill response"},
+    ],
+    "Waste Handling, Skip & Sludge Management": [
+        {"aspect":"Mixing, leakage or improper storage of hazardous and non-hazardous waste","impact":"Soil/water contamination, odour, pests and increased disposal impacts","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; approved waste management conditions","severity":4,"probability":3,"controls":"Waste segregation; compatible sealed containers; covered skips; inspections; licensed transport and traceable manifests"},
+    ],
+    "Exploration & Geophysical Surveys": [
+        {"aspect":"Seismic survey vehicle and equipment emissions, noise and vibration","impact":"Air quality and noise disturbance; potential effects on nearby communities and wildlife","regulatory":"Qatar Law No. 30 of 2002, applicable EIA/project approval conditions and environmental noise requirements","severity":3,"probability":3,"controls":"Approved survey plan; maintained equipment; route and timing controls; noise management; avoid sensitive habitats where required"},
+        {"aspect":"Survey camp waste, wastewater and fuel/chemical storage","impact":"Soil and groundwater contamination; waste generation and resource consumption","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; project environmental conditions","severity":3,"probability":3,"controls":"Designated contained storage; segregated waste; sewage collection/treatment; spill kits; approved waste removal and records"},
+    ],
+    "Well Workover, Intervention & Abandonment": [
+        {"aspect":"Workover fluids, completion chemicals and recovered hydrocarbons","impact":"Potential soil, groundwater or marine contamination and controlled waste generation","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; applicable well and environmental permit conditions","severity":4,"probability":3,"controls":"Closed fluid handling; chemical approval and SDS; bunded tanks; waste characterisation; approved recovery/disposal route"},
+        {"aspect":"Well suspension or abandonment materials and site reinstatement","impact":"Potential long-term leakage or contamination; disturbance of land and habitats","regulatory":"Qatar Law No. 30 of 2002; approved abandonment, closure and reinstatement plans","severity":5,"probability":2,"controls":"Approved abandonment design; verified barriers; well integrity records; remove waste/materials; inspect and document reinstatement"},
+    ],
+    "Hydrocarbon Transportation, Loading & Offloading": [
+        {"aspect":"Leakage or spill during pipeline, road tanker, ship loading or transfer","impact":"Soil, groundwater, shoreline or marine pollution; harm to aquatic habitats","regulatory":"Qatar Law No. 30 of 2002, applicable oil/marine pollution provisions and terminal/port permit conditions","severity":5,"probability":3,"controls":"Transfer checklist; hose and coupling inspection; overfill protection; emergency shutdown; drip trays; spill booms and response readiness"},
+        {"aspect":"Transport fleet and vessel fuel consumption and exhaust emissions","impact":"Greenhouse-gas emissions and local air pollutants","regulatory":"Qatar Law No. 30 of 2002, Articles 30–33; applicable vehicle, vessel and facility conditions","severity":3,"probability":4,"controls":"Preventive maintenance; efficient routing and loading; avoid unnecessary idling; monitor fuel and emissions"},
+    ],
+    "Oil & Gas Construction and Commissioning": [
+        {"aspect":"Land clearing, grading, excavation and temporary access roads","impact":"Land disturbance, erosion, dust and potential impacts to sensitive habitats","regulatory":"Qatar Law No. 30 of 2002, EIA/project approval provisions and applicable construction permit conditions","severity":3,"probability":3,"controls":"Approved construction footprint; erosion and sediment controls; dust suppression; topsoil management; reinstatement"},
+        {"aspect":"Construction waste, hydrotest fluids, flushing and commissioning releases","impact":"Waste generation and potential soil/water contamination from chemicals, oils or untreated water","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; applicable discharge and waste approvals","severity":4,"probability":3,"controls":"Construction environmental management plan; waste segregation; controlled collection and sampling; approved treatment/disposal; commissioning checks"},
+    ],
 }
 
 
@@ -13689,6 +13423,17 @@ LEGAL_LIBRARY_SEED = [
 ]
 
 
+# Qatar environmental obligations are reference prompts; verify current permits, regulations,
+# executive regulations and project/client conditions before treating any item as applicable.
+ASPECT_QATAR_LEGAL_SEED = [
+    ("QA-ENV-030-AIR", "Qatar Law No. 30 of 2002 — Air pollution and emissions", "Regulation", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 30–37", "Control air pollutant emissions, combustion gases and releases; verify current executive regulations, limits and facility permit conditions.", "Air Emissions"),
+    ("QA-ENV-030-WASTE", "Qatar Law No. 30 of 2002 — Waste and hazardous materials", "Regulation", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 24–27 and 32", "Check hazardous material precautions, hazardous waste authorisations, approved handling/disposal routes and waste records.", "Waste"),
+    ("QA-ENV-030-WATER", "Qatar Law No. 30 of 2002 — Water and marine environment", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Parts 3 and relevant Articles 40–61", "Assess water abstraction, effluent and marine discharges against applicable approvals, limits and receiving-environment requirements.", "Water / Effluent"),
+    ("QA-ENV-030-OIL", "Qatar Law No. 30 of 2002 — Oil and marine pollution prevention", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, marine pollution provisions", "Prevent oil and harmful-substance pollution from vessels, platforms, terminals, pipelines and land-based sources; apply approved contingency plans.", "Water / Effluent"),
+    ("QA-ENV-030-NOISE", "Qatar Law No. 30 of 2002 — Environmental noise", "Regulation / Project", "Qatar", "Al Meezan — Law No. 30 of 2002, Article 36", "Control noise from machinery, equipment and operations against applicable limits and project conditions.", "Noise / Vibration"),
+]
+
+
 def _aspect_risk_score(severity, probability):
     try:
         return int(severity) * int(probability)
@@ -13703,6 +13448,59 @@ def _aspect_significance(score):
     if score >= 6:
         return "Moderate"
     return "Low"
+
+
+class CheckableComboBox(QComboBox):
+    """Compact multi-select dropdown used only by the Aspect & Impact module."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setModel(QStandardItemModel(self))
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText("Select one or more activities…")
+        self.setMinimumHeight(34)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.model().itemChanged.connect(self._refresh_text)
+        self.view().pressed.connect(self._toggle_pressed_item)
+
+    def _toggle_pressed_item(self, index):
+        item = self.model().itemFromIndex(index)
+        if item is not None:
+            item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
+            # Re-open the popup after the current click so users can tick several activities in one pass.
+            QTimer.singleShot(0, self.showPopup)
+
+    def add_check_item(self, text):
+        item = QStandardItem(text)
+        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
+        self.model().appendRow(item)
+
+    def checked_items(self):
+        return [self.model().item(i).text() for i in range(self.model().rowCount())
+                if self.model().item(i).checkState() == Qt.CheckState.Checked]
+
+    def set_checked(self, text, checked):
+        for i in range(self.model().rowCount()):
+            item = self.model().item(i)
+            if item.text() == text:
+                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+                break
+
+    def set_all_checked(self, checked):
+        for i in range(self.model().rowCount()):
+            self.model().item(i).setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+
+    def _refresh_text(self, *_):
+        chosen = self.checked_items()
+        if not chosen:
+            text = "Select one or more activities…"
+        elif len(chosen) <= 2:
+            text = "; ".join(chosen)
+        else:
+            text = f"{len(chosen)} activities selected"
+        self.lineEdit().setText(text)
+        self.setToolTip("Selected activities: " + (", ".join(chosen) if chosen else "None"))
 
 
 class AspectImpactModule(QWidget):
@@ -13825,6 +13623,15 @@ class AspectImpactModule(QWidget):
                         now, now,
                     ),
                 )
+        # Additive Qatar legal-reference prompts; INSERT OR IGNORE keeps user edits and existing data intact.
+        for ref, title, req_type, jurisdiction, source, description, category in ASPECT_QATAR_LEGAL_SEED:
+            self.db.conn.execute(
+                """INSERT OR IGNORE INTO legal_requirements(
+                    ref_code, title, requirement_type, jurisdiction, source, description,
+                    iso_reference, default_category, compliance_status, active, created_at, updated_at
+                ) VALUES (?,?,?,?,?,?, 'Qatar Law No. 30 of 2002 / ISO 14001 6.1.3', ?, 'Not Assessed', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+                (ref, title, req_type, jurisdiction, source, description, category),
+            )
         item_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(aspect_register_items)").fetchall()}
         if "linked_legal_refs" not in item_cols:
             self.db.conn.execute("ALTER TABLE aspect_register_items ADD COLUMN linked_legal_refs TEXT DEFAULT ''")
@@ -13834,6 +13641,8 @@ class AspectImpactModule(QWidget):
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 4, 8, 8)
+        root.setSpacing(6)
+        self.setMinimumWidth(0)
 
         intro = QLabel(
             "Select the organisation / project activities below. The Aspect & Impact Register is generated "
@@ -13851,6 +13660,35 @@ class AspectImpactModule(QWidget):
         self._build_register_tab()
         self._build_library_tab()
         self._build_legal_tab()
+        self._apply_aspect_responsive_style()
+
+    def _apply_aspect_responsive_style(self):
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self.tabs.setDocumentMode(True)
+        self.setStyleSheet(self.styleSheet() + """
+            QGroupBox { font-weight: 600; margin-top: 10px; padding-top: 8px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
+            QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QTextEdit {
+                min-height: 30px; padding: 4px 7px; border: 1px solid #C7D2DE;
+                border-radius: 5px; background: #FFFFFF; color: #203040;
+            }
+            QTextEdit { padding: 6px; }
+            QPushButton { min-height: 30px; padding: 5px 10px; border-radius: 5px; }
+            QTabBar::tab { min-height: 28px; padding: 6px 10px; }
+            QTableWidget { gridline-color: #D8E0E8; alternate-background-color: #F5F8FB; }
+            QHeaderView::section { padding: 6px; font-weight: 600; background: #EAF1F7; }
+        """)
+
+    def _add_scroll_tab(self, page, title):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        page.setMinimumWidth(0)
+        scroll.setWidget(page)
+        self.tabs.addTab(scroll, title)
 
     def _build_generator_tab(self):
         page = QWidget()
@@ -13858,6 +13696,8 @@ class AspectImpactModule(QWidget):
 
         meta = QGroupBox("Register header")
         form = QFormLayout(meta)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.reg_name = QLineEdit()
         self.reg_name.setPlaceholderText("e.g. Site Aspect & Impact Register — 2026")
         self.reg_project = QLineEdit()
@@ -13886,18 +13726,14 @@ class AspectImpactModule(QWidget):
 
         act_box = QGroupBox("Step 1 — Select activities performed by the organisation")
         act_layout = QVBoxLayout(act_box)
-        hint = QLabel("Tick all applicable activities. You can multi-select. The register rows are built from the library for each tick.")
+        hint = QLabel("Choose activities from the multi-select dropdown. Each selected activity generates its environmental aspects, impacts, controls and suggested compliance references. Verify applicability against current permits, Qatar legislation and client requirements before approval.")
         hint.setWordWrap(True)
         act_layout.addWidget(hint)
 
-        self.activity_list = QListWidget()
-        self.activity_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.activity_list = CheckableComboBox()
         for name in sorted(ASPECT_ACTIVITIES.keys()):
-            item = QListWidgetItem(name)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Unchecked)
-            self.activity_list.addItem(item)
-        self.activity_list.setMinimumHeight(220)
+            self.activity_list.add_check_item(name)
+        self.activity_list.setMinimumWidth(260)
         act_layout.addWidget(self.activity_list)
 
         btn_row = QHBoxLayout()
@@ -13923,11 +13759,13 @@ class AspectImpactModule(QWidget):
         notes_layout.addWidget(self.reg_notes)
         layout.addWidget(notes_box)
 
-        self.tabs.addTab(page, "1. Select Activities & Generate")
+        self._add_scroll_tab(page, "1. Select Activities & Generate")
 
     def _build_register_tab(self):
         page = QWidget()
         layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Saved registers:"))
@@ -13957,13 +13795,23 @@ class AspectImpactModule(QWidget):
             "Responsible", "Target Date / Evidence / Status"
         ])
         self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.items_table.horizontalHeader().setStretchLastSection(True)
+        self.items_table.horizontalHeader().setStretchLastSection(False)
+        self.items_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.items_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.items_table.setMinimumHeight(300)
+        self.items_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        for col, width in enumerate([190,230,250,230,155,145,75,75,80,115,135,230,230,75,75,155,145,230]):
+            self.items_table.setColumnWidth(col, width)
         self.items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.items_table.setAlternatingRowColors(True)
         self.items_table.setWordWrap(True)
         layout.addWidget(self.items_table, 1)
 
-        actions = QHBoxLayout()
+        actions_widget = QWidget()
+        actions = QGridLayout(actions_widget)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setHorizontalSpacing(7)
+        actions.setVerticalSpacing(6)
         save_btn = QPushButton("Save Register")
         save_btn.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:8px 14px;")
         save_btn.clicked.connect(self._save_register)
@@ -13982,16 +13830,12 @@ class AspectImpactModule(QWidget):
         link_legal_btn.clicked.connect(self._link_legal_to_selected_row)
         view_legal_btn = QPushButton("View Linked Legal")
         view_legal_btn.clicked.connect(self._view_linked_legal_for_row)
-        actions.addWidget(save_btn)
-        actions.addWidget(add_row_btn)
-        actions.addWidget(del_row_btn)
-        actions.addWidget(link_legal_btn)
-        actions.addWidget(view_legal_btn)
-        actions.addStretch(1)
-        actions.addWidget(export_xlsx)
-        actions.addWidget(export_docx)
-        actions.addWidget(delete_reg)
-        layout.addLayout(actions)
+        action_buttons = [save_btn, add_row_btn, del_row_btn, link_legal_btn,
+                          view_legal_btn, export_xlsx, export_docx, delete_reg]
+        for index, button in enumerate(action_buttons):
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            actions.addWidget(button, index // 4, index % 4)
+        layout.addWidget(actions_widget)
 
         legend = QLabel(
             "Initial and residual scores = Severity × Probability (1–25). Initial score: ≥12 Significant, 6–11 Moderate, <6 Low. "
@@ -14002,7 +13846,7 @@ class AspectImpactModule(QWidget):
         legend.setStyleSheet("color:#555; padding-top:4px;")
         layout.addWidget(legend)
 
-        self.tabs.addTab(page, "2. Aspect & Impact Register")
+        self._add_scroll_tab(page, "2. Aspect & Impact Register")
 
     def _build_library_tab(self):
         page = QWidget()
@@ -14016,7 +13860,9 @@ class AspectImpactModule(QWidget):
             "Activity", "Aspect", "Impact", "Regulatory", "Sev", "Prob", "Existing Controls"
         ])
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setMinimumHeight(300)
         rows = []
         for activity, items in sorted(ASPECT_ACTIVITIES.items()):
             for it in items:
@@ -14032,7 +13878,7 @@ class AspectImpactModule(QWidget):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(i, j, item)
         layout.addWidget(table, 1)
-        self.tabs.addTab(page, "3. Activity Library (reference)")
+        self._add_scroll_tab(page, "3. Activity Library (reference)")
 
     # ------------------------------------------------------------------ helpers
 
@@ -14051,6 +13897,8 @@ class AspectImpactModule(QWidget):
 
         form_box = QGroupBox("Add / Edit legal requirement")
         form = QFormLayout(form_box)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.legal_id = None
         self.legal_ref = QLineEdit(); self.legal_ref.setPlaceholderText("e.g. ENV-WASTE-001")
         self.legal_title = QLineEdit()
@@ -14086,7 +13934,11 @@ class AspectImpactModule(QWidget):
         form.addRow("Evidence summary", self.legal_evidence)
         layout.addWidget(form_box)
 
-        btn_row = QHBoxLayout()
+        btn_widget = QWidget()
+        btn_row = QGridLayout(btn_widget)
+        btn_row.setContentsMargins(0, 0, 0, 0)
+        btn_row.setHorizontalSpacing(7)
+        btn_row.setVerticalSpacing(6)
         save_l = QPushButton("Save Legal Requirement")
         save_l.setStyleSheet("background:#17365D; color:white; font-weight:bold; padding:6px 12px;")
         save_l.clicked.connect(self._save_legal_requirement)
@@ -14096,14 +13948,14 @@ class AspectImpactModule(QWidget):
         del_l.clicked.connect(self._deactivate_legal_requirement)
         refresh_l = QPushButton("Refresh List")
         refresh_l.clicked.connect(self._refresh_legal_table)
-        btn_row.addWidget(save_l)
-        btn_row.addWidget(clear_l)
-        btn_row.addWidget(del_l)
-        btn_row.addStretch(1)
-        btn_row.addWidget(refresh_l)
-        layout.addLayout(btn_row)
+        for i, button in enumerate((save_l, clear_l, del_l, refresh_l)):
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn_row.addWidget(button, i // 2, i % 2)
+        layout.addWidget(btn_widget)
 
         self.legal_table = QTableWidget(0, 9)
+        self.legal_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.legal_table.setMinimumHeight(260)
         self.legal_table.setHorizontalHeaderLabels([
             "Ref.", "Title", "Type", "Jurisdiction", "Category", "Status", "Owner", "Next Review", "ISO Ref."
         ])
@@ -14114,7 +13966,7 @@ class AspectImpactModule(QWidget):
         self.legal_table.horizontalHeader().setStretchLastSection(True)
         self.legal_table.doubleClicked.connect(self._load_legal_from_table)
         layout.addWidget(self.legal_table, 1)
-        self.tabs.addTab(page, "4. Legal Compliance Library")
+        self._add_scroll_tab(page, "4. Legal Compliance Library")
         self._refresh_legal_table()
 
     def _clear_legal_form(self):
@@ -14332,20 +14184,13 @@ class AspectImpactModule(QWidget):
 
 
     def _selected_activities(self):
-        names = []
-        for i in range(self.activity_list.count()):
-            item = self.activity_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                names.append(item.text())
-        return names
+        return self.activity_list.checked_items()
 
     def _select_all_activities(self):
-        for i in range(self.activity_list.count()):
-            self.activity_list.item(i).setCheckState(Qt.CheckState.Checked)
+        self.activity_list.set_all_checked(True)
 
     def _clear_all_activities(self):
-        for i in range(self.activity_list.count()):
-            self.activity_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+        self.activity_list.set_all_checked(False)
 
     def _set_significance_cell(self, row, score, legal="No", residual=False):
         sig = "Significant" if str(legal).strip().lower() in ("yes", "y", "true", "1") else _aspect_significance(score)
@@ -14401,9 +14246,11 @@ class AspectImpactModule(QWidget):
             item = QTableWidgetItem(str(v))
             if c in (6,7,8,9,13,14,15): item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if c in (8,9,15): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            item.setToolTip(str(v))
+            item.setTextAlignment(item.textAlignment() | Qt.AlignmentFlag.AlignVCenter)
             self.items_table.setItem(r,c,item)
         self._set_significance_cell(r, score, legal)
-        self.items_table.setRowHeight(r, 64)
+        self.items_table.setRowHeight(r, 78)
 
     def _generate_from_activities(self):
         activities = self._selected_activities()
@@ -14415,7 +14262,7 @@ class AspectImpactModule(QWidget):
         category_map = {
             "emission": "Air", "dust": "Air", "fume": "Air", "voc": "Air", "exhaust": "Air",
             "noise": "Noise", "vibration": "Noise", "waste": "Waste", "slag": "Waste", "scrap": "Waste",
-            "water": "Water", "runoff": "Water", "wash water": "Water", "spill": "Soil / Water",
+            "water": "Water", "runoff": "Water", "wash water": "Water", "wastewater": "Water", "produced water": "Water", "marine": "Water", "discharge": "Water", "spill": "Soil / Water",
             "leak": "Soil / Water", "soil": "Soil", "fuel": "Resources", "energy": "Resources",
             "electricity": "Resources", "consumption": "Resources"
         }
@@ -14425,7 +14272,10 @@ class AspectImpactModule(QWidget):
                 low = aspect.lower()
                 category = next((v for k,v in category_map.items() if k in low), "Other")
                 condition = "Emergency" if any(x in low for x in ("spill", "leak", "release", "rupture")) else "Normal"
-                self._append_item_row({"activity":activity,"aspect":aspect,"impact":it["impact"],"regulatory":it["regulatory"],
+                regulatory_text = it["regulatory"]
+                if "Qatar Law No. 30 of 2002" not in regulatory_text and any(k in regulatory_text.lower() for k in ("waste", "emission", "air", "water", "marine", "oil", "noise", "hazardous", "discharge")):
+                    regulatory_text += "; Check applicability of Qatar Law No. 30 of 2002 and current executive regulations / project permits"
+                self._append_item_row({"activity":activity,"aspect":aspect,"impact":it["impact"],"regulatory":regulatory_text,
                     "severity":it["severity"],"probability":it["probability"],"existing_controls":it["controls"],
                     "operating_condition":condition,"environmental_category":category,"residual_severity":it["severity"],
                     "residual_probability":it["probability"],"status":"Open"})
@@ -14537,6 +14387,30 @@ class AspectImpactModule(QWidget):
                     it["evidence"], it["responsible"], it["target_date"], it["status"], it["sort_order"],
                 ),
             )
+        # Automatically attach relevant Qatar compliance references to generated rows by category.
+        # Existing/manual legal links are retained where possible; links are specific to this register row.
+        qatar_refs = self.db.fetchall("SELECT id, default_category, ref_code FROM legal_requirements WHERE active=1 AND ref_code LIKE 'QA-ENV-030-%'")
+        category_map = {
+            "Air": {"QA-ENV-030-AIR"}, "Air Emissions": {"QA-ENV-030-AIR"},
+            "Waste": {"QA-ENV-030-WASTE"}, "Water": {"QA-ENV-030-WATER", "QA-ENV-030-OIL"},
+            "Soil / Water": {"QA-ENV-030-WASTE", "QA-ENV-030-WATER", "QA-ENV-030-OIL"},
+            "Soil": {"QA-ENV-030-WASTE"}, "Noise": {"QA-ENV-030-NOISE"},
+            "Resources": set(), "Other": set(),
+        }
+        for row_index, it in enumerate(items):
+            cat = it.get("environmental_category", "Other")
+            refs = category_map.get(cat, set())
+            for legal in qatar_refs:
+                if legal["ref_code"] in refs:
+                    already_linked = self.db.fetchone(
+                        "SELECT id FROM aspect_item_legal_links WHERE register_id=? AND item_sort_order=? AND legal_id=?",
+                        (rid, row_index, legal["id"]),
+                    )
+                    if not already_linked:
+                        self.db.execute(
+                            "INSERT INTO aspect_item_legal_links(register_id,item_sort_order,activity,aspect,legal_id) VALUES(?,?,?,?,?)",
+                            (rid, row_index, it["activity"], it["aspect"], legal["id"]),
+                        )
         self.db.conn.commit()
         self._load_register_list(select_id=rid)
         self._update_summary_label(len(items))
@@ -14606,11 +14480,9 @@ class AspectImpactModule(QWidget):
             })
         # Sync activity checkboxes to loaded activities
         loaded_acts = {safe(it["activity"]) for it in items}
-        for i in range(self.activity_list.count()):
-            item = self.activity_list.item(i)
-            item.setCheckState(
-                Qt.CheckState.Checked if item.text() in loaded_acts else Qt.CheckState.Unchecked
-            )
+        self.activity_list.set_all_checked(False)
+        for activity_name in loaded_acts:
+            self.activity_list.set_checked(activity_name, True)
         self._update_summary_label(len(items), sorted(loaded_acts))
         self.tabs.setCurrentIndex(1)
 
@@ -14629,7 +14501,7 @@ class AspectImpactModule(QWidget):
         self.items_table.setRowCount(0)
         self._clear_all_activities()
         self.register_combo.setCurrentIndex(0)
-        self.register_summary.setText("New register — select activities and generate.")
+        self.register_summary.setText("New register — choose activities from the multi-select dropdown and generate.")
         self.tabs.setCurrentIndex(0)
 
     def _delete_register(self):
@@ -17190,16 +17062,7 @@ def main():
         "HSE"
     )
 
-    login = LoginDialog()
-    if login.exec() != QDialog.Accepted or not login.user:
-        return
-    user = login.user
-    if user.get("must_change_password"):
-        change = ChangePasswordDialog(user["username"], force=True)
-        if change.exec() != QDialog.Accepted:
-            return
-        user = dict(db.fetchone("SELECT * FROM app_users WHERE id=?", (user["id"],)))
-    window = MainWindow(user)
+    window = MainWindow()
 
     window.showMaximized()
 
