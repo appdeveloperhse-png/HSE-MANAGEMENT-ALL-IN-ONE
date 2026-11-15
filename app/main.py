@@ -17189,21 +17189,85 @@ _CHEM_H_GROUPS = [
 
 
 def chem_file_text(path):
-    """Extract readable text from an SDS (.pdf or .docx). Raises RuntimeError with a plain message."""
+    """Extract readable text from an SDS (.pdf or .docx). Raises RuntimeError with a plain message.
+
+    PDF backends tried in order: pypdf, PyPDF2, system pdftotext (poppler).
+    """
     ext = Path(path).suffix.lower()
     if ext == ".pdf":
+        errors = []
+        # 1) pypdf
         try:
             from pypdf import PdfReader
+            reader = PdfReader(str(path))
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    raise RuntimeError("This PDF is password-protected.")
+            text = "\n".join((pg.extract_text() or "") for pg in reader.pages)
+            if text.strip():
+                return text
+            errors.append("pypdf returned no text")
         except ImportError:
-            raise RuntimeError("The PDF reader (pypdf) is not installed.\nInstall it with:  pip install pypdf\n"
-                               "(If you run the app as an .exe, rebuild it after installing.)")
-        reader = PdfReader(str(path))
-        if reader.is_encrypted:
+            errors.append("pypdf not installed")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            errors.append(f"pypdf: {exc}")
+        # 2) PyPDF2
+        try:
+            from PyPDF2 import PdfReader as PyPDF2Reader
+            reader = PyPDF2Reader(str(path))
+            if getattr(reader, "is_encrypted", False):
+                try:
+                    reader.decrypt("")
+                except Exception:
+                    raise RuntimeError("This PDF is password-protected.")
+            pages = getattr(reader, "pages", None) or []
+            text = "\n".join((pg.extract_text() or "") for pg in pages)
+            if text.strip():
+                return text
+            errors.append("PyPDF2 returned no text")
+        except ImportError:
+            errors.append("PyPDF2 not installed")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            errors.append(f"PyPDF2: {exc}")
+        # 3) system pdftotext (poppler-utils) if available
+        try:
+            import subprocess, tempfile
+            with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp:
+                out_path = tmp.name
             try:
-                reader.decrypt("")
-            except Exception:
-                raise RuntimeError("This PDF is password-protected.")
-        return "\n".join((pg.extract_text() or "") for pg in reader.pages)
+                proc = subprocess.run(
+                    ["pdftotext", "-layout", "-enc", "UTF-8", str(path), out_path],
+                    capture_output=True, text=True, timeout=60
+                )
+                if proc.returncode == 0 and Path(out_path).is_file():
+                    text = Path(out_path).read_text(encoding="utf-8", errors="replace")
+                    if text.strip():
+                        return text
+                    errors.append("pdftotext returned no text")
+                else:
+                    errors.append("pdftotext failed or not found")
+            finally:
+                Path(out_path).unlink(missing_ok=True)
+        except FileNotFoundError:
+            errors.append("pdftotext not found on PATH")
+        except Exception as exc:
+            errors.append(f"pdftotext: {exc}")
+        detail = "; ".join(errors) if errors else "no backend available"
+        raise RuntimeError(
+            "Could not extract text from this PDF.\n"
+            "Tried: pypdf, PyPDF2, and system pdftotext.\n"
+            f"Details: {detail}\n\n"
+            "Fix: pip install pypdf\n"
+            "  or: pip install PyPDF2\n"
+            "  or install poppler (pdftotext) for your OS.\n"
+            "Scanned image-only PDFs need OCR and are not supported here — fill the form manually."
+        )
     if ext == ".docx":
         d = Document(str(path)); parts = [p.text for p in d.paragraphs]
         for t in d.tables:
@@ -17216,6 +17280,10 @@ def chem_file_text(path):
                 if cells:
                     parts.append(" : ".join(cells))
         return "\n".join(parts)
+    if ext == ".doc":
+        raise RuntimeError(
+            "Legacy .doc files are not supported. Please save the SDS as .docx or .pdf and try again."
+        )
     return ""
 
 
@@ -17490,6 +17558,7 @@ class ChemicalSDSModule(QWidget):
         self._build_sds_tab()
         self._build_alerts_tab()
         self._build_history_tab()
+        self.tabs.currentChanged.connect(self._on_chem_tab_changed)
 
     def _mk_table(self, headers):
         t = QTableWidget(0, len(headers))
@@ -17572,14 +17641,36 @@ class ChemicalSDSModule(QWidget):
     # ----- product dialog -----
     def _product_dialog(self, rec=None, sds=None, banner=None):
         rec = dict(rec) if rec else {}
-        dlg = QDialog(self); dlg.setWindowTitle("Chemical Details"); dlg.resize(760, 760)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Chemical Details")
+        dlg.setModal(True)
+        # Fit dialog to the available screen so it never overflows
+        try:
+            screen = QApplication.primaryScreen().availableGeometry()
+            max_w = min(820, max(560, screen.width() - 100))
+            max_h = min(680, max(420, screen.height() - 120))
+            dlg.resize(max_w, max_h)
+            dlg.setMinimumSize(min(560, max_w), min(420, max_h))
+            dlg.setMaximumSize(screen.width() - 40, screen.height() - 40)
+            dlg.move(screen.x() + (screen.width() - max_w) // 2,
+                     screen.y() + max(20, (screen.height() - max_h) // 2))
+        except Exception:
+            dlg.resize(720, 600)
         outer = QVBoxLayout(dlg)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
         if banner:
             bl = QLabel(banner); bl.setWordWrap(True)
             bl.setStyleSheet("padding:8px;background:#E8F3FF;border:1px solid #9CC3E6;border-radius:4px;color:#17365D;")
             outer.addWidget(bl)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        body = QWidget(); form = QFormLayout(body); scroll.setWidget(body); outer.addWidget(scroll)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        body = QWidget(); form = QFormLayout(body); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        scroll.setWidget(body)
+        outer.addWidget(scroll, 1)  # stretch so buttons stay visible at bottom
         le = lambda k: QLineEdit(_s(rec.get(k)))
         f = {}
         f["product_name"] = le("product_name"); f["supplier"] = le("supplier"); f["supplier_contact"] = le("supplier_contact")
@@ -17656,6 +17747,13 @@ class ChemicalSDSModule(QWidget):
             val["sds_number"] = sw["sds_number"].text().strip(); val["sds_revision"] = sw["sds_revision"].text().strip()
             val["sds_language"] = sw["sds_language"].text().strip() or "English"
             val["sds_issue"] = sw["issue"].date().toString("yyyy-MM-dd"); val["sds_due"] = sw["due"].date().toString("yyyy-MM-dd")
+        else:
+            # Manual add without SDS still needs keys when callers expect them
+            val.setdefault("sds_number", ""); val.setdefault("sds_revision", "")
+            val.setdefault("sds_language", "English"); val.setdefault("sds_issue", "")
+            val.setdefault("sds_due", "")
+        # Normalize product name (remove newlines from poor SDS parses)
+        val["product_name"] = " ".join(_s(val.get("product_name")).split())
         if not val["product_name"]:
             QMessageBox.warning(self, "Required", "Product name is required.")
             return None
@@ -17670,11 +17768,25 @@ class ChemicalSDSModule(QWidget):
         v = self._product_dialog()
         if not v: return
         cols = self._PCOLS
-        cur = self.db.execute(f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
-                              [v[c] for c in cols] + [_now(), _now()])
+        if not _s(v.get("status")).strip():
+            v["status"] = "Active"
+        try:
+            v["quantity"] = float(v.get("quantity") or 0)
+        except Exception:
+            v["quantity"] = 0.0
+        cur = self.db.execute(
+            f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
+            [v.get(c, "") for c in cols] + [_now(), _now()]
+        )
         self._event(cur.lastrowid, "Chemical added", v["product_name"])
+        try:
+            self.search.blockSignals(True); self.search.clear(); self.search.blockSignals(False)
+            self.status_filter.blockSignals(True); self.status_filter.setCurrentIndex(0); self.status_filter.blockSignals(False)
+        except Exception:
+            pass
         self.refresh_all()
-        QMessageBox.information(self, "Saved", "Chemical added. Attach its SDS in tab 2 - it shows as 'Missing' until then.")
+        self.tabs.setCurrentIndex(0)
+        QMessageBox.information(self, "Saved", "Chemical added. Attach its SDS in tab 2 — it shows as 'Missing' until then.")
 
     def _edit_product(self):
         pid = self._sel_id(self.reg_table, "chemical")
@@ -17726,13 +17838,45 @@ class ChemicalSDSModule(QWidget):
 
     def _upload_sds(self, pid=None):
         """Pick SDS file(s) -> read text -> pre-fill review dialog -> save chemical + SDS in one step."""
-        paths, _ = QFileDialog.getOpenFileNames(self, "Select SDS file(s)", "", "SDS Files (*.pdf *.docx);;All Files (*)")
-        for i, path in enumerate(paths):
-            if self._import_one(path, pid) == "stop":
-                break
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select SDS file(s)", "",
+            "SDS Files (*.pdf *.docx);;PDF (*.pdf);;Word (*.docx);;All Files (*)"
+        )
+        if not paths:
+            return
+        saved = 0
+        skipped = 0
+        for path in paths:
+            result = self._import_one(path, pid)
+            if result == "saved":
+                saved += 1
+            elif result == "skip":
+                skipped += 1
             if pid is not None:
                 break
+        # Clear filters so newly saved items are visible, then refresh everything
+        try:
+            self.search.blockSignals(True)
+            self.search.clear()
+            self.search.blockSignals(False)
+            self.status_filter.blockSignals(True)
+            self.status_filter.setCurrentIndex(0)  # All
+            self.status_filter.blockSignals(False)
+        except Exception:
+            pass
         self.refresh_all()
+        if saved:
+            # Switch to register so the user sees the new/updated row
+            try:
+                self.tabs.setCurrentIndex(0)
+            except Exception:
+                pass
+            QMessageBox.information(
+                self, "SDS Saved",
+                f"Saved {saved} SDS record(s) to the Chemical Register"
+                + (f" ({skipped} skipped)." if skipped else ".")
+                + "\n\nCheck tab 1 (Chemical Register) and tab 2 (SDS Library)."
+            )
 
     def _new_revision(self):
         pid = self._sel_id(self.reg_table, "chemical (select it in tab 1 first)")
@@ -17779,23 +17923,65 @@ class ChemicalSDSModule(QWidget):
                 if ans == QMessageBox.StandardButton.Yes:
                     pid = dup["id"]
         cols = self._PCOLS
+        # Ensure required defaults so the row always appears in the register
+        if not _s(v.get("status")).strip():
+            v["status"] = "Active"
+        if v.get("quantity") in (None, ""):
+            v["quantity"] = 0
+        try:
+            v["quantity"] = float(v.get("quantity") or 0)
+        except Exception:
+            v["quantity"] = 0.0
         if pid is None:
-            cur = self.db.execute(f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
-                                  [v[c] for c in cols] + [_now(), _now()])
+            cur = self.db.execute(
+                f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
+                [v.get(c, "") for c in cols] + [_now(), _now()]
+            )
             pid = cur.lastrowid
-            self._event(pid, "Chemical auto-registered from SDS", fname)
+            self._event(pid, "Chemical auto-registered from SDS", f"{v.get('product_name','')} | file: {fname}")
         else:
-            self.db.execute(f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
-                            [v[c] for c in cols] + [_now(), pid])
-            self._event(pid, "Chemical updated from new SDS", fname)
-        folder = ATTACH_DIR / "sds" / str(pid); folder.mkdir(parents=True, exist_ok=True)
+            self.db.execute(
+                f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
+                [v.get(c, "") for c in cols] + [_now(), pid]
+            )
+            self._event(pid, "Chemical updated from new SDS", f"{v.get('product_name','')} | file: {fname}")
+        folder = ATTACH_DIR / "sds" / str(pid)
+        folder.mkdir(parents=True, exist_ok=True)
         dest = folder / f"{_stamp()}_{fname}"
-        shutil.copy2(path, dest)
+        try:
+            shutil.copy2(path, dest)
+        except Exception as copy_exc:
+            logging.exception("SDS file copy failed")
+            QMessageBox.warning(self, "Attachment Warning",
+                                f"Chemical was saved but the SDS file could not be copied:\n{copy_exc}")
+            dest = Path(path)
         self.db.execute("UPDATE chem_sds SET status='Superseded' WHERE product_id=? AND status='Current'", (pid,))
-        self.db.execute("INSERT INTO chem_sds(product_id,sds_number,revision,issue_date,review_due_date,language,file_path,status,uploaded_by,uploaded_at) "
-                        "VALUES(?,?,?,?,?,?,?,'Current',?,?)",
-                        (pid, v["sds_number"], v["sds_revision"], v["sds_issue"], v["sds_due"], v["sds_language"], str(dest), self._actor(), _now()))
-        self._event(pid, "SDS attached", f"Rev {v['sds_revision']} issued {v['sds_issue']}; previous SDS superseded")
+        self.db.execute(
+            "INSERT INTO chem_sds(product_id,sds_number,revision,issue_date,review_due_date,language,file_path,status,uploaded_by,uploaded_at) "
+            "VALUES(?,?,?,?,?,?,?,'Current',?,?)",
+            (
+                pid,
+                _s(v.get("sds_number")),
+                _s(v.get("sds_revision")),
+                _s(v.get("sds_issue")),
+                _s(v.get("sds_due")),
+                _s(v.get("sds_language")) or "English",
+                str(dest),
+                self._actor(),
+                _now(),
+            ),
+        )
+        self._event(
+            pid, "SDS attached",
+            f"Product: {v.get('product_name','')} | Rev {_s(v.get('sds_revision')) or '-'} | "
+            f"Issued {_s(v.get('sds_issue')) or '-'} | Due {_s(v.get('sds_due')) or '-'} | File: {fname}"
+        )
+        # Verify the product is actually in the DB (helps diagnose filter/display issues)
+        check = self.db.fetchone("SELECT id, product_name, status FROM chem_products WHERE id=?", (pid,))
+        if not check:
+            logging.error("chem_products insert appeared to succeed but row id=%s not found", pid)
+            QMessageBox.critical(self, "Save Error", "The chemical was not written to the database. Please try again.")
+            return "skip"
         return "saved"
 
     def _open_sds(self):
@@ -17865,13 +18051,71 @@ class ChemicalSDSModule(QWidget):
     def _build_history_tab(self):
         w = QWidget(); self.tabs.addTab(w, "4. Change History")
         lay = QVBoxLayout(w)
-        self.hist_table = self._mk_table(["When", "Who", "Event", "Details"])
+        hint = QLabel("Recent chemical register and SDS changes (newest first). Double-click a row to see full details.")
+        hint.setStyleSheet("color:#555;padding:4px;")
+        lay.addWidget(hint)
+        self.hist_table = self._mk_table(["When", "Who", "Product", "Event", "Details"])
+        self.hist_table.doubleClicked.connect(self._history_details)
         lay.addWidget(self.hist_table, 1)
+        refresh_btn = QPushButton("Refresh History")
+        refresh_btn.clicked.connect(self.refresh_history)
+        lay.addWidget(refresh_btn)
+
+    def _history_details(self, *_):
+        row = self.hist_table.currentRow()
+        if row < 0:
+            return
+        parts = []
+        for c in range(self.hist_table.columnCount()):
+            hdr = self.hist_table.horizontalHeaderItem(c)
+            label = hdr.text() if hdr else f"Col {c}"
+            item = self.hist_table.item(row, c)
+            parts.append(f"{label}: {_s(item.text() if item else '')}")
+        QMessageBox.information(self, "Change History Detail", "\n".join(parts)[:4000])
 
     def refresh_history(self):
-        rows = [(r["id"], [r["created_at"], r["actor"], r["event_type"], r["details"]])
-                for r in self.db.fetchall("SELECT * FROM chem_events ORDER BY id DESC LIMIT 1000")]
+        sql = (
+            "SELECT e.id, e.created_at, e.actor, e.event_type, e.details, "
+            "COALESCE(p.product_name, '') AS product_name "
+            "FROM chem_events e "
+            "LEFT JOIN chem_products p ON p.id = e.product_id "
+            "ORDER BY e.id DESC LIMIT 1000"
+        )
+        rows = []
+        try:
+            for r in self.db.fetchall(sql):
+                rows.append((
+                    r["id"],
+                    [
+                        _s(r["created_at"]),
+                        _s(r["actor"]),
+                        _s(r["product_name"]),
+                        _s(r["event_type"]),
+                        _s(r["details"]),
+                    ],
+                ))
+        except Exception:
+            logging.exception("chem history refresh failed")
+            # Fallback without join if schema is older
+            for r in self.db.fetchall("SELECT * FROM chem_events ORDER BY id DESC LIMIT 1000"):
+                rows.append((
+                    r["id"],
+                    [
+                        _s(r["created_at"]),
+                        _s(r["actor"]),
+                        "",
+                        _s(r["event_type"]),
+                        _s(r["details"]),
+                    ],
+                ))
         self._fill(self.hist_table, rows)
+        # Make Details column readable
+        try:
+            self.hist_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+            for col in (0, 1, 2, 3):
+                self.hist_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        except Exception:
+            pass
 
     # ----- export -----
     def _export_excel(self):
@@ -17907,6 +18151,20 @@ class ChemicalSDSModule(QWidget):
         except Exception as exc:
             logging.exception("Chemical register export failed")
             QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _on_chem_tab_changed(self, index):
+        """Refresh the visible tab so register/history always show current data."""
+        try:
+            if index == 0:
+                self.refresh_register()
+            elif index == 1:
+                self.refresh_sds()
+            elif index == 2:
+                self.refresh_alerts()
+            elif index == 3:
+                self.refresh_history()
+        except Exception:
+            logging.exception("Chemical tab refresh failed")
 
     def refresh_all(self):
         self.refresh_register(); self.refresh_sds(); self.refresh_alerts(); self.refresh_history()
