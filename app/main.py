@@ -17282,8 +17282,17 @@ def chem_file_text(path):
                     selection = pdf.getPageText(page_no)
                     page_text.append(selection.text() if hasattr(selection, "text") else str(selection or ""))
                 elif hasattr(pdf, "getSelection"):
-                    from PySide6.QtCore import QRectF
-                    selection = pdf.getSelection(page_no, QRectF(-100000, -100000, 200000, 200000))
+                    # PySide6 QPdfDocument.getSelection requires THREE
+                    # arguments: page number, start QPointF and end QPointF.
+                    # The previous QRectF/two-argument call raised:
+                    # "getSelection expected 3 arguments, got 2".
+                    from PySide6.QtCore import QPointF
+                    page_size = pdf.pagePointSize(page_no)
+                    if page_size is None:
+                        raise RuntimeError(f"QtPdf could not determine the size of page {page_no + 1}.")
+                    start_point = QPointF(0.0, 0.0)
+                    end_point = QPointF(float(page_size.width()), float(page_size.height()))
+                    selection = pdf.getSelection(page_no, start_point, end_point)
                     page_text.append(selection.text() if hasattr(selection, "text") else "")
                 else:
                     raise RuntimeError("This QtPdf version does not expose PDF text extraction.")
@@ -17300,11 +17309,23 @@ def chem_file_text(path):
                 "The PDF reader opened the file, but no selectable text was found. This SDS is likely a scanned/image-only PDF; "
                 "it requires OCR before automatic field extraction. Reader diagnostics: " + details
             )
+        if getattr(sys, "frozen", False):
+            runtime_help = (
+                "This is a packaged HSE EXE, not a normal Python interpreter. "
+                "Installing pypdf into your separately installed Python (for example Python 3.15) "
+                "does not add it to this EXE's embedded Python runtime. "
+                "The EXE must be rebuilt with pypdf included (PyInstaller: add pypdf as a hidden import "
+                "or collect its package), or use the corrected QtPdf fallback bundled with the application. "
+            )
+        else:
+            runtime_help = (
+                "Install pypdf into this exact Python environment with: "
+                f'"{sys.executable}" -m pip install --upgrade pypdf. '
+            )
         raise RuntimeError(
             "No PDF reader in the HSE application's running Python environment could extract this file. "
             f"Python executable: {sys.executable}; Python version: {sys.version.split()[0]}. "
-            "Install pypdf using this exact interpreter command: \"" + sys.executable + "\" -m pip install --upgrade pypdf. "
-            "If running a packaged EXE, the PDF library must be included in that EXE build. Reader diagnostics: " + details
+            + runtime_help + "Reader diagnostics: " + details
         )
 
     if ext == ".docx":
