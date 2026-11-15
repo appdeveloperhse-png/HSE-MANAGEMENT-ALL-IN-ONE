@@ -3643,7 +3643,8 @@ class MainWindow(QMainWindow):
             "ISO 14001 Aspect & Impact",
             "Reports",
             "Master Data",
-            "Settings"
+            "Settings",
+            "Chemical & SDS Register"
         ]
 
         self.nav.addItems(modules)
@@ -3720,6 +3721,9 @@ class MainWindow(QMainWindow):
                 self.master_data()
             elif row == 11:
                 self.settings_page()
+            elif row == 12:
+                w, layout = self.page("Chemical Register & SDS Management")
+                layout.addWidget(ChemicalSDSModule(self, db), 1)
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -17102,6 +17106,810 @@ class PTWModule(QWidget):
         self.db.execute("INSERT INTO ptw_events(permit_id,event_type,details,actor,created_at) SELECT id,'PTW configuration updated',?,?,? FROM ptw_permits WHERE id=(SELECT MIN(id) FROM ptw_permits)",(f"Permit type/configuration changed: {name}",self._actor(),now)) if self.db.fetchone("SELECT id FROM ptw_permits LIMIT 1") else None
         self.refresh_all(); QMessageBox.information(self,"Configuration Saved","PTW-specific configuration saved. Validate against the governing procedure before use.")
 
+
+
+# ============================================================
+# CHEMICAL REGISTER & SDS MODULE  (additive - new tables only)
+# ============================================================
+
+CHEM_STORAGE_GROUPS = [
+    "Flammable Liquid", "Flammable Gas", "Flammable Solid", "Oxidizer", "Corrosive - Acid", "Corrosive - Base",
+    "Toxic / Poison", "Compressed Gas (Inert)", "Water-Reactive", "Peroxide / Self-Reactive",
+    "Environmental Hazard", "Non-Hazardous / Other",
+]
+CHEM_GHS = ["Flammable", "Oxidizing", "Explosive", "Compressed Gas", "Corrosive",
+            "Acute Toxic", "Health Hazard", "Irritant", "Environmental Hazard"]
+CHEM_INCOMPAT = {
+    frozenset(["Flammable Liquid", "Oxidizer"]): "Fire/explosion risk - oxidizer feeds flammable fire",
+    frozenset(["Flammable Solid", "Oxidizer"]): "Fire/explosion risk - oxidizer feeds flammable solid fire",
+    frozenset(["Flammable Gas", "Oxidizer"]): "Fire/explosion risk - oxidizer feeds flammable gas fire",
+    frozenset(["Flammable Liquid", "Corrosive - Acid"]): "Strong acids can ignite or react with flammables",
+    frozenset(["Corrosive - Acid", "Corrosive - Base"]): "Violent exothermic neutralisation if mixed",
+    frozenset(["Corrosive - Acid", "Toxic / Poison"]): "Acids can release toxic gas (e.g. cyanide, sulphide)",
+    frozenset(["Oxidizer", "Corrosive - Acid"]): "Acid + oxidizer can release toxic/oxidizing gas",
+    frozenset(["Water-Reactive", "Corrosive - Acid"]): "Water-reactive material reacts with aqueous acid",
+    frozenset(["Water-Reactive", "Corrosive - Base"]): "Water-reactive material reacts with aqueous base",
+    frozenset(["Water-Reactive", "Oxidizer"]): "Water-reactive material + oxidizer: fire risk",
+    frozenset(["Peroxide / Self-Reactive", "Flammable Liquid"]): "Peroxide decomposition can ignite flammables",
+    frozenset(["Peroxide / Self-Reactive", "Corrosive - Acid"]): "Acid can trigger peroxide decomposition",
+}
+CHEM_SDS_REVIEW_YEARS = 5      # default review interval - align with site/client rule
+CHEM_DUE_SOON_DAYS = 90
+
+
+def chem_conflicts(items):
+    """items: dicts with name, storage_location, storage_group. Returns co-location conflicts."""
+    out, by_loc = [], {}
+    for it in items:
+        loc = (it.get("storage_location") or "").strip().lower()
+        if loc:
+            by_loc.setdefault(loc, []).append(it)
+    for loc, group in by_loc.items():
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a, b = group[i], group[j]
+                reason = CHEM_INCOMPAT.get(frozenset([a.get("storage_group", ""), b.get("storage_group", "")]))
+                if reason:
+                    out.append((a["storage_location"], a["name"], a["storage_group"], b["name"], b["storage_group"], reason))
+    return out
+
+
+def chem_sds_state(sds_row, today_iso):
+    """Return Missing / Expired / Due Soon / Current for a chemical's latest current SDS."""
+    if not sds_row:
+        return "Missing"
+    due = (sds_row["review_due_date"] or "").strip()
+    if not due:
+        return "Current"
+    if due < today_iso:
+        return "Expired"
+    soon = (datetime.strptime(today_iso, "%Y-%m-%d") + timedelta(days=CHEM_DUE_SOON_DAYS)).strftime("%Y-%m-%d")
+    return "Due Soon" if due <= soon else "Current"
+
+
+# ---------------- SDS auto-reader (PDF / DOCX -> register fields) ----------------
+_CHEM_SEC_KEYS = {
+    1: ("identification", "product identifier"), 2: ("hazard",), 3: ("composition", "ingredient"),
+    4: ("first",), 5: ("fire",), 6: ("accidental", "release"), 7: ("handling", "storage"),
+    8: ("exposure", "protection"), 9: ("physical",), 10: ("stability", "reactivity"),
+    11: ("toxicolog",), 12: ("ecolog",), 13: ("disposal",), 14: ("transport",),
+    15: ("regulat",), 16: ("other",),
+}
+_CHEM_H_GROUPS = [
+    ("Explosive", {"H200", "H201", "H202", "H203", "H204", "H205", "H240", "H241"}),
+    ("Flammable", {"H220", "H221", "H222", "H223", "H224", "H225", "H226", "H228", "H229", "H242", "H250", "H260", "H261"}),
+    ("Oxidizing", {"H270", "H271", "H272"}),
+    ("Compressed Gas", {"H280", "H281"}),
+    ("Corrosive", {"H290", "H314", "H318"}),
+    ("Acute Toxic", {"H300", "H301", "H310", "H311", "H330", "H331"}),
+    ("Health Hazard", {"H304", "H334", "H340", "H341", "H350", "H351", "H360", "H361", "H362", "H370", "H371", "H372", "H373"}),
+    ("Irritant", {"H302", "H312", "H315", "H317", "H319", "H332", "H335", "H336"}),
+    ("Environmental Hazard", {"H400", "H410", "H411"}),
+]
+
+
+def chem_file_text(path):
+    """Extract readable text from an SDS (.pdf or .docx). Raises RuntimeError with a plain message."""
+    ext = Path(path).suffix.lower()
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+        except ImportError:
+            raise RuntimeError("The PDF reader (pypdf) is not installed.\nInstall it with:  pip install pypdf\n"
+                               "(If you run the app as an .exe, rebuild it after installing.)")
+        reader = PdfReader(str(path))
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                raise RuntimeError("This PDF is password-protected.")
+        return "\n".join((pg.extract_text() or "") for pg in reader.pages)
+    if ext == ".docx":
+        d = Document(str(path)); parts = [p.text for p in d.paragraphs]
+        for t in d.tables:
+            for row in t.rows:
+                cells = []
+                for c in row.cells:
+                    tx = c.text.strip()
+                    if tx and tx not in cells:
+                        cells.append(tx)
+                if cells:
+                    parts.append(" : ".join(cells))
+        return "\n".join(parts)
+    return ""
+
+
+def chem_split_sections(text):
+    lines = text.splitlines(); marks = []
+    for i, ln in enumerate(lines):
+        m = re.match(r"^\s*(?:section|sec\.?)?\s*(\d{1,2})\s*[:.\-–—)]?\s+([A-Za-z][^\n]{2,90})$", ln, re.I)
+        if m:
+            n = int(m.group(1)); title = m.group(2).lower()
+            if 1 <= n <= 16 and any(k in title for k in _CHEM_SEC_KEYS[n]):
+                marks.append((i, n))
+    bodies = {}
+    for idx, (i, n) in enumerate(marks):
+        end = marks[idx + 1][0] if idx + 1 < len(marks) else len(lines)
+        body = "\n".join(lines[i + 1:end])
+        if len(body) > len(bodies.get(n, "")):
+            bodies[n] = body
+    return bodies
+
+
+def chem_label_value(text, labels, maxlen=140):
+    """Find 'Label : value' (same line first, then value on the next line), label by label in priority order."""
+    lines = text.splitlines()
+    clean = lambda v: v.lstrip(" :.-–—\t").rstrip(" :-–—\t")
+    for lab in labels:
+        pat = re.compile(r"^[ \t]*(?:%s)\b[ \t]*[:\-–—]?[ \t]*(.*)$" % lab, re.I)
+        for ln in lines:
+            m = pat.match(ln)
+            if m:
+                v = clean(m.group(1))
+                if v and not v.endswith(":"):
+                    return v[:maxlen]
+        for i, ln in enumerate(lines):
+            m = pat.match(ln)
+            if m and not clean(m.group(1)):
+                for nxt in lines[i + 1:i + 3]:
+                    nv = nxt.strip()
+                    if nv and not nv.endswith(":"):
+                        return nv[:maxlen]
+    return ""
+
+
+def chem_parse_date(s):
+    """Return ISO yyyy-mm-dd or ''. Numeric dd/mm/yyyy is read day-first unless impossible."""
+    s = s or ""
+    months = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+    def ok(y, mo, d):
+        try:
+            return datetime(int(y), int(mo), int(d)).strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+    m = re.search(r"\b(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", s)
+    if m and ok(*m.groups()):
+        return ok(*m.groups())
+    m = re.search(r"\b(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})\b", s)
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        if b > 12 and a <= 12:
+            a, b = b, a
+        if ok(y, b, a):
+            return ok(y, b, a)
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?[\s\-]+([A-Za-z]{3,9})\.?,?[\s\-]+(\d{4})\b", s)
+    if m and m.group(2)[:3].lower() in months and ok(m.group(3), months[m.group(2)[:3].lower()], m.group(1)):
+        return ok(m.group(3), months[m.group(2)[:3].lower()], m.group(1))
+    m = re.search(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b", s)
+    if m and m.group(1)[:3].lower() in months and ok(m.group(3), months[m.group(1)[:3].lower()], m.group(2)):
+        return ok(m.group(3), months[m.group(1)[:3].lower()], m.group(2))
+    return ""
+
+
+def _chem_cas_valid(cas):
+    digits = cas.replace("-", "")
+    body, check = digits[:-1], int(digits[-1])
+    return sum(int(d) * (i + 1) for i, d in enumerate(reversed(body))) % 10 == check
+
+
+def _chem_clean(body, maxlen):
+    out = []
+    for ln in (body or "").splitlines():
+        ln = re.sub(r"^\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s*", "", ln).strip()
+        if ln:
+            out.append(ln)
+    t = " ".join(out)
+    return t if len(t) <= maxlen else t[:maxlen].rsplit(" ", 1)[0] + " …"
+
+
+def chem_ghs_from_h(codes):
+    base = {re.match(r"H\d{3}", c).group(0) for c in codes if re.match(r"H\d{3}", c)}
+    return [name for name, group in _CHEM_H_GROUPS if base & group]
+
+
+def chem_infer_group(codes, blob):
+    base = {re.match(r"H\d{3}", c).group(0) for c in codes if re.match(r"H\d{3}", c)}
+    b = blob.lower()
+    if base & {"H260", "H261"}: return "Water-Reactive"
+    if base & {"H240", "H241", "H242"} or "organic peroxide" in b: return "Peroxide / Self-Reactive"
+    if base & {"H270", "H271", "H272"}: return "Oxidizer"
+    if base & {"H220", "H221", "H222", "H223"}: return "Flammable Gas"
+    if base & {"H224", "H225", "H226"}: return "Flammable Liquid"
+    if "H228" in base: return "Flammable Solid"
+    if base & {"H314", "H290"}:
+        acid = re.search(r"\bacid\b|acidic|hydrochloric|sulphuric|sulfuric|nitric|phosphoric", b)
+        basek = re.search(r"hydroxide|caustic|\bammonia|\bamine|alkali|potash", b)
+        if acid and not basek: return "Corrosive - Acid"
+        if basek and not acid: return "Corrosive - Base"
+        return ""
+    if base & {"H300", "H301", "H310", "H311", "H330", "H331"}: return "Toxic / Poison"
+    if base & {"H280", "H281"}: return "Compressed Gas (Inert)"
+    if base & {"H400", "H410", "H411"}: return "Environmental Hazard"
+    if base or "not classified" in b or "not a hazardous" in b or "non-hazardous" in b: return "Non-Hazardous / Other"
+    return ""
+
+
+def chem_parse_sds(text):
+    """Best-effort read of a 16-section SDS. Returns dict of register fields (+ sds_* fields).
+    Always verified by the user in the review dialog before saving."""
+    text = text or ""
+    sec = chem_split_sections(text)
+    S = lambda n: sec.get(n, text)            # fall back to whole text if section not located
+    out = {}
+    s1 = S(1)
+    name = chem_label_value(s1, [r"product\s*name", r"product\s*identifier", r"trade\s*name", r"substance\s*name", r"material\s*name"])
+    if not name:
+        for ln in text.splitlines():
+            t = ln.strip()
+            if t and not re.search(r"safety\s*data\s*sheet|msds|\bsds\b|page\s*\d|section\s*1", t, re.I):
+                name = t[:120]; break
+    out["product_name"] = name
+    out["supplier"] = chem_label_value(s1, [r"manufacturer(?:\s*/\s*supplier)?", r"supplier", r"company(?:\s*name)?", r"distributor", r"registered\s*company"])
+    out["supplier_contact"] = chem_label_value(s1, [r"emergency\s*(?:telephone|phone|tel\.?|contact|number)(?:\s*number)?", r"24[\s\-]*h(?:ou)?r\s*emergency[^:\n]*"])
+    out["product_use"] = chem_label_value(s1, [r"recommended\s*use", r"relevant\s*identified\s*uses?", r"identified\s*uses?", r"product\s*use", r"use\s*of\s*the\s*(?:substance|mixture)(?:/mixture)?"])
+    # hazards
+    s2 = S(2)
+    codes, hlines = [], []
+    for m in re.finditer(r"\b(EUH\d{3}|H\d{3}[A-Z]{0,2})\b\s*[:\-–—]?\s*([^\n]{0,110})", s2):
+        code = m.group(1)
+        if code in codes: continue
+        codes.append(code)
+        desc = re.split(r"\b(?:EUH\d{3}|H\d{3}[A-Z]{0,2}|P\d{3})\b", m.group(2))[0].strip(" ,;.")
+        hlines.append(f"{code} {desc}".strip() if desc and re.match(r"[A-Za-z]", desc) else code)
+    out["h_statements"] = "\n".join(hlines)
+    plines, pseen = [], set()
+    for m in re.finditer(r"\b(P\d{3}(?:\s*\+\s*P\d{3})*)\b\s*[:\-–—]?\s*([^\n]{0,110})", s2):
+        code = re.sub(r"\s+", "", m.group(1))
+        if code in pseen: continue
+        pseen.add(code)
+        desc = re.split(r"\b(?:EUH\d{3}|H\d{3}[A-Z]{0,2}|P\d{3})\b", m.group(2))[0].strip(" ,;.")
+        plines.append(f"{code} {desc}".strip() if desc and re.match(r"[A-Za-z]", desc) else code)
+    out["p_statements"] = _chem_clean("\n".join(plines), 1500)
+    m = re.search(r"signal\s*word\s*[:\-–—]?\s*(danger|warning)", s2, re.I)
+    out["signal_word"] = m.group(1).capitalize() if m else ("None" if re.search(r"signal\s*word\s*[:\-–—]?\s*(none|no signal)", s2, re.I) else "")
+    out["ghs_classes"] = ", ".join(chem_ghs_from_h(codes))
+    out["storage_group"] = chem_infer_group(codes, " ".join([name, S(1), s2, S(3)])[:6000])
+    # identifiers
+    cas = []
+    for c in re.findall(r"\b(\d{2,7}-\d{2}-\d)\b", S(3)) or re.findall(r"\b(\d{2,7}-\d{2}-\d)\b", text):
+        if _chem_cas_valid(c) and c not in cas: cas.append(c)
+    out["cas_number"] = ", ".join(cas[:4])
+    m = re.search(r"\bUN[\s\-]*(?:number|no\.?)?[\s:\-]*(\d{4})\b", S(14), re.I)
+    out["un_number"] = m.group(1) if m else ""
+    ph = chem_label_value(S(9), [r"physical\s*state", r"appearance", r"form"], 80).lower()
+    for kw, label in [("aerosol", "Aerosol"), ("gas", "Gas"), ("powder", "Powder"), ("paste", "Paste/Gel"), ("gel", "Paste/Gel"),
+                      ("solid", "Solid"), ("liquid", "Liquid")]:
+        if kw in ph:
+            out["physical_state"] = label; break
+    # response information
+    out["first_aid"] = _chem_clean(sec.get(4, ""), 700)
+    out["fire_fighting"] = _chem_clean(sec.get(5, ""), 600)
+    out["spill_response"] = _chem_clean(sec.get(6, ""), 600)
+    s8 = sec.get(8, ""); lines8 = s8.splitlines(); start = 0
+    for i, ln in enumerate(lines8):
+        if re.search(r"personal\s*protective|individual\s*protection|protective\s*equipment|eye/face|hand\s*protection", ln, re.I):
+            start = i; break
+    out["ppe_required"] = _chem_clean("\n".join(lines8[start:]), 700)
+    out["disposal"] = _chem_clean(sec.get(13, ""), 500)
+    stor = _chem_clean(sec.get(7, ""), 450)
+    out["remarks"] = f"SDS s.7 storage: {stor}" if stor else ""
+    # SDS document details
+    out["sds_number"] = chem_label_value(text, [r"sds\s*(?:no\.?|number|id|code)", r"msds\s*(?:no\.?|number)", r"document\s*(?:no\.?|number)"], 60)
+    out["sds_revision"] = chem_label_value(text, [r"revision\s*(?:no\.?|number)", r"version(?:\s*(?:no\.?|number))?(?!\s*date)", r"revision(?!\s*date)"], 30)
+    for lab in [r"revision\s*date", r"date\s*of\s*(?:revision|issue|preparation|last\s*revision)", r"issue\s*date", r"date\s*issued",
+                r"version\s*date", r"date\s*prepared", r"prepared\s*on"]:
+        d = chem_parse_date(chem_label_value(text, [lab], 60))
+        if d:
+            out["sds_issue"] = d; break
+    out.setdefault("sds_issue", "")
+    out["sds_language"] = "English"
+    return {k: (v if v is not None else "") for k, v in out.items()}
+
+
+def chem_missing_fields(parsed):
+    keys = [("product_name", "Product name"), ("supplier", "Supplier"), ("supplier_contact", "Emergency contact"),
+            ("cas_number", "CAS"), ("signal_word", "Signal word"), ("h_statements", "H-statements"),
+            ("storage_group", "Storage group"), ("sds_issue", "Issue date"), ("sds_revision", "Revision")]
+    return [lab for k, lab in keys if not parsed.get(k)]
+
+
+class ChemicalSDSModule(QWidget):
+    """Chemical Register + SDS Library + compatibility/alerts, mounted in the main stack."""
+
+    def __init__(self, parent_window, db):
+        super().__init__(parent_window)
+        self.host = parent_window
+        self.db = db
+        self._ensure_schema()
+        self._build_ui()
+        self.refresh_all()
+
+    # ---------- schema ----------
+    def _ensure_schema(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS chem_products (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            supplier TEXT DEFAULT '', supplier_contact TEXT DEFAULT '',
+            cas_number TEXT DEFAULT '', un_number TEXT DEFAULT '',
+            product_use TEXT DEFAULT '', physical_state TEXT DEFAULT '',
+            storage_group TEXT DEFAULT '', storage_location TEXT DEFAULT '',
+            ghs_classes TEXT DEFAULT '', signal_word TEXT DEFAULT '',
+            h_statements TEXT DEFAULT '', p_statements TEXT DEFAULT '',
+            quantity REAL DEFAULT 0, unit TEXT DEFAULT 'L',
+            project TEXT DEFAULT '', department TEXT DEFAULT '',
+            ppe_required TEXT DEFAULT '', first_aid TEXT DEFAULT '',
+            spill_response TEXT DEFAULT '', fire_fighting TEXT DEFAULT '', disposal TEXT DEFAULT '',
+            status TEXT DEFAULT 'Active',
+            approved_by TEXT DEFAULT '', approval_date TEXT DEFAULT '', remarks TEXT DEFAULT '',
+            created_at TEXT DEFAULT '', updated_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS chem_sds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER NOT NULL,
+            sds_number TEXT DEFAULT '', revision TEXT DEFAULT '',
+            issue_date TEXT DEFAULT '', review_due_date TEXT DEFAULT '',
+            language TEXT DEFAULT 'English', file_path TEXT DEFAULT '',
+            status TEXT DEFAULT 'Current',
+            uploaded_by TEXT DEFAULT '', uploaded_at TEXT DEFAULT '',
+            FOREIGN KEY(product_id) REFERENCES chem_products(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS chem_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id INTEGER, event_type TEXT, details TEXT DEFAULT '',
+            actor TEXT DEFAULT '', created_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_chem_sds_product ON chem_sds(product_id);
+        CREATE INDEX IF NOT EXISTS idx_chem_events_product ON chem_events(product_id);
+        """)
+        self.db.conn.commit()
+
+    def _actor(self):
+        return os.environ.get("USERNAME") or os.environ.get("USER") or "User"
+
+    def _event(self, pid, etype, details=""):
+        self.db.execute("INSERT INTO chem_events(product_id,event_type,details,actor,created_at) VALUES(?,?,?,?,?)",
+                        (pid, etype, details, self._actor(), _now()))
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        head = QLabel("CHEMICAL REGISTER & SDS MANAGEMENT")
+        head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:7px;")
+        root.addWidget(head)
+        note = QLabel("Go to tab 2 and upload an SDS (PDF/DOCX): the system reads it and pre-fills the register for your review. Every chemical on site needs a current SDS. SDS review interval defaults to "
+                      f"{CHEM_SDS_REVIEW_YEARS} years from issue date - align with your site/client/regulatory rule. "
+                      "Compatibility check is indicative only; always confirm against SDS Sections 7 and 10.")
+        note.setWordWrap(True)
+        note.setStyleSheet("padding:8px;background:#FFF4D6;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
+        root.addWidget(note)
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self._build_register_tab()
+        self._build_sds_tab()
+        self._build_alerts_tab()
+        self._build_history_tab()
+
+    def _mk_table(self, headers):
+        t = QTableWidget(0, len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setAlternatingRowColors(True)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        t.horizontalHeader().setStretchLastSection(True)
+        return t
+
+    def _fill(self, table, rows, state_col=None):
+        """rows: list of (record_id, [cell values]). Record id is kept on column 0."""
+        table.setRowCount(0)
+        for rid, vals in rows:
+            r = table.rowCount()
+            table.insertRow(r)
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(_s(v))
+                if c == 0:
+                    it.setData(Qt.ItemDataRole.UserRole, rid)
+                if state_col is not None and c == state_col:
+                    colour = {"Missing": "#F8CBAD", "Expired": "#F8CBAD", "Due Soon": "#FFE699",
+                              "Current": "#C6E0B4"}.get(_s(v))
+                    if colour:
+                        it.setBackground(QBrush(QColor(colour)))
+                table.setItem(r, c, it)
+        table.resizeColumnsToContents()
+
+    def _sel_id(self, table, what="record"):
+        r = table.currentRow()
+        if r < 0 or not table.item(r, 0):
+            QMessageBox.information(self, "Select", f"Select a {what} row first.")
+            return None
+        return table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+
+    # ----- register tab -----
+    def _build_register_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "1. Chemical Register")
+        lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.search = QLineEdit(); self.search.setPlaceholderText("Search name, supplier, CAS, location...")
+        self.search.textChanged.connect(self.refresh_register)
+        self.status_filter = QComboBox(); self.status_filter.addItems(["All", "Active", "Phased Out", "Disposed"])
+        self.status_filter.currentTextChanged.connect(self.refresh_register)
+        bar.addWidget(self.search, 2); bar.addWidget(QLabel("Status:")); bar.addWidget(self.status_filter)
+        for text, fn in [("Add Chemical", self._add_product), ("Edit", self._edit_product),
+                         ("Delete", self._delete_product), ("Export Excel", self._export_excel)]:
+            b = QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
+        lay.addLayout(bar)
+        self.reg_headers = ["ID", "Product", "Supplier", "CAS No.", "UN No.", "Storage Group", "Location",
+                            "Qty", "Unit", "GHS Classes", "Signal Word", "Project", "Status", "SDS Status", "SDS Review Due"]
+        self.reg_table = self._mk_table(self.reg_headers)
+        self.reg_table.doubleClicked.connect(lambda *_: self._edit_product())
+        lay.addWidget(self.reg_table, 1)
+
+    def _latest_sds_map(self):
+        m = {}
+        for s in self.db.fetchall("SELECT * FROM chem_sds WHERE status='Current' ORDER BY issue_date, id"):
+            m[s["product_id"]] = s
+        return m
+
+    def refresh_register(self, *_):
+        q = self.search.text().strip().lower(); st = self.status_filter.currentText()
+        sds = self._latest_sds_map(); today_iso = today(); rows = []
+        for p in self.db.fetchall("SELECT * FROM chem_products ORDER BY product_name"):
+            if st != "All" and p["status"] != st:
+                continue
+            blob = " ".join(_s(p[k]) for k in ("product_name", "supplier", "cas_number", "storage_location", "un_number")).lower()
+            if q and q not in blob:
+                continue
+            s = sds.get(p["id"])
+            state = chem_sds_state(s, today_iso) if p["status"] == "Active" else "-"
+            rows.append((p["id"], [p["id"], p["product_name"], p["supplier"], p["cas_number"], p["un_number"],
+                                   p["storage_group"], p["storage_location"], p["quantity"], p["unit"], p["ghs_classes"],
+                                   p["signal_word"], p["project"], p["status"], state, s["review_due_date"] if s else ""]))
+        self._fill(self.reg_table, rows, state_col=13)
+
+    # ----- product dialog -----
+    def _product_dialog(self, rec=None, sds=None, banner=None):
+        rec = dict(rec) if rec else {}
+        dlg = QDialog(self); dlg.setWindowTitle("Chemical Details"); dlg.resize(760, 760)
+        outer = QVBoxLayout(dlg)
+        if banner:
+            bl = QLabel(banner); bl.setWordWrap(True)
+            bl.setStyleSheet("padding:8px;background:#E8F3FF;border:1px solid #9CC3E6;border-radius:4px;color:#17365D;")
+            outer.addWidget(bl)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        body = QWidget(); form = QFormLayout(body); scroll.setWidget(body); outer.addWidget(scroll)
+        le = lambda k: QLineEdit(_s(rec.get(k)))
+        f = {}
+        f["product_name"] = le("product_name"); f["supplier"] = le("supplier"); f["supplier_contact"] = le("supplier_contact")
+        f["cas_number"] = le("cas_number"); f["un_number"] = le("un_number"); f["product_use"] = le("product_use")
+        f["physical_state"] = QComboBox(); f["physical_state"].addItems(["", "Liquid", "Solid", "Gas", "Powder", "Paste/Gel", "Aerosol"])
+        f["physical_state"].setCurrentText(_s(rec.get("physical_state")))
+        f["storage_group"] = QComboBox(); f["storage_group"].addItems([""] + CHEM_STORAGE_GROUPS)
+        f["storage_group"].setCurrentText(_s(rec.get("storage_group")))
+        f["storage_location"] = le("storage_location")
+        f["signal_word"] = QComboBox(); f["signal_word"].addItems(["", "Danger", "Warning", "None"])
+        f["signal_word"].setCurrentText(_s(rec.get("signal_word")))
+        f["quantity"] = QDoubleSpinBox(); f["quantity"].setRange(0, 10000000); f["quantity"].setDecimals(2)
+        f["quantity"].setValue(float(rec.get("quantity") or 0))
+        f["unit"] = QComboBox(); f["unit"].addItems(["L", "mL", "kg", "g", "drum", "cylinder", "pail", "can", "pcs"])
+        f["unit"].setCurrentText(_s(rec.get("unit")) or "L")
+        f["project"] = QComboBox(); f["project"].setEditable(True)
+        try:
+            f["project"].addItems([""] + [r["project"] for r in self.db.fetchall("SELECT project FROM projects WHERE active=1 ORDER BY project")])
+        except Exception:
+            pass
+        f["project"].setCurrentText(_s(rec.get("project")))
+        f["department"] = le("department")
+        f["status"] = QComboBox(); f["status"].addItems(["Active", "Phased Out", "Disposed"])
+        f["status"].setCurrentText(_s(rec.get("status")) or "Active")
+        f["approved_by"] = le("approved_by"); f["approval_date"] = le("approval_date")
+        f["approval_date"].setPlaceholderText("YYYY-MM-DD")
+        txt = lambda k: QTextEdit(_s(rec.get(k)))
+        for k in ("h_statements", "p_statements", "ppe_required", "first_aid", "spill_response", "fire_fighting", "disposal", "remarks"):
+            f[k] = txt(k); f[k].setFixedHeight(62)
+        ghs_have = {x.strip() for x in _s(rec.get("ghs_classes")).split(",") if x.strip()}
+        ghs_boxes = []; ghs_wrap = QWidget(); gl = QGridLayout(ghs_wrap)
+        for i, g in enumerate(CHEM_GHS):
+            cb = QCheckBox(g); cb.setChecked(g in ghs_have); ghs_boxes.append(cb); gl.addWidget(cb, i // 3, i % 3)
+        form.addRow("Product Name *", f["product_name"]); form.addRow("Supplier / Manufacturer", f["supplier"])
+        form.addRow("Supplier Emergency Contact", f["supplier_contact"]); form.addRow("CAS Number", f["cas_number"])
+        form.addRow("UN Number", f["un_number"]); form.addRow("Intended Use", f["product_use"])
+        form.addRow("Physical State", f["physical_state"]); form.addRow("Storage Group", f["storage_group"])
+        form.addRow("Storage Location", f["storage_location"]); form.addRow("GHS Hazard Classes", ghs_wrap)
+        form.addRow("Signal Word", f["signal_word"]); form.addRow("H-Statements", f["h_statements"])
+        form.addRow("P-Statements", f["p_statements"]); form.addRow("Quantity on Site", f["quantity"])
+        form.addRow("Unit", f["unit"]); form.addRow("Project", f["project"]); form.addRow("Department", f["department"])
+        form.addRow("PPE Required", f["ppe_required"]); form.addRow("First Aid", f["first_aid"])
+        form.addRow("Spill Response", f["spill_response"]); form.addRow("Fire Fighting", f["fire_fighting"])
+        form.addRow("Disposal", f["disposal"]); form.addRow("Status", f["status"])
+        form.addRow("Approved For Use By", f["approved_by"]); form.addRow("Approval Date", f["approval_date"])
+        form.addRow("Remarks", f["remarks"])
+        sw = {}
+        if sds is not None:
+            form.addRow(QLabel("<b>SDS document details</b>"))
+            sw["sds_number"] = QLineEdit(_s(sds.get("sds_number"))); sw["sds_revision"] = QLineEdit(_s(sds.get("sds_revision")))
+            sw["sds_language"] = QLineEdit(_s(sds.get("sds_language")) or "English")
+            d0 = QDate.fromString(_s(sds.get("sds_issue")), "yyyy-MM-dd")
+            if not d0.isValid(): d0 = QDate.currentDate()
+            sw["issue"] = QDateEdit(d0); sw["due"] = QDateEdit(d0.addYears(CHEM_SDS_REVIEW_YEARS))
+            for k in ("issue", "due"):
+                sw[k].setCalendarPopup(True); sw[k].setDisplayFormat("yyyy-MM-dd")
+            sw["issue"].dateChanged.connect(lambda d: sw["due"].setDate(d.addYears(CHEM_SDS_REVIEW_YEARS)))
+            form.addRow("SDS Number", sw["sds_number"]); form.addRow("Revision", sw["sds_revision"])
+            form.addRow("SDS Issue Date", sw["issue"]); form.addRow("SDS Review Due", sw["due"]); form.addRow("Language", sw["sds_language"])
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        if sds is not None:
+            bb.button(QDialogButtonBox.StandardButton.Cancel).setText("Skip this SDS")
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject); outer.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        val = {}
+        for k, wdg in f.items():
+            if isinstance(wdg, QLineEdit): val[k] = wdg.text().strip()
+            elif isinstance(wdg, QComboBox): val[k] = wdg.currentText().strip()
+            elif isinstance(wdg, QTextEdit): val[k] = wdg.toPlainText().strip()
+            else: val[k] = wdg.value()
+        val["ghs_classes"] = ", ".join(cb.text() for cb in ghs_boxes if cb.isChecked())
+        if sds is not None:
+            val["sds_number"] = sw["sds_number"].text().strip(); val["sds_revision"] = sw["sds_revision"].text().strip()
+            val["sds_language"] = sw["sds_language"].text().strip() or "English"
+            val["sds_issue"] = sw["issue"].date().toString("yyyy-MM-dd"); val["sds_due"] = sw["due"].date().toString("yyyy-MM-dd")
+        if not val["product_name"]:
+            QMessageBox.warning(self, "Required", "Product name is required.")
+            return None
+        return val
+
+    _PCOLS = ["product_name", "supplier", "supplier_contact", "cas_number", "un_number", "product_use", "physical_state",
+              "storage_group", "storage_location", "ghs_classes", "signal_word", "h_statements", "p_statements", "quantity",
+              "unit", "project", "department", "ppe_required", "first_aid", "spill_response", "fire_fighting", "disposal",
+              "status", "approved_by", "approval_date", "remarks"]
+
+    def _add_product(self):
+        v = self._product_dialog()
+        if not v: return
+        cols = self._PCOLS
+        cur = self.db.execute(f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
+                              [v[c] for c in cols] + [_now(), _now()])
+        self._event(cur.lastrowid, "Chemical added", v["product_name"])
+        self.refresh_all()
+        QMessageBox.information(self, "Saved", "Chemical added. Attach its SDS in tab 2 - it shows as 'Missing' until then.")
+
+    def _edit_product(self):
+        pid = self._sel_id(self.reg_table, "chemical")
+        if pid is None: return
+        rec = self.db.fetchone("SELECT * FROM chem_products WHERE id=?", (pid,))
+        v = self._product_dialog(rec)
+        if not v: return
+        cols = self._PCOLS
+        self.db.execute(f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
+                        [v[c] for c in cols] + [_now(), pid])
+        changed = [c for c in cols if _s(rec[c]) != _s(v[c])]
+        self._event(pid, "Chemical updated", "Changed: " + ", ".join(changed) if changed else "No field changes")
+        self.refresh_all()
+
+    def _delete_product(self):
+        pid = self._sel_id(self.reg_table, "chemical")
+        if pid is None: return
+        rec = self.db.fetchone("SELECT product_name FROM chem_products WHERE id=?", (pid,))
+        if QMessageBox.question(self, "Delete Chemical",
+                                f"Delete '{rec['product_name']}' and all its SDS records?\n(Tip: set Status to 'Disposed' instead to keep history.)",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute("DELETE FROM chem_products WHERE id=?", (pid,))
+        self._event(pid, "Chemical deleted", rec["product_name"])
+        self.refresh_all()
+
+    # ----- SDS tab -----
+    def _build_sds_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "2. SDS Library")
+        lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        for text, fn in [("Upload SDS (auto-register)", self._upload_sds), ("New Revision for Selected Chemical", self._new_revision), ("Open SDS File", self._open_sds),
+                         ("Mark Superseded", self._supersede_sds), ("Delete SDS Record", self._delete_sds)]:
+            b = QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
+        bar.addStretch(1); lay.addLayout(bar)
+        self.sds_table = self._mk_table(["ID", "Product", "SDS No.", "Revision", "Issue Date", "Review Due", "Language",
+                                         "Status", "Review State", "File"])
+        lay.addWidget(self.sds_table, 1)
+
+    def refresh_sds(self):
+        today_iso = today(); rows = []
+        for s in self.db.fetchall("SELECT s.*, p.product_name FROM chem_sds s JOIN chem_products p ON p.id=s.product_id "
+                                  "ORDER BY p.product_name, s.issue_date DESC"):
+            state = chem_sds_state(s, today_iso) if s["status"] == "Current" else "Superseded"
+            rows.append((s["id"], [s["id"], s["product_name"], s["sds_number"], s["revision"], s["issue_date"],
+                                   s["review_due_date"], s["language"], s["status"], state, s["file_path"]]))
+        self._fill(self.sds_table, rows, state_col=8)
+
+    def _upload_sds(self, pid=None):
+        """Pick SDS file(s) -> read text -> pre-fill review dialog -> save chemical + SDS in one step."""
+        paths, _ = QFileDialog.getOpenFileNames(self, "Select SDS file(s)", "", "SDS Files (*.pdf *.docx);;All Files (*)")
+        for i, path in enumerate(paths):
+            if self._import_one(path, pid) == "stop":
+                break
+            if pid is not None:
+                break
+        self.refresh_all()
+
+    def _new_revision(self):
+        pid = self._sel_id(self.reg_table, "chemical (select it in tab 1 first)")
+        if pid is not None:
+            self._upload_sds(pid)
+
+    def _import_one(self, path, pid=None):
+        fname = Path(path).name; text = ""; problem = ""
+        try:
+            text = chem_file_text(path)
+        except RuntimeError as exc:
+            problem = str(exc)
+        except Exception as exc:
+            logging.exception("SDS read failed"); problem = f"Could not read the file: {exc}"
+        if not problem and len(text.strip()) < 200:
+            problem = "This file has no readable text (probably a scanned PDF). OCR is not included - fill the form manually."
+        parsed = chem_parse_sds(text) if not problem else {}
+        existing = self.db.fetchone("SELECT * FROM chem_products WHERE id=?", (pid,)) if pid else None
+        rec = dict(parsed)
+        if existing:                                  # keep existing register data, fill only blanks from the new SDS
+            ex = dict(existing)
+            rec = {k: (ex[k] if ex.get(k) not in ("", None, 0) else parsed.get(k, ex.get(k, ""))) for k in self._PCOLS}
+            for k in ("sds_number", "sds_revision", "sds_issue", "sds_language"):
+                rec[k] = parsed.get(k, "")
+        if problem:
+            banner = f"<b>{fname}</b><br>{problem}"
+        else:
+            miss = chem_missing_fields(parsed)
+            banner = (f"<b>Auto-read from {fname}</b> - check every field against the SDS before saving. "
+                      "Quantity, storage location, project and approval are site data: enter them yourself."
+                      + (f"<br><b>Not found:</b> {', '.join(miss)}" if miss else "")
+                      + "<br>Storage group and GHS classes are <i>suggested</i> from the H-statements.")
+        v = self._product_dialog(rec, sds=rec, banner=banner)
+        if not v:
+            return "skip"
+        if pid is None:
+            dup = self.db.fetchone("SELECT id FROM chem_products WHERE lower(product_name)=lower(?) AND status!='Disposed'", (v["product_name"],))
+            if dup:
+                ans = QMessageBox.question(self, "Chemical Already Registered",
+                                           f"'{v['product_name']}' is already in the register.\n\nYes = add this as the NEW SDS REVISION of that chemical.\nNo = register it as a separate chemical.",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+                if ans == QMessageBox.StandardButton.Cancel:
+                    return "skip"
+                if ans == QMessageBox.StandardButton.Yes:
+                    pid = dup["id"]
+        cols = self._PCOLS
+        if pid is None:
+            cur = self.db.execute(f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
+                                  [v[c] for c in cols] + [_now(), _now()])
+            pid = cur.lastrowid
+            self._event(pid, "Chemical auto-registered from SDS", fname)
+        else:
+            self.db.execute(f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
+                            [v[c] for c in cols] + [_now(), pid])
+            self._event(pid, "Chemical updated from new SDS", fname)
+        folder = ATTACH_DIR / "sds" / str(pid); folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / f"{_stamp()}_{fname}"
+        shutil.copy2(path, dest)
+        self.db.execute("UPDATE chem_sds SET status='Superseded' WHERE product_id=? AND status='Current'", (pid,))
+        self.db.execute("INSERT INTO chem_sds(product_id,sds_number,revision,issue_date,review_due_date,language,file_path,status,uploaded_by,uploaded_at) "
+                        "VALUES(?,?,?,?,?,?,?,'Current',?,?)",
+                        (pid, v["sds_number"], v["sds_revision"], v["sds_issue"], v["sds_due"], v["sds_language"], str(dest), self._actor(), _now()))
+        self._event(pid, "SDS attached", f"Rev {v['sds_revision']} issued {v['sds_issue']}; previous SDS superseded")
+        return "saved"
+
+    def _open_sds(self):
+        sid = self._sel_id(self.sds_table, "SDS")
+        if sid is None: return
+        s = self.db.fetchone("SELECT file_path FROM chem_sds WHERE id=?", (sid,))
+        if not s or not Path(s["file_path"]).is_file():
+            return QMessageBox.warning(self, "File Missing", "The stored SDS file cannot be found.")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(s["file_path"]))
+
+    def _supersede_sds(self):
+        sid = self._sel_id(self.sds_table, "SDS")
+        if sid is None: return
+        s = self.db.fetchone("SELECT product_id FROM chem_sds WHERE id=?", (sid,))
+        self.db.execute("UPDATE chem_sds SET status='Superseded' WHERE id=?", (sid,))
+        self._event(s["product_id"], "SDS marked superseded", f"SDS record {sid}")
+        self.refresh_all()
+
+    def _delete_sds(self):
+        sid = self._sel_id(self.sds_table, "SDS")
+        if sid is None: return
+        if QMessageBox.question(self, "Delete SDS Record", "Delete this SDS record? (The stored file is kept on disk.)",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        s = self.db.fetchone("SELECT product_id FROM chem_sds WHERE id=?", (sid,))
+        self.db.execute("DELETE FROM chem_sds WHERE id=?", (sid,))
+        self._event(s["product_id"], "SDS record deleted", f"SDS record {sid}")
+        self.refresh_all()
+
+    # ----- alerts tab -----
+    def _build_alerts_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "3. Compliance Alerts")
+        lay = QVBoxLayout(w)
+        self.kpi = QLabel(); self.kpi.setStyleSheet("font-size:15px;font-weight:bold;color:#17365D;padding:6px;")
+        self.kpi.setWordWrap(True); lay.addWidget(self.kpi)
+        lay.addWidget(QLabel("SDS gaps (active chemicals):"))
+        self.gap_table = self._mk_table(["ID", "Product", "Location", "Issue", "Review Due"])
+        lay.addWidget(self.gap_table, 1)
+        lay.addWidget(QLabel("Incompatible chemicals stored in the same location:"))
+        self.conf_table = self._mk_table(["Location", "Chemical A", "Group A", "Chemical B", "Group B", "Reason"])
+        lay.addWidget(self.conf_table, 1)
+
+    def refresh_alerts(self):
+        today_iso = today(); sds = self._latest_sds_map()
+        active = self.db.fetchall("SELECT * FROM chem_products WHERE status='Active' ORDER BY product_name")
+        gaps = []; counts = {"Missing": 0, "Expired": 0, "Due Soon": 0}
+        for p in active:
+            s = sds.get(p["id"]); st = chem_sds_state(s, today_iso)
+            if st in counts:
+                counts[st] += 1
+                gaps.append((p["id"], [p["id"], p["product_name"], p["storage_location"], f"SDS {st}", s["review_due_date"] if s else ""]))
+        self._fill(self.gap_table, gaps, state_col=None)
+        conf = chem_conflicts([{"name": p["product_name"], "storage_location": p["storage_location"],
+                                "storage_group": p["storage_group"]} for p in active])
+        self.conf_table.setRowCount(0)
+        for row in conf:
+            r = self.conf_table.rowCount(); self.conf_table.insertRow(r)
+            for c, v in enumerate(row):
+                it = QTableWidgetItem(_s(v)); it.setBackground(QBrush(QColor("#F8CBAD"))); self.conf_table.setItem(r, c, it)
+        self.conf_table.resizeColumnsToContents()
+        self.kpi.setText(f"Active chemicals: {len(active)}   |   SDS missing: {counts['Missing']}   |   "
+                         f"SDS expired: {counts['Expired']}   |   Review due ≤{CHEM_DUE_SOON_DAYS} days: {counts['Due Soon']}   |   "
+                         f"Storage conflicts: {len(conf)}")
+
+    # ----- history tab -----
+    def _build_history_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "4. Change History")
+        lay = QVBoxLayout(w)
+        self.hist_table = self._mk_table(["When", "Who", "Event", "Details"])
+        lay.addWidget(self.hist_table, 1)
+
+    def refresh_history(self):
+        rows = [(r["id"], [r["created_at"], r["actor"], r["event_type"], r["details"]])
+                for r in self.db.fetchall("SELECT * FROM chem_events ORDER BY id DESC LIMIT 1000")]
+        self._fill(self.hist_table, rows)
+
+    # ----- export -----
+    def _export_excel(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Chemical Register", "chemical_register.xlsx", "Excel Workbook (*.xlsx)")
+        if not path: return
+        if not path.lower().endswith(".xlsx"): path += ".xlsx"
+        try:
+            wb = Workbook(); ws = wb.active; ws.title = "Chemical Register"
+            sds = self._latest_sds_map(); today_iso = today()
+            heads = ["Product", "Supplier", "Supplier Contact", "CAS", "UN", "Use", "State", "Storage Group", "Location",
+                     "GHS Classes", "Signal Word", "H-Statements", "P-Statements", "Qty", "Unit", "Project", "Department",
+                     "PPE", "First Aid", "Spill Response", "Fire Fighting", "Disposal", "Status", "SDS Status", "SDS Rev", "SDS Review Due"]
+            ws.append(["CHEMICAL REGISTER"]); ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(heads))
+            ws["A1"].font = Font(size=16, bold=True, color="FFFFFF"); ws["A1"].fill = PatternFill("solid", fgColor="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center"); ws.append(heads)
+            for c in ws[2]:
+                c.font = Font(bold=True, color="17365D"); c.fill = PatternFill("solid", fgColor="D9EAF7")
+                c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            for p in self.db.fetchall("SELECT * FROM chem_products ORDER BY product_name"):
+                s = sds.get(p["id"])
+                ws.append([p["product_name"], p["supplier"], p["supplier_contact"], p["cas_number"], p["un_number"], p["product_use"],
+                           p["physical_state"], p["storage_group"], p["storage_location"], p["ghs_classes"], p["signal_word"],
+                           p["h_statements"], p["p_statements"], p["quantity"], p["unit"], p["project"], p["department"],
+                           p["ppe_required"], p["first_aid"], p["spill_response"], p["fire_fighting"], p["disposal"], p["status"],
+                           chem_sds_state(s, today_iso) if p["status"] == "Active" else "-",
+                           s["revision"] if s else "", s["review_due_date"] if s else ""])
+            ws.freeze_panes = "A3"
+            for col in ws.columns:
+                from openpyxl.utils import get_column_letter
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max(max(len(_s(c.value)) for c in col) + 2, 12), 34)
+            wb.save(path)
+            QMessageBox.information(self, "Exported", f"Chemical register saved.\n{path}")
+        except Exception as exc:
+            logging.exception("Chemical register export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def refresh_all(self):
+        self.refresh_register(); self.refresh_sds(); self.refresh_alerts(); self.refresh_history()
 
 
 # ============================================================
