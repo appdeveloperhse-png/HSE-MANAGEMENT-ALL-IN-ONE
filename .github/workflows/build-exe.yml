@@ -1,3 +1,4 @@
+```yaml
 name: Build HSE Management System EXE
 
 on:
@@ -31,7 +32,16 @@ jobs:
             python -m pip install -r requirements.txt
           }
 
-          python -m pip install pyinstaller
+          # Explicitly install PDF reader in the EXE build environment
+          python -m pip install --upgrade pypdf
+
+          # Install PyInstaller
+          python -m pip install --upgrade pyinstaller
+
+      - name: Verify PDF reader installation
+        shell: pwsh
+        run: |
+          python -c "import sys, pypdf; print('Python:', sys.version); print('PDF reader:', pypdf.__version__); print('Location:', pypdf.__file__)"
 
       - name: Check Python source
         shell: pwsh
@@ -51,6 +61,8 @@ jobs:
             --windowed `
             --name "HSE-Management-System" `
             --clean `
+            --hidden-import=pypdf `
+            --collect-all pypdf `
             app/main.py
 
       - name: Check generated EXE
@@ -69,3 +81,4 @@ jobs:
           name: HSE-Management-System-Windows
           path: dist/HSE-Management-System.exe
           if-no-files-found: error
+```
