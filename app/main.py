@@ -17189,51 +17189,44 @@ _CHEM_H_GROUPS = [
 
 
 def chem_file_text(path):
-    """Extract selectable text from PDF/DOCX SDS files with bundled and optional readers."""
+    """Extract selectable text from SDS PDF/DOCX files using installed readers."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".pdf":
         if not path.is_file():
             raise RuntimeError(f"PDF file not found: {path}")
-        errors = []
-
-        # PySide6.QtPdf ships with many PySide6 deployments and avoids requiring a
-        # separately-installed Python PDF package in the running HSE application.
         try:
-            from PySide6.QtPdf import QPdfDocument
-            pdf = QPdfDocument()
-            load_result = pdf.load(str(path))
-            status = pdf.status() if callable(getattr(pdf, "status", None)) else getattr(pdf, "status", None)
-            status_name = getattr(status, "name", str(status)).lower()
-            if "error" in status_name or "password" in status_name:
-                raise RuntimeError(f"Qt PDF reader could not load the document (status: {status_name}).")
-            page_count = int(pdf.pageCount())
-            if page_count <= 0:
-                raise RuntimeError("The PDF contains no readable pages.")
-            pages = []
-            for page_no in range(page_count):
-                selection = pdf.getPageText(page_no)
-                value = selection.text() if hasattr(selection, "text") else str(selection or "")
-                pages.append(value or "")
-            extracted = "\n".join(pages).strip()
-            if extracted:
-                return extracted
-            errors.append("QtPdf: opened the PDF, but no selectable text was found (possibly scanned/image-only).")
-        except Exception as exc:
-            errors.append(f"QtPdf: {type(exc).__name__}: {exc}")
+            with path.open("rb") as stream:
+                signature = stream.read(8)
+            if b"%PDF-" not in signature:
+                raise RuntimeError("The selected file does not have a valid PDF header. Re-save it as a PDF and try again.")
+        except OSError as exc:
+            raise RuntimeError(f"Cannot read the PDF file: {exc}")
 
-        # Optional readers provide compatibility with PDFs that QtPdf cannot parse.
+        errors = []
+        # Try pypdf first. It is the reader the user has installed and is
+        # independent of optional Qt PDF modules bundled with the application.
         try:
             from pypdf import PdfReader
             reader = PdfReader(str(path), strict=False)
             if reader.is_encrypted and not reader.decrypt(""):
                 raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
-            extracted = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+            page_text = []
+            for page in reader.pages:
+                try:
+                    page_text.append(page.extract_text() or "")
+                except Exception as page_exc:
+                    errors.append(f"pypdf page extraction: {type(page_exc).__name__}: {page_exc}")
+                    page_text.append("")
+            extracted = "\n".join(page_text).strip()
             if extracted:
                 return extracted
-            errors.append("pypdf: opened the PDF, but found no selectable text.")
+            errors.append("pypdf opened the PDF but found no selectable text; it may be scanned/image-only.")
         except Exception as exc:
             errors.append(f"pypdf: {type(exc).__name__}: {exc}")
+
+        # Compatibility fallbacks for systems where the app runtime has a
+        # different set of installed PDF packages.
         try:
             from PyPDF2 import PdfReader
             reader = PdfReader(str(path), strict=False)
@@ -17242,19 +17235,18 @@ def chem_file_text(path):
             extracted = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
             if extracted:
                 return extracted
-            errors.append("PyPDF2: opened the PDF, but found no selectable text.")
+            errors.append("PyPDF2 opened the PDF but found no selectable text.")
         except Exception as exc:
             errors.append(f"PyPDF2: {type(exc).__name__}: {exc}")
         try:
             import fitz
-            pdf = fitz.open(str(path))
-            if getattr(pdf, "needs_pass", False) and not pdf.authenticate(""):
-                raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
-            extracted = "\n".join(page.get_text("text") or "" for page in pdf).strip()
-            pdf.close()
+            with fitz.open(str(path)) as pdf:
+                if getattr(pdf, "needs_pass", False) and not pdf.authenticate(""):
+                    raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
+                extracted = "\n".join(page.get_text("text") or "" for page in pdf).strip()
             if extracted:
                 return extracted
-            errors.append("PyMuPDF: opened the PDF, but found no selectable text.")
+            errors.append("PyMuPDF opened the PDF but found no selectable text.")
         except Exception as exc:
             errors.append(f"PyMuPDF: {type(exc).__name__}: {exc}")
         try:
@@ -17263,7 +17255,7 @@ def chem_file_text(path):
                 extracted = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
             if extracted:
                 return extracted
-            errors.append("pdfplumber: opened the PDF, but found no selectable text.")
+            errors.append("pdfplumber opened the PDF but found no selectable text.")
         except Exception as exc:
             errors.append(f"pdfplumber: {type(exc).__name__}: {exc}")
         try:
@@ -17271,21 +17263,48 @@ def chem_file_text(path):
             extracted = (extract_text(str(path)) or "").strip()
             if extracted:
                 return extracted
-            errors.append("pdfminer: opened the PDF, but found no selectable text.")
+            errors.append("pdfminer opened the PDF but found no selectable text.")
         except Exception as exc:
             errors.append(f"pdfminer: {type(exc).__name__}: {exc}")
 
-        detail = " | ".join(errors)
-        if any("no selectable text" in x.lower() or "image-only" in x.lower() for x in errors):
+        # QtPdf is a final fallback for deployments that bundle QtPdf.
+        try:
+            from PySide6.QtPdf import QPdfDocument
+            pdf = QPdfDocument()
+            pdf.load(str(path))
+            if int(pdf.pageCount()) <= 0:
+                raise RuntimeError("QtPdf reports that the PDF has no pages.")
+            # QtPdf versions differ in their text API; use it only if the
+            # installed binding exposes a supported whole-page text method.
+            page_text = []
+            for page_no in range(int(pdf.pageCount())):
+                if hasattr(pdf, "getPageText"):
+                    selection = pdf.getPageText(page_no)
+                    page_text.append(selection.text() if hasattr(selection, "text") else str(selection or ""))
+                elif hasattr(pdf, "getSelection"):
+                    from PySide6.QtCore import QRectF
+                    selection = pdf.getSelection(page_no, QRectF(-100000, -100000, 200000, 200000))
+                    page_text.append(selection.text() if hasattr(selection, "text") else "")
+                else:
+                    raise RuntimeError("This QtPdf version does not expose PDF text extraction.")
+            extracted = "\n".join(page_text).strip()
+            if extracted:
+                return extracted
+            errors.append("QtPdf opened the PDF but found no selectable text.")
+        except Exception as exc:
+            errors.append(f"QtPdf: {type(exc).__name__}: {exc}")
+
+        details = " | ".join(errors)
+        if any("no selectable text" in e.lower() or "scanned/image-only" in e.lower() for e in errors):
             raise RuntimeError(
-                "The PDF could be opened, but it does not contain selectable text. It is likely a scanned/image-only "
-                "SDS. OCR is required for this document; please upload a text-based PDF or enter the chemical details "
-                "manually. Reader details: " + detail
+                "The PDF reader opened the file, but no selectable text was found. This SDS is likely a scanned/image-only PDF; "
+                "it requires OCR before automatic field extraction. Reader diagnostics: " + details
             )
         raise RuntimeError(
-            "The PDF could not be opened by the available readers. If this application is a packaged EXE, "
-            "its PySide6.QtPdf module or PDF reader dependencies may be missing from the build. "
-            "Try opening and re-saving the PDF in a PDF viewer, then import it again. Reader details: " + detail
+            "No PDF reader in the HSE application's running Python environment could extract this file. "
+            f"Python executable: {sys.executable}; Python version: {sys.version.split()[0]}. "
+            "Install pypdf using this exact interpreter command: \"" + sys.executable + "\" -m pip install --upgrade pypdf. "
+            "If running a packaged EXE, the PDF library must be included in that EXE build. Reader diagnostics: " + details
         )
 
     if ext == ".docx":
@@ -17294,7 +17313,6 @@ def chem_file_text(path):
         except Exception as exc:
             raise RuntimeError(f"Could not open this Word document: {exc}")
         parts = []
-
         def append_table(table):
             for row in table.rows:
                 cells = []
@@ -17304,8 +17322,6 @@ def chem_file_text(path):
                         cells.append(value)
                 if cells:
                     parts.append(" | ".join(cells))
-
-        # python-docx's public collections are reliable across supported versions.
         for paragraph in d.paragraphs:
             value = paragraph.text.strip()
             if value:
@@ -17878,7 +17894,12 @@ class ChemicalSDSModule(QWidget):
         bar = QHBoxLayout()
         for text, fn in [("Upload SDS (auto-register)", self._upload_sds), ("New Revision for Selected Chemical", self._new_revision), ("Open SDS File", self._open_sds),
                          ("Mark Superseded", self._supersede_sds), ("Delete SDS Record", self._delete_sds)]:
-            b = QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
+            b = QPushButton(text)
+            if fn == self._upload_sds:
+                b.clicked.connect(lambda checked=False: self._upload_sds())
+            else:
+                b.clicked.connect(fn)
+            bar.addWidget(b)
         bar.addStretch(1); lay.addLayout(bar)
         self.sds_table = self._mk_table(["ID", "Product", "SDS No.", "Revision", "Issue Date", "Review Due", "Language",
                                          "Status", "Review State", "File"])
@@ -17895,6 +17916,15 @@ class ChemicalSDSModule(QWidget):
 
     def _upload_sds(self, pid=None):
         """Pick SDS file(s) -> read text -> pre-fill review dialog -> save chemical + SDS in one step."""
+        # QPushButton.clicked(bool) can pass False into this optional argument.
+        # Only an actual positive integer database key means "attach to existing".
+        if isinstance(pid, bool) or pid in (None, 0, ""):
+            pid = None
+        else:
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                raise RuntimeError(f"Invalid Chemical Register record ID: {pid!r}")
         paths, _ = QFileDialog.getOpenFileNames(self, "Select SDS file(s)", "", "SDS Files (*.pdf *.docx);;All Files (*)")
         for i, path in enumerate(paths):
             try:
@@ -17916,6 +17946,14 @@ class ChemicalSDSModule(QWidget):
             self._upload_sds(pid)
 
     def _import_one(self, path, pid=None):
+        # Defensive normalization for callers other than the upload button.
+        if isinstance(pid, bool) or pid in (None, 0, ""):
+            pid = None
+        else:
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                raise RuntimeError(f"Invalid Chemical Register record ID: {pid!r}")
         fname = Path(path).name
         text = ""
         problem = ""
