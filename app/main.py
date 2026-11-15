@@ -17311,11 +17311,12 @@ def chem_file_text(path):
             )
         if getattr(sys, "frozen", False):
             runtime_help = (
-                "This is a packaged HSE EXE, not a normal Python interpreter. "
-                "Installing pypdf into your separately installed Python (for example Python 3.15) "
-                "does not add it to this EXE's embedded Python runtime. "
-                "The EXE must be rebuilt with pypdf included (PyInstaller: add pypdf as a hidden import "
-                "or collect its package), or use the corrected QtPdf fallback bundled with the application. "
+                "This is a packaged HSE EXE. Installing pypdf with pip into another Python installation "
+                "does not add it to this EXE. Rebuild the HSE application from this updated main.py using "
+                "the same project build configuration, with pypdf installed in the build Python and "
+                "PyInstaller options --collect-all pypdf --hidden-import pypdf. "
+                "If this message still reports the old QtPdf getSelection argument error, the EXE being "
+                "launched was built from an older main.py; close it and rebuild/redeploy the EXE. "
             )
         else:
             runtime_help = (
