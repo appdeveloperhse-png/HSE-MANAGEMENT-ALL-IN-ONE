@@ -17189,102 +17189,139 @@ _CHEM_H_GROUPS = [
 
 
 def chem_file_text(path):
-    """Extract text from PDF/DOCX SDS files using available reader libraries."""
+    """Extract selectable text from PDF/DOCX SDS files with bundled and optional readers."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".pdf":
+        if not path.is_file():
+            raise RuntimeError(f"PDF file not found: {path}")
         errors = []
-        # Try the maintained reader first, then common alternatives used by older installs.
+
+        # PySide6.QtPdf ships with many PySide6 deployments and avoids requiring a
+        # separately-installed Python PDF package in the running HSE application.
+        try:
+            from PySide6.QtPdf import QPdfDocument
+            pdf = QPdfDocument()
+            load_result = pdf.load(str(path))
+            status = pdf.status() if callable(getattr(pdf, "status", None)) else getattr(pdf, "status", None)
+            status_name = getattr(status, "name", str(status)).lower()
+            if "error" in status_name or "password" in status_name:
+                raise RuntimeError(f"Qt PDF reader could not load the document (status: {status_name}).")
+            page_count = int(pdf.pageCount())
+            if page_count <= 0:
+                raise RuntimeError("The PDF contains no readable pages.")
+            pages = []
+            for page_no in range(page_count):
+                selection = pdf.getPageText(page_no)
+                value = selection.text() if hasattr(selection, "text") else str(selection or "")
+                pages.append(value or "")
+            extracted = "\n".join(pages).strip()
+            if extracted:
+                return extracted
+            errors.append("QtPdf: opened the PDF, but no selectable text was found (possibly scanned/image-only).")
+        except Exception as exc:
+            errors.append(f"QtPdf: {type(exc).__name__}: {exc}")
+
+        # Optional readers provide compatibility with PDFs that QtPdf cannot parse.
         try:
             from pypdf import PdfReader
-            reader = PdfReader(str(path))
-            if reader.is_encrypted:
-                result = reader.decrypt("")
-                if not result:
-                    raise RuntimeError("This PDF is password-protected.")
-            return "\n".join((page.extract_text() or "") for page in reader.pages)
-        except RuntimeError:
-            raise
+            reader = PdfReader(str(path), strict=False)
+            if reader.is_encrypted and not reader.decrypt(""):
+                raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
+            extracted = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+            if extracted:
+                return extracted
+            errors.append("pypdf: opened the PDF, but found no selectable text.")
         except Exception as exc:
-            errors.append(f"pypdf: {exc}")
+            errors.append(f"pypdf: {type(exc).__name__}: {exc}")
         try:
             from PyPDF2 import PdfReader
-            reader = PdfReader(str(path))
+            reader = PdfReader(str(path), strict=False)
             if reader.is_encrypted and not reader.decrypt(""):
-                raise RuntimeError("This PDF is password-protected.")
-            return "\n".join((page.extract_text() or "") for page in reader.pages)
-        except RuntimeError:
-            raise
+                raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
+            extracted = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+            if extracted:
+                return extracted
+            errors.append("PyPDF2: opened the PDF, but found no selectable text.")
         except Exception as exc:
-            errors.append(f"PyPDF2: {exc}")
+            errors.append(f"PyPDF2: {type(exc).__name__}: {exc}")
         try:
             import fitz
-            doc = fitz.open(str(path))
-            if getattr(doc, "needs_pass", False) and not doc.authenticate(""):
-                raise RuntimeError("This PDF is password-protected.")
-            return "\n".join(page.get_text("text") or "" for page in doc)
-        except RuntimeError:
-            raise
+            pdf = fitz.open(str(path))
+            if getattr(pdf, "needs_pass", False) and not pdf.authenticate(""):
+                raise RuntimeError("This PDF is password-protected. Remove the password and try again.")
+            extracted = "\n".join(page.get_text("text") or "" for page in pdf).strip()
+            pdf.close()
+            if extracted:
+                return extracted
+            errors.append("PyMuPDF: opened the PDF, but found no selectable text.")
         except Exception as exc:
-            errors.append(f"PyMuPDF: {exc}")
+            errors.append(f"PyMuPDF: {type(exc).__name__}: {exc}")
         try:
             import pdfplumber
             with pdfplumber.open(str(path)) as pdf:
-                return "\n".join(page.extract_text() or "" for page in pdf.pages)
+                extracted = "\n".join(page.extract_text() or "" for page in pdf.pages).strip()
+            if extracted:
+                return extracted
+            errors.append("pdfplumber: opened the PDF, but found no selectable text.")
         except Exception as exc:
-            errors.append(f"pdfplumber: {exc}")
+            errors.append(f"pdfplumber: {type(exc).__name__}: {exc}")
+        try:
+            from pdfminer.high_level import extract_text
+            extracted = (extract_text(str(path)) or "").strip()
+            if extracted:
+                return extracted
+            errors.append("pdfminer: opened the PDF, but found no selectable text.")
+        except Exception as exc:
+            errors.append(f"pdfminer: {type(exc).__name__}: {exc}")
+
+        detail = " | ".join(errors)
+        if any("no selectable text" in x.lower() or "image-only" in x.lower() for x in errors):
+            raise RuntimeError(
+                "The PDF could be opened, but it does not contain selectable text. It is likely a scanned/image-only "
+                "SDS. OCR is required for this document; please upload a text-based PDF or enter the chemical details "
+                "manually. Reader details: " + detail
+            )
         raise RuntimeError(
-            "No compatible PDF text reader could open this file. Install at least one supported reader "
-            "(recommended: python -m pip install pypdf). If this is a packaged .exe, the reader must be "
-            "included when rebuilding the application. Details: " + " | ".join(errors)
+            "The PDF could not be opened by the available readers. If this application is a packaged EXE, "
+            "its PySide6.QtPdf module or PDF reader dependencies may be missing from the build. "
+            "Try opening and re-saving the PDF in a PDF viewer, then import it again. Reader details: " + detail
         )
+
     if ext == ".docx":
         try:
             d = Document(str(path))
         except Exception as exc:
             raise RuntimeError(f"Could not open this Word document: {exc}")
         parts = []
-        def add_paragraphs_and_tables(container):
-            # Preserve document order, including paragraphs and tables.
-            try:
-                from docx.text.paragraph import Paragraph
-                from docx.table import Table as DocxTable
-                from docx.oxml.text.paragraph import CT_P
-                from docx.oxml.table import CT_Tbl
-                for child in container.element.body.iterchildren():
-                    if isinstance(child, CT_P):
-                        value = Paragraph(child, container).text.strip()
-                        if value:
-                            parts.append(value)
-                    elif isinstance(child, CT_Tbl):
-                        table = DocxTable(child, container)
-                        for row in table.rows:
-                            cells = []
-                            for cell in row.cells:
-                                value = " ".join(x.strip() for x in cell.text.splitlines() if x.strip())
-                                if value and value not in cells:
-                                    cells.append(value)
-                            if cells:
-                                parts.append(" | ".join(cells))
-            except Exception:
-                # Compatibility fallback for python-docx versions with different internals.
-                parts.extend(x.text.strip() for x in getattr(container, "paragraphs", []) if x.text.strip())
-                for table in getattr(container, "tables", []):
-                    for row in table.rows:
-                        cells = list(dict.fromkeys(c.text.strip() for c in row.cells if c.text.strip()))
-                        if cells:
-                            parts.append(" | ".join(cells))
-        add_paragraphs_and_tables(d)
+
+        def append_table(table):
+            for row in table.rows:
+                cells = []
+                for cell in row.cells:
+                    value = " ".join(x.strip() for x in cell.text.splitlines() if x.strip())
+                    if value and value not in cells:
+                        cells.append(value)
+                if cells:
+                    parts.append(" | ".join(cells))
+
+        # python-docx's public collections are reliable across supported versions.
+        for paragraph in d.paragraphs:
+            value = paragraph.text.strip()
+            if value:
+                parts.append(value)
+        for table in d.tables:
+            append_table(table)
         for section in d.sections:
             for part in (section.header, section.footer):
-                parts.extend(x.text.strip() for x in part.paragraphs if x.text.strip())
+                for paragraph in part.paragraphs:
+                    value = paragraph.text.strip()
+                    if value:
+                        parts.append(value)
                 for table in part.tables:
-                    for row in table.rows:
-                        cells = list(dict.fromkeys(c.text.strip() for c in row.cells if c.text.strip()))
-                        if cells:
-                            parts.append(" | ".join(cells))
+                    append_table(table)
         return "\n".join(parts)
-    return ""
+    raise RuntimeError("Unsupported SDS file type. Please select a PDF or DOCX file.")
 
 
 def chem_split_sections(text):
@@ -17531,7 +17568,63 @@ class ChemicalSDSModule(QWidget):
         CREATE INDEX IF NOT EXISTS idx_chem_sds_product ON chem_sds(product_id);
         CREATE INDEX IF NOT EXISTS idx_chem_events_product ON chem_events(product_id);
         """)
-        self.db.conn.commit()
+
+        # Older builds may have created chem_sds with a foreign key to a legacy
+        # parent table. CREATE TABLE IF NOT EXISTS does not repair that schema.
+        # Rebuild only this SDS table, retaining all rows that have a valid parent.
+        conn = self.db.conn
+        fk_rows = conn.execute("PRAGMA foreign_key_list(chem_sds)").fetchall()
+        wrong_parent = any(_s(row[2]).lower() != "chem_products" for row in fk_rows)
+        if wrong_parent:
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("""CREATE TABLE chem_sds_rebuild (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    sds_number TEXT DEFAULT '', revision TEXT DEFAULT '',
+                    issue_date TEXT DEFAULT '', review_due_date TEXT DEFAULT '',
+                    language TEXT DEFAULT 'English', file_path TEXT DEFAULT '',
+                    status TEXT DEFAULT 'Current', uploaded_by TEXT DEFAULT '', uploaded_at TEXT DEFAULT '',
+                    FOREIGN KEY(product_id) REFERENCES chem_products(id) ON DELETE CASCADE
+                )""")
+                old_cols = {row[1] for row in conn.execute("PRAGMA table_info(chem_sds)").fetchall()}
+                new_cols = ["id", "product_id", "sds_number", "revision", "issue_date", "review_due_date",
+                            "language", "file_path", "status", "uploaded_by", "uploaded_at"]
+                copy_cols = [c for c in new_cols if c in old_cols]
+                cols_sql = ",".join('"' + c + '"' for c in copy_cols)
+                conn.execute(
+                    f"INSERT INTO chem_sds_rebuild({cols_sql}) SELECT {cols_sql} FROM chem_sds "
+                    "WHERE product_id IN (SELECT id FROM chem_products)"
+                )
+                # Keep orphaned legacy SDS metadata in a separate archive instead of
+                # silently deleting records that cannot be linked to a current chemical.
+                orphan_count = conn.execute(
+                    "SELECT COUNT(*) FROM chem_sds WHERE product_id NOT IN (SELECT id FROM chem_products)"
+                ).fetchone()[0]
+                if orphan_count:
+                    conn.execute("""CREATE TABLE IF NOT EXISTS chem_sds_orphan_archive (
+                        id INTEGER, product_id INTEGER, sds_number TEXT, revision TEXT,
+                        issue_date TEXT, review_due_date TEXT, language TEXT, file_path TEXT,
+                        status TEXT, uploaded_by TEXT, uploaded_at TEXT, archived_at TEXT DEFAULT CURRENT_TIMESTAMP
+                    )""")
+                    archive_cols = [c for c in new_cols if c in old_cols]
+                    archive_sql = ",".join('"' + c + '"' for c in archive_cols)
+                    conn.execute(
+                        f"INSERT INTO chem_sds_orphan_archive({archive_sql}) SELECT {archive_sql} FROM chem_sds "
+                        "WHERE product_id NOT IN (SELECT id FROM chem_products)"
+                    )
+                conn.execute("DROP TABLE chem_sds")
+                conn.execute("ALTER TABLE chem_sds_rebuild RENAME TO chem_sds")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chem_sds_product ON chem_sds(product_id)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.execute("PRAGMA foreign_keys=ON")
+        conn.commit()
 
     def _actor(self):
         return os.environ.get("USERNAME") or os.environ.get("USER") or "User"
@@ -17823,67 +17916,123 @@ class ChemicalSDSModule(QWidget):
             self._upload_sds(pid)
 
     def _import_one(self, path, pid=None):
-        fname = Path(path).name; text = ""; problem = ""
+        fname = Path(path).name
+        text = ""
+        problem = ""
         try:
             text = chem_file_text(path)
-        except RuntimeError as exc:
-            problem = str(exc)
         except Exception as exc:
-            logging.exception("SDS read failed"); problem = f"Could not read the file: {exc}"
+            logging.exception("SDS read failed for %s", path)
+            problem = str(exc) or f"Could not read the file: {type(exc).__name__}"
+
         if not problem and len(re.sub(r"\s+", "", text or "")) < 40:
-            problem = ("This file contains no usable selectable text (it may be a scanned/image-only PDF). "
-                       "OCR is not included; enter the chemical details manually or upload a text-based SDS.")
+            problem = ("The PDF/Word file opened, but it contains too little selectable text to identify the SDS details. "
+                       "If it is a scanned PDF, OCR is needed. You can still continue and enter the chemical details manually.")
         parsed = chem_parse_sds(text) if not problem else {}
-        existing = self.db.fetchone("SELECT * FROM chem_products WHERE id=?", (pid,)) if pid else None
+        existing = self.db.fetchone("SELECT * FROM chem_products WHERE id=?", (pid,)) if pid is not None else None
+        if pid is not None and existing is None:
+            # Never attempt an SDS insert against a stale register row id.
+            raise RuntimeError(f"The selected chemical (ID {pid}) no longer exists in the Chemical Register. Refresh the register and try again.")
         rec = dict(parsed)
-        if existing:                                  # keep existing register data, fill only blanks from the new SDS
+        if existing:
             ex = dict(existing)
             rec = {k: (ex[k] if ex.get(k) not in ("", None, 0) else parsed.get(k, ex.get(k, ""))) for k in self._PCOLS}
             for k in ("sds_number", "sds_revision", "sds_issue", "sds_language"):
                 rec[k] = parsed.get(k, "")
         if problem:
-            banner = f"<b>{fname}</b><br>{problem}"
+            banner = f"<b>{html.escape(fname)}</b><br>{html.escape(problem)}"
         else:
             miss = chem_missing_fields(parsed)
-            banner = (f"<b>Auto-read from {fname}</b> - check every field against the SDS before saving. "
+            banner = (f"<b>Auto-read from {html.escape(fname)}</b> - check every field against the SDS before saving. "
                       "Quantity, storage location, project and approval are site data: enter them yourself."
                       + (f"<br><b>Not found:</b> {', '.join(miss)}" if miss else "")
                       + "<br>Storage group and GHS classes are <i>suggested</i> from the H-statements.")
         v = self._product_dialog(rec, sds=rec, banner=banner)
         if not v:
             return "skip"
+
         if pid is None:
-            dup = self.db.fetchone("SELECT id FROM chem_products WHERE lower(product_name)=lower(?) AND status!='Disposed'", (v["product_name"],))
+            dup = self.db.fetchone(
+                "SELECT id FROM chem_products WHERE lower(product_name)=lower(?) AND status!='Disposed'",
+                (v["product_name"],)
+            )
             if dup:
-                ans = QMessageBox.question(self, "Chemical Already Registered",
-                                           f"'{v['product_name']}' is already in the register.\n\nYes = add this as the NEW SDS REVISION of that chemical.\nNo = register it as a separate chemical.",
-                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel)
+                ans = QMessageBox.question(
+                    self, "Chemical Already Registered",
+                    f"'{v['product_name']}' is already in the register.\n\n"
+                    "Yes = add this as the NEW SDS REVISION of that chemical.\n"
+                    "No = register it as a separate chemical.",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel
+                )
                 if ans == QMessageBox.StandardButton.Cancel:
                     return "skip"
                 if ans == QMessageBox.StandardButton.Yes:
-                    pid = dup["id"]
-        cols = self._PCOLS
-        if pid is None:
-            cur = self.db.execute(f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) VALUES({','.join('?'*len(cols))},?,?)",
-                                  [v[c] for c in cols] + [_now(), _now()])
-            pid = cur.lastrowid
-            self._event(pid, "Chemical auto-registered from SDS", fname)
-        else:
-            self.db.execute(f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
-                            [v[c] for c in cols] + [_now(), pid])
-            self._event(pid, "Chemical updated from new SDS", fname)
-        folder = ATTACH_DIR / "sds" / str(pid); folder.mkdir(parents=True, exist_ok=True)
+                    pid = int(dup["id"])
+
+        folder = ATTACH_DIR / "sds" / (str(pid) if pid is not None else "pending")
+        folder.mkdir(parents=True, exist_ok=True)
         dest = folder / f"{_stamp()}_{fname}"
         shutil.copy2(path, dest)
-        self.db.execute("UPDATE chem_sds SET status='Superseded' WHERE product_id=? AND status='Current'", (pid,))
-        self.db.execute("INSERT INTO chem_sds(product_id,sds_number,revision,issue_date,review_due_date,language,file_path,status,uploaded_by,uploaded_at) "
-                        "VALUES(?,?,?,?,?,?,?,'Current',?,?)",
-                        (pid, v["sds_number"], v["sds_revision"], v["sds_issue"], v["sds_due"], v["sds_language"], str(dest), self._actor(), _now()))
-        self._event(pid, "SDS attached", f"Rev {v['sds_revision']} issued {v['sds_issue']}; previous SDS superseded")
-        # Refresh the chemical register and SDS list immediately so the new record is visible.
-        self.refresh_register()
-        self.refresh_sds()
-        self.refresh_history()
+        conn = self.db.conn
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cols = self._PCOLS
+            if pid is None:
+                cur = conn.execute(
+                    f"INSERT INTO chem_products({','.join(cols)},created_at,updated_at) "
+                    f"VALUES({','.join('?' * len(cols))},?,?)",
+                    [v[c] for c in cols] + [_now(), _now()]
+                )
+                pid = int(cur.lastrowid)
+                event_type = "Chemical auto-registered from SDS"
+            else:
+                parent = conn.execute("SELECT id FROM chem_products WHERE id=?", (pid,)).fetchone()
+                if parent is None:
+                    raise RuntimeError(f"Chemical Register record {pid} was not found; the SDS was not attached.")
+                conn.execute(
+                    f"UPDATE chem_products SET {','.join(c+'=?' for c in cols)},updated_at=? WHERE id=?",
+                    [v[c] for c in cols] + [_now(), pid]
+                )
+                event_type = "Chemical updated from new SDS"
+
+            # Confirm the parent exists in the same transaction before adding the SDS.
+            if conn.execute("SELECT 1 FROM chem_products WHERE id=?", (pid,)).fetchone() is None:
+                raise RuntimeError("Chemical details were not saved, so the SDS attachment was cancelled.")
+            # Store the attachment under the final chemical ID (not a temporary folder).
+            final_folder = ATTACH_DIR / "sds" / str(pid)
+            final_folder.mkdir(parents=True, exist_ok=True)
+            final_dest = final_folder / dest.name
+            if dest.parent != final_folder:
+                shutil.move(str(dest), str(final_dest))
+                dest = final_dest
+            conn.execute("UPDATE chem_sds SET status='Superseded' WHERE product_id=? AND status='Current'", (pid,))
+            conn.execute(
+                "INSERT INTO chem_sds(product_id,sds_number,revision,issue_date,review_due_date,language,file_path,status,uploaded_by,uploaded_at) "
+                "VALUES(?,?,?,?,?,?,?,'Current',?,?)",
+                (pid, v["sds_number"], v["sds_revision"], v["sds_issue"], v["sds_due"],
+                 v["sds_language"], str(dest), self._actor(), _now())
+            )
+            conn.execute(
+                "INSERT INTO chem_events(product_id,event_type,details,actor,created_at) VALUES(?,?,?,?,?)",
+                (pid, event_type, fname, self._actor(), _now())
+            )
+            conn.execute(
+                "INSERT INTO chem_events(product_id,event_type,details,actor,created_at) VALUES(?,?,?,?,?)",
+                (pid, "SDS attached", f"Rev {v['sds_revision']} issued {v['sds_issue']}; previous SDS superseded",
+                 self._actor(), _now())
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            try:
+                if dest.is_file():
+                    dest.unlink()
+            except Exception:
+                logging.exception("Could not remove incomplete SDS copy: %s", dest)
+            raise
+
+        # Refresh every visible SDS view after the committed transaction.
+        self.refresh_all()
         return "saved"
 
     def _open_sds(self):
