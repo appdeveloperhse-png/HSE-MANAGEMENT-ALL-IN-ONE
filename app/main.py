@@ -17862,44 +17862,264 @@ class ChemicalSDSModule(QWidget):
         QMessageBox.information(self, "COSHH Assessment", "To preserve the original SDS-derived assessment and sign-off trail, create a new assessment revision by selecting the chemical and choosing New COSHH Assessment. Existing assessment remains available for export.")
 
     def _export_coshh(self, fmt="docx"):
+        """Export a structured, approval-ready COSHH report. Changes are confined to COSHH export."""
         aid = self._selected_coshh_id()
-        if aid is None: return
-        r = self.db.fetchone("SELECT c.*,p.product_name,s.revision AS sds_revision,s.sds_number FROM coshh_assessments c JOIN chem_products p ON p.id=c.product_id LEFT JOIN chem_sds s ON s.id=c.sds_id WHERE c.id=?", (aid,))
-        if not r: return
-        d = json.loads(r['assessment_json'] or '{}')
+        if aid is None:
+            return
+        r = self.db.fetchone(
+            "SELECT c.*,p.product_name,p.supplier,p.cas_number,p.un_number,p.ghs_classes,p.signal_word,"
+            "s.revision AS sds_revision,s.sds_number FROM coshh_assessments c "
+            "JOIN chem_products p ON p.id=c.product_id LEFT JOIN chem_sds s ON s.id=c.sds_id WHERE c.id=?", (aid,)
+        )
+        if not r:
+            return
+        try:
+            d = json.loads(r['assessment_json'] or '{}')
+        except Exception:
+            d = {}
         default = f"{r['assessment_ref']}.{fmt}"
-        path, _ = QFileDialog.getSaveFileName(self, "Export COSHH Assessment", default, "Word Document (*.docx)" if fmt=="docx" else "PDF (*.pdf)")
-        if not path: return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export COSHH Assessment", default,
+            "Word Document (*.docx)" if fmt == "docx" else "PDF (*.pdf)"
+        )
+        if not path:
+            return
+
+        order = [
+            "1. Assessment details", "2. Substance identification & classification",
+            "3. CLP / GHS pictograms", "4. Routes of exposure & health effects",
+            "5. Persons at risk / number / job roles / special considerations",
+            "6. Matters considered in assessment (Yes / No / N/A and evidence)",
+            "7. Risk rating comments / acceptability",
+            "8. Hierarchy of controls – existing / additional / responsible / target date",
+            "9. PPE / RPE requirements and specifications",
+            "10. Maintenance, examination & testing of controls",
+            "11. Exposure monitoring & health surveillance",
+            "12. Information, instruction & training",
+            "13. Emergency arrangements / first aid",
+            "14. Storage, handling, waste & environment",
+            "15. Conclusion / action plan / review triggers"
+        ]
+        ghs_names = {
+            "GHS01": "Exploding bomb – explosive / self-reactive hazard",
+            "GHS02": "Flame – flammable / pyrophoric hazard",
+            "GHS03": "Flame over circle – oxidising hazard",
+            "GHS04": "Gas cylinder – gas under pressure",
+            "GHS05": "Corrosion – corrosive to metals / skin / eyes",
+            "GHS06": "Skull and crossbones – acute toxicity",
+            "GHS07": "Exclamation mark – irritant / harmful effects",
+            "GHS08": "Health hazard – serious / chronic health effects",
+            "GHS09": "Environment – aquatic toxicity"
+        }
+        pictogram_source = " ".join([
+            _s(r['ghs_classes']), _s(d.get("3. CLP / GHS pictograms", "")),
+            _s(d.get("2. Substance identification & classification", ""))
+        ]).upper()
+        ghs_codes = [re.sub(r"\s+", "", x) for x in re.findall(r"GHS\s*0[1-9]", pictogram_source)]
+        # The chemical register stores hazard classes as names; map those classes to
+        # their standard GHS pictogram identifiers without inventing unrecorded hazards.
+        class_to_ghs = {
+            "EXPLOSIVE": "GHS01", "FLAMMABLE": "GHS02", "OXIDIZING": "GHS03",
+            "OXIDISING": "GHS03", "COMPRESSED GAS": "GHS04", "GAS UNDER PRESSURE": "GHS04",
+            "CORROSIVE": "GHS05", "ACUTE TOXIC": "GHS06", "ACUTE TOXICITY": "GHS06",
+            "IRRITANT": "GHS07", "HEALTH HAZARD": "GHS08", "ENVIRONMENTAL HAZARD": "GHS09"
+        }
+        for hazard_class, pictogram_id in class_to_ghs.items():
+            if hazard_class in pictogram_source and pictogram_id not in ghs_codes:
+                ghs_codes.append(pictogram_id)
+
+        def clean_lines(value):
+            return [x.strip(" \t•-*\u2022") for x in _s(value).replace("\r", "\n").split("\n") if x.strip()]
+
+        def section_rows(key):
+            value = _s(d.get(key, "Not completed")).strip() or "Not completed"
+            lines = clean_lines(value)
+            # Preserve all source text while presenting each item as a numbered register row.
+            return [(f"{i:02d}", line) for i, line in enumerate(lines, 1)]
+
+        before = d.get('inherent_score', '')
+        after = d.get('residual_score', '')
+        before_band = d.get('inherent_band', '')
+        after_band = d.get('residual_band', '')
+
         try:
             if fmt == "docx":
-                doc = Document(); sec = doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55)
-                title = doc.add_heading("COSHH ASSESSMENT FORM", 0); title.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                p = doc.add_paragraph("Control of Substances Hazardous to Health Regulations 2002 (as amended) – Regulation 6")
-                p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                doc.add_paragraph("Controlled document | Uncontrolled when printed")
-                doc.add_heading("Assessment and SDS Reference", level=1)
-                doc.add_paragraph(f"Assessment Ref.: {r['assessment_ref']} | Date: {r['assessment_date']} | Chemical: {r['product_name']} | SDS No.: {r['sds_number'] or ''} | SDS Revision: {r['sds_revision'] or ''}")
-                order = ["1. Assessment details","2. Substance identification & classification","3. CLP / GHS pictograms","4. Routes of exposure & health effects","5. Persons at risk / number / job roles / special considerations","6. Matters considered in assessment (Yes / No / N/A and evidence)","7. Risk rating comments / acceptability","8. Hierarchy of controls – existing / additional / responsible / target date","9. PPE / RPE requirements and specifications","10. Maintenance, examination & testing of controls","11. Exposure monitoring & health surveillance","12. Information, instruction & training","13. Emergency arrangements / first aid","14. Storage, handling, waste & environment","15. Conclusion / action plan / review triggers"]
+                from docx.enum.section import WD_SECTION
+                from docx.enum.table import WD_ROW_HEIGHT_RULE
+                from docx.oxml import parse_xml
+                from docx.oxml.ns import nsdecls
+                from docx.shared import RGBColor
+
+                doc = Document()
+                sec = doc.sections[0]
+                sec.page_width = Inches(8.27); sec.page_height = Inches(11.69)
+                sec.top_margin = Inches(.55); sec.bottom_margin = Inches(.55)
+                sec.left_margin = Inches(.58); sec.right_margin = Inches(.58)
+                styles = doc.styles
+                styles['Normal'].font.name = 'Arial'; styles['Normal'].font.size = Pt(8.5)
+                styles['Normal'].font.color.rgb = RGBColor(45, 55, 65)
+                for stylename in ('Heading 1', 'Heading 2'):
+                    styles[stylename].font.name = 'Arial'
+                    styles[stylename].font.color.rgb = RGBColor(23, 54, 93)
+                styles['Heading 1'].font.size = Pt(11)
+                styles['Heading 1'].font.bold = True
+                styles['Heading 2'].font.size = Pt(9.5)
+
+                header = sec.header.paragraphs[0]
+                header.text = "HSE MANAGEMENT SYSTEM  |  CONTROLLED COSHH ASSESSMENT"
+                header.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                for run in header.runs:
+                    run.font.name = 'Arial'; run.font.size = Pt(7); run.font.color.rgb = RGBColor(100, 110, 120)
+                footer = sec.footer.paragraphs[0]
+                footer.text = f"{r['assessment_ref']}  |  Uncontrolled when printed  |  Page "
+                for run in footer.runs:
+                    run.font.size = Pt(7)
+                fld = OxmlElement('w:fldSimple'); fld.set(qn('w:instr'), 'PAGE'); footer._p.append(fld)
+
+                title = doc.add_heading("COSHH ASSESSMENT", 0)
+                title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                sub = doc.add_paragraph("CONTROL OF SUBSTANCES HAZARDOUS TO HEALTH")
+                sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for run in sub.runs:
+                    run.bold = True; run.font.size = Pt(9); run.font.color.rgb = RGBColor(80, 90, 105)
+
+                def shade(cell, fill):
+                    tcPr = cell._tc.get_or_add_tcPr()
+                    tcPr.append(parse_xml(r'<w:shd {} w:fill="{}"/>'.format(nsdecls('w'), fill)))
+                def set_cell(cell, value, bold=False, color=None, size=8):
+                    cell.text = _s(value)
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    for para in cell.paragraphs:
+                        para.paragraph_format.space_after = Pt(1)
+                        for run in para.runs:
+                            run.font.name = 'Arial'; run.font.size = Pt(size); run.bold = bold
+                            if color: run.font.color.rgb = RGBColor(*color)
+                def table(headers, rows, widths=None):
+                    t = doc.add_table(rows=1, cols=len(headers)); t.style = 'Table Grid'
+                    t.alignment = WD_TABLE_ALIGNMENT.CENTER
+                    for i, h in enumerate(headers):
+                        set_cell(t.rows[0].cells[i], h, True, (255,255,255), 8)
+                        shade(t.rows[0].cells[i], '17365D')
+                    for row in rows:
+                        cells = t.add_row().cells
+                        for i, val in enumerate(row):
+                            set_cell(cells[i], val, False, None, 8)
+                    if widths:
+                        for row in t.rows:
+                            for i, width in enumerate(widths): row.cells[i].width = Inches(width)
+                    doc.add_paragraph().paragraph_format.space_after = Pt(1)
+                    return t
+                def heading(text):
+                    p = doc.add_paragraph()
+                    p.paragraph_format.space_before = Pt(6); p.paragraph_format.space_after = Pt(3)
+                    run = p.add_run(text); run.bold = True; run.font.name = 'Arial'; run.font.size = Pt(10)
+                    run.font.color.rgb = RGBColor(23,54,93)
+                    pPr = p._p.get_or_add_pPr(); pPr.append(parse_xml(r'<w:shd {} w:fill="E8EFF7"/>'.format(nsdecls('w'))))
+                table(["Assessment Reference", "Assessment Date", "Chemical / Product", "SDS Revision"], [[
+                    r['assessment_ref'], r['assessment_date'], r['product_name'], r['sds_revision'] or "Not recorded"
+                ]])
+                table(["SDS No.", "Supplier", "CAS No.", "UN No.", "Signal Word"], [[
+                    r['sds_number'] or "", r['supplier'] or "", r['cas_number'] or "", r['un_number'] or "", r['signal_word'] or ""
+                ]])
+                heading("RISK RATING SUMMARY")
+                table(["Initial Likelihood", "Initial Severity", "Initial Score", "Initial Rating", "Residual Likelihood", "Residual Severity", "Residual Score", "Residual Rating"], [[
+                    d.get("Likelihood Before Controls (1-5)", ""), d.get("Severity Before Controls (1-5)", ""), before, before_band,
+                    d.get("Likelihood After Controls (1-5)", ""), d.get("Severity After Controls (1-5)", ""), after, after_band
+                ]])
+                heading("GHS / CLP HAZARD PICTOGRAMS")
+                if ghs_codes:
+                    table(["Pictogram ID", "Hazard pictogram / meaning"], [[c, "◇  " + ghs_names.get(c, "Refer to SDS classification")] for c in ghs_codes])
+                else:
+                    table(["Pictogram status", "Assessment record"], [["Not identified in saved assessment", "Verify pictograms directly against SDS Section 2. No pictogram has been assumed."]])
                 for key in order:
-                    doc.add_heading(key, level=1); doc.add_paragraph(_s(d.get(key,"Not completed")) or "Not completed")
-                doc.add_heading("Risk Assessment Summary", level=1)
-                doc.add_paragraph(f"Inherent risk: {d.get('inherent_score','')} ({d.get('inherent_band','')}) | Residual risk: {d.get('residual_score','')} ({d.get('residual_band','')}) | Conclusion: {d.get('Conclusion','')}")
-                doc.add_heading("Sign-off", level=1)
-                t=doc.add_table(rows=1, cols=3); t.style='Table Grid'
-                for c,txt in zip(t.rows[0].cells,["Assessor – name / signature / date","HSE Reviewer – name / signature / date","Approver – name / signature / date"]): c.text=txt+"\n\nSignature: ____________________\nDate: ____________________"
-                doc.add_heading("Employee Acknowledgement", level=1); doc.add_paragraph(_s(d.get("Employee acknowledgement / signatures","")))
-                doc.add_paragraph("Assessment is a draft until all task/site information is verified and competent persons complete review and approval.")
+                    heading(key.upper())
+                    val = _s(d.get(key, "Not completed")).strip() or "Not completed"
+                    if key.startswith("8.") or key.startswith("9."):
+                        rows = section_rows(key)
+                        table(["Item ID", "Control / PPE requirement and specification"], rows)
+                    elif key.startswith("6."):
+                        table(["Check ID", "Assessment consideration / evidence"], section_rows(key))
+                    else:
+                        table(["Assessment information / evidence"], [[val]])
+                heading("APPROVAL AND SIGNATURE RECORD")
+                t = doc.add_table(rows=2, cols=3); t.style = 'Table Grid'
+                labels = ["PREPARED BY – ASSESSOR", "REVIEWED BY – HSE", "APPROVED BY – MANAGEMENT"]
+                names = [d.get("Assessor Name / Signature / Date", d.get("Assessor Name & Designation", "")),
+                         d.get("HSE Reviewer Name / Signature / Date", ""), d.get("Approver Name / Signature / Date", d.get("Reviewed / Approved By", ""))]
+                for i in range(3):
+                    set_cell(t.rows[0].cells[i], labels[i], True, (255,255,255), 8); shade(t.rows[0].cells[i], '17365D')
+                    set_cell(t.rows[1].cells[i], "Name: " + _s(names[i]) + "\n\nSignature: ____________________\n\nDate: ____________________", False, None, 8)
+                heading("EMPLOYEE / WORKER ACKNOWLEDGEMENT")
+                table(["Acknowledgement / Names / IDs / Signatures / Dates"], [[_s(d.get("Employee acknowledgement / signatures", "To be completed by affected personnel."))]])
+                note = doc.add_paragraph("This assessment must be verified against the actual task, work location, SDS and site conditions. Work must not proceed until required controls are implemented and competent review / approval is complete.")
+                for run in note.runs:
+                    run.italic = True; run.font.size = Pt(7.5); run.font.color.rgb = RGBColor(90,90,90)
                 doc.save(path)
             else:
-                styles=getSampleStyleSheet(); story=[Paragraph("COSHH ASSESSMENT FORM",styles['Title']),Paragraph(f"Ref: {r['assessment_ref']} | Date: {r['assessment_date']} | Chemical: {r['product_name']} | SDS Rev: {r['sds_revision'] or ''}",styles['BodyText']),Spacer(1,10)]
-                order=["1. Assessment details","2. Substance identification & classification","3. CLP / GHS pictograms","4. Routes of exposure & health effects","5. Persons at risk / number / job roles / special considerations","6. Matters considered in assessment (Yes / No / N/A and evidence)","7. Risk rating comments / acceptability","8. Hierarchy of controls – existing / additional / responsible / target date","9. PPE / RPE requirements and specifications","10. Maintenance, examination & testing of controls","11. Exposure monitoring & health surveillance","12. Information, instruction & training","13. Emergency arrangements / first aid","14. Storage, handling, waste & environment","15. Conclusion / action plan / review triggers"]
+                from reportlab.lib.styles import ParagraphStyle
+                from reportlab.lib.enums import TA_CENTER
+                from reportlab.lib.units import mm
+                from reportlab.platypus import KeepTogether, PageBreak
+                styles = getSampleStyleSheet()
+                styles.add(ParagraphStyle(name='COSHHHead', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=17, leading=20, textColor=colors.HexColor('#17365D'), alignment=TA_CENTER, spaceAfter=4))
+                styles.add(ParagraphStyle(name='COSHHSub', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, leading=10, alignment=TA_CENTER, textColor=colors.HexColor('#566579'), spaceAfter=8))
+                styles.add(ParagraphStyle(name='COSHHSection', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=9, leading=11, textColor=colors.white, backColor=colors.HexColor('#17365D'), borderPadding=5, spaceBefore=7, spaceAfter=4))
+                styles.add(ParagraphStyle(name='COSHHBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=7.5, leading=10, spaceAfter=1, wordWrap='CJK'))
+                styles.add(ParagraphStyle(name='COSHHCell', parent=styles['BodyText'], fontName='Helvetica', fontSize=7, leading=9, wordWrap='CJK'))
+                def para(v): return Paragraph(html.escape(_s(v)).replace('\n','<br/>'), styles['COSHHCell'])
+                def pdf_table(headers, rows, widths=None):
+                    data = [[Paragraph(f'<b>{html.escape(_s(x))}</b>', styles['COSHHCell']) for x in headers]]
+                    data += [[para(x) for x in row] for row in rows]
+                    t = Table(data, colWidths=widths, repeatRows=1, hAlign='LEFT')
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),
+                        ('TEXTCOLOR',(0,0),(-1,0),colors.white), ('GRID',(0,0),(-1,-1),.4,colors.HexColor('#AAB7C4')),
+                        ('VALIGN',(0,0),(-1,-1),'TOP'), ('LEFTPADDING',(0,0),(-1,-1),5),
+                        ('RIGHTPADDING',(0,0),(-1,-1),5), ('TOPPADDING',(0,0),(-1,-1),4),
+                        ('BOTTOMPADDING',(0,0),(-1,-1),4), ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#F3F6F9')])
+                    ]))
+                    return t
+                story = [Paragraph("COSHH ASSESSMENT", styles['COSHHHead']),
+                         Paragraph("CONTROL OF SUBSTANCES HAZARDOUS TO HEALTH", styles['COSHHSub'])]
+                story += [pdf_table(["Assessment Reference", "Assessment Date", "Chemical / Product", "SDS Revision"], [[r['assessment_ref'], r['assessment_date'], r['product_name'], r['sds_revision'] or "Not recorded"]], [38*mm,30*mm,75*mm,35*mm]), Spacer(1,5)]
+                story += [pdf_table(["SDS No.","Supplier","CAS No.","UN No.","Signal Word"], [[r['sds_number'] or "",r['supplier'] or "",r['cas_number'] or "",r['un_number'] or "",r['signal_word'] or ""]], [28*mm,55*mm,35*mm,25*mm,35*mm]), Spacer(1,5)]
+                story.append(Paragraph("RISK RATING SUMMARY", styles['COSHHSection']))
+                story.append(pdf_table(["Initial L","Initial S","Score","Rating","Residual L","Residual S","Score","Rating"], [[d.get("Likelihood Before Controls (1-5)",""),d.get("Severity Before Controls (1-5)",""),before,before_band,d.get("Likelihood After Controls (1-5)",""),d.get("Severity After Controls (1-5)",""),after,after_band]], [21*mm]*8))
+                story.append(Paragraph("GHS / CLP HAZARD PICTOGRAMS", styles['COSHHSection']))
+                if ghs_codes:
+                    story.append(pdf_table(["Pictogram ID","Hazard pictogram / meaning"], [[c,"◇  "+ghs_names.get(c,"Refer to SDS classification")] for c in ghs_codes], [30*mm,138*mm]))
+                else:
+                    story.append(pdf_table(["Pictogram status","Assessment record"], [["Not identified in saved assessment","Verify directly against SDS Section 2. No pictogram has been assumed."]], [38*mm,130*mm]))
                 for key in order:
-                    story += [Paragraph(html.escape(key),styles['Heading2']),Paragraph(html.escape(_s(d.get(key,"Not completed")).replace('\n','<br/>')),styles['BodyText']),Spacer(1,6)]
-                story += [Paragraph("Risk Summary",styles['Heading2']),Paragraph(f"Inherent: {d.get('inherent_score','')} ({d.get('inherent_band','')}) | Residual: {d.get('residual_score','')} ({d.get('residual_band','')})",styles['BodyText']),Spacer(1,10),Paragraph("Assessor signature: ____________________  HSE Reviewer: ____________________  Approver: ____________________",styles['BodyText']),Paragraph("Employee acknowledgement: "+html.escape(_s(d.get('Employee acknowledgement / signatures',''))),styles['BodyText'])]
-                SimpleDocTemplate(path,pagesize=A4,rightMargin=32,leftMargin=32,topMargin=32,bottomMargin=32).build(story)
-            QMessageBox.information(self,"Exported",f"COSHH assessment exported to:\n{path}")
+                    story.append(Paragraph(html.escape(key.upper()), styles['COSHHSection']))
+                    val = _s(d.get(key,"Not completed")).strip() or "Not completed"
+                    if key.startswith(("8.","9.","6.")):
+                        heading = "Check ID" if key.startswith("6.") else "Item ID"
+                        label = "Assessment consideration / evidence" if key.startswith("6.") else ("Control / PPE requirement and specification" if key.startswith("9.") else "Control measure / action")
+                        story.append(pdf_table([heading,label], section_rows(key), [22*mm,146*mm]))
+                    else:
+                        story.append(pdf_table(["Assessment information / evidence"], [[val]], [168*mm]))
+                    story.append(Spacer(1,3))
+                story.append(Paragraph("APPROVAL AND SIGNATURE RECORD", styles['COSHHSection']))
+                sig_rows = [["PREPARED BY – ASSESSOR","REVIEWED BY – HSE","APPROVED BY – MANAGEMENT"],
+                            ["Name: "+_s(d.get("Assessor Name / Signature / Date",d.get("Assessor Name & Designation","")))+"\n\nSignature: __________________\n\nDate: ______________",
+                             "Name: "+_s(d.get("HSE Reviewer Name / Signature / Date",""))+"\n\nSignature: __________________\n\nDate: ______________",
+                             "Name: "+_s(d.get("Approver Name / Signature / Date",d.get("Reviewed / Approved By","")))+"\n\nSignature: __________________\n\nDate: ______________"]]
+                story.append(pdf_table(sig_rows[0], [sig_rows[1]], [56*mm,56*mm,56*mm]))
+                story.append(Paragraph("EMPLOYEE / WORKER ACKNOWLEDGEMENT", styles['COSHHSection']))
+                story.append(pdf_table(["Acknowledgement / Names / IDs / Signatures / Dates"], [[d.get("Employee acknowledgement / signatures","To be completed by affected personnel.")]], [168*mm]))
+                story.append(Spacer(1,6))
+                story.append(Paragraph("This assessment must be verified against the actual task, work location, SDS and site conditions. Work must not proceed until required controls are implemented and competent review / approval is complete.", styles['COSHHCell']))
+                def page_footer(canvas, document):
+                    canvas.saveState(); canvas.setFont('Helvetica',7); canvas.setFillColor(colors.HexColor('#667788'))
+                    canvas.drawString(16*mm, 9*mm, f"{r['assessment_ref']} | Uncontrolled when printed")
+                    canvas.drawRightString(194*mm, 9*mm, f"Page {document.page}")
+                    canvas.restoreState()
+                SimpleDocTemplate(path, pagesize=A4, rightMargin=16*mm, leftMargin=16*mm, topMargin=15*mm, bottomMargin=16*mm).build(story, onFirstPage=page_footer, onLaterPages=page_footer)
+            QMessageBox.information(self, "Exported", f"COSHH assessment exported to:\n{path}")
         except Exception as exc:
-            logging.exception("COSHH export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+            logging.exception("COSHH export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
 
     # ---------- UI ----------
     def _build_ui(self):
