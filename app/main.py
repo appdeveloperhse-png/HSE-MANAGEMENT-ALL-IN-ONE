@@ -47,7 +47,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.19"
+APP_VERSION = "1.4.20"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -17557,6 +17557,26 @@ def chem_missing_fields(parsed):
     return [lab for k, lab in keys if not parsed.get(k)]
 
 
+def chem_extract_sds_sections(text):
+    """Return standard SDS sections 1-16 from selectable SDS text; retain source wording."""
+    raw = (text or "").replace("\r", "\n")
+    # Section headings normally begin with a numbered heading (e.g. 1. Identification).
+    matches = list(re.finditer(r"(?im)^\s*(?:SECTION\s*)?(1[0-6]|[1-9])\s*(?:[.):\-]|\|)\s*([^\n]{2,150})", raw))
+    out = []
+    for i, m in enumerate(matches):
+        n = int(m.group(1))
+        if n < 1 or n > 16: continue
+        end = matches[i+1].start() if i+1 < len(matches) else len(raw)
+        content = raw[m.end():end].strip()
+        title = m.group(2).strip()
+        out.append((n, title, content[:30000]))
+    # De-duplicate repeated page headers by keeping the longest captured block per section.
+    best = {}
+    for n,t,c in out:
+        if n not in best or len(c) > len(best[n][1]): best[n] = (t,c)
+    return [(n,best[n][0],best[n][1]) for n in range(1,17) if n in best]
+
+
 class ChemicalSDSModule(QWidget):
     """Chemical Register + SDS Library + compatibility/alerts, mounted in the main stack."""
 
@@ -17605,6 +17625,21 @@ class ChemicalSDSModule(QWidget):
         );
         CREATE INDEX IF NOT EXISTS idx_chem_sds_product ON chem_sds(product_id);
         CREATE INDEX IF NOT EXISTS idx_chem_events_product ON chem_events(product_id);
+        CREATE TABLE IF NOT EXISTS chem_sds_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, sds_id INTEGER NOT NULL, section_no INTEGER NOT NULL,
+            section_title TEXT DEFAULT '', section_content TEXT DEFAULT '',
+            UNIQUE(sds_id, section_no),
+            FOREIGN KEY(sds_id) REFERENCES chem_sds(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS coshh_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, assessment_ref TEXT UNIQUE, product_id INTEGER NOT NULL,
+            sds_id INTEGER, assessment_date TEXT DEFAULT '', revision TEXT DEFAULT '1',
+            assessment_json TEXT NOT NULL DEFAULT '{}', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT '',
+            FOREIGN KEY(product_id) REFERENCES chem_products(id) ON DELETE CASCADE,
+            FOREIGN KEY(sds_id) REFERENCES chem_sds(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_coshh_product ON coshh_assessments(product_id);
         """)
 
         # Older builds may have created chem_sds with a foreign key to a legacy
@@ -17671,6 +17706,201 @@ class ChemicalSDSModule(QWidget):
         self.db.execute("INSERT INTO chem_events(product_id,event_type,details,actor,created_at) VALUES(?,?,?,?,?)",
                         (pid, etype, details, self._actor(), _now()))
 
+    # ---------- SDS 16-section register and COSHH assessment ----------
+    def _build_sds_sections_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "3. SDS 16-Section Register")
+        lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.sds_section_filter = QComboBox(); self.sds_section_filter.setMinimumWidth(260)
+        self.sds_section_filter.currentIndexChanged.connect(self.refresh_sds_sections)
+        bar.addWidget(QLabel("SDS / Chemical:")); bar.addWidget(self.sds_section_filter, 1)
+        lay.addLayout(bar)
+        self.sds_sections_table = self._mk_table(["Section", "SDS Heading", "Extracted SDS Content"])
+        self.sds_sections_table.setWordWrap(True)
+        lay.addWidget(self.sds_sections_table, 1)
+        note = QLabel("The register stores all 16 standard SDS sections from the uploaded file. Missing or scanned/non-selectable sections remain blank and must be checked against the original SDS.")
+        note.setWordWrap(True); lay.addWidget(note)
+
+    def refresh_sds_sections(self, *_):
+        if not hasattr(self, "sds_section_filter"):
+            return
+        keep = self.sds_section_filter.currentData()
+        self.sds_section_filter.blockSignals(True); self.sds_section_filter.clear()
+        rows = self.db.fetchall("SELECT s.id, p.product_name, s.revision, s.issue_date FROM chem_sds s JOIN chem_products p ON p.id=s.product_id ORDER BY p.product_name, s.issue_date DESC, s.id DESC")
+        for r in rows:
+            self.sds_section_filter.addItem(f"{r['product_name']} | Rev {r['revision']} | {r['issue_date']}", int(r['id']))
+        idx = self.sds_section_filter.findData(keep)
+        if idx >= 0: self.sds_section_filter.setCurrentIndex(idx)
+        self.sds_section_filter.blockSignals(False)
+        self.sds_sections_table.setRowCount(0)
+        sid = self.sds_section_filter.currentData()
+        if sid is None: return
+        # Backfill section extraction for SDS records uploaded by earlier app versions.
+        existing_sections = self.db.fetchone("SELECT COUNT(*) AS n FROM chem_sds_sections WHERE sds_id=?", (sid,))
+        if not existing_sections or int(existing_sections['n'] or 0) == 0:
+            source = self.db.fetchone("SELECT file_path FROM chem_sds WHERE id=?", (sid,))
+            if source and source['file_path'] and Path(source['file_path']).is_file():
+                try:
+                    extracted = chem_extract_sds_sections(chem_file_text(source['file_path']))
+                    for sec_no, sec_title, sec_text in extracted:
+                        self.db.execute("INSERT OR REPLACE INTO chem_sds_sections(sds_id,section_no,section_title,section_content) VALUES(?,?,?,?)",
+                                        (sid, sec_no, sec_title, sec_text))
+                except Exception:
+                    logging.exception("Could not backfill SDS sections for SDS record %s", sid)
+        stored = {int(x['section_no']): x for x in self.db.fetchall("SELECT * FROM chem_sds_sections WHERE sds_id=? ORDER BY section_no", (sid,))}
+        for n in range(1, 17):
+            x = stored.get(n)
+            rr = self.sds_sections_table.rowCount(); self.sds_sections_table.insertRow(rr)
+            vals = [f"Section {n}", x['section_title'] if x else "Not identified in uploaded SDS", x['section_content'] if x else ""]
+            for c, v in enumerate(vals): self.sds_sections_table.setItem(rr, c, QTableWidgetItem(_s(v)))
+        self.sds_sections_table.resizeRowsToContents()
+
+    def _build_coshh_tab(self):
+        w = QWidget(); self.tabs.addTab(w, "4. COSHH Assessment")
+        lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        b = QPushButton("New COSHH Assessment for Chemical")
+        b.clicked.connect(self._new_coshh_assessment); bar.addWidget(b)
+        x = QPushButton("Export Selected (Word)"); x.clicked.connect(lambda: self._export_coshh("docx")); bar.addWidget(x)
+        pdf = QPushButton("Export Selected (PDF)"); pdf.clicked.connect(lambda: self._export_coshh("pdf")); bar.addWidget(pdf)
+        bar.addStretch(1); lay.addLayout(bar)
+        self.coshh_table = self._mk_table(["ID", "Assessment Ref.", "Chemical", "Assessment Date", "SDS Revision", "Residual Risk", "Conclusion"])
+        lay.addWidget(self.coshh_table, 1)
+        tip = QLabel("Automatic draft uses SDS Sections 1, 2, 3, 6 and 8 for identification, hazards, composition, spill response and exposure controls. Complete and verify all site/task-specific fields before approval; this is not an automatic substitute for competent assessment.")
+        tip.setWordWrap(True); lay.addWidget(tip)
+
+    def refresh_coshh(self):
+        rows = []
+        for r in self.db.fetchall("SELECT c.*, p.product_name, s.revision AS sds_revision FROM coshh_assessments c JOIN chem_products p ON p.id=c.product_id LEFT JOIN chem_sds s ON s.id=c.sds_id ORDER BY c.id DESC"):
+            try: d = json.loads(r['assessment_json'] or '{}')
+            except Exception: d = {}
+            rows.append((r['id'], [r['id'], r['assessment_ref'], r['product_name'], r['assessment_date'], r['sds_revision'] or '', d.get('residual_score',''), d.get('Conclusion','Draft / review required')]))
+        self._fill(self.coshh_table, rows)
+
+    def _selected_coshh_id(self):
+        return self._sel_id(self.coshh_table, "COSHH assessment")
+
+    def _new_coshh_assessment(self):
+        pid = self._sel_id(self.reg_table, "chemical in Chemical Register tab")
+        if pid is None:
+            QMessageBox.information(self, "Select Chemical", "Select a chemical in the Chemical Register tab first.")
+            return
+        product = self.db.fetchone("SELECT * FROM chem_products WHERE id=?", (pid,))
+        sds = self.db.fetchone("SELECT * FROM chem_sds WHERE product_id=? AND status='Current' ORDER BY issue_date DESC,id DESC LIMIT 1", (pid,))
+        if not sds:
+            QMessageBox.warning(self, "Current SDS Required", "Upload a current SDS before creating the COSHH assessment.")
+            return
+        sections = {int(r['section_no']): r for r in self.db.fetchall("SELECT * FROM chem_sds_sections WHERE sds_id=?", (sds['id'],))}
+        def sec(n):
+            r = sections.get(n); return (r['section_title'] + "\n" + r['section_content']).strip() if r else "Not extracted from this SDS. Verify against original SDS."
+        auto = {
+            "1. Assessment details": f"Chemical: {product['product_name']}\nSupplier: {product['supplier']}\nEmergency contact: {product['supplier_contact']}\nProject: {product['project']}\nDepartment: {product['department']}\nLocation: {product['storage_location']}\nSDS reference: {sds['sds_number']} | Revision: {sds['revision']} | Issue: {sds['issue_date']}",
+            "2. Substance identification & classification": f"SDS Section 1:\n{sec(1)}\n\nSDS Section 2:\n{sec(2)}\n\nSDS Section 3:\n{sec(3)}",
+            "3. CLP / GHS pictograms": f"SDS Section 2:\n{sec(2)}\n\nGHS classes recorded: {product['ghs_classes']}\nSignal word: {product['signal_word']}\nH-statements: {product['h_statements']}\nP-statements: {product['p_statements']}",
+            "4. Routes of exposure & health effects": f"Potential hazards / health effects from the requested SDS source sections 2 and 3:\n{sec(2)}\n\nComposition:\n{sec(3)}\n\nConfirm actual exposure routes and task-specific effects with the competent assessor.",
+            "8. Control measures / exposure controls": f"SDS Section 8 – exposure controls / PPE:\n{sec(8)}",
+            "13. Emergency arrangements / first aid": f"SDS Section 6 – accidental release / spill response:\n{sec(6)}\n\nFirst-aid, fire-fighting and site emergency arrangements must be completed by the assessor from approved site information; SDS sections outside 1, 2, 3, 6 and 8 are intentionally not imported.",
+        }
+        dlg = QDialog(self); dlg.setWindowTitle("COSHH Assessment – " + _s(product['product_name']))
+        dlg.resize(980, 850); outer = QVBoxLayout(dlg)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); form = QFormLayout(body); scroll.setWidget(body); outer.addWidget(scroll)
+        widgets = {}
+        def line(k, value="", placeholder=""):
+            w = QLineEdit(_s(value)); w.setPlaceholderText(placeholder); widgets[k] = w; form.addRow(k, w)
+        def memo(k, value="", h=100):
+            w = QTextEdit(_s(value)); w.setMinimumHeight(h); widgets[k] = w; form.addRow(k, w)
+        ref = f"COSHH-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        line("Assessment Ref. No.", ref); line("Date of Assessment", date.today().isoformat())
+        line("Company / Employer", ""); line("Project / Contract", product['project']); line("Site / Location / Work Area", product['storage_location'])
+        line("Department / Section", product['department']); line("Task / Process / Activity"); memo("Description of Work & Method", "", 80)
+        line("Assessor Name & Designation"); line("Assessor Competency / Qualification"); line("Reviewed / Approved By")
+        line("Next Review Due Date", (date.today()+timedelta(days=365)).isoformat()); line("Frequency / Duration / Quantity / Persons Exposed")
+        line("SDS Available at Point of Use?", "Yes"); line("SDS Language", sds['language'])
+        for title, value in auto.items(): memo(title, value, 135)
+        memo("5. Persons at risk / number / job roles / special considerations", "Employees / contractors / maintenance personnel – confirm actual persons and job roles.")
+        memo("6. Matters considered in assessment (Yes / No / N/A and evidence)", "Confirm CLP hazards, SDS review, exposure duration, task conditions, maintenance/spill exposure, WEL/BMGV, existing controls, monitoring, health surveillance and combined exposure.")
+        line("Likelihood Before Controls (1-5)", "3"); line("Severity Before Controls (1-5)", "3")
+        line("Likelihood After Controls (1-5)", "2"); line("Severity After Controls (1-5)", "2")
+        memo("7. Risk rating comments / acceptability", "Risk score = likelihood × severity. 1–4 Low; 5–9 Medium; 10–16 High; 17–25 Extreme. Verify scoring with competent assessor.")
+        memo("8. Hierarchy of controls – existing / additional / responsible / target date", "Eliminate; substitute; enclose/isolate; engineering controls; reduce exposure; safe systems of work; hygiene/welfare; PPE/RPE as last resort.")
+        memo("9. PPE / RPE requirements and specifications", sec(8))
+        memo("10. Maintenance, examination & testing of controls", "Specify LEV / enclosure / ventilation examination, competent person, last and next test dates, records and defects.")
+        memo("11. Exposure monitoring & health surveillance", "State whether monitoring and health surveillance are required, method, frequency, results versus WEL and record retention.")
+        memo("12. Information, instruction & training", "Record training topics, attendees, dates and trainer.")
+        memo("13. Emergency arrangements / first aid", auto["13. Emergency arrangements / first aid"] + "\nAdd site first-aid, eyewash, shower, emergency contacts and spill/fire response arrangements.")
+        memo("14. Storage, handling, waste & environment", f"Storage: {product['storage_location']}\nUN No.: {product['un_number']}\nDisposal information recorded in Chemical Register: {product['disposal']}\nComplete site-specific handling, segregation, bunding, waste and environmental controls. SDS sections outside 1, 2, 3, 6 and 8 are intentionally not imported.")
+        memo("15. Conclusion / action plan / review triggers", "Select: adequately controlled / further actions required / work must not proceed. Record actions, owners, due dates and review triggers.")
+        line("Conclusion", "Draft – competent review required")
+        line("Assessor Name / Signature / Date", "")
+        line("HSE Reviewer Name / Signature / Date", "")
+        line("Approver Name / Signature / Date", "")
+        memo("Employee acknowledgement / signatures", "Record employee name, ID/badge, company/trade, signature and date.", 70)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel); outer.addWidget(bb)
+        bb.accepted.connect(dlg.accept); bb.rejected.connect(dlg.reject)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        data = {k: (v.toPlainText() if isinstance(v, QTextEdit) else v.text()).strip() for k,v in widgets.items()}
+        try:
+            lb = int(data.get("Likelihood Before Controls (1-5)",3)); sb = int(data.get("Severity Before Controls (1-5)",3))
+            la = int(data.get("Likelihood After Controls (1-5)",2)); sa = int(data.get("Severity After Controls (1-5)",2))
+            if any(v < 1 or v > 5 for v in (lb, sb, la, sa)): raise ValueError()
+            before = lb * sb; after = la * sa
+        except Exception:
+            QMessageBox.warning(self, "Risk Score", "Likelihood and severity must each be whole numbers from 1 to 5."); return
+        data['inherent_score'] = before; data['residual_score'] = after
+        data['inherent_band'] = self._risk_band(before); data['residual_band'] = self._risk_band(after)
+        self.db.execute("INSERT INTO coshh_assessments(assessment_ref,product_id,sds_id,assessment_date,assessment_json) VALUES(?,?,?,?,?)",
+                        (data.get('Assessment Ref. No.') or ref, pid, int(sds['id']), data.get('Date of Assessment',''), json.dumps(data, ensure_ascii=False)))
+        self.refresh_coshh()
+
+    @staticmethod
+    def _risk_band(score):
+        return "Low" if score <= 4 else "Medium" if score <= 9 else "High" if score <= 16 else "Extreme"
+
+    def _edit_coshh_assessment(self):
+        aid = self._selected_coshh_id()
+        if aid is None: return
+        QMessageBox.information(self, "COSHH Assessment", "To preserve the original SDS-derived assessment and sign-off trail, create a new assessment revision by selecting the chemical and choosing New COSHH Assessment. Existing assessment remains available for export.")
+
+    def _export_coshh(self, fmt="docx"):
+        aid = self._selected_coshh_id()
+        if aid is None: return
+        r = self.db.fetchone("SELECT c.*,p.product_name,s.revision AS sds_revision,s.sds_number FROM coshh_assessments c JOIN chem_products p ON p.id=c.product_id LEFT JOIN chem_sds s ON s.id=c.sds_id WHERE c.id=?", (aid,))
+        if not r: return
+        d = json.loads(r['assessment_json'] or '{}')
+        default = f"{r['assessment_ref']}.{fmt}"
+        path, _ = QFileDialog.getSaveFileName(self, "Export COSHH Assessment", default, "Word Document (*.docx)" if fmt=="docx" else "PDF (*.pdf)")
+        if not path: return
+        try:
+            if fmt == "docx":
+                doc = Document(); sec = doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55)
+                title = doc.add_heading("COSHH ASSESSMENT FORM", 0); title.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                p = doc.add_paragraph("Control of Substances Hazardous to Health Regulations 2002 (as amended) – Regulation 6")
+                p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                doc.add_paragraph("Controlled document | Uncontrolled when printed")
+                doc.add_heading("Assessment and SDS Reference", level=1)
+                doc.add_paragraph(f"Assessment Ref.: {r['assessment_ref']} | Date: {r['assessment_date']} | Chemical: {r['product_name']} | SDS No.: {r['sds_number'] or ''} | SDS Revision: {r['sds_revision'] or ''}")
+                order = ["1. Assessment details","2. Substance identification & classification","3. CLP / GHS pictograms","4. Routes of exposure & health effects","5. Persons at risk / number / job roles / special considerations","6. Matters considered in assessment (Yes / No / N/A and evidence)","7. Risk rating comments / acceptability","8. Hierarchy of controls – existing / additional / responsible / target date","9. PPE / RPE requirements and specifications","10. Maintenance, examination & testing of controls","11. Exposure monitoring & health surveillance","12. Information, instruction & training","13. Emergency arrangements / first aid","14. Storage, handling, waste & environment","15. Conclusion / action plan / review triggers"]
+                for key in order:
+                    doc.add_heading(key, level=1); doc.add_paragraph(_s(d.get(key,"Not completed")) or "Not completed")
+                doc.add_heading("Risk Assessment Summary", level=1)
+                doc.add_paragraph(f"Inherent risk: {d.get('inherent_score','')} ({d.get('inherent_band','')}) | Residual risk: {d.get('residual_score','')} ({d.get('residual_band','')}) | Conclusion: {d.get('Conclusion','')}")
+                doc.add_heading("Sign-off", level=1)
+                t=doc.add_table(rows=1, cols=3); t.style='Table Grid'
+                for c,txt in zip(t.rows[0].cells,["Assessor – name / signature / date","HSE Reviewer – name / signature / date","Approver – name / signature / date"]): c.text=txt+"\n\nSignature: ____________________\nDate: ____________________"
+                doc.add_heading("Employee Acknowledgement", level=1); doc.add_paragraph(_s(d.get("Employee acknowledgement / signatures","")))
+                doc.add_paragraph("Assessment is a draft until all task/site information is verified and competent persons complete review and approval.")
+                doc.save(path)
+            else:
+                styles=getSampleStyleSheet(); story=[Paragraph("COSHH ASSESSMENT FORM",styles['Title']),Paragraph(f"Ref: {r['assessment_ref']} | Date: {r['assessment_date']} | Chemical: {r['product_name']} | SDS Rev: {r['sds_revision'] or ''}",styles['BodyText']),Spacer(1,10)]
+                order=["1. Assessment details","2. Substance identification & classification","3. CLP / GHS pictograms","4. Routes of exposure & health effects","5. Persons at risk / number / job roles / special considerations","6. Matters considered in assessment (Yes / No / N/A and evidence)","7. Risk rating comments / acceptability","8. Hierarchy of controls – existing / additional / responsible / target date","9. PPE / RPE requirements and specifications","10. Maintenance, examination & testing of controls","11. Exposure monitoring & health surveillance","12. Information, instruction & training","13. Emergency arrangements / first aid","14. Storage, handling, waste & environment","15. Conclusion / action plan / review triggers"]
+                for key in order:
+                    story += [Paragraph(html.escape(key),styles['Heading2']),Paragraph(html.escape(_s(d.get(key,"Not completed")).replace('\n','<br/>')),styles['BodyText']),Spacer(1,6)]
+                story += [Paragraph("Risk Summary",styles['Heading2']),Paragraph(f"Inherent: {d.get('inherent_score','')} ({d.get('inherent_band','')}) | Residual: {d.get('residual_score','')} ({d.get('residual_band','')})",styles['BodyText']),Spacer(1,10),Paragraph("Assessor signature: ____________________  HSE Reviewer: ____________________  Approver: ____________________",styles['BodyText']),Paragraph("Employee acknowledgement: "+html.escape(_s(d.get('Employee acknowledgement / signatures',''))),styles['BodyText'])]
+                SimpleDocTemplate(path,pagesize=A4,rightMargin=32,leftMargin=32,topMargin=32,bottomMargin=32).build(story)
+            QMessageBox.information(self,"Exported",f"COSHH assessment exported to:\n{path}")
+        except Exception as exc:
+            logging.exception("COSHH export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
     # ---------- UI ----------
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -17687,8 +17917,8 @@ class ChemicalSDSModule(QWidget):
         root.addWidget(self.tabs, 1)
         self._build_register_tab()
         self._build_sds_tab()
-        self._build_alerts_tab()
-        self._build_history_tab()
+        self._build_sds_sections_tab()
+        self._build_coshh_tab()
 
     def _mk_table(self, headers):
         t = QTableWidget(0, len(headers))
@@ -17737,6 +17967,7 @@ class ChemicalSDSModule(QWidget):
         self.status_filter.currentTextChanged.connect(self.refresh_register)
         bar.addWidget(self.search, 2); bar.addWidget(QLabel("Status:")); bar.addWidget(self.status_filter)
         for text, fn in [("Add Chemical", self._add_product), ("Edit", self._edit_product),
+                         ("New Revision for Selected Chemical", self._new_revision),
                          ("Delete", self._delete_product), ("Export Excel", self._export_excel)]:
             b = QPushButton(text); b.clicked.connect(fn); bar.addWidget(b)
         lay.addLayout(bar)
@@ -17914,7 +18145,7 @@ class ChemicalSDSModule(QWidget):
         w = QWidget(); self.tabs.addTab(w, "2. SDS Library")
         lay = QVBoxLayout(w)
         bar = QHBoxLayout()
-        for text, fn in [("Upload SDS (auto-register)", self._upload_sds), ("New Revision for Selected Chemical", self._new_revision), ("Open SDS File", self._open_sds),
+        for text, fn in [("Upload SDS (auto-register)", self._upload_sds), ("Open SDS File", self._open_sds),
                          ("Mark Superseded", self._supersede_sds), ("Delete SDS Record", self._delete_sds)]:
             b = QPushButton(text)
             if fn == self._upload_sds:
@@ -18072,6 +18303,12 @@ class ChemicalSDSModule(QWidget):
                 (pid, v["sds_number"], v["sds_revision"], v["sds_issue"], v["sds_due"],
                  v["sds_language"], str(dest), self._actor(), _now())
             )
+            new_sds_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            for sec_no, sec_title, sec_text in chem_extract_sds_sections(text):
+                conn.execute(
+                    "INSERT OR REPLACE INTO chem_sds_sections(sds_id,section_no,section_title,section_content) VALUES(?,?,?,?)",
+                    (new_sds_id, sec_no, sec_title, sec_text)
+                )
             conn.execute(
                 "INSERT INTO chem_events(product_id,event_type,details,actor,created_at) VALUES(?,?,?,?,?)",
                 (pid, event_type, fname, self._actor(), _now())
@@ -18252,7 +18489,11 @@ class ChemicalSDSModule(QWidget):
             QMessageBox.critical(self, "Export Failed", str(exc))
 
     def refresh_all(self):
-        self.refresh_register(); self.refresh_sds(); self.refresh_alerts(); self.refresh_history()
+        self.refresh_register(); self.refresh_sds()
+        if hasattr(self, "sds_sections_table"):
+            self.refresh_sds_sections()
+        if hasattr(self, "coshh_table"):
+            self.refresh_coshh()
 
 
 # ============================================================
