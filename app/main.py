@@ -3640,11 +3640,10 @@ class MainWindow(QMainWindow):
             "Permit to Work (PTW)",
             "Training",
             "Manpower Details",
-            "ISO 14001 Aspect & Impact",
+            "Chemical & SDS Register",
             "Reports",
             "Master Data",
-            "Settings",
-            "Chemical & SDS Register"
+            "Settings"
         ]
 
         self.nav.addItems(modules)
@@ -3713,17 +3712,14 @@ class MainWindow(QMainWindow):
             elif row == 7:
                 self.manpower_details()
             elif row == 8:
-                w, layout = self.page("ISO 14001 — Aspect & Impact Register")
-                layout.addWidget(AspectImpactModule(self, db), 1)
+                w, layout = self.page("Chemical Register & SDS Management")
+                layout.addWidget(ChemicalSDSModule(self, db), 1)
             elif row == 9:
                 self.reports()
             elif row == 10:
                 self.master_data()
             elif row == 11:
                 self.settings_page()
-            elif row == 12:
-                w, layout = self.page("Chemical Register & SDS Management")
-                layout.addWidget(ChemicalSDSModule(self, db), 1)
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -6123,47 +6119,133 @@ class MainWindow(QMainWindow):
     def observation_form(self, refresh):
         dialog = QDialog(self)
         dialog.setWindowTitle("New HSE Observation / Inspection")
-        dialog.resize(980, 820)
+        dialog.resize(1120, 900)
         dialog.setMinimumSize(900, 700)
+        dialog.setStyleSheet("""
+            QDialog { background: #f3f6fa; }
+            QLabel#formTitle { color: #17365d; font-size: 22px; font-weight: 700; }
+            QLabel#formSubtitle { color: #64748b; font-size: 11px; }
+            QGroupBox {
+                background: #ffffff; border: 1px solid #dbe4ef; border-radius: 10px;
+                margin-top: 12px; padding: 14px 12px 12px 12px;
+                font-size: 13px; font-weight: 700; color: #17365d;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; }
+            QLineEdit, QComboBox, QDateEdit, QTextEdit {
+                background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
+                padding: 8px; color: #1e293b; font-size: 12px;
+            }
+            QLineEdit:focus, QComboBox:focus, QDateEdit:focus, QTextEdit:focus {
+                border: 1px solid #2874b8;
+            }
+            QPushButton {
+                background: #e8eef6; color: #17365d; border: 1px solid #cbd5e1;
+                border-radius: 6px; padding: 8px 13px; font-weight: 600;
+            }
+            QPushButton:hover { background: #dce8f5; }
+            QPushButton#primaryAction { background: #1769aa; color: white; border: 0; }
+            QPushButton#primaryAction:hover { background: #12588f; }
+            QScrollArea { border: 0; background: transparent; }
+        """)
         outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(18, 16, 18, 14)
+        outer.setSpacing(10)
 
         header = QLabel("HSE Inspection Observation")
-        header.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
+        header.setObjectName("formTitle")
+        subtitle = QLabel("Record the finding, assign responsibility and define clear corrective actions.")
+        subtitle.setObjectName("formSubtitle")
         outer.addWidget(header)
+        outer.addWidget(subtitle)
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         content = QWidget()
-        form = QFormLayout(content)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(4, 4, 8, 8)
+        content_layout.setSpacing(12)
         edits = {}
 
-        def edit(name):
+        def make_card(title, parent_layout=None):
+            card = QGroupBox(title)
+            grid = QGridLayout(card)
+            grid.setContentsMargins(12, 18, 12, 12)
+            grid.setHorizontalSpacing(14)
+            grid.setVerticalSpacing(10)
+            if parent_layout is not None:
+                parent_layout.addWidget(card)
+            return card, grid
+
+        def add_tile(grid, row, col, label_text, widget, key=None):
+            tile = QWidget()
+            tile_layout = QVBoxLayout(tile)
+            tile_layout.setContentsMargins(0, 0, 0, 0)
+            tile_layout.setSpacing(4)
+            label = QLabel(label_text)
+            label.setStyleSheet("color:#475569;font-size:11px;font-weight:600;")
+            tile_layout.addWidget(label)
+            widget.setMinimumHeight(36)
+            tile_layout.addWidget(widget)
+            grid.addWidget(tile, row, col)
+            if key:
+                edits[key] = widget
+            return widget
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(12)
+        details_card, details_grid = make_card("OBSERVATION DETAILS")
+        people_card, people_grid = make_card("PEOPLE & RESPONSIBILITY")
+        top_row.addWidget(details_card, 3)
+        top_row.addWidget(people_card, 2)
+        content_layout.addLayout(top_row)
+
+        observation_date = QDateEdit()
+        observation_date.setCalendarPopup(True)
+        observation_date.setDate(datetime.now().date())
+        add_tile(details_grid, 0, 0, "Observation Date", observation_date)
+
+        def edit(name, label_text=None, grid=None, row=0, col=0):
             e = QLineEdit()
+            e.setPlaceholderText("Enter " + (label_text or name.replace("_", " ").lower()))
             edits[name] = e
-            form.addRow(name.replace("_", " ").title() + ":", e)
+            if grid is not None:
+                add_tile(grid, row, col, label_text or name.replace("_", " ").title(), e)
             return e
 
-        observation_date = QDateEdit(); observation_date.setCalendarPopup(True); observation_date.setDate(datetime.now().date())
-        form.addRow("Observation Date:", observation_date)
-
-        for name in ["project", "company", "location", "area", "responsible", "designation", "employee_id",
-                     "observer", "observer_designation", "observer_id", "observer_company"]:
-            edit(name)
+        for name, label_text, row, col in [
+            ("project", "Project", 0, 1), ("company", "Company", 1, 0),
+            ("location", "Location *", 1, 1), ("area", "Area / Worksite", 2, 0),
+        ]:
+            edit(name, label_text, details_grid, row, col)
         edits["project"].setText(safe(db.setting("project_name", "")))
         edits["company"].setText(safe(db.setting("company_name", "")))
 
         obs_type = QComboBox(); obs_type.addItems(OBS_TYPES)
-        form.addRow("Observation Type:", obs_type)
         category = QComboBox(); category.addItems(CATEGORIES)
-        form.addRow("Category:", category)
-        edit("subcategory")
+        add_tile(details_grid, 2, 1, "Observation Type", obs_type)
+        add_tile(details_grid, 3, 0, "Category", category)
+        edit("subcategory", "Subcategory", details_grid, 3, 1)
 
-        observation = QTextEdit(); observation.setMinimumHeight(100)
-        form.addRow("Observation Description:", observation)
+        for name, label_text, row, col in [
+            ("responsible", "Responsible Person", 0, 0), ("designation", "Designation", 0, 1),
+            ("employee_id", "Employee ID", 1, 0), ("observer", "Observer Name", 1, 1),
+            ("observer_designation", "Observer Designation", 2, 0), ("observer_id", "Observer ID", 2, 1),
+            ("observer_company", "Observer Company", 3, 0),
+        ]:
+            edit(name, label_text, people_grid, row, col)
 
-        actions_box = QGroupBox("Corrective Action(s) — add one or more")
+        description_card, description_grid = make_card("OBSERVATION DESCRIPTION")
+        observation = QTextEdit()
+        observation.setPlaceholderText("Describe what was observed, where it happened, the unsafe condition or act, and any immediate risk...")
+        observation.setMinimumHeight(145)
+        observation.setAcceptRichText(False)
+        description_grid.addWidget(observation, 0, 0, 1, 2)
+        content_layout.addWidget(description_card)
+
+        actions_box = QGroupBox("CORRECTIVE ACTION PLAN")
         actions_layout = QVBoxLayout(actions_box)
+        actions_layout.setContentsMargins(12, 18, 12, 12)
+        actions_layout.setSpacing(9)
         action_rows = []
 
         def add_action_row(text=""):
@@ -6172,16 +6254,19 @@ class MainWindow(QMainWindow):
             row_l.setContentsMargins(0, 0, 0, 0)
             idx = QLabel(str(len(action_rows) + 1) + ".")
             idx.setFixedWidth(28)
+            idx.setStyleSheet("font-weight:700;color:#1769aa;")
             te = QTextEdit()
-            te.setPlaceholderText("Corrective action required")
-            te.setFixedHeight(54)
+            te.setPlaceholderText("Describe the corrective action required, responsible measure and expected result...")
+            te.setMinimumHeight(92)
+            te.setMaximumHeight(125)
+            te.setAcceptRichText(False)
             if text:
                 te.setPlainText(text)
             rem = QPushButton("Remove")
-            rem.setFixedWidth(80)
-            row_l.addWidget(idx)
+            rem.setFixedWidth(82)
+            row_l.addWidget(idx, 0, Qt.AlignmentFlag.AlignTop)
             row_l.addWidget(te, 1)
-            row_l.addWidget(rem)
+            row_l.addWidget(rem, 0, Qt.AlignmentFlag.AlignTop)
             actions_layout.insertWidget(max(0, actions_layout.count() - 1), row_w)
             entry = {"widget": row_w, "edit": te, "label": idx}
             action_rows.append(entry)
@@ -6200,32 +6285,34 @@ class MainWindow(QMainWindow):
         add_btn.clicked.connect(lambda: add_action_row())
         actions_layout.addWidget(add_btn)
         add_action_row()
-        form.addRow(actions_box)
+        content_layout.addWidget(actions_box)
 
+        follow_card, follow_grid = make_card("FOLLOW-UP & CLASSIFICATION")
         priority = QComboBox(); priority.addItems(PRIORITIES)
-        form.addRow("Priority:", priority)
         target = QDateEdit(); target.setCalendarPopup(True); target.setDate(datetime.now().date())
-        form.addRow("Target Completion Date:", target)
         status = QComboBox(); status.addItems(STATUSES)
-        form.addRow("Status:", status)
-
-        capa_required = QComboBox()
-        capa_required.addItems(["No", "Yes"])
+        capa_required = QComboBox(); capa_required.addItems(["No", "Yes"])
         capa_required.setToolTip(
             "Select Yes when formal CAPA tracking is required. All observation details and corrective actions "
             "will be sent to the CAPA Tracking Register."
         )
-        form.addRow("CAPA Required?:", capa_required)
-        capa_hint = QLabel("If Yes, observation details and every corrective action are created in CAPA Tracking Register.")
-        capa_hint.setStyleSheet("color:#245486;font-size:11px;")
+        add_tile(follow_grid, 0, 0, "Priority", priority)
+        add_tile(follow_grid, 0, 1, "Target Completion Date", target)
+        add_tile(follow_grid, 1, 0, "Status", status)
+        add_tile(follow_grid, 1, 1, "CAPA Required?", capa_required)
+        capa_hint = QLabel("If Yes, the observation and every corrective action will also be created in the CAPA Tracking Register.")
         capa_hint.setWordWrap(True)
-        form.addRow("", capa_hint)
+        capa_hint.setStyleSheet("color:#245486;font-size:11px;padding:3px;")
+        follow_grid.addWidget(capa_hint, 2, 0, 1, 2)
+        content_layout.addWidget(follow_card)
 
+        attachment_card, attachment_grid = make_card("EVIDENCE & ATTACHMENTS")
         attachment_paths = []
         attachment_label = QLabel("No evidence files selected.")
         attachment_label.setWordWrap(True)
+        attachment_label.setStyleSheet("color:#64748b;font-size:11px;")
         attach_button = QPushButton("Attach Evidence Files")
-        attach_button.setMinimumHeight(36)
+        attach_button.setMinimumHeight(38)
 
         def choose_files():
             paths, _ = QFileDialog.getOpenFileNames(
@@ -6238,8 +6325,10 @@ class MainWindow(QMainWindow):
                 attachment_label.setText("\n".join(Path(p).name for p in paths))
 
         attach_button.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments:", attach_button)
-        form.addRow("Selected Files:", attachment_label)
+        attachment_grid.addWidget(attach_button, 0, 0)
+        attachment_grid.addWidget(attachment_label, 0, 1)
+        content_layout.addWidget(attachment_card)
+        content_layout.addStretch(1)
 
         scroll_area.setWidget(content)
         outer.addWidget(scroll_area, 1)
@@ -6247,8 +6336,9 @@ class MainWindow(QMainWindow):
         buttons = QDialogButtonBox()
         save_button = buttons.addButton("Save Observation", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-        save_button.setMinimumHeight(40)
-        cancel_button.setMinimumHeight(40)
+        save_button.setObjectName("primaryAction")
+        save_button.setMinimumHeight(42)
+        cancel_button.setMinimumHeight(42)
         outer.addWidget(buttons)
         cancel_button.clicked.connect(dialog.reject)
 
@@ -12764,1990 +12854,6 @@ def _stamp():
 
 
 # ============================================================
-# ISO 14001 — ASPECT & IMPACT REGISTER MODULE
-# Additive, self-contained. Does not alter existing HSE tables.
-# ============================================================
-
-# Severity / Probability scales (ISO 14001 style risk matrix)
-# Severity: 1 Negligible … 5 Catastrophic
-# Probability: 1 Rare … 5 Almost Certain
-# Risk Score = Severity × Probability
-# Significance: score >= 12 Significant; 6–11 Moderate; <6 Low
-
-ASPECT_ACTIVITIES = {
-    "Welding / Hot Work": [
-        {
-            "aspect": "Emission of welding fumes and metal oxides",
-            "impact": "Local air quality deterioration; potential respiratory harm to workers and nearby receptors",
-            "regulatory": "Air Pollution Control / Local emission limits; ISO 14001 6.1.2; OHS welding fume exposure limits",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Local exhaust ventilation (LEV); fume extraction; suitable respiratory protection; hot-work permit; positioning of work away from sensitive receptors",
-        },
-        {
-            "aspect": "Generation of welding slag, consumable waste and electrode stubs",
-            "impact": "Solid waste generation; potential contamination if disposed incorrectly",
-            "regulatory": "Waste management regulations; hazardous waste rules where applicable",
-            "severity": 2,
-            "probability": 4,
-            "controls": "Segregated scrap bins; licensed waste contractor; return of unused consumables; housekeeping at work front",
-        },
-        {
-            "aspect": "Use of energy (electricity / gas) for welding equipment",
-            "impact": "Contribution to energy consumption and associated indirect GHG emissions",
-            "regulatory": "Energy efficiency expectations; ISO 14001 6.1.2; company energy policy",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Switch off idle machines; efficient welding processes; planned work sequences to reduce rework",
-        },
-        {
-            "aspect": "UV / IR radiation and hot surfaces during welding",
-            "impact": "Potential secondary fires affecting vegetation or materials; environmental incident risk",
-            "regulatory": "Fire prevention requirements; hot-work controls",
-            "severity": 3,
-            "probability": 2,
-            "controls": "Fire watch; remove combustibles; fire extinguisher at point of work; post-work fire watch duration as procedure",
-        },
-    ],
-    "Chemical Handling & Storage": [
-        {
-            "aspect": "Storage and handling of hazardous chemicals (solvents, acids, reagents)",
-            "impact": "Soil and groundwater contamination risk from spills/leaks; harm to aquatic life",
-            "regulatory": "Hazardous substances storage rules; spill containment; SDS requirements; ISO 14001 8.1",
-            "severity": 4,
-            "probability": 3,
-            "controls": "Bunded storage; secondary containment (≥110%); compatible segregation; SDS available; spill kits; trained handlers; inventory control",
-        },
-        {
-            "aspect": "Emission of volatile organic compounds (VOCs) from solvents",
-            "impact": "Air pollution; contribution to photochemical smog; odour nuisance",
-            "regulatory": "VOC emission limits; air quality regulations",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Closed containers; low-VOC alternatives where practicable; ventilation; minimise open transfer",
-        },
-        {
-            "aspect": "Generation of chemical waste and empty containers",
-            "impact": "Hazardous waste requiring controlled disposal",
-            "regulatory": "Hazardous waste regulations; cradle-to-grave tracking",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Labelled hazardous waste streams; licensed disposal; empty drums managed as per residual content; waste manifests",
-        },
-    ],
-    "Painting / Coating": [
-        {
-            "aspect": "Emission of paint fumes, solvents and overspray",
-            "impact": "Air quality impact; odour; potential deposition on surrounding surfaces/vegetation",
-            "regulatory": "Air emission / VOC controls; local environmental permits where required",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Enclosed or controlled spray areas; extract ventilation; low-VOC coatings; wind consideration for outdoor spraying; PPE",
-        },
-        {
-            "aspect": "Paint sludge, waste paint and contaminated consumables",
-            "impact": "Hazardous solid/liquid waste generation",
-            "regulatory": "Hazardous waste rules; waste hierarchy",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Segregated waste; lids on containers; licensed disposal; minimise over-ordering",
-        },
-        {
-            "aspect": "Spill of paint or thinner to ground / drains",
-            "impact": "Soil and water contamination",
-            "regulatory": "Pollution prevention; drainage protection requirements",
-            "severity": 4,
-            "probability": 2,
-            "controls": "Spill trays; drain covers; immediate spill response; no washing into drains",
-        },
-    ],
-    "Vehicle Operation / Driving": [
-        {
-            "aspect": "Exhaust emissions (NOx, CO, PM, CO₂) from vehicles and mobile plant",
-            "impact": "Air pollution and contribution to climate change",
-            "regulatory": "Vehicle emission standards; company fleet policy; ISO 14001 energy/GHG aspects",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Well-maintained fleet; no idling policy; route planning; prefer efficient vehicles; emissions inspection",
-        },
-        {
-            "aspect": "Fuel spills during refuelling",
-            "impact": "Soil and groundwater contamination",
-            "regulatory": "Pollution control; spill prevention requirements",
-            "severity": 4,
-            "probability": 2,
-            "controls": "Spill kits at refuel points; drip trays; trained operators; report and clean spills immediately",
-        },
-        {
-            "aspect": "Noise from vehicle movements",
-            "impact": "Noise nuisance to neighbours and wildlife disturbance",
-            "regulatory": "Noise limits; local authority / project noise conditions",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Speed limits; restricted night movements; well-maintained exhausts; designated haul routes",
-        },
-    ],
-    "Blasting / Abrasive Blasting": [
-        {
-            "aspect": "Release of abrasive dust and spent grit",
-            "impact": "Airborne particulate pollution; deposition on land and water; respiratory risk",
-            "regulatory": "Air quality / particulate controls; abrasive blasting controls; waste rules",
-            "severity": 4,
-            "probability": 4,
-            "controls": "Containment / tenting; dust extraction; wet methods where suitable; PPE; barrier zones; grit recovery",
-        },
-        {
-            "aspect": "Noise and vibration from blasting operations",
-            "impact": "Noise nuisance; potential structural/environmental disturbance",
-            "regulatory": "Noise and vibration limits; project environmental conditions",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Scheduled blasting windows; barriers; monitoring; community notification where required",
-        },
-        {
-            "aspect": "Contaminated blast media (heavy metals, coatings)",
-            "impact": "Hazardous waste; soil contamination if uncontrolled",
-            "regulatory": "Hazardous waste classification and disposal",
-            "severity": 4,
-            "probability": 3,
-            "controls": "Test spent media; sealed storage; licensed disposal; no open dumping",
-        },
-    ],
-    "Concreting / Concrete Works": [
-        {
-            "aspect": "Cementitious wash water and alkaline runoff",
-            "impact": "High pH discharge to drains/watercourses; harm to aquatic organisms",
-            "regulatory": "Water discharge controls; prohibition on uncontrolled discharge to environment",
-            "severity": 4,
-            "probability": 3,
-            "controls": "Wash-out bays; settlement; pH treatment before disposal; never discharge untreated wash water to storm drains",
-        },
-        {
-            "aspect": "Cement dust emissions during mixing and pouring",
-            "impact": "Airborne particulate; local deposition",
-            "regulatory": "Dust control expectations; air quality",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Enclosed mixers where practicable; dust suppression; covered storage of cement; PPE",
-        },
-        {
-            "aspect": "Waste concrete and packaging",
-            "impact": "Inert waste volume; resource use",
-            "regulatory": "Construction waste rules; waste hierarchy",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Order optimisation; reuse surplus where suitable; segregated skips; licensed disposal/recycling",
-        },
-    ],
-    "Civil Works / Earthworks": [
-        {
-            "aspect": "Soil excavation, stockpiling and potential erosion",
-            "impact": "Sediment runoff to watercourses; loss of topsoil; habitat disturbance",
-            "regulatory": "Erosion and sediment control; water quality; project environmental conditions",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Silt fences / bunds; covered stockpiles; phased excavation; drainage design; reinstatement plans",
-        },
-        {
-            "aspect": "Dust from earthmoving and haul roads",
-            "impact": "Air quality impact; nuisance to neighbours",
-            "regulatory": "Dust management plans; local air quality expectations",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Water spraying; speed limits; covered loads; stabilised haul roads",
-        },
-        {
-            "aspect": "Fuel and oil use by earthmoving plant",
-            "impact": "Spill risk to soil and water; resource consumption",
-            "regulatory": "Pollution prevention; plant maintenance standards",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Plant nappies / drip trays; daily checks; spill response; refuel in designated areas",
-        },
-    ],
-    "Mechanical Works / Installation": [
-        {
-            "aspect": "Cutting, grinding and machining of metals — noise, sparks and swarf",
-            "impact": "Noise; particulate; hot-work related fire risk to surroundings",
-            "regulatory": "Noise and hot-work controls; waste management for metal scrap",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Guarding; local extraction; hot-work controls; metal recycling bins; hearing protection zones",
-        },
-        {
-            "aspect": "Use of lubricants, hydraulic oils and greases",
-            "impact": "Potential soil/water contamination from leaks",
-            "regulatory": "Pollution prevention; hazardous substance storage",
-            "severity": 3,
-            "probability": 2,
-            "controls": "Spill trays; leak inspections; proper storage; used oil recovery by licensed contractor",
-        },
-        {
-            "aspect": "Packaging and installation waste",
-            "impact": "General and recyclable waste generation",
-            "regulatory": "Waste hierarchy; segregation requirements",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Segregated waste streams; return packaging to suppliers where possible; avoid over-packaging",
-        },
-    ],
-    "Excavation & Trenching": [
-        {
-            "aspect": "Disturbance of soil and potential contaminated ground",
-            "impact": "Mobilisation of contaminants; sediment runoff; damage to buried services with pollution risk",
-            "regulatory": "Contaminated land protocols; excavation permits; utility protection",
-            "severity": 4,
-            "probability": 3,
-            "controls": "Desktop and ground investigation review; excavation permit; stockpile management; unexpected finds procedure",
-        },
-        {
-            "aspect": "Dewatering discharge from excavations",
-            "impact": "Sediment and potentially contaminated water discharged to environment",
-            "regulatory": "Discharge consents / permits; water quality limits",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Settlement tanks; filtration; test before discharge; no uncontrolled pumping to storm system",
-        },
-    ],
-    "Scaffolding & Temporary Works": [
-        {
-            "aspect": "Transport, storage and eventual disposal of scaffold materials",
-            "impact": "Resource use; waste at demobilisation; potential ground damage from storage",
-            "regulatory": "Waste and materials management expectations",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Reuse scaffold components; designated storage areas; protect ground surfaces; orderly demobilisation",
-        },
-        {
-            "aspect": "Paint / coating debris from scaffold near coated structures",
-            "impact": "Local contamination of ground if debris not collected",
-            "regulatory": "Housekeeping and pollution prevention",
-            "severity": 2,
-            "probability": 2,
-            "controls": "Debris nets / sheeting; daily clean-up; designated collection points",
-        },
-    ],
-    "Electrical Works": [
-        {
-            "aspect": "Disposal of electrical waste, cables and batteries",
-            "impact": "WEEE / hazardous components if not properly recycled",
-            "regulatory": "WEEE / electrical waste regulations; battery rules",
-            "severity": 3,
-            "probability": 2,
-            "controls": "Segregated WEEE stream; licensed recyclers; no landfill of batteries",
-        },
-        {
-            "aspect": "SF₆ or other insulating gases (where applicable)",
-            "impact": "High global-warming-potential GHG release if leaked",
-            "regulatory": "F-gas / GHG handling rules where applicable",
-            "severity": 4,
-            "probability": 1,
-            "controls": "Certified handlers only; leak checks; recovery equipment; record quantities",
-        },
-    ],
-    "Housekeeping & Waste Management": [
-        {
-            "aspect": "Generation and segregation of general, recyclable and hazardous waste",
-            "impact": "Landfill burden; pollution if mixed or illegally dumped",
-            "regulatory": "Waste duty of care; hazardous waste rules; ISO 14001 operational control",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Colour-coded bins; clear labelling; staff awareness; licensed carriers; waste transfer notes; audits of segregation",
-        },
-        {
-            "aspect": "Litter and wind-blown waste from site",
-            "impact": "Visual impact; pollution of surrounding land and drains",
-            "regulatory": "Site environmental rules; local cleanliness expectations",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Covered skips; daily housekeeping; perimeter checks; secure storage",
-        },
-    ],
-    "Fuel Storage & Refuelling": [
-        {
-            "aspect": "Bulk or intermediate fuel storage",
-            "impact": "Major soil and groundwater contamination risk from tank failure or overfill",
-            "regulatory": "Oil storage regulations; bunding requirements; spill response planning",
-            "severity": 5,
-            "probability": 2,
-            "controls": "Double-skinned or bunded tanks; overfill protection; inspection regime; spill response plan and drills; inventory reconciliation",
-        },
-        {
-            "aspect": "Mobile refuelling of plant",
-            "impact": "Localised spills to soil",
-            "regulatory": "Pollution prevention good practice",
-            "severity": 3,
-            "probability": 3,
-            "controls": "Designated refuel points; drip trays; spill kits; trained operators; no refuel near drains or water",
-        },
-    ],
-    "Water Use & Discharge": [
-        {
-            "aspect": "Consumption of potable / process water",
-            "impact": "Resource depletion; associated energy for treatment and supply",
-            "regulatory": "Water efficiency expectations; company sustainability policy",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Metering; leak repair; reuse of non-potable water where suitable; awareness campaigns",
-        },
-        {
-            "aspect": "Trade effluent / process water discharge",
-            "impact": "Watercourse pollution if untreated or outside consent limits",
-            "regulatory": "Discharge consents; trade effluent agreements",
-            "severity": 4,
-            "probability": 2,
-            "controls": "Consent compliance monitoring; treatment systems; diversion of incompatible streams; emergency shut-off",
-        },
-    ],
-    "Office / Admin Activities": [
-        {
-            "aspect": "Paper, toner and general office consumables",
-            "impact": "Resource use and waste generation",
-            "regulatory": "Waste hierarchy; company green office policy",
-            "severity": 1,
-            "probability": 4,
-            "controls": "Digital workflows; duplex printing; recycled paper; toner recycling",
-        },
-        {
-            "aspect": "Energy use for lighting, HVAC and IT",
-            "impact": "Indirect GHG emissions",
-            "regulatory": "Energy management expectations; ISO 14001",
-            "severity": 2,
-            "probability": 4,
-            "controls": "LED lighting; set-back temperatures; switch-off policy; efficient IT equipment",
-        },
-    ],
-    "Emergency Response / Spill Response": [
-        {
-            "aspect": "Deployment of absorbents and response materials during incidents",
-            "impact": "Generation of contaminated waste; residual environmental impact of the original spill",
-            "regulatory": "Emergency preparedness ISO 14001 8.2; pollution incident response duties",
-            "severity": 4,
-            "probability": 2,
-            "controls": "Trained response teams; stocked spill kits; contaminated waste labelled and disposed as hazardous; post-incident review",
-        },
-    ],
-    "Catering / Welfare Facilities": [
-        {
-            "aspect": "Food waste and packaging from canteens",
-            "impact": "Organic waste; attraction of pests; landfill methane if not managed",
-            "regulatory": "Food waste rules where applicable; pest control",
-            "severity": 2,
-            "probability": 3,
-            "controls": "Segregated food waste; covered bins; frequent collection; minimise single-use packaging",
-        },
-        {
-            "aspect": "Wastewater from welfare and ablutions",
-            "impact": "Sanitary pollution if systems fail",
-            "regulatory": "Sanitation and sewage rules",
-            "severity": 3,
-            "probability": 1,
-            "controls": "Maintained septic / connection systems; no discharge of chemicals to toilets; inspection regime",
-        },
-    ],
-    "Demolition Works": [
-        {
-            "aspect": "Dust, noise and vibration from demolition",
-            "impact": "Air quality, noise nuisance, potential structural effects on surroundings",
-            "regulatory": "Demolition notifications; noise/dust conditions; asbestos rules where relevant",
-            "severity": 4,
-            "probability": 4,
-            "controls": "Method statements; water suppression; screening; monitoring; sequential soft-strip; licensed asbestos removal if present",
-        },
-        {
-            "aspect": "Construction and demolition waste streams including potential hazardous materials",
-            "impact": "Large waste volumes; contamination risk if mixed",
-            "regulatory": "C&D waste regulations; hazardous waste identification",
-            "severity": 3,
-            "probability": 4,
-            "controls": "Pre-demolition audit; segregation; recycling targets; licensed carriers; hazardous materials survey",
-        },
-    ],
-    "Lifting & Crane Operations": [
-        {
-            "aspect": "Hydraulic oil leaks from mobile cranes and lifting plant",
-            "impact": "Soil contamination",
-            "regulatory": "Pollution prevention; plant integrity",
-            "severity": 3,
-            "probability": 2,
-            "controls": "Pre-use inspections; drip trays under stationary plant; spill kits; prompt repair of leaks",
-        },
-        {
-            "aspect": "Energy use and exhaust from mobile cranes",
-            "impact": "Air emissions and fuel consumption",
-            "regulatory": "Fleet / emissions expectations",
-            "severity": 2,
-            "probability": 3,
-            "controls": "No unnecessary idling; planned lifts to minimise running time; maintained engines",
-        },
-    ],
-    "Confined Space Entry": [
-        {
-            "aspect": "Use of forced ventilation and potential release of displaced atmospheres",
-            "impact": "Local air quality effects; possible release of hazardous gases",
-            "regulatory": "Confined space and atmospheric controls; environmental incident reporting if releases occur",
-            "severity": 3,
-            "probability": 2,
-            "controls": "Gas testing; controlled ventilation direction; monitoring; emergency plans",
-        },
-    ],
-    "Landscaping / Reinstatement": [
-        {
-            "aspect": "Import and placement of soils and landscaping materials",
-            "impact": "Potential introduction of invasive species or contaminated soils; positive habitat creation if done well",
-            "regulatory": "Soil movement controls; invasive species rules",
-            "severity": 2,
-            "probability": 2,
-            "controls": "Source-verified materials; inspection for invasives; appropriate native planting where specified",
-        },
-    ],
-    "Drilling & Well Operations": [
-        {"aspect":"Drilling muds, cuttings and spent drilling fluids","impact":"Potential soil, groundwater or marine contamination; generation of controlled drilling waste","regulatory":"Qatar Law No. 30 of 2002 (environmental protection); applicable waste and discharge permits; ISO 14001 6.1.3","severity":4,"probability":3,"controls":"Use approved drilling-fluid systems; segregate and characterise cuttings; closed handling; approved treatment/disposal route; retain waste manifests and discharge records"},
-        {"aspect":"Well testing, flaring and venting","impact":"Greenhouse-gas emissions and local air pollutants; light and noise nuisance","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; facility emission limits and permit conditions","severity":4,"probability":3,"controls":"Minimise flaring and venting where technically safe; monitor and record volumes; maintain combustion equipment; follow approved operating and emergency procedures"},
-        {"aspect":"Hydrocarbon release from well control failure","impact":"Potential major soil, groundwater and marine pollution; harm to habitats and wildlife","regulatory":"Qatar Law No. 30 of 2002; approved emergency response and spill contingency plans","severity":5,"probability":2,"controls":"Well integrity barriers; pressure-control maintenance; tested blowout prevention systems; emergency response readiness; spill containment and incident reporting"},
-    ],
-    "Oil & Gas Production / Process Operations": [
-        {"aspect":"Produced water and process wastewater generation/discharge","impact":"Potential marine or groundwater pollution from hydrocarbons, salts and treatment chemicals","regulatory":"Qatar Law No. 30 of 2002; applicable water discharge consent, permit and monitoring limits","severity":5,"probability":3,"controls":"Operate and maintain treatment systems; sample and analyse effluent; monitor discharge limits; segregate off-spec water and retain records"},
-        {"aspect":"Fugitive methane and VOC emissions from valves, flanges and seals","impact":"Greenhouse-gas contribution, photochemical smog and local air quality impacts","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 37; applicable facility permit conditions","severity":4,"probability":3,"controls":"Leak detection and repair programme; preventive maintenance; emissions monitoring; promptly repair leaking components"},
-        {"aspect":"Process chemical use and storage","impact":"Spill or leak may contaminate soil, groundwater and marine environment","regulatory":"Qatar Law No. 30 of 2002, Article 27; hazardous material controls and SDS requirements","severity":4,"probability":3,"controls":"Approved chemical register; compatible segregation; bunding; closed transfer; SDS; inspections and spill kits"},
-        {"aspect":"Process equipment energy and fuel consumption","impact":"Resource depletion and indirect/direct greenhouse-gas emissions","regulatory":"ISO 14001 6.1.2; company energy and emissions objectives","severity":3,"probability":4,"controls":"Energy metering; efficient operating envelope; equipment maintenance; optimise utilities and avoid unnecessary flaring"},
-    ],
-    "Pipeline Operation, Pigging & Integrity Maintenance": [
-        {"aspect":"Hydrocarbon leakage from pipeline corrosion, joints or failure","impact":"Soil and water contamination; potential marine pollution and ecosystem damage","regulatory":"Qatar Law No. 30 of 2002; applicable pipeline and environmental permit conditions","severity":5,"probability":2,"controls":"Integrity management; corrosion monitoring; leak detection; right-of-way patrols; emergency isolation and spill response"},
-        {"aspect":"Pigging waste, wax, scale and contaminated liquids","impact":"Hazardous or controlled waste generation; potential soil and water contamination","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; approved waste handling/disposal requirements","severity":4,"probability":3,"controls":"Closed pig receiver handling; characterise residues; labelled sealed containers; licensed waste contractor and disposal records"},
-    ],
-    "Tank Farm, Terminal & Hydrocarbon Storage": [
-        {"aspect":"Tank overfill, leaks and hydrocarbon spills","impact":"Soil, groundwater and potentially marine contamination; fire-related secondary environmental damage","regulatory":"Qatar Law No. 30 of 2002; facility environmental permit and spill response plan","severity":5,"probability":2,"controls":"Secondary containment; overfill prevention; tank inspection; level alarms; drain isolation; tested emergency response"},
-        {"aspect":"Tank breathing, loading and transfer vapour emissions","impact":"VOC emissions, odour and contribution to air pollution","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; applicable emission conditions","severity":4,"probability":3,"controls":"Vapour recovery where required; closed loading; seal maintenance; emissions inspection and operating controls"},
-        {"aspect":"Oily sludge and tank-cleaning residues","impact":"Hazardous waste generation and contamination risk during handling","regulatory":"Qatar Law No. 30 of 2002, Articles 25–27; authorised waste treatment/disposal requirements","severity":4,"probability":3,"controls":"Waste characterisation; impermeable staging; covered labelled containers; approved transporter and treatment facility"},
-    ],
-    "Offshore Platform & Marine Operations": [
-        {"aspect":"Offshore discharges, drainage and deck runoff","impact":"Marine water contamination and potential effects on aquatic organisms","regulatory":"Qatar Law No. 30 of 2002, Part 3; applicable marine discharge permit conditions","severity":5,"probability":3,"controls":"Segregate clean and contaminated drains; maintain treatment; monitor discharge quality; prohibit unauthorised discharge"},
-        {"aspect":"Vessel exhaust, noise and lighting","impact":"Air emissions, underwater/noise disturbance and light effects on marine wildlife","regulatory":"Qatar Law No. 30 of 2002; applicable vessel, port and project requirements","severity":3,"probability":3,"controls":"Maintain engines; minimise idling; plan vessel movements; use task lighting efficiently; comply with operating limits"},
-        {"aspect":"Marine spill from bunkering, hose failure or vessel collision","impact":"Oil slick, shoreline contamination and harm to marine habitats and wildlife","regulatory":"Qatar Law No. 30 of 2002, marine pollution provisions; approved SOPEP/OSCP and port requirements","severity":5,"probability":2,"controls":"Bunkering checklist; hose inspection; scupper plugs; booms and response equipment; trained responders and drills"},
-    ],
-    "Refinery & Gas Processing": [
-        {"aspect":"Combustion emissions from heaters, boilers and turbines","impact":"NOx, SOx, particulate and greenhouse-gas emissions affecting air quality and climate","regulatory":"Qatar Law No. 30 of 2002, Articles 30–33; applicable stack emission limits","severity":4,"probability":4,"controls":"Combustion tuning; preventive maintenance; stack monitoring; fuel quality control; maintain emissions records"},
-        {"aspect":"Catalyst, spent adsorbent and process residue generation","impact":"Potential hazardous waste and contamination if mishandled","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; authorised hazardous waste handling","severity":4,"probability":3,"controls":"Characterise waste; segregate and label; secure temporary storage; use approved recovery/disposal contractor"},
-        {"aspect":"Cooling water abstraction and blowdown","impact":"Water resource consumption and potential thermal/chemical impact on receiving waters","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; applicable abstraction/discharge conditions","severity":4,"probability":3,"controls":"Optimise cooling cycles; monitor blowdown quality and temperature; maintain treatment; comply with discharge consent"},
-    ],
-    "Gas Compression, Flaring & Utilities": [
-        {"aspect":"Compressor seal leakage and gas venting","impact":"Methane emissions and contribution to climate change","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 37; facility permit conditions","severity":4,"probability":3,"controls":"Seal monitoring; leak detection and repair; maintain compressor packages; record venting events"},
-        {"aspect":"Flare operation and pilot fuel consumption","impact":"Combustion emissions, light and noise; greenhouse-gas emissions","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 33; approved flare management requirements","severity":4,"probability":3,"controls":"Flare minimisation; maintain flare tips and pilots; monitor flare events; investigate abnormal flaring"},
-    ],
-    "Hydrotesting, Flushing & Chemical Cleaning": [
-        {"aspect":"Hydrotest water withdrawal and discharge","impact":"Water consumption; discharge may carry corrosion inhibitors, solids or contaminants","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; applicable discharge consent","severity":4,"probability":3,"controls":"Use approved water source; assess additives; test water before discharge; collect and treat or dispose through approved route"},
-        {"aspect":"Chemical cleaning fluids and spent solutions","impact":"Potential hazardous liquid waste and soil/water contamination","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; hazardous waste and chemical handling requirements","severity":4,"probability":3,"controls":"Approve chemical method; bund tanks; neutralise only under approved procedure; analyse residues; use authorised waste contractor"},
-    ],
-    "Sandblasting, Coating & Insulation Removal": [
-        {"aspect":"Abrasive dust, paint particles and coating overspray","impact":"Airborne particulate and potential deposition on soil or marine surfaces","regulatory":"Qatar Law No. 30 of 2002, Articles 30 and 36; project air/noise conditions","severity":4,"probability":3,"controls":"Contain blasting; use suitable extraction; select approved abrasives; monitor dust; collect spent abrasive"},
-        {"aspect":"Spent abrasive and removed coating waste","impact":"Potential hazardous waste depending on coating composition and contaminants","regulatory":"Qatar Law No. 30 of 2002, Articles 25–27; waste classification requirements","severity":4,"probability":3,"controls":"Test/characterise waste; segregate; covered storage; prevent runoff; authorised disposal"},
-    ],
-    "Wastewater Treatment & Desalination": [
-        {"aspect":"Brine, sludge and treatment residuals","impact":"Potential salinity, temperature or chemical changes in receiving waters; waste generation","regulatory":"Qatar Law No. 30 of 2002, Articles 40–42; discharge permit limits","severity":4,"probability":3,"controls":"Monitor discharge quality; optimise treatment; contain sludge; approved disposal; retain laboratory records"},
-        {"aspect":"Treatment chemical storage and dosing","impact":"Chemical release may affect soil, groundwater or marine environment","regulatory":"Qatar Law No. 30 of 2002, Article 27; chemical storage and spill control requirements","severity":4,"probability":2,"controls":"Bunded dosing skids; dosing interlocks; SDS; inspections; emergency isolation and spill response"},
-    ],
-    "Waste Handling, Skip & Sludge Management": [
-        {"aspect":"Mixing, leakage or improper storage of hazardous and non-hazardous waste","impact":"Soil/water contamination, odour, pests and increased disposal impacts","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; approved waste management conditions","severity":4,"probability":3,"controls":"Waste segregation; compatible sealed containers; covered skips; inspections; licensed transport and traceable manifests"},
-    ],
-    "Exploration & Geophysical Surveys": [
-        {"aspect":"Seismic survey vehicle and equipment emissions, noise and vibration","impact":"Air quality and noise disturbance; potential effects on nearby communities and wildlife","regulatory":"Qatar Law No. 30 of 2002, applicable EIA/project approval conditions and environmental noise requirements","severity":3,"probability":3,"controls":"Approved survey plan; maintained equipment; route and timing controls; noise management; avoid sensitive habitats where required"},
-        {"aspect":"Survey camp waste, wastewater and fuel/chemical storage","impact":"Soil and groundwater contamination; waste generation and resource consumption","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; project environmental conditions","severity":3,"probability":3,"controls":"Designated contained storage; segregated waste; sewage collection/treatment; spill kits; approved waste removal and records"},
-    ],
-    "Well Workover, Intervention & Abandonment": [
-        {"aspect":"Workover fluids, completion chemicals and recovered hydrocarbons","impact":"Potential soil, groundwater or marine contamination and controlled waste generation","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27; applicable well and environmental permit conditions","severity":4,"probability":3,"controls":"Closed fluid handling; chemical approval and SDS; bunded tanks; waste characterisation; approved recovery/disposal route"},
-        {"aspect":"Well suspension or abandonment materials and site reinstatement","impact":"Potential long-term leakage or contamination; disturbance of land and habitats","regulatory":"Qatar Law No. 30 of 2002; approved abandonment, closure and reinstatement plans","severity":5,"probability":2,"controls":"Approved abandonment design; verified barriers; well integrity records; remove waste/materials; inspect and document reinstatement"},
-    ],
-    "Hydrocarbon Transportation, Loading & Offloading": [
-        {"aspect":"Leakage or spill during pipeline, road tanker, ship loading or transfer","impact":"Soil, groundwater, shoreline or marine pollution; harm to aquatic habitats","regulatory":"Qatar Law No. 30 of 2002, applicable oil/marine pollution provisions and terminal/port permit conditions","severity":5,"probability":3,"controls":"Transfer checklist; hose and coupling inspection; overfill protection; emergency shutdown; drip trays; spill booms and response readiness"},
-        {"aspect":"Transport fleet and vessel fuel consumption and exhaust emissions","impact":"Greenhouse-gas emissions and local air pollutants","regulatory":"Qatar Law No. 30 of 2002, Articles 30–33; applicable vehicle, vessel and facility conditions","severity":3,"probability":4,"controls":"Preventive maintenance; efficient routing and loading; avoid unnecessary idling; monitor fuel and emissions"},
-    ],
-    "Oil & Gas Construction and Commissioning": [
-        {"aspect":"Land clearing, grading, excavation and temporary access roads","impact":"Land disturbance, erosion, dust and potential impacts to sensitive habitats","regulatory":"Qatar Law No. 30 of 2002, EIA/project approval provisions and applicable construction permit conditions","severity":3,"probability":3,"controls":"Approved construction footprint; erosion and sediment controls; dust suppression; topsoil management; reinstatement"},
-        {"aspect":"Construction waste, hydrotest fluids, flushing and commissioning releases","impact":"Waste generation and potential soil/water contamination from chemicals, oils or untreated water","regulatory":"Qatar Law No. 30 of 2002, Articles 24–27 and 32; applicable discharge and waste approvals","severity":4,"probability":3,"controls":"Construction environmental management plan; waste segregation; controlled collection and sampling; approved treatment/disposal; commissioning checks"},
-    ],
-}
-
-
-
-# Master Environmental Legal / Other Requirements library (seed).
-# Users can add site-specific obligations in the Legal Compliance Library tab.
-# This is environment-focused and does NOT link to CAPA in this version.
-LEGAL_LIBRARY_SEED = [
-    {
-        "ref_code": "ENV-AIR-001",
-        "title": "Air emission / ambient air quality controls",
-        "requirement_type": "Regulation",
-        "jurisdiction": "National / Local",
-        "source": "Air pollution control regulations",
-        "description": "Control of emissions from combustion, welding, coating, dust-generating activities; comply with applicable emission limits and nuisance rules.",
-        "iso_reference": "ISO 14001 6.1.2 / 8.1",
-        "default_category": "Air Emissions",
-    },
-    {
-        "ref_code": "ENV-WASTE-001",
-        "title": "Waste duty of care and segregation",
-        "requirement_type": "Regulation",
-        "jurisdiction": "National / Local",
-        "source": "Waste management regulations",
-        "description": "Segregate waste streams, use licensed carriers, retain transfer notes, and prevent illegal dumping or mixing of hazardous with non-hazardous waste.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Waste",
-    },
-    {
-        "ref_code": "ENV-WASTE-002",
-        "title": "Hazardous waste storage and disposal",
-        "requirement_type": "Regulation",
-        "jurisdiction": "National / Local",
-        "source": "Hazardous waste rules",
-        "description": "Label, contain, and dispose of hazardous waste (oils, chemicals, contaminated absorbents, batteries, WEEE) via authorised facilities only.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Waste",
-    },
-    {
-        "ref_code": "ENV-WATER-001",
-        "title": "Controlled water / trade effluent discharge",
-        "requirement_type": "Permit / Regulation",
-        "jurisdiction": "National / Local",
-        "source": "Water discharge / trade effluent rules",
-        "description": "No uncontrolled discharge of process water, cement wash water, or contaminated runoff to drains or watercourses without consent and treatment as required.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Water / Effluent",
-    },
-    {
-        "ref_code": "ENV-SPILL-001",
-        "title": "Spill prevention and response",
-        "requirement_type": "Regulation / Company",
-        "jurisdiction": "Site / Company",
-        "source": "Pollution prevention good practice / company procedure",
-        "description": "Provide secondary containment, spill kits, trained responders, and immediate reporting/cleanup of fuel, oil, and chemical spills.",
-        "iso_reference": "ISO 14001 8.2",
-        "default_category": "Land / Soil",
-    },
-    {
-        "ref_code": "ENV-FUEL-001",
-        "title": "Oil and fuel storage requirements",
-        "requirement_type": "Regulation",
-        "jurisdiction": "National / Local",
-        "source": "Oil storage regulations / good practice",
-        "description": "Bunded or double-skinned tanks, overfill protection, inspection, and refuelling controls to prevent land and water pollution.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Land / Soil",
-    },
-    {
-        "ref_code": "ENV-NOISE-001",
-        "title": "Environmental noise and vibration",
-        "requirement_type": "Regulation / Client",
-        "jurisdiction": "Local / Project",
-        "source": "Noise limits / project environmental conditions",
-        "description": "Comply with applicable noise limits, restricted hours, and monitoring where required for construction or industrial activities.",
-        "iso_reference": "ISO 14001 6.1.2",
-        "default_category": "Noise / Vibration",
-    },
-    {
-        "ref_code": "ENV-DUST-001",
-        "title": "Dust and particulate control",
-        "requirement_type": "Regulation / Client",
-        "jurisdiction": "Local / Project",
-        "source": "Air quality / project dust management",
-        "description": "Suppress and contain dust from earthworks, traffic, cutting, and abrasive blasting; protect neighbours and sensitive receptors.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Air Emissions",
-    },
-    {
-        "ref_code": "ENV-CHEM-001",
-        "title": "Hazardous substance storage and SDS",
-        "requirement_type": "Regulation",
-        "jurisdiction": "National / Site",
-        "source": "Chemical / hazardous substance rules",
-        "description": "Maintain SDS, compatible segregation, labelled containers, secondary containment, and controlled access for chemicals used on site.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Materials / Chemicals",
-    },
-    {
-        "ref_code": "ENV-ENERGY-001",
-        "title": "Energy use and efficiency expectations",
-        "requirement_type": "Company / Other",
-        "jurisdiction": "Company",
-        "source": "Company energy / sustainability policy",
-        "description": "Monitor significant energy uses, reduce idle running, and consider efficiency in plant and equipment selection.",
-        "iso_reference": "ISO 14001 6.1.2",
-        "default_category": "Energy / Resource",
-    },
-    {
-        "ref_code": "ENV-ISO-001",
-        "title": "ISO 14001 environmental aspects determination",
-        "requirement_type": "ISO / Other",
-        "jurisdiction": "Organisation",
-        "source": "ISO 14001 clause 6.1.2",
-        "description": "Determine environmental aspects, associated impacts, and significant aspects considering normal, abnormal, and emergency conditions and a life-cycle perspective as applicable.",
-        "iso_reference": "ISO 14001 6.1.2",
-        "default_category": "Other",
-    },
-    {
-        "ref_code": "ENV-ISO-002",
-        "title": "ISO 14001 compliance obligations",
-        "requirement_type": "ISO / Other",
-        "jurisdiction": "Organisation",
-        "source": "ISO 14001 clause 6.1.3",
-        "description": "Identify and have access to compliance obligations related to environmental aspects; take them into account in the EMS.",
-        "iso_reference": "ISO 14001 6.1.3",
-        "default_category": "Other",
-    },
-    {
-        "ref_code": "ENV-ISO-003",
-        "title": "ISO 14001 operational planning and control",
-        "requirement_type": "ISO / Other",
-        "jurisdiction": "Organisation",
-        "source": "ISO 14001 clause 8.1",
-        "description": "Implement operational controls for significant environmental aspects, including staged processes and outsourced processes as applicable.",
-        "iso_reference": "ISO 14001 8.1",
-        "default_category": "Other",
-    },
-    {
-        "ref_code": "ENV-ISO-004",
-        "title": "ISO 14001 emergency preparedness and response",
-        "requirement_type": "ISO / Other",
-        "jurisdiction": "Organisation",
-        "source": "ISO 14001 clause 8.2",
-        "description": "Prepare for and respond to potential environmental emergency situations; test and review response processes.",
-        "iso_reference": "ISO 14001 8.2",
-        "default_category": "Other",
-    },
-    {
-        "ref_code": "ENV-CLIENT-001",
-        "title": "Client / project environmental conditions",
-        "requirement_type": "Client",
-        "jurisdiction": "Project",
-        "source": "Contract / project environmental requirements",
-        "description": "Comply with project-specific environmental constraints (working hours, protected areas, waste targets, discharge limits) stated in the contract or EMP.",
-        "iso_reference": "ISO 14001 6.1.3",
-        "default_category": "Other",
-    },
-]
-
-
-# Qatar environmental obligations are reference prompts; verify current permits, regulations,
-# executive regulations and project/client conditions before treating any item as applicable.
-ASPECT_QATAR_LEGAL_SEED = [
-    ("QA-ENV-030-AIR", "Qatar Law No. 30 of 2002 — Air pollution and emissions", "Regulation", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 30–37", "Control air pollutant emissions, combustion gases and releases; verify current executive regulations, limits and facility permit conditions.", "Air Emissions"),
-    ("QA-ENV-030-WASTE", "Qatar Law No. 30 of 2002 — Waste and hazardous materials", "Regulation", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 24–27 and 32", "Check hazardous material precautions, hazardous waste authorisations, approved handling/disposal routes and waste records.", "Waste"),
-    ("QA-ENV-030-WATER", "Qatar Law No. 30 of 2002 — Water and marine environment", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Parts 3 and relevant Articles 40–61", "Assess water abstraction, effluent and marine discharges against applicable approvals, limits and receiving-environment requirements.", "Water / Effluent"),
-    ("QA-ENV-030-OIL", "Qatar Law No. 30 of 2002 — Oil and marine pollution prevention", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, marine pollution provisions", "Prevent oil and harmful-substance pollution from vessels, platforms, terminals, pipelines and land-based sources; apply approved contingency plans.", "Water / Effluent"),
-    ("QA-ENV-030-NOISE", "Qatar Law No. 30 of 2002 — Environmental noise", "Regulation / Project", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 28 and 36", "Control noise from machinery, equipment and operations against applicable limits and project conditions.", "Noise / Vibration"),
-    ("QA-ENV-030-EIA", "Qatar environmental impact assessment and project approval", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 11–20", "Confirm whether the activity requires an environmental assessment, approval or conditions before construction, modification or operation; retain approvals and implement mitigation commitments.", "Other"),
-    ("QA-ENV-030-EMERGENCY", "Qatar environmental emergency and contingency planning", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 21–23", "Identify credible environmental emergencies and maintain applicable contingency, notification, response, equipment, training and drill arrangements.", "Other"),
-    ("QA-ENV-030-AIR-FUEL", "Qatar combustion sources, fuel burning and vehicle exhaust", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 31 and 33", "Maintain engines, vehicles, boilers, heaters and generators; verify applicable exhaust and combustion emission limits and retain monitoring or maintenance evidence.", "Air Emissions"),
-    ("QA-ENV-030-WATER-GROUND", "Qatar surface water and groundwater protection", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 40–41", "Prevent contamination and unauthorised abstraction or discharge; assess runoff, dewatering, groundwater interaction and wastewater routes against applicable approvals.", "Water / Effluent"),
-    ("QA-ENV-030-MARINE-VESSEL", "Qatar vessel oil pollution prevention and response", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 43–50", "For vessel and offshore activities, prevent prohibited oil discharges, maintain applicable pollution-prevention and response arrangements, and retain transfer, inspection and incident records.", "Water / Effluent"),
-    ("QA-ENV-030-MARINE-WASTE", "Qatar vessel hazardous substances, sewage and garbage controls", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 51–54", "Manage hazardous substances, sewage and garbage from vessels through approved reception, storage, transfer and disposal arrangements; prevent unauthorised discharge to sea.", "Water / Effluent"),
-    ("QA-ENV-030-LAND-DISCHARGE", "Qatar land-based sources of aquatic pollution", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 55–61", "Assess land-based releases and discharges that may affect the aquatic environment; apply applicable treatment, monitoring, permit and incident-response conditions.", "Water / Effluent"),
-    ("QA-ENV-030-HAZ-RECORD", "Qatar hazardous waste producer records and authorised contractors", "Regulation / Permit", "Qatar", "Al Meezan — Law No. 30 of 2002, Articles 25–27", "Classify hazardous waste, use authorised handling, transport, treatment and disposal routes where required, and maintain waste descriptions, quantities, transfer records and contractor evidence.", "Waste"),
-    ("QA-MECC-IND-GUIDE", "Qatar MECC industrial environmental assessment technical guidance", "Guideline / Permit", "Qatar", "MECC Environmental Assessment & Permits Department — Technical Guideline EAPD-TG-EA-0002-19-V.04", "Where applicable to an industrial project assessment, document liquid waste and discharge routes, gaseous emission sources, solid waste handling/disposal, and hazardous waste/material transport, handling and storage.", "Other"),
-    ("ISO14001-6.1.3", "ISO 14001 environmental compliance obligations register", "ISO / Other", "International / Organisation", "ISO 14001:2015 clause 6.1.3", "Determine, access and maintain compliance obligations related to environmental aspects; identify how obligations apply and keep them current. Verify the organisation's controlled standard edition.", "Other"),
-    ("ISO14001-8.1", "ISO 14001 operational control and life-cycle perspective", "ISO / Other", "International / Organisation", "ISO 14001:2015 clause 8.1", "Establish operational criteria and controls for significant environmental aspects, outsourced processes, procurement and relevant life-cycle stages; communicate applicable requirements to contractors.", "Other"),
-]
-
-
-def _aspect_risk_score(severity, probability):
-    try:
-        return int(severity) * int(probability)
-    except Exception:
-        return 0
-
-
-def _aspect_significance(score):
-    score = int(score or 0)
-    if score >= 12:
-        return "Significant"
-    if score >= 6:
-        return "Moderate"
-    return "Low"
-
-
-class CheckableComboBox(QComboBox):
-    """Compact multi-select dropdown; ticking an item never clears earlier choices."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setModel(QStandardItemModel(self))
-        self.setEditable(True)
-        self.lineEdit().setReadOnly(True)
-        self.lineEdit().setPlaceholderText("Select one or more activities…")
-        self.setMinimumHeight(27)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self._selection_pending = False
-        self.model().itemChanged.connect(self._refresh_text)
-        self.view().pressed.connect(self._toggle_pressed_item)
-        self.view().setUniformItemSizes(True)
-
-    def hidePopup(self):
-        # QComboBox normally closes after each pressed row. Suppress that close
-        # only during a checkbox click so the user can tick multiple activities.
-        if self._selection_pending:
-            return
-        super().hidePopup()
-
-    def _toggle_pressed_item(self, index):
-        item = self.model().itemFromIndex(index)
-        if item is None:
-            return
-        self._selection_pending = True
-        item.setCheckState(Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked)
-        QTimer.singleShot(100, self._finish_checkbox_click)
-
-    def _finish_checkbox_click(self):
-        self._selection_pending = False
-        if self.isVisible():
-            self.showPopup()
-
-    def add_check_item(self, text):
-        item = QStandardItem(text)
-        item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
-        item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-        self.model().appendRow(item)
-
-    def checked_items(self):
-        return [self.model().item(i).text() for i in range(self.model().rowCount())
-                if self.model().item(i).checkState() == Qt.CheckState.Checked]
-
-    def set_checked(self, text, checked):
-        for i in range(self.model().rowCount()):
-            item = self.model().item(i)
-            if item.text() == text:
-                item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-                break
-
-    def set_all_checked(self, checked):
-        self.model().blockSignals(True)
-        try:
-            for i in range(self.model().rowCount()):
-                self.model().item(i).setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
-        finally:
-            self.model().blockSignals(False)
-        self._refresh_text()
-
-    def _refresh_text(self, *_):
-        chosen = self.checked_items()
-        if not chosen:
-            text = "Select one or more activities…"
-        elif len(chosen) == 1:
-            text = chosen[0]
-        else:
-            text = f"{len(chosen)} activities selected"
-        self.lineEdit().setText(text)
-        self.setToolTip("Selected activities: " + (", ".join(chosen) if chosen else "None"))
-
-
-class AspectImpactModule(QWidget):
-    """ISO 14001 Aspect & Impact Register — dynamic by selected activities."""
-
-    def __init__(self, parent_window, db):
-        super().__init__(parent_window)
-        self.host = parent_window
-        self.db = db
-        self.current_register_id = None
-        self._ensure_schema()
-        self._build_ui()
-        self._load_register_list()
-
-    # ------------------------------------------------------------------ schema
-    def _ensure_schema(self):
-        self.db.conn.executescript("""
-        CREATE TABLE IF NOT EXISTS aspect_registers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            register_name TEXT NOT NULL,
-            project TEXT DEFAULT '',
-            location TEXT DEFAULT '',
-            department TEXT DEFAULT '',
-            review_date TEXT DEFAULT '',
-            next_review_date TEXT DEFAULT '',
-            prepared_by TEXT DEFAULT '',
-            approved_by TEXT DEFAULT '',
-            status TEXT DEFAULT 'Draft',
-            notes TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS aspect_register_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            register_id INTEGER NOT NULL,
-            activity TEXT NOT NULL,
-            aspect TEXT NOT NULL,
-            impact TEXT DEFAULT '',
-            regulatory TEXT DEFAULT '',
-            severity INTEGER DEFAULT 1,
-            probability INTEGER DEFAULT 1,
-            risk_score INTEGER DEFAULT 1,
-            significance TEXT DEFAULT 'Low',
-            existing_controls TEXT DEFAULT '',
-            additional_controls TEXT DEFAULT '',
-            residual_severity INTEGER DEFAULT 0,
-            residual_probability INTEGER DEFAULT 0,
-            residual_score INTEGER DEFAULT 0,
-            residual_significance TEXT DEFAULT '',
-            operating_condition TEXT DEFAULT 'Normal',
-            environmental_category TEXT DEFAULT 'Other',
-            legal_obligation TEXT DEFAULT 'No',
-            evidence TEXT DEFAULT '',
-            responsible TEXT DEFAULT '',
-            target_date TEXT DEFAULT '',
-            status TEXT DEFAULT 'Open',
-            sort_order INTEGER DEFAULT 0,
-            FOREIGN KEY(register_id) REFERENCES aspect_registers(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_aspect_items_register
-            ON aspect_register_items(register_id);
-        """)
-        # Additive migration: only the Aspect & Impact module's own table is changed.
-        existing_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(aspect_register_items)").fetchall()}
-        aspect_migrations = {
-            "operating_condition": "TEXT DEFAULT 'Normal'",
-            "environmental_category": "TEXT DEFAULT 'Other'",
-            "legal_obligation": "TEXT DEFAULT 'No'",
-            "evidence": "TEXT DEFAULT ''",
-        }
-        for col, definition in aspect_migrations.items():
-            if col not in existing_cols:
-                self.db.conn.execute(f"ALTER TABLE aspect_register_items ADD COLUMN {col} {definition}")
-        # Legal Compliance Library — Aspect module only (not linked to CAPA).
-        self.db.conn.executescript("""
-        CREATE TABLE IF NOT EXISTS legal_requirements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ref_code TEXT NOT NULL UNIQUE,
-            title TEXT NOT NULL,
-            requirement_type TEXT DEFAULT 'Regulation',
-            jurisdiction TEXT DEFAULT '',
-            source TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            iso_reference TEXT DEFAULT '',
-            default_category TEXT DEFAULT 'Other',
-            compliance_status TEXT DEFAULT 'Not Assessed',
-            owner TEXT DEFAULT '',
-            next_review_date TEXT DEFAULT '',
-            evidence_summary TEXT DEFAULT '',
-            active INTEGER DEFAULT 1,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT ''
-        );
-        CREATE TABLE IF NOT EXISTS aspect_item_legal_links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            register_id INTEGER NOT NULL,
-            item_sort_order INTEGER NOT NULL DEFAULT 0,
-            activity TEXT DEFAULT '',
-            aspect TEXT DEFAULT '',
-            legal_id INTEGER NOT NULL,
-            linked_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(legal_id) REFERENCES legal_requirements(id) ON DELETE CASCADE
-        );
-        CREATE INDEX IF NOT EXISTS idx_aspect_legal_links_reg
-            ON aspect_item_legal_links(register_id);
-        """)
-        # Seed master library once (skip if any user/library rows already exist).
-        count_row = self.db.conn.execute("SELECT COUNT(*) AS n FROM legal_requirements").fetchone()
-        if int(count_row[0] if count_row else 0) == 0:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            for seed in LEGAL_LIBRARY_SEED:
-                self.db.conn.execute(
-                    """INSERT OR IGNORE INTO legal_requirements(
-                        ref_code, title, requirement_type, jurisdiction, source, description,
-                        iso_reference, default_category, compliance_status, active, created_at, updated_at
-                    ) VALUES (?,?,?,?,?,?,?,?, 'Not Assessed', 1, ?, ?)""",
-                    (
-                        seed["ref_code"], seed["title"], seed["requirement_type"], seed["jurisdiction"],
-                        seed["source"], seed["description"], seed["iso_reference"], seed["default_category"],
-                        now, now,
-                    ),
-                )
-        # Additive Qatar legal-reference prompts; INSERT OR IGNORE keeps user edits and existing data intact.
-        for ref, title, req_type, jurisdiction, source, description, category in ASPECT_QATAR_LEGAL_SEED:
-            self.db.conn.execute(
-                """INSERT OR IGNORE INTO legal_requirements(
-                    ref_code, title, requirement_type, jurisdiction, source, description,
-                    iso_reference, default_category, compliance_status, active, created_at, updated_at
-                ) VALUES (?,?,?,?,?,?, 'Qatar Law No. 30 of 2002 / ISO 14001 6.1.3', ?, 'Not Assessed', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
-                (ref, title, req_type, jurisdiction, source, description, category),
-            )
-        item_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(aspect_register_items)").fetchall()}
-        if "linked_legal_refs" not in item_cols:
-            self.db.conn.execute("ALTER TABLE aspect_register_items ADD COLUMN linked_legal_refs TEXT DEFAULT ''")
-        self.db.conn.commit()
-
-    # ------------------------------------------------------------------ UI
-    def _build_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 4, 8, 8)
-        root.setSpacing(6)
-        self.setMinimumWidth(0)
-
-        intro = QLabel(
-            "Select the organisation / project activities below. The Aspect & Impact Register is generated "
-            "automatically from the ISO 14001 activity library (aspect, impact, regulatory reference, "
-            "initial/residual assessment, operating condition, legal obligations and evidence. Review every generated row for site relevance before approval."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("color:#176B78; font-weight:600; padding:3px 2px 5px 2px;")
-        root.addWidget(intro)
-
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 1)
-
-        self._build_generator_tab()
-        self._build_register_tab()
-        self._build_library_tab()
-        self._build_legal_tab()
-        self._apply_aspect_responsive_style()
-
-    def _apply_aspect_responsive_style(self):
-        self.tabs.setUsesScrollButtons(True)
-        self.tabs.setElideMode(Qt.TextElideMode.ElideRight)
-        self.tabs.setDocumentMode(True)
-        self.setStyleSheet(self.styleSheet() + """
-            QWidget { font-size: 9pt; }
-            QLabel { color: #34465A; }
-            QGroupBox { color: #176B78; font-weight: 700; margin-top: 7px; padding-top: 5px; border: 1px solid #D5E0E8; border-radius: 6px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 9px; padding: 0 5px; color: #176B78; }
-            QLineEdit, QComboBox, QDateEdit, QSpinBox, QDoubleSpinBox, QTextEdit {
-                min-height: 25px; padding: 2px 6px; border: 1px solid #C7D2DE;
-                border-radius: 4px; background: #FFFFFF; color: #203040; font-size: 9pt;
-            }
-            QTextEdit { padding: 4px; }
-            QPushButton { min-height: 25px; max-height: 27px; padding: 2px 7px; border-radius: 4px; font-size: 8.5pt; font-weight: 600; }
-            QPushButton:hover { background-color: #E5F2F4; border: 1px solid #4B9AA5; }
-            QTabBar::tab { min-height: 25px; padding: 4px 8px; font-size: 8.5pt; }
-            QTableWidget { gridline-color: #D8E0E8; alternate-background-color: #F5F8FB; font-size: 8.5pt; }
-            QHeaderView::section { padding: 4px; font-size: 8.5pt; font-weight: 700; color: #FFFFFF; background: #176B78; }
-        """)
-
-    def _add_scroll_tab(self, page, title):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        page.setMinimumWidth(0)
-        scroll.setWidget(page)
-        self.tabs.addTab(scroll, title)
-
-    def _build_generator_tab(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        meta = QGroupBox("Register header")
-        form = QFormLayout(meta)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.reg_name = QLineEdit()
-        self.reg_name.setPlaceholderText("e.g. Site Aspect & Impact Register — 2026")
-        self.reg_project = QLineEdit()
-        self.reg_location = QLineEdit()
-        self.reg_department = QLineEdit()
-        self.reg_prepared = QLineEdit()
-        self.reg_approved = QLineEdit()
-        self.reg_review = QDateEdit()
-        self.reg_review.setCalendarPopup(True)
-        self.reg_review.setDate(QDate.currentDate())
-        self.reg_next = QDateEdit()
-        self.reg_next.setCalendarPopup(True)
-        self.reg_next.setDate(QDate.currentDate().addMonths(12))
-        self.reg_status = QComboBox()
-        self.reg_status.addItems(["Draft", "Under Review", "Approved", "Superseded"])
-        form.addRow("Register name *", self.reg_name)
-        form.addRow("Project", self.reg_project)
-        form.addRow("Location / Site", self.reg_location)
-        form.addRow("Department", self.reg_department)
-        form.addRow("Prepared by", self.reg_prepared)
-        form.addRow("Approved by", self.reg_approved)
-        form.addRow("Review date", self.reg_review)
-        form.addRow("Next review", self.reg_next)
-        form.addRow("Status", self.reg_status)
-        layout.addWidget(meta)
-
-        act_box = QGroupBox("Step 1 — Select activities performed by the organisation")
-        act_layout = QVBoxLayout(act_box)
-        hint = QLabel("Choose activities from the multi-select dropdown. Each selected activity generates its environmental aspects, impacts, controls and suggested compliance references. Verify applicability against current permits, Qatar legislation and client requirements before approval.")
-        hint.setWordWrap(True)
-        act_layout.addWidget(hint)
-
-        self.activity_list = CheckableComboBox()
-        for name in sorted(ASPECT_ACTIVITIES.keys()):
-            self.activity_list.add_check_item(name)
-        self.activity_list.setMinimumWidth(260)
-        act_layout.addWidget(self.activity_list)
-
-        btn_row = QHBoxLayout()
-        select_all = QPushButton("Select all")
-        clear_all = QPushButton("Clear all")
-        generate_btn = QPushButton("Generate Aspect & Impact Register")
-        generate_btn.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
-        select_all.clicked.connect(self._select_all_activities)
-        clear_all.clicked.connect(self._clear_all_activities)
-        generate_btn.clicked.connect(self._generate_from_activities)
-        btn_row.addWidget(select_all)
-        btn_row.addWidget(clear_all)
-        btn_row.addStretch(1)
-        btn_row.addWidget(generate_btn)
-        act_layout.addLayout(btn_row)
-        layout.addWidget(act_box)
-
-        notes_box = QGroupBox("Notes")
-        notes_layout = QVBoxLayout(notes_box)
-        self.reg_notes = QTextEdit()
-        self.reg_notes.setPlaceholderText("Scope notes, exclusions, assumptions…")
-        self.reg_notes.setMaximumHeight(80)
-        notes_layout.addWidget(self.reg_notes)
-        layout.addWidget(notes_box)
-
-        self._add_scroll_tab(page, "1. Select Activities & Generate")
-
-    def _build_register_tab(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
-
-        top = QHBoxLayout()
-        top.addWidget(QLabel("Saved registers:"))
-        self.register_combo = QComboBox()
-        self.register_combo.setMinimumWidth(190)
-        self.register_combo.currentIndexChanged.connect(self._on_register_selected)
-        top.addWidget(self.register_combo, 1)
-        edit_btn = QPushButton("Open / Edit")
-        edit_btn.setToolTip("Open the selected saved register and edit its header and aspect rows.")
-        edit_btn.clicked.connect(self._open_selected_register)
-        top.addWidget(edit_btn)
-        load_btn = QPushButton("Refresh")
-        load_btn.clicked.connect(self._load_register_list)
-        top.addWidget(load_btn)
-        new_btn = QPushButton("New blank")
-        new_btn.clicked.connect(self._new_register)
-        top.addWidget(new_btn)
-        layout.addLayout(top)
-
-        self.register_summary = QLabel("No register loaded. Generate from activities or open a saved register.")
-        self.register_summary.setStyleSheet("color:#176B78; font-weight:700; padding:3px 4px; background:#EAF5F5; border-radius:4px;")
-        layout.addWidget(self.register_summary)
-
-        self.items_table = QTableWidget(0, 18)
-        self.items_table.setHorizontalHeaderLabels([
-            "Activity", "Environmental Aspect", "Impact", "Regulatory / Other Requirements",
-            "Condition (Normal/Abnormal/Emergency)", "Environmental Category",
-            "Initial Sev", "Initial Prob", "Initial Score", "Initial Significance",
-            "Legal / Other Obligation?", "Existing Controls", "Additional Controls",
-            "Residual Sev", "Residual Prob", "Residual Score / Significance",
-            "Responsible", "Target Date / Evidence / Status"
-        ])
-        self.items_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.items_table.horizontalHeader().setStretchLastSection(False)
-        self.items_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.items_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.items_table.setMinimumHeight(240)
-        self.items_table.verticalHeader().setDefaultSectionSize(54)
-        self.items_table.verticalHeader().setMinimumSectionSize(38)
-        self.items_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        for col, width in enumerate([190,230,250,230,155,145,75,75,80,115,135,230,230,75,75,155,145,230]):
-            self.items_table.setColumnWidth(col, width)
-        self.items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.items_table.setAlternatingRowColors(True)
-        self.items_table.setWordWrap(True)
-        layout.addWidget(self.items_table, 1)
-
-        actions_widget = QWidget()
-        actions = QGridLayout(actions_widget)
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setHorizontalSpacing(7)
-        actions.setVerticalSpacing(6)
-        save_btn = QPushButton("Save Register")
-        save_btn.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
-        save_btn.clicked.connect(self._save_register)
-        add_row_btn = QPushButton("Add custom row")
-        add_row_btn.clicked.connect(self._add_custom_row)
-        del_row_btn = QPushButton("Delete selected row")
-        del_row_btn.clicked.connect(self._delete_selected_row)
-        export_xlsx = QPushButton("Export Excel")
-        export_xlsx.clicked.connect(self._export_excel)
-        export_docx = QPushButton("Export Word")
-        export_docx.clicked.connect(self._export_word)
-        delete_reg = QPushButton("Delete register")
-        delete_reg.clicked.connect(self._delete_register)
-        link_legal_btn = QPushButton("Link Legal to Selected Row")
-        link_legal_btn.setToolTip("Link one or more Legal Compliance Library entries to the selected aspect row.")
-        link_legal_btn.clicked.connect(self._link_legal_to_selected_row)
-        view_legal_btn = QPushButton("View Linked Legal")
-        view_legal_btn.clicked.connect(self._view_linked_legal_for_row)
-        action_buttons = [save_btn, add_row_btn, del_row_btn, link_legal_btn,
-                          view_legal_btn, export_xlsx, export_docx, delete_reg]
-        for index, button in enumerate(action_buttons):
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            button.setFixedHeight(27)
-            actions.addWidget(button, index // 4, index % 4)
-        layout.addWidget(actions_widget)
-
-        legend = QLabel(
-            "Initial and residual scores = Severity × Probability (1–25). Initial score: ≥12 Significant, 6–11 Moderate, <6 Low. "
-            "A legal/other compliance obligation is flagged Significant for management attention regardless of score. "
-            "Use residual severity/probability after controls; verify the organisation's documented criteria before approval."
-        )
-        legend.setWordWrap(True)
-        legend.setStyleSheet("color:#555; padding-top:4px;")
-        layout.addWidget(legend)
-
-        self._add_scroll_tab(page, "2. Aspect & Impact Register")
-
-    def _build_library_tab(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.addWidget(QLabel(
-            "Built-in ISO 14001 activity library used to populate the register. "
-            "This is a reference list — generation always pulls the latest mapping for selected activities."
-        ))
-        table = QTableWidget(0, 7)
-        table.setHorizontalHeaderLabels([
-            "Activity", "Aspect", "Impact", "Regulatory", "Sev", "Prob", "Existing Controls"
-        ])
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(False)
-        table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        table.setMinimumHeight(300)
-        rows = []
-        for activity, items in sorted(ASPECT_ACTIVITIES.items()):
-            for it in items:
-                rows.append(it | {"activity": activity})
-        table.setRowCount(len(rows))
-        for i, it in enumerate(rows):
-            vals = [
-                it["activity"], it["aspect"], it["impact"], it["regulatory"],
-                str(it["severity"]), str(it["probability"]), it["controls"]
-            ]
-            for j, v in enumerate(vals):
-                item = QTableWidgetItem(v)
-                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                table.setItem(i, j, item)
-        layout.addWidget(table, 1)
-        self._add_scroll_tab(page, "3. Activity Library (reference)")
-
-    # ------------------------------------------------------------------ helpers
-
-    def _build_legal_tab(self):
-        """Master Environmental Legal / Other Requirements library (Aspect module only)."""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        info = QLabel(
-            "Master Legal Compliance Library for environmental and other requirements (ISO 14001 6.1.3). "
-            "Maintain obligations here, then link them to Aspect & Impact register rows. "
-            "This library is not linked to CAPA in this version."
-        )
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#176B78; font-weight:600; padding:3px 2px;")
-        layout.addWidget(info)
-
-        form_box = QGroupBox("Add / Edit legal requirement")
-        form = QFormLayout(form_box)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
-        self.legal_id = None
-        self.legal_ref = QLineEdit(); self.legal_ref.setPlaceholderText("e.g. ENV-WASTE-001")
-        self.legal_title = QLineEdit()
-        self.legal_type = QComboBox(); self.legal_type.addItems(
-            ["Regulation", "Permit", "Client", "ISO / Other", "Company", "Other"]
-        )
-        self.legal_jurisdiction = QLineEdit(); self.legal_jurisdiction.setPlaceholderText("National / Local / Project / Company")
-        self.legal_source = QLineEdit()
-        self.legal_iso = QLineEdit(); self.legal_iso.setPlaceholderText("e.g. ISO 14001 6.1.3")
-        self.legal_category = QComboBox(); self.legal_category.addItems(
-            ["Air Emissions", "Water / Effluent", "Waste", "Land / Soil", "Noise / Vibration",
-             "Energy / Resource", "Materials / Chemicals", "Biodiversity", "Other"]
-        )
-        self.legal_status = QComboBox(); self.legal_status.addItems(
-            ["Not Assessed", "Compliant", "Partial", "Non-compliant"]
-        )
-        self.legal_owner = QLineEdit()
-        self.legal_next_review = QDateEdit(); self.legal_next_review.setCalendarPopup(True)
-        self.legal_next_review.setDate(QDate.currentDate().addMonths(12))
-        self.legal_desc = QTextEdit(); self.legal_desc.setMaximumHeight(70)
-        self.legal_evidence = QTextEdit(); self.legal_evidence.setMaximumHeight(50)
-        form.addRow("Ref. code *", self.legal_ref)
-        form.addRow("Title *", self.legal_title)
-        form.addRow("Type", self.legal_type)
-        form.addRow("Jurisdiction", self.legal_jurisdiction)
-        form.addRow("Source", self.legal_source)
-        form.addRow("ISO / clause ref.", self.legal_iso)
-        form.addRow("Env. category", self.legal_category)
-        form.addRow("Compliance status", self.legal_status)
-        form.addRow("Owner", self.legal_owner)
-        form.addRow("Next review", self.legal_next_review)
-        form.addRow("Description", self.legal_desc)
-        form.addRow("Evidence summary", self.legal_evidence)
-        layout.addWidget(form_box)
-
-        btn_widget = QWidget()
-        btn_row = QGridLayout(btn_widget)
-        btn_row.setContentsMargins(0, 0, 0, 0)
-        btn_row.setHorizontalSpacing(7)
-        btn_row.setVerticalSpacing(6)
-        save_l = QPushButton("Save Legal Requirement")
-        save_l.setStyleSheet("background:#176B78; color:white; font-weight:bold; padding:2px 8px; border-radius:4px;")
-        save_l.clicked.connect(self._save_legal_requirement)
-        clear_l = QPushButton("Clear Form")
-        clear_l.clicked.connect(self._clear_legal_form)
-        del_l = QPushButton("Deactivate Selected")
-        del_l.clicked.connect(self._deactivate_legal_requirement)
-        refresh_l = QPushButton("Refresh List")
-        refresh_l.clicked.connect(self._refresh_legal_table)
-        for i, button in enumerate((save_l, clear_l, del_l, refresh_l)):
-            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            button.setFixedHeight(27)
-            btn_row.addWidget(button, i // 2, i % 2)
-        layout.addWidget(btn_widget)
-
-        self.legal_table = QTableWidget(0, 9)
-        self.legal_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.legal_table.setMinimumHeight(220)
-        self.legal_table.verticalHeader().setDefaultSectionSize(28)
-        self.legal_table.verticalHeader().setVisible(False)
-        self.legal_table.setHorizontalHeaderLabels([
-            "Ref.", "Title", "Type", "Jurisdiction", "Category", "Status", "Owner", "Next Review", "ISO Ref."
-        ])
-        self.legal_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.legal_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.legal_table.setAlternatingRowColors(True)
-        self.legal_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.legal_table.horizontalHeader().setStretchLastSection(True)
-        self.legal_table.doubleClicked.connect(self._load_legal_from_table)
-        layout.addWidget(self.legal_table, 1)
-        self._add_scroll_tab(page, "4. Legal Compliance Library")
-        self._refresh_legal_table()
-
-    def _clear_legal_form(self):
-        self.legal_id = None
-        self.legal_ref.clear()
-        self.legal_title.clear()
-        self.legal_type.setCurrentIndex(0)
-        self.legal_jurisdiction.clear()
-        self.legal_source.clear()
-        self.legal_iso.clear()
-        self.legal_category.setCurrentIndex(0)
-        self.legal_status.setCurrentIndex(0)
-        self.legal_owner.clear()
-        self.legal_next_review.setDate(QDate.currentDate().addMonths(12))
-        self.legal_desc.clear()
-        self.legal_evidence.clear()
-
-    def _refresh_legal_table(self):
-        rows = self.db.fetchall(
-            "SELECT * FROM legal_requirements WHERE COALESCE(active,1)=1 ORDER BY ref_code"
-        )
-        self.legal_table.setRowCount(len(rows))
-        for i, r in enumerate(rows):
-            vals = [
-                safe(r["ref_code"]), safe(r["title"]), safe(r["requirement_type"]),
-                safe(r["jurisdiction"]), safe(r["default_category"]), safe(r["compliance_status"]),
-                safe(r["owner"]), safe(r["next_review_date"]), safe(r["iso_reference"]),
-            ]
-            for j, v in enumerate(vals):
-                item = QTableWidgetItem(v)
-                item.setData(Qt.ItemDataRole.UserRole, r["id"])
-                if j == 5:
-                    st = v.strip().lower()
-                    if st == "non-compliant":
-                        item.setBackground(QColor("#F8D7DA"))
-                    elif st == "partial":
-                        item.setBackground(QColor("#FFF3CD"))
-                    elif st == "compliant":
-                        item.setBackground(QColor("#D4EDDA"))
-                self.legal_table.setItem(i, j, item)
-        self.legal_table.resizeRowsToContents()
-
-    def _load_legal_from_table(self, *_args):
-        row = self.legal_table.currentRow()
-        if row < 0:
-            return
-        item = self.legal_table.item(row, 0)
-        if not item:
-            return
-        lid = item.data(Qt.ItemDataRole.UserRole)
-        r = self.db.fetchone("SELECT * FROM legal_requirements WHERE id=?", (lid,))
-        if not r:
-            return
-        self.legal_id = r["id"]
-        self.legal_ref.setText(safe(r["ref_code"]))
-        self.legal_title.setText(safe(r["title"]))
-        ix = self.legal_type.findText(safe(r["requirement_type"]))
-        self.legal_type.setCurrentIndex(ix if ix >= 0 else 0)
-        self.legal_jurisdiction.setText(safe(r["jurisdiction"]))
-        self.legal_source.setText(safe(r["source"]))
-        self.legal_iso.setText(safe(r["iso_reference"]))
-        ix = self.legal_category.findText(safe(r["default_category"]))
-        self.legal_category.setCurrentIndex(ix if ix >= 0 else 0)
-        ix = self.legal_status.findText(safe(r["compliance_status"]))
-        self.legal_status.setCurrentIndex(ix if ix >= 0 else 0)
-        self.legal_owner.setText(safe(r["owner"]))
-        d = QDate.fromString(safe(r["next_review_date"]), "yyyy-MM-dd")
-        if d.isValid():
-            self.legal_next_review.setDate(d)
-        self.legal_desc.setPlainText(safe(r["description"]))
-        self.legal_evidence.setPlainText(safe(r["evidence_summary"]))
-
-    def _save_legal_requirement(self):
-        ref = self.legal_ref.text().strip().upper()
-        title = self.legal_title.text().strip()
-        if not ref or not title:
-            QMessageBox.warning(self, "Required", "Enter reference code and title.")
-            return
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        data = dict(
-            ref_code=ref,
-            title=title,
-            requirement_type=self.legal_type.currentText(),
-            jurisdiction=self.legal_jurisdiction.text().strip(),
-            source=self.legal_source.text().strip(),
-            description=self.legal_desc.toPlainText().strip(),
-            iso_reference=self.legal_iso.text().strip(),
-            default_category=self.legal_category.currentText(),
-            compliance_status=self.legal_status.currentText(),
-            owner=self.legal_owner.text().strip(),
-            next_review_date=self.legal_next_review.date().toString("yyyy-MM-dd"),
-            evidence_summary=self.legal_evidence.toPlainText().strip(),
-            updated_at=now,
-            active=1,
-        )
-        try:
-            if self.legal_id:
-                cols = list(data.keys())
-                self.db.execute(
-                    "UPDATE legal_requirements SET " + ", ".join(f"{c}=?" for c in cols) + " WHERE id=?",
-                    [data[c] for c in cols] + [self.legal_id],
-                )
-            else:
-                data["created_at"] = now
-                cols = list(data.keys())
-                self.db.execute(
-                    "INSERT INTO legal_requirements(" + ",".join(cols) + ") VALUES(" + ",".join("?" for _ in cols) + ")",
-                    [data[c] for c in cols],
-                )
-            self.db.conn.commit()
-        except Exception as exc:
-            QMessageBox.warning(self, "Save Failed", f"Could not save legal requirement.\n\n{exc}")
-            return
-        self._clear_legal_form()
-        self._refresh_legal_table()
-        QMessageBox.information(self, "Saved", f"Legal requirement {ref} saved.")
-
-    def _deactivate_legal_requirement(self):
-        row = self.legal_table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Select", "Select a legal requirement row first.")
-            return
-        lid = self.legal_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        ref = self.legal_table.item(row, 0).text()
-        if QMessageBox.question(
-            self, "Deactivate",
-            f"Deactivate {ref}? Existing aspect links remain for history but the item is hidden from the active library.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        self.db.execute(
-            "UPDATE legal_requirements SET active=0, updated_at=? WHERE id=?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), lid),
-        )
-        self.db.conn.commit()
-        self._clear_legal_form()
-        self._refresh_legal_table()
-
-    def _link_legal_to_selected_row(self):
-        row = self.items_table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Select Aspect Row", "Select an aspect register row first.")
-            return
-        legals = self.db.fetchall(
-            "SELECT id, ref_code, title, compliance_status FROM legal_requirements WHERE COALESCE(active,1)=1 ORDER BY ref_code"
-        )
-        if not legals:
-            QMessageBox.warning(self, "Library Empty", "Add legal requirements in the Legal Compliance Library tab first.")
-            return
-        labels = [f"{r['ref_code']} — {r['title']} [{r['compliance_status']}]" for r in legals]
-        choice, ok = QInputDialog.getItem(self, "Link Legal Requirement", "Select requirement to link:", labels, 0, False)
-        if not ok or not choice:
-            return
-        idx = labels.index(choice)
-        legal = legals[idx]
-        # Append ref into Regulatory column for visibility (keep existing text)
-        reg_item = self.items_table.item(row, 3)
-        existing = reg_item.text().strip() if reg_item else ""
-        tag = legal["ref_code"]
-        if tag not in existing:
-            new_reg = (existing + "; " + tag).strip("; ").strip() if existing else tag
-            self.items_table.setItem(row, 3, QTableWidgetItem(new_reg))
-        # Force legal obligation flag to Yes
-        self.items_table.setItem(row, 10, QTableWidgetItem("Yes"))
-        self._recalc_row_score(row)
-        # Persist link if register already saved
-        activity = self.items_table.item(row, 0).text() if self.items_table.item(row, 0) else ""
-        aspect = self.items_table.item(row, 1).text() if self.items_table.item(row, 1) else ""
-        if self.current_register_id:
-            exists = self.db.fetchone(
-                """SELECT id FROM aspect_item_legal_links
-                   WHERE register_id=? AND item_sort_order=? AND legal_id=?""",
-                (self.current_register_id, row, legal["id"]),
-            )
-            if not exists:
-                self.db.execute(
-                    """INSERT INTO aspect_item_legal_links(register_id, item_sort_order, activity, aspect, legal_id)
-                       VALUES (?,?,?,?,?)""",
-                    (self.current_register_id, row, activity, aspect, legal["id"]),
-                )
-                self.db.conn.commit()
-        QMessageBox.information(
-            self, "Linked",
-            f"Linked {tag} to the selected aspect row.\nLegal obligation set to Yes.\nSave the register to keep changes."
-        )
-
-    def _view_linked_legal_for_row(self):
-        row = self.items_table.currentRow()
-        if row < 0:
-            QMessageBox.information(self, "Select Aspect Row", "Select an aspect register row first.")
-            return
-        reg_item = self.items_table.item(row, 3)
-        refs_text = reg_item.text().strip() if reg_item else ""
-        lines = []
-        if self.current_register_id:
-            links = self.db.fetchall(
-                """SELECT l.ref_code, l.title, l.compliance_status, l.requirement_type, l.iso_reference
-                   FROM aspect_item_legal_links x
-                   JOIN legal_requirements l ON l.id=x.legal_id
-                   WHERE x.register_id=? AND x.item_sort_order=?
-                   ORDER BY l.ref_code""",
-                (self.current_register_id, row),
-            )
-            for l in links:
-                lines.append(
-                    f"{l['ref_code']} | {l['title']} | {l['requirement_type']} | "
-                    f"Status: {l['compliance_status']} | {l['iso_reference']}"
-                )
-        if not lines and refs_text:
-            lines.append("References shown on row: " + refs_text)
-        if not lines:
-            lines.append("No legal requirements linked to this row yet.")
-        QMessageBox.information(self, "Linked Legal Requirements", "\n".join(lines))
-
-
-    def _selected_activities(self):
-        return self.activity_list.checked_items()
-
-    def _select_all_activities(self):
-        self.activity_list.set_all_checked(True)
-
-    def _clear_all_activities(self):
-        self.activity_list.set_all_checked(False)
-
-    def _set_significance_cell(self, row, score, legal="No", residual=False):
-        sig = "Significant" if str(legal).strip().lower() in ("yes", "y", "true", "1") else _aspect_significance(score)
-        col = 15 if residual else 9
-        item = QTableWidgetItem(sig)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if sig == "Significant":
-            item.setBackground(QColor("#F8D7DA")); item.setForeground(QColor("#721C24"))
-        elif sig == "Moderate":
-            item.setBackground(QColor("#FFF3CD")); item.setForeground(QColor("#856404"))
-        else:
-            item.setBackground(QColor("#D4EDDA")); item.setForeground(QColor("#155724"))
-        self.items_table.setItem(row, col, item)
-
-    def _recalc_row_score(self, row):
-        def number(col, default=1):
-            try: return max(1, min(5, int(self.items_table.item(row, col).text())))
-            except Exception: return default
-        sev, prob = number(6), number(7)
-        score = sev * prob
-        for col, val in ((6, sev), (7, prob), (8, score)):
-            self.items_table.setItem(row, col, QTableWidgetItem(str(val)))
-        legal = self.items_table.item(row, 10).text() if self.items_table.item(row, 10) else "No"
-        self._set_significance_cell(row, score, legal)
-        rsev, rprob = number(13), number(14)
-        rscore = rsev * rprob
-        self.items_table.setItem(row, 15, QTableWidgetItem(str(rscore)))
-        # Residual significance is a separate cell label in the same column text.
-        residual_sig = "Significant" if legal.strip().lower() in ("yes", "y", "true", "1") else _aspect_significance(rscore)
-        self.items_table.item(row, 15).setText(f"{rscore} / {residual_sig}")
-
-    def _append_item_row(self, data):
-        r = self.items_table.rowCount(); self.items_table.insertRow(r)
-        sev = max(1, min(5, int(data.get("severity") or 1)))
-        prob = max(1, min(5, int(data.get("probability") or 1)))
-        score = sev * prob
-        legal = data.get("legal_obligation", "No") or "No"
-        rsev = max(1, min(5, int(data.get("residual_severity") or sev)))
-        rprob = max(1, min(5, int(data.get("residual_probability") or prob)))
-        rscore = rsev * rprob
-        values = [
-            data.get("activity", ""), data.get("aspect", ""), data.get("impact", ""), data.get("regulatory", ""),
-            data.get("operating_condition", "Normal"), data.get("environmental_category", "Other"),
-            str(sev), str(prob), str(score), ("Significant" if str(legal).lower() == "yes" else _aspect_significance(score)),
-            legal, data.get("existing_controls") or data.get("controls") or "", data.get("additional_controls", ""),
-            str(rsev), str(rprob), f"{rscore} / {'Significant' if str(legal).lower() == 'yes' else _aspect_significance(rscore)}",
-            data.get("responsible", ""), data.get("target_date", ""),
-        ]
-        # Evidence and Status are kept as dedicated extra fields in the last column using clear labels.
-        values[17] = f"Target: {data.get('target_date','')} | Evidence: {data.get('evidence','')} | Status: {data.get('status','Open')}"
-        for c, v in enumerate(values):
-            item = QTableWidgetItem(str(v))
-            if c in (6,7,8,9,13,14,15): item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if c in (8,9,15): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            item.setToolTip(str(v))
-            item.setTextAlignment(item.textAlignment() | Qt.AlignmentFlag.AlignVCenter)
-            self.items_table.setItem(r,c,item)
-        self._set_significance_cell(r, score, legal)
-        self.items_table.setRowHeight(r, 54)
-
-    def _generate_from_activities(self):
-        activities = self._selected_activities()
-        if not activities:
-            QMessageBox.warning(self, "Activities Required", "Select at least one activity from the list."); return
-        if not self.reg_name.text().strip():
-            self.reg_name.setText(f"Aspect & Impact Register — {', '.join(activities[:2])}" + ("…" if len(activities)>2 else ""))
-        self.items_table.setRowCount(0); count = 0
-        category_map = {
-            "emission": "Air", "dust": "Air", "fume": "Air", "voc": "Air", "exhaust": "Air",
-            "noise": "Noise", "vibration": "Noise", "waste": "Waste", "slag": "Waste", "scrap": "Waste",
-            "water": "Water", "runoff": "Water", "wash water": "Water", "wastewater": "Water", "produced water": "Water", "marine": "Water", "discharge": "Water", "spill": "Soil / Water",
-            "leak": "Soil / Water", "soil": "Soil", "fuel": "Resources", "energy": "Resources",
-            "electricity": "Resources", "consumption": "Resources"
-        }
-        for activity in activities:
-            for it in ASPECT_ACTIVITIES.get(activity, []):
-                aspect = it["aspect"]
-                low = aspect.lower()
-                category = next((v for k,v in category_map.items() if k in low), "Other")
-                condition = "Emergency" if any(x in low for x in ("spill", "leak", "release", "rupture")) else "Normal"
-                regulatory_text = it["regulatory"]
-                if "Qatar Law No. 30 of 2002" not in regulatory_text and any(k in regulatory_text.lower() for k in ("waste", "emission", "air", "water", "marine", "oil", "noise", "hazardous", "discharge")):
-                    regulatory_text += "; Check applicability of Qatar Law No. 30 of 2002 and current executive regulations / project permits"
-                self._append_item_row({"activity":activity,"aspect":aspect,"impact":it["impact"],"regulatory":regulatory_text,
-                    "severity":it["severity"],"probability":it["probability"],"existing_controls":it["controls"],
-                    "operating_condition":condition,"environmental_category":category,"residual_severity":it["severity"],
-                    "residual_probability":it["probability"],"status":"Open"})
-                count += 1
-        self.current_register_id = None; self._update_summary_label(count, activities); self.tabs.setCurrentIndex(1)
-        QMessageBox.information(self,"Register Generated",f"Generated {count} rows from {len(activities)} activities. Review operating condition/category, legal obligations, residual scores, controls and evidence before saving.")
-
-    def _update_summary_label(self, count=None, activities=None):
-        if count is None: count = self.items_table.rowCount()
-        name = self.reg_name.text().strip() or "(unnamed)"
-        sig = sum(1 for r in range(self.items_table.rowCount()) if self.items_table.item(r,9) and self.items_table.item(r,9).text()=="Significant")
-        act_txt = f" | Activities: {', '.join(activities)}" if activities else ""
-        self.register_summary.setText(f"{name} | Rows: {count} | Significant aspects: {sig}{act_txt}")
-
-    def _add_custom_row(self):
-        self._append_item_row({"activity":"Custom","severity":3,"probability":3,"residual_severity":3,"residual_probability":3})
-        self._update_summary_label()
-
-    def _delete_selected_row(self):
-        rows = sorted({i.row() for i in self.items_table.selectedIndexes()}, reverse=True)
-        if not rows: QMessageBox.information(self,"Select Row","Select one or more rows to delete."); return
-        for r in rows: self.items_table.removeRow(r)
-        self._update_summary_label()
-
-    def _collect_items_from_table(self):
-        items=[]
-        for r in range(self.items_table.rowCount()):
-            def cell(c):
-                it=self.items_table.item(r,c); return it.text().strip() if it else ""
-            def num(c,default=1):
-                try: return max(1,min(5,int(cell(c))))
-                except Exception: return default
-            tail=cell(17)
-            def tail_value(label):
-                marker=label+":"
-                if marker not in tail: return ""
-                return tail.split(marker,1)[1].split("|",1)[0].strip()
-            sev,prob=num(6),num(7); rsev,rprob=num(13),num(14)
-            legal=cell(10) or "No"
-            items.append({"activity":cell(0),"aspect":cell(1),"impact":cell(2),"regulatory":cell(3),
-                "operating_condition":cell(4) or "Normal","environmental_category":cell(5) or "Other",
-                "severity":sev,"probability":prob,"risk_score":sev*prob,
-                "significance":"Significant" if legal.lower()=="yes" else _aspect_significance(sev*prob),
-                "legal_obligation":legal,"existing_controls":cell(11),"additional_controls":cell(12),
-                "residual_severity":rsev,"residual_probability":rprob,"residual_score":rsev*rprob,
-                "residual_significance":"Significant" if legal.lower()=="yes" else _aspect_significance(rsev*rprob),
-                "responsible":cell(16),"target_date":tail_value("Target"),"evidence":tail_value("Evidence"),
-                "status":tail_value("Status") or "Open","sort_order":r})
-        return items
-
-    def _save_register(self):
-        name = self.reg_name.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Name Required", "Enter a register name before saving.")
-            self.tabs.setCurrentIndex(0)
-            return
-        items = self._collect_items_from_table()
-        if not items:
-            QMessageBox.warning(self, "No Rows", "Generate or add at least one aspect/impact row.")
-            return
-        # Recalc displayed scores before save
-        for r in range(self.items_table.rowCount()):
-            self._recalc_row_score(r)
-        items = self._collect_items_from_table()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        header = {
-            "register_name": name,
-            "project": self.reg_project.text().strip(),
-            "location": self.reg_location.text().strip(),
-            "department": self.reg_department.text().strip(),
-            "review_date": self.reg_review.date().toString("yyyy-MM-dd"),
-            "next_review_date": self.reg_next.date().toString("yyyy-MM-dd"),
-            "prepared_by": self.reg_prepared.text().strip(),
-            "approved_by": self.reg_approved.text().strip(),
-            "status": self.reg_status.currentText(),
-            "notes": self.reg_notes.toPlainText().strip(),
-            "updated_at": now,
-        }
-        if self.current_register_id:
-            cols = list(header.keys())
-            sql = "UPDATE aspect_registers SET " + ", ".join(f"{c}=?" for c in cols) + " WHERE id=?"
-            self.db.execute(sql, [header[c] for c in cols] + [self.current_register_id])
-            self.db.execute("DELETE FROM aspect_register_items WHERE register_id=?", (self.current_register_id,))
-            rid = self.current_register_id
-        else:
-            header["created_at"] = now
-            cols = list(header.keys())
-            cur = self.db.execute(
-                "INSERT INTO aspect_registers(" + ",".join(cols) + ") VALUES(" + ",".join("?" for _ in cols) + ")",
-                [header[c] for c in cols],
-            )
-            rid = cur.lastrowid
-            self.current_register_id = rid
-        for it in items:
-            self.db.execute(
-                """INSERT INTO aspect_register_items(
-                    register_id, activity, aspect, impact, regulatory, severity, probability,
-                    risk_score, significance, existing_controls, additional_controls,
-                    residual_severity, residual_probability, residual_score, residual_significance,
-                    operating_condition, environmental_category, legal_obligation, evidence,
-                    responsible, target_date, status, sort_order
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    rid, it["activity"], it["aspect"], it["impact"], it["regulatory"],
-                    it["severity"], it["probability"], it["risk_score"], it["significance"],
-                    it["existing_controls"], it["additional_controls"], it["residual_severity"],
-                    it["residual_probability"], it["residual_score"], it["residual_significance"],
-                    it["operating_condition"], it["environmental_category"], it["legal_obligation"],
-                    it["evidence"], it["responsible"], it["target_date"], it["status"], it["sort_order"],
-                ),
-            )
-        # Automatically attach relevant Qatar compliance references to generated rows by category.
-        # Existing/manual legal links are retained where possible; links are specific to this register row.
-        qatar_refs = self.db.fetchall("SELECT id, default_category, ref_code FROM legal_requirements WHERE active=1 AND (ref_code LIKE 'QA-ENV-030-%' OR ref_code IN ('ISO14001-6.1.3','ISO14001-8.1','QA-MECC-IND-GUIDE'))")
-        category_map = {
-            "Air": {"QA-ENV-030-AIR", "QA-ENV-030-AIR-FUEL", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Air Emissions": {"QA-ENV-030-AIR", "QA-ENV-030-AIR-FUEL", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Waste": {"QA-ENV-030-WASTE", "QA-ENV-030-HAZ-RECORD", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Water": {"QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-MARINE-VESSEL", "QA-ENV-030-MARINE-WASTE", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Water / Effluent": {"QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-MARINE-VESSEL", "QA-ENV-030-MARINE-WASTE", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Soil / Water": {"QA-ENV-030-WASTE", "QA-ENV-030-WATER", "QA-ENV-030-OIL", "QA-ENV-030-WATER-GROUND", "QA-ENV-030-LAND-DISCHARGE", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Soil": {"QA-ENV-030-WASTE", "QA-ENV-030-HAZ-RECORD", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Noise": {"QA-ENV-030-NOISE", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Noise / Vibration": {"QA-ENV-030-NOISE", "ISO14001-6.1.3", "ISO14001-8.1"},
-            "Resources": {"ISO14001-6.1.3", "ISO14001-8.1"},
-            "Other": {"QA-ENV-030-EIA", "QA-ENV-030-EMERGENCY", "QA-MECC-IND-GUIDE", "ISO14001-6.1.3", "ISO14001-8.1"},
-        }
-        for row_index, it in enumerate(items):
-            cat = it.get("environmental_category", "Other")
-            refs = category_map.get(cat, set())
-            for legal in qatar_refs:
-                if legal["ref_code"] in refs:
-                    already_linked = self.db.fetchone(
-                        "SELECT id FROM aspect_item_legal_links WHERE register_id=? AND item_sort_order=? AND legal_id=?",
-                        (rid, row_index, legal["id"]),
-                    )
-                    if not already_linked:
-                        self.db.execute(
-                            "INSERT INTO aspect_item_legal_links(register_id,item_sort_order,activity,aspect,legal_id) VALUES(?,?,?,?,?)",
-                            (rid, row_index, it["activity"], it["aspect"], legal["id"]),
-                        )
-        self.db.conn.commit()
-        self._load_register_list(select_id=rid)
-        self._update_summary_label(len(items))
-        QMessageBox.information(self, "Saved", f"Aspect & Impact Register saved ({len(items)} rows).")
-
-    def _load_register_list(self, select_id=None):
-        self.register_combo.blockSignals(True)
-        self.register_combo.clear()
-        self.register_combo.addItem("— Select a saved register —", None)
-        rows = self.db.fetchall(
-            "SELECT id, register_name, project, status, review_date FROM aspect_registers ORDER BY id DESC"
-        )
-        for r in rows:
-            label = f"{r['register_name']}  [{r['status']}]"
-            if r["project"]:
-                label += f" — {r['project']}"
-            self.register_combo.addItem(label, r["id"])
-        if select_id is not None:
-            idx = self.register_combo.findData(select_id)
-            if idx >= 0:
-                self.register_combo.setCurrentIndex(idx)
-        self.register_combo.blockSignals(False)
-
-    def _on_register_selected(self, _index=0):
-        rid = self.register_combo.currentData()
-        if not rid:
-            return
-        self._load_register(rid)
-
-    def _open_selected_register(self):
-        rid = self.register_combo.currentData()
-        if not rid:
-            QMessageBox.information(self, "Select Register", "Choose a saved register from the dropdown first.")
-            return
-        self._load_register(rid)
-        self.tabs.setCurrentIndex(1)
-
-    def _load_register(self, rid):
-        header = self.db.fetchone("SELECT * FROM aspect_registers WHERE id=?", (rid,))
-        if not header:
-            return
-        self.current_register_id = rid
-        self.reg_name.setText(safe(header["register_name"]))
-        self.reg_project.setText(safe(header["project"]))
-        self.reg_location.setText(safe(header["location"]))
-        self.reg_department.setText(safe(header["department"]))
-        self.reg_prepared.setText(safe(header["prepared_by"]))
-        self.reg_approved.setText(safe(header["approved_by"]))
-        self.reg_notes.setPlainText(safe(header["notes"]))
-        idx = self.reg_status.findText(safe(header["status"]) or "Draft")
-        self.reg_status.setCurrentIndex(idx if idx >= 0 else 0)
-        for widget, key in ((self.reg_review, "review_date"), (self.reg_next, "next_review_date")):
-            try:
-                d = QDate.fromString(safe(header[key]), "yyyy-MM-dd")
-                if d.isValid():
-                    widget.setDate(d)
-            except Exception:
-                pass
-        items = self.db.fetchall(
-            "SELECT * FROM aspect_register_items WHERE register_id=? ORDER BY sort_order, id", (rid,)
-        )
-        self.items_table.setRowCount(0)
-        for it in items:
-            self._append_item_row({
-                "activity": it["activity"],
-                "aspect": it["aspect"],
-                "impact": it["impact"],
-                "regulatory": it["regulatory"],
-                "severity": it["severity"], "probability": it["probability"],
-                "existing_controls": it["existing_controls"], "additional_controls": it["additional_controls"],
-                "residual_severity": it["residual_severity"], "residual_probability": it["residual_probability"],
-                "operating_condition": it["operating_condition"], "environmental_category": it["environmental_category"],
-                "legal_obligation": it["legal_obligation"], "evidence": it["evidence"],
-                "target_date": it["target_date"], "responsible": it["responsible"], "status": it["status"],
-            })
-        # Sync activity checkboxes to loaded activities
-        loaded_acts = {safe(it["activity"]) for it in items}
-        self.activity_list.set_all_checked(False)
-        for activity_name in loaded_acts:
-            self.activity_list.set_checked(activity_name, True)
-        self._update_summary_label(len(items), sorted(loaded_acts))
-        self.tabs.setCurrentIndex(1)
-
-    def _new_register(self):
-        self.current_register_id = None
-        self.reg_name.clear()
-        self.reg_project.clear()
-        self.reg_location.clear()
-        self.reg_department.clear()
-        self.reg_prepared.clear()
-        self.reg_approved.clear()
-        self.reg_notes.clear()
-        self.reg_status.setCurrentIndex(0)
-        self.reg_review.setDate(QDate.currentDate())
-        self.reg_next.setDate(QDate.currentDate().addMonths(12))
-        self.items_table.setRowCount(0)
-        self._clear_all_activities()
-        self.register_combo.setCurrentIndex(0)
-        self.register_summary.setText("New register — choose activities from the multi-select dropdown and generate.")
-        self.tabs.setCurrentIndex(0)
-
-    def _delete_register(self):
-        rid = self.current_register_id or self.register_combo.currentData()
-        if not rid:
-            QMessageBox.information(self, "Select Register", "Open a saved register first.")
-            return
-        header = self.db.fetchone("SELECT register_name FROM aspect_registers WHERE id=?", (rid,))
-        name = safe(header["register_name"]) if header else str(rid)
-        if QMessageBox.question(
-            self, "Delete Register",
-            f"Delete register “{name}” and all its rows? This cannot be undone.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        self.db.execute("DELETE FROM aspect_register_items WHERE register_id=?", (rid,))
-        self.db.execute("DELETE FROM aspect_registers WHERE id=?", (rid,))
-        self.db.conn.commit()
-        self._new_register()
-        self._load_register_list()
-        QMessageBox.information(self, "Deleted", "Register deleted.")
-
-    # ------------------------------------------------------------------ export
-    def _export_excel(self):
-        items = self._collect_items_from_table()
-        if not items:
-            QMessageBox.warning(self, "No Data", "There is nothing to export.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Aspect & Impact Register",
-            f"Aspect_Impact_Register_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            "Excel Workbook (*.xlsx)",
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".xlsx"):
-            path += ".xlsx"
-        try:
-            wb = Workbook()
-            ws = wb.active
-            ws.title = "Aspect & Impact Register"
-            title = self.reg_name.text().strip() or "Aspect & Impact Register"
-            ws.append([title])
-            ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=22)
-            ws["A1"].font = Font(name="Arial", size=16, bold=True, color="FFFFFF")
-            ws["A1"].fill = PatternFill("solid", fgColor="17365D")
-            ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-            ws.row_dimensions[1].height = 28
-            ws.append([
-                f"Project: {self.reg_project.text().strip()}",
-                f"Location: {self.reg_location.text().strip()}",
-                f"Department: {self.reg_department.text().strip()}",
-                f"Status: {self.reg_status.currentText()}",
-                f"Review: {self.reg_review.date().toString('yyyy-MM-dd')}",
-                f"Next review: {self.reg_next.date().toString('yyyy-MM-dd')}",
-                f"Prepared by: {self.reg_prepared.text().strip()}",
-                f"Approved by: {self.reg_approved.text().strip()}",
-            ])
-            ws.append([])
-            headers = [
-                "S.No.", "Activity", "Environmental Aspect", "Impact", "Regulatory / Other Requirements",
-                "Operating Condition", "Environmental Category", "Initial Severity", "Initial Probability", "Initial Score",
-                "Initial Significance", "Legal / Other Obligation", "Existing Controls", "Additional Controls",
-                "Residual Severity", "Residual Probability", "Residual Score", "Residual Significance", "Responsible", "Target Date", "Evidence", "Status"
-            ]
-            ws.append(headers)
-            headfill = PatternFill("solid", fgColor="D9EAF7")
-            thin = Side(style="thin", color="B7C9D6")
-            for cell in ws[ws.max_row]:
-                cell.font = Font(bold=True, color="17365D")
-                cell.fill = headfill
-                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                cell.border = Border(bottom=thin)
-            for i, it in enumerate(items, 1):
-                ws.append([
-                    i, it["activity"], it["aspect"], it["impact"], it["regulatory"], it["operating_condition"],
-                    it["environmental_category"], it["severity"], it["probability"], it["risk_score"], it["significance"],
-                    it["legal_obligation"], it["existing_controls"], it["additional_controls"], it["residual_severity"],
-                    it["residual_probability"], it["residual_score"], it["residual_significance"], it["responsible"],
-                    it["target_date"], it["evidence"], it["status"],
-                ])
-                sig = it["significance"]
-                fill = "F8D7DA" if sig == "Significant" else ("FFF3CD" if sig == "Moderate" else "D4EDDA")
-                for cell in ws[ws.max_row]:
-                    cell.alignment = Alignment(vertical="top", wrap_text=True)
-                    if cell.column in (11,18): cell.fill = PatternFill("solid", fgColor=fill)
-            ws.freeze_panes = "A5"
-            from openpyxl.utils import get_column_letter
-            widths = [6,22,36,36,32,16,20,12,12,12,16,18,34,30,12,12,12,18,18,14,30,12]
-            for i, w in enumerate(widths, 1):
-                ws.column_dimensions[get_column_letter(i)].width = w
-            # Summary sheet
-            summary = wb.create_sheet("Significance Summary")
-            summary.append(["Significance", "Count"])
-            from collections import Counter
-            counts = Counter(it["significance"] for it in items)
-            for key in ("Significant", "Moderate", "Low"):
-                summary.append([key, counts.get(key, 0)])
-            summary.append([])
-            summary.append(["Activity", "Rows"])
-            act_counts = Counter(it["activity"] for it in items)
-            for act, n in sorted(act_counts.items()):
-                summary.append([act, n])
-            wb.save(path)
-            QMessageBox.information(self, "Exported", f"Excel register saved:\n{path}")
-        except Exception as exc:
-            logging.exception("Aspect impact Excel export failed")
-            QMessageBox.critical(self, "Export Failed", str(exc))
-
-    def _export_word(self):
-        items = self._collect_items_from_table()
-        if not items:
-            QMessageBox.warning(self, "No Data", "There is nothing to export.")
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export Aspect & Impact Register",
-            f"Aspect_Impact_Register_{datetime.now().strftime('%Y%m%d')}.docx",
-            "Word Document (*.docx)",
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".docx"):
-            path += ".docx"
-        try:
-            doc = Document()
-            set_docx_landscape(doc)
-            title = self.reg_name.text().strip() or "ISO 14001 Aspect & Impact Register"
-            add_docx_report_header(
-                doc, "ISO 14001 ASPECT & IMPACT REGISTER", "ENV",
-                f"{document_prefix()}-ENV-AI-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            )
-            add_docx_kv_table(doc, [
-                ("Register Name", title),
-                ("Project", self.reg_project.text().strip()),
-                ("Location / Site", self.reg_location.text().strip()),
-                ("Department", self.reg_department.text().strip()),
-                ("Status", self.reg_status.currentText()),
-                ("Review Date", self.reg_review.date().toString("yyyy-MM-dd")),
-                ("Next Review", self.reg_next.date().toString("yyyy-MM-dd")),
-                ("Prepared By", self.reg_prepared.text().strip()),
-                ("Approved By", self.reg_approved.text().strip()),
-            ])
-            if self.reg_notes.toPlainText().strip():
-                add_docx_boxed_section(doc, "Scope / Notes", self.reg_notes.toPlainText().strip(), 8)
-
-            doc.add_heading("Aspect & Impact Register", level=2)
-            headers = ["S.No.","Activity","Aspect","Impact","Regulatory","Condition","Category","Initial S","Initial P","Initial Score","Initial Sig.","Legal?","Existing Controls","Additional Controls","Residual S","Residual P","Residual Score","Residual Sig.","Responsible","Target Date","Evidence","Status"]
-            table = doc.add_table(rows=1, cols=len(headers))
-            for i, h in enumerate(headers):
-                table.rows[0].cells[i].text = h
-            for i, it in enumerate(items, 1):
-                cells = table.add_row().cells
-                vals = [str(i),it["activity"],it["aspect"],it["impact"],it["regulatory"],it["operating_condition"],it["environmental_category"],
-                    str(it["severity"]),str(it["probability"]),str(it["risk_score"]),it["significance"],it["legal_obligation"],
-                    it["existing_controls"],it["additional_controls"],str(it["residual_severity"]),str(it["residual_probability"]),
-                    str(it["residual_score"]),it["residual_significance"],it["responsible"],it["target_date"],it["evidence"],it["status"]]
-                for c, v in enumerate(vals):
-                    cells[c].text = xml_safe(v)
-            style_docx_table(table, header=True, font_size=7)
-
-            doc.add_heading("Significance Summary", level=2)
-            from collections import Counter
-            counts = Counter(it["significance"] for it in items)
-            st = doc.add_table(rows=1, cols=2)
-            st.rows[0].cells[0].text = "Significance"
-            st.rows[0].cells[1].text = "Count"
-            for key in ("Significant", "Moderate", "Low"):
-                c = st.add_row().cells
-                c[0].text = key
-                c[1].text = str(counts.get(key, 0))
-            style_docx_table(st, header=True, font_size=9)
-
-            add_docx_signatures(doc)
-            add_docx_footer(doc)
-            save_docx_validated(doc, path)
-            QMessageBox.information(self, "Exported", f"Word register saved:\n{path}")
-        except Exception as exc:
-            logging.exception("Aspect impact Word export failed")
-            QMessageBox.critical(self, "Export Failed", str(exc))
-
-
-
-
 class PTWModule(QWidget):
     """Standalone PTW workspace mounted inside the existing application stack."""
     def __init__(self, parent_window, db):
