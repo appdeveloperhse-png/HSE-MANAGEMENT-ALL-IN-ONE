@@ -723,6 +723,8 @@ class Database:
             self.conn.execute("ALTER TABLE observations ADD COLUMN capa_number TEXT DEFAULT ''")
         if "corrective_actions_json" not in observation_cols:
             self.conn.execute("ALTER TABLE observations ADD COLUMN corrective_actions_json TEXT DEFAULT '[]'")
+        if "updated_at" not in observation_cols:
+            self.conn.execute("ALTER TABLE observations ADD COLUMN updated_at TEXT DEFAULT ''")
 
         capa_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(capa)").fetchall()}
         capa_extra = {
@@ -738,6 +740,24 @@ class Database:
             if col not in capa_cols:
                 self.conn.execute(f"ALTER TABLE capa ADD COLUMN {col} {definition}")
 
+        # Observation-only close-out evidence and review history; additive migration.
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS observation_closeout_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            observation_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            submitted_by TEXT DEFAULT '',
+            submitted_at TEXT DEFAULT '',
+            review_status TEXT DEFAULT 'Pending Review',
+            reviewed_by TEXT DEFAULT '',
+            reviewed_at TEXT DEFAULT '',
+            review_comments TEXT DEFAULT '',
+            FOREIGN KEY(observation_id) REFERENCES observations(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_obs_closeout_observation ON observation_closeout_evidence(observation_id);
+        CREATE INDEX IF NOT EXISTS idx_obs_closeout_batch ON observation_closeout_evidence(batch_id);
+        """)
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -5902,12 +5922,11 @@ class MainWindow(QMainWindow):
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
         toolbar = QHBoxLayout()
-        search = QLineEdit()
-        search.setPlaceholderText("Search observation no., location, responsible person, description, action...")
+        search = QLineEdit(); search.setPlaceholderText("Search observation no., location, responsible person, description, action...")
         toolbar.addWidget(search)
-        clear_filter=QPushButton("Clear Category Filter")
-        toolbar.addWidget(clear_filter)
+        clear_filter = QPushButton("Clear Category Filter"); toolbar.addWidget(clear_filter)
         add_button = QPushButton("+ New Observation")
+        edit_button = QPushButton("Edit Selected")
         attachment_button = QPushButton("Attachments")
         delete_button = QPushButton("Delete Selected")
         export_button = QPushButton("Export CSV")
@@ -5915,210 +5934,328 @@ class MainWindow(QMainWindow):
         pdf_button = QPushButton("Export PDF")
         word_button = QPushButton("Export Word")
         card_button = QPushButton("Draft STOP Card(s)")
-        for b in [add_button, attachment_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]:
-            toolbar.addWidget(b)
+        for b in [add_button, edit_button, attachment_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]:
+            b.setMinimumHeight(34); toolbar.addWidget(b)
         layout.addLayout(toolbar)
 
+        tabs = QTabWidget()
+        register_page = QWidget(); register_layout = QVBoxLayout(register_page)
         table = QTableWidget()
-        headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status",
-                   "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
-        table.setColumnCount(len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        table.setColumnHidden(0, True)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        table.setWordWrap(True)
-        table.setAlternatingRowColors(True)
-        layout.addWidget(table)
+        headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status", "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
+        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setColumnHidden(0, True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        table.setWordWrap(True); table.setAlternatingRowColors(True); register_layout.addWidget(table)
+        tabs.addTab(register_page, "Observation Register")
 
         def load():
-            term = search.text().strip()
-            category_filter = getattr(self, "observation_dashboard_filter", "")
-            query = "SELECT * FROM observations"
-            clauses=[]; params=[]
+            term = search.text().strip(); category_filter = getattr(self, "observation_dashboard_filter", "")
+            query = "SELECT * FROM observations"; clauses=[]; params=[]
             if term:
                 clauses.append("(number LIKE ? OR location LIKE ? OR responsible LIKE ? OR observation LIKE ? OR corrective_action LIKE ? OR category LIKE ? OR COALESCE(capa_number,'') LIKE ?)")
-                like = f"%{term}%"
-                params.extend([like, like, like, like, like, like, like])
-            if category_filter:
-                clauses.append("category=?"); params.append(category_filter)
-            if clauses:
-                query += " WHERE " + " AND ".join(clauses)
+                like=f"%{term}%"; params.extend([like]*7)
+            if category_filter: clauses.append("category=?"); params.append(category_filter)
+            if clauses: query += " WHERE " + " AND ".join(clauses)
             query += " ORDER BY id DESC"
-            rows = db.fetchall(query, tuple(params))
-            table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                attachments = attachment_names("observation_attachments", row["id"])
-                actions_text = format_corrective_actions_display(row)
-                try:
-                    capa_req = "Yes" if int(row["capa_required"] or 0) else "No"
-                except Exception:
-                    capa_req = "No"
-                try:
-                    capa_no = safe(row["capa_number"]) or "—"
-                except Exception:
-                    capa_no = "—"
-                values = [
-                    row["id"], r + 1, row["number"], row["obs_date"], row["obs_type"], row["observation"], row["status"],
-                    row["location"], actions_text, row["target_date"], capa_req, capa_no,
-                    attachments or "No attachment"
-                ]
-                for c, value in enumerate(values):
-                    item = QTableWidgetItem(safe(value))
-                    item.setToolTip(safe(value))
-                    table.setItem(r, c, item)
-                if overdue(row["target_date"], row["status"]):
-                    table.item(r, 9).setForeground(Qt.GlobalColor.red)
-                    table.item(r, 6).setForeground(Qt.GlobalColor.red)
-                if capa_req == "Yes":
-                    table.item(r, 10).setForeground(Qt.GlobalColor.darkBlue)
-                table.setRowHeight(r, max(48, 18 + 16 * max(1, len(parse_corrective_actions(row)))))
+            rows=db.fetchall(query,tuple(params)); table.setRowCount(len(rows))
+            for r,row in enumerate(rows):
+                attachments=attachment_names("observation_attachments",row["id"])
+                try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
+                except Exception: capa_req="No"
+                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,safe(row["capa_number"]) or "—",attachments or "No attachment"]
+                for c,value in enumerate(values):
+                    item=QTableWidgetItem(safe(value)); item.setToolTip(safe(value)); table.setItem(r,c,item)
+                if overdue(row["target_date"],row["status"]):
+                    table.item(r,9).setForeground(Qt.GlobalColor.red); table.item(r,6).setForeground(Qt.GlobalColor.red)
+                if capa_req=="Yes": table.item(r,10).setForeground(Qt.GlobalColor.darkBlue)
+                table.setRowHeight(r,max(48,18+16*max(1,len(parse_corrective_actions(row)))))
 
         def selected_observation_ids(require_one=False):
-            indexes = table.selectionModel().selectedRows(0) if table.selectionModel() else []
-            ids = []
+            indexes=table.selectionModel().selectedRows(0) if table.selectionModel() else []; ids=[]
             for index in indexes:
-                item = table.item(index.row(), 0)
+                item=table.item(index.row(),0)
                 if item:
                     try:
-                        oid = int(item.text())
-                        if oid not in ids:
-                            ids.append(oid)
-                    except Exception:
-                        pass
-            if not ids:
-                current = table.currentRow()
-                if current >= 0 and table.item(current, 0):
-                    try:
-                        ids = [int(table.item(current, 0).text())]
-                    except Exception:
-                        ids = []
-            if require_one and len(ids) != 1:
-                QMessageBox.warning(self, "Observation", "Select exactly one observation for this action.")
-                return []
-            if not ids:
-                QMessageBox.warning(self, "Observation", "Select at least one observation first.")
+                        oid=int(item.text())
+                        if oid not in ids: ids.append(oid)
+                    except Exception: pass
+            if not ids and table.currentRow()>=0 and table.item(table.currentRow(),0):
+                try: ids=[int(table.item(table.currentRow(),0).text())]
+                except Exception: ids=[]
+            if require_one and len(ids)!=1:
+                QMessageBox.warning(self,"Observation","Select exactly one observation for this action."); return []
+            if not ids: QMessageBox.warning(self,"Observation","Select at least one observation first.")
             return ids
 
-        def selected_observation_id():
-            ids = selected_observation_ids(require_one=True)
-            return ids[0] if ids else None
-
         def draft_selected_card():
-            obs_ids = selected_observation_ids()
-            if not obs_ids:
-                return
-            records = []
-            for obs_id in obs_ids:
-                record = db.fetchone("SELECT number FROM observations WHERE id=?", (obs_id,))
-                if record:
-                    records.append(record)
-            if not records:
-                QMessageBox.warning(self, "Observation", "The selected observation(s) could not be found.")
-                return
-            if len(records) == 1:
-                default_name = f"{safe(records[0]['number'])}_Observation_STOP_Card.docx"
-            else:
-                default_name = "Selected_Observations_STOP_Cards.docx"
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Draft Observation STOP Card(s)", default_name, "Word Documents (*.docx)"
-            )
-            if not path:
-                return
+            obs_ids=selected_observation_ids()
+            if not obs_ids: return
+            path,_=QFileDialog.getSaveFileName(self,"Draft Observation STOP Card(s)","Selected_Observations_STOP_Cards.docx","Word Documents (*.docx)")
+            if not path: return
             try:
-                if not path.lower().endswith(".docx"):
-                    path += ".docx"
-                generate_observation_card_docx(obs_ids, path)
-                if not Path(path).exists() or Path(path).stat().st_size < 500:
-                    raise ValueError("STOP Card file was not created correctly.")
-                with zipfile.ZipFile(path, "r") as z:
-                    bad = z.testzip()
-                    if bad:
-                        raise ValueError(f"Generated STOP Card is corrupt: {bad}")
+                if not path.lower().endswith(".docx"): path += ".docx"
+                generate_observation_card_docx(obs_ids,path)
+                if not Path(path).exists() or Path(path).stat().st_size<500: raise ValueError("STOP Card file was not created correctly.")
+                with zipfile.ZipFile(path,"r") as z:
+                    if z.testzip(): raise ValueError("Generated STOP Card is corrupt.")
                 self.show_export_success(path)
             except Exception as e:
-                logging.exception("Observation card report failed")
-                QMessageBox.critical(self, "Report Error", str(e))
+                logging.exception("Observation card report failed"); QMessageBox.critical(self,"Report Error",str(e))
 
         def manage_attachments():
-            obs_id = selected_observation_id()
-            if obs_id is None:
-                return
-            record = db.fetchone("SELECT number FROM observations WHERE id=?", (obs_id,))
-            if not record:
-                return
-            dialog = QDialog(self)
-            dialog.setWindowTitle(f"Attachments - {record['number']}")
-            dialog.resize(760, 480)
-            v = QVBoxLayout(dialog)
-            v.addWidget(QLabel(f"<b>Observation:</b> {safe(record['number'])}"))
-            listw = QListWidget()
-            v.addWidget(listw, 1)
+            ids=selected_observation_ids(require_one=True)
+            if not ids: return
+            obs_id=ids[0]; record=db.fetchone("SELECT number FROM observations WHERE id=?",(obs_id,))
+            if not record: return
+            dialog=QDialog(self); dialog.setWindowTitle(f"Attachments - {record['number']}"); dialog.resize(760,480); v=QVBoxLayout(dialog)
+            v.addWidget(QLabel(f"<b>Observation:</b> {safe(record['number'])}")); listw=QListWidget(); v.addWidget(listw,1)
             def refresh_files():
                 listw.clear()
-                rows = attachment_rows("observation_attachments", obs_id)
-                for a in rows:
-                    p = Path(safe(a["file_path"]))
-                    listw.addItem(f"{p.name}  |  {safe(a['attachment_type'])}")
-                if not rows:
-                    listw.addItem("No attachments recorded.")
+                for a in attachment_rows("observation_attachments",obs_id):
+                    listw.addItem(f"{Path(safe(a['file_path'])).name} | {safe(a['attachment_type'])}")
+                if listw.count()==0: listw.addItem("No attachments recorded.")
             def add_files():
-                paths, _ = QFileDialog.getOpenFileNames(
-                    dialog, "Add Observation Evidence", "",
-                    "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
-                )
-                if paths:
-                    copy_attachments(paths, safe(record["number"]), "observation_attachments", obs_id)
-                    refresh_files(); load()
-            add = QPushButton("Add Attachment")
-            close = QPushButton("Close")
-            rowbtn = QHBoxLayout(); rowbtn.addWidget(add); rowbtn.addStretch(); rowbtn.addWidget(close); v.addLayout(rowbtn)
-            add.clicked.connect(add_files); close.clicked.connect(dialog.accept)
-            refresh_files(); dialog.exec()
+                paths,_=QFileDialog.getOpenFileNames(dialog,"Add Observation Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+                if paths: copy_attachments(paths,safe(record["number"]),"observation_attachments",obs_id); refresh_files(); load()
+            add=QPushButton("Add Attachment"); close=QPushButton("Close"); rowbtn=QHBoxLayout(); rowbtn.addWidget(add); rowbtn.addStretch(); rowbtn.addWidget(close); v.addLayout(rowbtn)
+            add.clicked.connect(add_files); close.clicked.connect(dialog.accept); refresh_files(); dialog.exec()
 
         def delete_selected():
-            obs_id = selected_observation_id()
-            if obs_id is None:
-                return
-            record = db.fetchone("SELECT number FROM observations WHERE id=?", (obs_id,))
-            if not record:
-                return
-            answer = QMessageBox.question(
-                self, "Confirm Delete",
-                f"Delete observation {record['number']} and its evidence?\n\nThis cannot be undone."
-            )
-            if answer != QMessageBox.Yes:
-                return
-            for a in attachment_rows("observation_attachments", obs_id):
-                try:
-                    Path(safe(a["file_path"])).unlink(missing_ok=True)
-                except Exception:
-                    logging.exception("Unable to remove observation attachment")
-            db.execute("DELETE FROM observations WHERE id=?", (obs_id,))
-            load()
+            ids=selected_observation_ids(require_one=True)
+            if not ids: return
+            obs_id=ids[0]; record=db.fetchone("SELECT number FROM observations WHERE id=?",(obs_id,))
+            if not record: return
+            if QMessageBox.question(self,"Confirm Delete",f"Delete observation {record['number']} and its evidence?\n\nThis cannot be undone.",QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes: return
+            # Preserve any evidence file that is also referenced by a linked CAPA record.
+            capa_paths={safe(r["file_path"]) for r in db.fetchall("SELECT file_path FROM capa_attachments WHERE file_path IS NOT NULL")}
+            for a in attachment_rows("observation_attachments",obs_id):
+                fp=safe(a["file_path"])
+                if fp and fp not in capa_paths:
+                    try: Path(fp).unlink(missing_ok=True)
+                    except Exception: logging.exception("Unable to remove observation attachment")
+            for a in db.fetchall("SELECT file_path FROM observation_closeout_evidence WHERE observation_id=?",(obs_id,)):
+                fp=safe(a["file_path"])
+                if fp and fp not in capa_paths:
+                    try: Path(fp).unlink(missing_ok=True)
+                    except Exception: logging.exception("Unable to remove observation close-out evidence")
+            db.execute("DELETE FROM observations WHERE id=?",(obs_id,)); load(); refresh_closeout_open(); refresh_closeout_evidence()
 
-        def clear_category_filter():
-            self.observation_dashboard_filter=""
-            search.clear()
-            load()
-        clear_filter.clicked.connect(clear_category_filter)
+        clear_filter.clicked.connect(lambda: (setattr(self,"observation_dashboard_filter",""),search.clear(),load()))
         search.textChanged.connect(load)
-        add_button.clicked.connect(lambda: self.observation_form(load))
-        attachment_button.clicked.connect(manage_attachments)
-        delete_button.clicked.connect(delete_selected)
-        export_button.clicked.connect(lambda: self.export_csv("observations"))
-        excel_button.clicked.connect(lambda: self.export_excel("observations"))
-        pdf_button.clicked.connect(lambda: self.export_pdf("observations"))
-        word_button.clicked.connect(lambda: self.export_docx("observations"))
-        card_button.clicked.connect(draft_selected_card)
-        load()
+        def refresh_observation_views():
+            load(); refresh_closeout_open(); refresh_closeout_evidence()
+        add_button.clicked.connect(lambda: self.observation_form(refresh_observation_views))
+        def edit_selected_observation():
+            ids=selected_observation_ids(require_one=True)
+            if ids: self.observation_form(refresh_observation_views,ids[0])
+        edit_button.clicked.connect(edit_selected_observation)
+        attachment_button.clicked.connect(manage_attachments); delete_button.clicked.connect(delete_selected)
+        export_button.clicked.connect(lambda:self.export_csv("observations")); excel_button.clicked.connect(lambda:self.export_excel("observations"))
+        pdf_button.clicked.connect(lambda:self.export_pdf("observations")); word_button.clicked.connect(lambda:self.export_docx("observations")); card_button.clicked.connect(draft_selected_card)
 
+        # ---------------- Close-out & Verification tab ----------------
+        close_page=QWidget(); close_layout=QVBoxLayout(close_page)
+        intro=QLabel("Select one or more open observations, upload close-out evidence, then submit it for review. CAPA-linked evidence is also copied to the linked CAPA record.")
+        intro.setWordWrap(True); intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); close_layout.addWidget(intro)
+        close_layout.addWidget(QLabel("A. Open observations awaiting close-out evidence"))
+        open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No."]
+        open_table.setColumnCount(len(open_headers)); open_table.setHorizontalHeaderLabels(open_headers); open_table.setColumnHidden(0,True)
+        open_table.setSelectionBehavior(QAbstractItemView.SelectRows); open_table.setSelectionMode(QAbstractItemView.ExtendedSelection); open_table.setAlternatingRowColors(True)
+        open_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); open_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(open_table,2)
+        submit_row=QHBoxLayout(); submitter=QLineEdit(); submitter.setPlaceholderText("Submitted by (name / ID)"); submitter.setText(safe(db.setting("current_user","") or db.setting("username","")))
+        upload_closeout=QPushButton("Upload Close-out Evidence for Selected"); refresh_open=QPushButton("Refresh Open List")
+        submit_row.addWidget(submitter,1); submit_row.addWidget(upload_closeout); submit_row.addWidget(refresh_open); close_layout.addLayout(submit_row)
+        close_layout.addWidget(QLabel("B. Evidence submissions awaiting / completed review"))
+        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","CAPA","Evidence File","Submitted By","Submitted At","Review Status","Reviewed By"]
+        evidence_table.setColumnCount(len(ev_headers)); evidence_table.setHorizontalHeaderLabels(ev_headers); evidence_table.setColumnHidden(0,True)
+        evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows); evidence_table.setSelectionMode(QAbstractItemView.SingleSelection); evidence_table.setAlternatingRowColors(True)
+        evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); evidence_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(evidence_table,2)
+        review_row=QHBoxLayout(); reviewer=QLineEdit(); reviewer.setPlaceholderText("Reviewed / verified by (name / role)"); reviewer_comments=QLineEdit(); reviewer_comments.setPlaceholderText("Review comments / reason for rejection")
+        approve_btn=QPushButton("Approve Close-out"); reject_btn=QPushButton("Reject / Return"); refresh_evidence=QPushButton("Refresh Submissions")
+        review_row.addWidget(reviewer,1); review_row.addWidget(reviewer_comments,2); review_row.addWidget(approve_btn); review_row.addWidget(reject_btn); review_row.addWidget(refresh_evidence); close_layout.addLayout(review_row)
+        tabs.addTab(close_page,"Close-out & Verification")
 
-    def observation_form(self, refresh):
+        def refresh_closeout_open():
+            rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
+            open_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["id"],r["number"],r["obs_date"],r["obs_type"],r["observation"],r["responsible"],r["status"],"Yes" if int(r["capa_required"] or 0) else "No",safe(r["capa_number"]) or "—"]
+                for j,val in enumerate(vals): open_table.setItem(i,j,QTableWidgetItem(safe(val)))
+
+        def refresh_closeout_evidence():
+            rows=db.fetchall("""SELECT ce.*,o.number,o.capa_number FROM observation_closeout_evidence ce
+                JOIN observations o ON o.id=ce.observation_id ORDER BY ce.id DESC""")
+            evidence_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                vals=[r["id"],r["batch_id"],r["number"],"Yes" if safe(r["capa_number"]) else "No",Path(safe(r["file_path"])).name,safe(r["submitted_by"]),safe(r["submitted_at"]),safe(r["review_status"]),safe(r["reviewed_by"])]
+                for j,val in enumerate(vals): evidence_table.setItem(i,j,QTableWidgetItem(safe(val)))
+                if safe(r["review_status"])=="Pending Review": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
+                elif safe(r["review_status"])=="Rejected": evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
+
+        def upload_closeout_evidence():
+            indexes=open_table.selectionModel().selectedRows(0) if open_table.selectionModel() else []
+            ids=[]
+            for ix in indexes:
+                it=open_table.item(ix.row(),0)
+                if it:
+                    try: ids.append(int(it.text()))
+                    except Exception: pass
+            if not ids and open_table.currentRow()>=0 and open_table.item(open_table.currentRow(),0):
+                ids=[int(open_table.item(open_table.currentRow(),0).text())]
+            if not ids: return QMessageBox.warning(self,"Close-out Evidence","Select at least one open observation.")
+            by=submitter.text().strip()
+            if not by: return QMessageBox.warning(self,"Submitter Required","Enter the name / ID of the person submitting the evidence.")
+            paths,_=QFileDialog.getOpenFileNames(self,"Select Close-out Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            if not paths: return
+            saved_paths=[]
+            try:
+                with db.conn:
+                    for oid in ids:
+                        obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
+                        if not obs or safe(obs["status"]).lower() in ("closed","cancelled"): continue
+                        batch=f"OBS-CO-{oid}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                        for src_name in paths:
+                            source=Path(src_name)
+                            if not source.is_file(): continue
+                            dest=ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{source.name}"
+                            counter=1
+                            while dest.exists(): dest=ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{counter}_{source.name}"; counter+=1
+                            shutil.copy2(source,dest); saved_paths.append(dest)
+                            now=datetime.now().isoformat(timespec="seconds")
+                            db.conn.execute("INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,'Pending Review')",(batch,oid,str(dest),by,now))
+                            db.conn.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)",(oid,str(dest),"Close-out Evidence"))
+                            capa_no=safe(obs["capa_number"])
+                            if int(obs["capa_required"] or 0) and capa_no:
+                                capa=db.conn.execute("SELECT id,closeout_evidence FROM capa WHERE number=?",(capa_no,)).fetchone()
+                                if capa:
+                                    db.conn.execute("INSERT INTO capa_attachments(capa_id,file_path,attachment_type) VALUES(?,?,?)",(capa["id"],str(dest),"Observation Close-out Evidence"))
+                                    prior=safe(capa["closeout_evidence"])
+                                    combined=(prior+";"+str(dest)).strip(";") if str(dest) not in prior.split(";") else prior
+                                    db.conn.execute("UPDATE capa SET closeout_evidence=? WHERE id=?",(combined,capa["id"]))
+                        db.conn.execute("UPDATE observations SET status='Pending Verification' WHERE id=? AND lower(COALESCE(status,'')) NOT IN ('closed','cancelled')",(oid,))
+                QMessageBox.information(self,"Evidence Submitted","Close-out evidence saved and submitted for review. CAPA-linked evidence has also been attached to the linked CAPA record where available.")
+                refresh_closeout_open(); refresh_closeout_evidence(); load()
+            except Exception as e:
+                for fp in saved_paths:
+                    try: fp.unlink(missing_ok=True)
+                    except Exception: pass
+                logging.exception("Observation close-out evidence upload failed")
+                QMessageBox.critical(self,"Upload Error",str(e))
+
+        def selected_evidence_batch():
+            row=evidence_table.currentRow()
+            if row<0 or not evidence_table.item(row,1):
+                QMessageBox.warning(self,"Review","Select a close-out evidence submission first."); return None
+            return evidence_table.item(row,1).text()
+
+        def review_closeout(approved):
+            batch=selected_evidence_batch()
+            if not batch: return
+            name=reviewer.text().strip()
+            if not name: return QMessageBox.warning(self,"Reviewer Required","Enter the reviewer / verifier name and role.")
+            comment=reviewer_comments.text().strip()
+            if not approved and not comment: return QMessageBox.warning(self,"Review Comment Required","Enter the reason for rejecting / returning the evidence.")
+            rows=db.fetchall("SELECT DISTINCT observation_id FROM observation_closeout_evidence WHERE batch_id=?",(batch,))
+            if not rows: return QMessageBox.warning(self,"Review","The selected submission could not be found.")
+            submitters=db.fetchall("SELECT DISTINCT submitted_by FROM observation_closeout_evidence WHERE batch_id=?",(batch,))
+            if any(safe(r["submitted_by"]).strip().casefold()==name.casefold() for r in submitters):
+                return QMessageBox.warning(self,"Independent Review Required","The reviewer must be a different person from the evidence submitter.")
+            decision="Approved" if approved else "Rejected"; now=datetime.now().isoformat(timespec="seconds")
+            try:
+                with db.conn:
+                    db.conn.execute("UPDATE observation_closeout_evidence SET review_status=?,reviewed_by=?,reviewed_at=?,review_comments=? WHERE batch_id=?",(decision,name,now,comment,batch))
+                    for item in rows:
+                        oid=int(item["observation_id"]); obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
+                        if not obs: continue
+                        old=safe(obs["closeout_comments"])
+                        note=f"Close-out evidence {decision.lower()} by {name} on {now}. {comment}".strip()
+                        comments=(old+"\n"+note).strip() if old else note
+                        if approved and not int(obs["capa_required"] or 0):
+                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Approved",comments,oid))
+                        elif approved and int(obs["capa_required"] or 0):
+                            # Evidence is reviewed here, but the linked CAPA approval remains the authority for final closure.
+                            db.conn.execute("UPDATE observations SET status='Pending Verification',verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(name,now[:10],"Close-out evidence approved; linked CAPA approval still required",comments,oid))
+                        else:
+                            db.conn.execute("UPDATE observations SET status='In Progress',verification=?,closeout_comments=? WHERE id=?",("Close-out evidence returned for correction",comments,oid))
+                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}.")
+                refresh_closeout_open(); refresh_closeout_evidence(); load()
+            except Exception as e:
+                logging.exception("Observation close-out review failed"); QMessageBox.critical(self,"Review Error",str(e))
+
+        upload_closeout.clicked.connect(upload_closeout_evidence); refresh_open.clicked.connect(refresh_closeout_open)
+        refresh_evidence.clicked.connect(refresh_closeout_evidence); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
+
+        # ---------------- Specific Inspection Report tab ----------------
+        report_page=QWidget(); report_layout=QVBoxLayout(report_page)
+        report_intro=QLabel("Fetch observations from the main register using the filters below, review the matching records, then generate a professional Word inspection report.")
+        report_intro.setWordWrap(True); report_intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); report_layout.addWidget(report_intro)
+        filters=QGridLayout(); report_layout.addLayout(filters)
+        type_filter=QComboBox(); type_filter.addItem("All Observation Types"); type_filter.addItems(OBS_TYPES)
+        category_filter=QComboBox(); category_filter.addItem("All Categories"); category_filter.addItems(CATEGORIES)
+        project_filter=QLineEdit(); project_filter.setPlaceholderText("All projects / enter project name")
+        location_filter=QLineEdit(); location_filter.setPlaceholderText("All locations / enter location")
+        use_dates=QCheckBox("Apply date range"); from_date=QDateEdit(); from_date.setCalendarPopup(True); from_date.setDate(datetime.now().date().replace(day=1))
+        to_date=QDateEdit(); to_date.setCalendarPopup(True); to_date.setDate(datetime.now().date())
+        filters.addWidget(QLabel("Observation Type"),0,0); filters.addWidget(type_filter,0,1)
+        filters.addWidget(QLabel("Category"),0,2); filters.addWidget(category_filter,0,3)
+        filters.addWidget(QLabel("Project"),1,0); filters.addWidget(project_filter,1,1)
+        filters.addWidget(QLabel("Location"),1,2); filters.addWidget(location_filter,1,3)
+        filters.addWidget(use_dates,2,0); filters.addWidget(QLabel("From"),2,1); filters.addWidget(from_date,2,2); filters.addWidget(QLabel("To"),2,3); filters.addWidget(to_date,2,4)
+        report_actions=QHBoxLayout(); show_matches=QPushButton("Show Matching Observations"); generate_report=QPushButton("Generate Professional Inspection Report"); generate_report.setEnabled(False)
+        report_actions.addWidget(show_matches); report_actions.addWidget(generate_report); report_layout.addLayout(report_actions)
+        match_label=QLabel("No filter results loaded."); report_layout.addWidget(match_label)
+        report_table=QTableWidget(); report_table.setColumnCount(7); report_table.setHorizontalHeaderLabels(["Observation No.","Date","Type","Category","Project","Location","Status"])
+        report_table.setSelectionBehavior(QAbstractItemView.SelectRows); report_table.setSelectionMode(QAbstractItemView.ExtendedSelection); report_table.setAlternatingRowColors(True)
+        report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); report_table.horizontalHeader().setStretchLastSection(True); report_layout.addWidget(report_table,1)
+        matched_ids=[]; matched_filters={}
+        def show_matching_observations():
+            nonlocal matched_ids, matched_filters
+            clauses=[]; params=[]
+            if type_filter.currentIndex()>0: clauses.append("obs_type=?"); params.append(type_filter.currentText())
+            if category_filter.currentIndex()>0: clauses.append("category=?"); params.append(category_filter.currentText())
+            if project_filter.text().strip(): clauses.append("project LIKE ?"); params.append("%"+project_filter.text().strip()+"%")
+            if location_filter.text().strip(): clauses.append("location LIKE ?"); params.append("%"+location_filter.text().strip()+"%")
+            if use_dates.isChecked():
+                if from_date.date()>to_date.date(): return QMessageBox.warning(self,"Date Filter","From date cannot be after To date.")
+                clauses.append("date(obs_date)>=date(?) AND date(obs_date)<=date(?)"); params.extend([from_date.date().toString("yyyy-MM-dd"),to_date.date().toString("yyyy-MM-dd")])
+            sql="SELECT id,number,obs_date,obs_type,category,project,location,status FROM observations"
+            if clauses: sql += " WHERE "+" AND ".join(clauses)
+            sql += " ORDER BY obs_date,id"
+            rows=db.fetchall(sql,tuple(params)); matched_ids=[int(r["id"]) for r in rows]
+            matched_filters={"Observation Type":type_filter.currentText(),"Category":category_filter.currentText(),"Project":project_filter.text().strip() or "All","Location":location_filter.text().strip() or "All","Date Range":(from_date.date().toString("yyyy-MM-dd")+" to "+to_date.date().toString("yyyy-MM-dd")) if use_dates.isChecked() else "All dates"}
+            report_table.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                for j,val in enumerate([r["number"],r["obs_date"],r["obs_type"],r["category"],r["project"],r["location"],r["status"]]): report_table.setItem(i,j,QTableWidgetItem(safe(val)))
+            match_label.setText(f"{len(rows)} matching observation(s) fetched from the main register.")
+            generate_report.setEnabled(bool(rows))
+        def create_specific_report():
+            if not matched_ids: return QMessageBox.warning(self,"Report","Click Show Matching Observations first.")
+            path,_=QFileDialog.getSaveFileName(self,"Save Specific Inspection Report",f"Specific_Inspection_Report_{datetime.now().strftime('%Y%m%d')}.docx","Word Documents (*.docx)")
+            if not path: return
+            try:
+                if not path.lower().endswith(".docx"): path += ".docx"
+                generate_observation_docx(path,matched_ids)
+                doc=Document(path)
+                p=doc.add_paragraph("FILTER CRITERIA: "+" | ".join(f"{k}: {v}" for k,v in matched_filters.items()))
+                p.paragraph_format.space_after=Pt(6)
+                if doc.tables: doc.tables[0]._tbl.addprevious(p._p)
+                save_docx_validated(doc,path)
+                self.show_export_success(path)
+            except Exception as e:
+                logging.exception("Specific inspection report generation failed"); QMessageBox.critical(self,"Report Error",str(e))
+        show_matches.clicked.connect(show_matching_observations); generate_report.clicked.connect(create_specific_report)
+        tabs.addTab(report_page,"Specific Inspection Report")
+
+        layout.addWidget(tabs,1)
+        load(); refresh_closeout_open(); refresh_closeout_evidence()
+
+    def observation_form(self, refresh, record_id=None):
+        existing = db.fetchone("SELECT * FROM observations WHERE id=?", (record_id,)) if record_id else None
+        if record_id and not existing:
+            QMessageBox.warning(self, "Observation", "The selected observation no longer exists.")
+            return
         dialog = QDialog(self)
-        dialog.setWindowTitle("New HSE Observation / Inspection")
+        dialog.setWindowTitle("Edit HSE Observation / Inspection" if existing else "New HSE Observation / Inspection")
         dialog.resize(1120, 900)
         dialog.setMinimumSize(900, 700)
         dialog.setStyleSheet("""
@@ -6151,9 +6288,9 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(18, 16, 18, 14)
         outer.setSpacing(10)
 
-        header = QLabel("HSE Inspection Observation")
+        header = QLabel("Edit HSE Inspection Observation" if existing else "HSE Inspection Observation")
         header.setObjectName("formTitle")
-        subtitle = QLabel("Record the finding, assign responsibility and define clear corrective actions.")
+        subtitle = QLabel("Update the finding, responsibility and corrective actions." if existing else "Record the finding, assign responsibility and define clear corrective actions.")
         subtitle.setObjectName("formSubtitle")
         outer.addWidget(header)
         outer.addWidget(subtitle)
@@ -6284,13 +6421,15 @@ class MainWindow(QMainWindow):
         add_btn = QPushButton("+ Add Corrective Action")
         add_btn.clicked.connect(lambda: add_action_row())
         actions_layout.addWidget(add_btn)
-        add_action_row()
+        old_actions = parse_corrective_actions(existing) if existing else []
+        for action_text in (old_actions or [""]):
+            add_action_row(action_text)
         content_layout.addWidget(actions_box)
 
         follow_card, follow_grid = make_card("FOLLOW-UP & CLASSIFICATION")
         priority = QComboBox(); priority.addItems(PRIORITIES)
         target = QDateEdit(); target.setCalendarPopup(True); target.setDate(datetime.now().date())
-        status = QComboBox(); status.addItems(STATUSES)
+        status = QComboBox(); status.addItems([x for x in STATUSES if x != "Closed"])
         capa_required = QComboBox(); capa_required.addItems(["No", "Yes"])
         capa_required.setToolTip(
             "Select Yes when formal CAPA tracking is required. All observation details and corrective actions "
@@ -6330,11 +6469,27 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(attachment_card)
         content_layout.addStretch(1)
 
+        if existing:
+            observation_date.setDate(QDate.fromString(safe(existing["obs_date"]), "yyyy-MM-dd") if safe(existing["obs_date"]) else QDate.currentDate())
+            for name in ["project", "company", "location", "area", "responsible", "designation", "employee_id", "observer", "observer_designation", "observer_id", "observer_company", "subcategory"]:
+                edits[name].setText(safe(existing[name]))
+            obs_type.setCurrentText(safe(existing["obs_type"]))
+            category.setCurrentText(safe(existing["category"]))
+            observation.setPlainText(safe(existing["observation"]))
+            priority.setCurrentText(safe(existing["priority"]))
+            target.setDate(QDate.fromString(safe(existing["target_date"]), "yyyy-MM-dd") if safe(existing["target_date"]) else QDate.currentDate())
+            existing_status = safe(existing["status"]) or "Open"
+            if existing_status == "Closed":
+                status.addItem("Closed")
+            status.setCurrentText(existing_status)
+            capa_required.setCurrentText("Yes" if int(existing["capa_required"] or 0) else "No")
+            attachment_label.setText("Existing evidence: " + (attachment_names("observation_attachments", record_id) or "None") + "\nNew files can be added without removing existing evidence.")
+
         scroll_area.setWidget(content)
         outer.addWidget(scroll_area, 1)
 
         buttons = QDialogButtonBox()
-        save_button = buttons.addButton("Save Observation", QDialogButtonBox.ButtonRole.AcceptRole)
+        save_button = buttons.addButton("Update Observation" if existing else "Save Observation", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
         save_button.setObjectName("primaryAction")
         save_button.setMinimumHeight(42)
@@ -6357,84 +6512,52 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(dialog, "Required", "Add at least one corrective action.")
                 return
             try:
-                number = next_number("HSE-OBS", "observations")
                 need_capa = capa_required.currentText() == "Yes"
+                old_capa_no = safe(existing["capa_number"]) if existing else ""
+                if old_capa_no and not need_capa:
+                    need_capa = True
+                    capa_required.setCurrentText("Yes")
+                    QMessageBox.information(dialog, "Linked CAPA Preserved", "This observation already has a linked CAPA record. CAPA Required has been kept as Yes to preserve the existing CAPA link.")
                 actions_json = json.dumps([{"action": a} for a in actions], ensure_ascii=False)
                 corrective_text = format_corrective_actions_display(actions)
-                db.execute("""
-                    INSERT INTO observations (
-                        number, obs_date, obs_time, project, company, location, area,
-                        responsible, designation, employee_id, observer, observer_designation,
-                        observer_id, observer_company, obs_type, category, subcategory,
-                        observation, corrective_action, corrective_actions_json, priority, target_date, status,
-                        capa_required, capa_number, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    number, observation_date.date().toString("yyyy-MM-dd"), now_time(), edits["project"].text(), edits["company"].text(),
-                    edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
-                    edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
-                    edits["observer_designation"].text(), edits["observer_id"].text(),
-                    edits["observer_company"].text(), obs_type.currentText(), category.currentText(),
-                    edits["subcategory"].text(), observation.toPlainText(), corrective_text, actions_json,
-                    priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(),
-                    1 if need_capa else 0, "", datetime.now().isoformat()
-                ))
-                row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
+                if existing:
+                    number = safe(existing["number"])
+                    db.execute("""UPDATE observations SET obs_date=?,project=?,company=?,location=?,area=?,responsible=?,designation=?,employee_id=?,observer=?,observer_designation=?,observer_id=?,observer_company=?,obs_type=?,category=?,subcategory=?,observation=?,corrective_action=?,corrective_actions_json=?,priority=?,target_date=?,status=?,capa_required=?,updated_at=? WHERE id=?""",
+                        (observation_date.date().toString("yyyy-MM-dd"), edits["project"].text(), edits["company"].text(), edits["location"].text(), edits["area"].text(), edits["responsible"].text(), edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(), edits["observer_designation"].text(), edits["observer_id"].text(), edits["observer_company"].text(), obs_type.currentText(), category.currentText(), edits["subcategory"].text(), observation.toPlainText(), corrective_text, actions_json, priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(), 1 if need_capa else 0, datetime.now().isoformat(), record_id))
+                    row = db.fetchone("SELECT id FROM observations WHERE id=?", (record_id,))
+                else:
+                    number = next_number("HSE-OBS", "observations")
+                    db.execute("""INSERT INTO observations(number,obs_date,obs_time,project,company,location,area,responsible,designation,employee_id,observer,observer_designation,observer_id,observer_company,obs_type,category,subcategory,observation,corrective_action,corrective_actions_json,priority,target_date,status,capa_required,capa_number,created_at)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (number, observation_date.date().toString("yyyy-MM-dd"), now_time(), edits["project"].text(), edits["company"].text(), edits["location"].text(), edits["area"].text(), edits["responsible"].text(), edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(), edits["observer_designation"].text(), edits["observer_id"].text(), edits["observer_company"].text(), obs_type.currentText(), category.currentText(), edits["subcategory"].text(), observation.toPlainText(), corrective_text, actions_json, priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(), 1 if need_capa else 0, "", datetime.now().isoformat()))
+                    row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
                 if row and attachment_paths:
                     copy_attachments(attachment_paths, number, "observation_attachments", row["id"])
-
-                capa_number = ""
+                capa_number = old_capa_no
                 if need_capa and row:
-                    capa_number = next_number("HSE-CAPA", "capa")
-                    finding_text = (
-                        f"Observation {number}\n"
-                        f"Type: {obs_type.currentText()} | Category: {category.currentText()}\n"
-                        f"Location: {edits['location'].text()}\n\n"
-                        f"{observation.toPlainText().strip()}"
-                    )
-                    capa_actions = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
-                    db.execute("""
-                        INSERT INTO capa (
-                            number, source, reference_number, finding, root_cause, corrective_action,
-                            preventive_action, responsible, priority, target_date, status,
-                            verification, closeout_evidence, created_at,
-                            actions_json, approval_status, approved_by, approved_date,
-                            completion_pct, action_status, observation_text
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    """, (
-                        capa_number,
-                        "HSE Inspection",
-                        number,
-                        finding_text,
-                        "",
-                        corrective_text,
-                        "",
-                        edits["responsible"].text().strip(),
-                        priority.currentText(),
-                        target.date().toString("yyyy-MM-dd"),
-                        "Open",
-                        "",
-                        "",
-                        datetime.now().isoformat(),
-                        json.dumps(capa_actions, ensure_ascii=False),
-                        "Pending Approval",
-                        "",
-                        "",
-                        0,
-                        "Open",
-                        observation.toPlainText().strip(),
-                    ))
-                    db.execute("UPDATE observations SET capa_number=? WHERE id=?", (capa_number, row["id"]))
-
+                    linked_capa = db.fetchone("SELECT * FROM capa WHERE number=?", (old_capa_no,)) if old_capa_no else None
+                    finding_text = (f"Observation {number}\nType: {obs_type.currentText()} | Category: {category.currentText()}\nLocation: {edits['location'].text()}\n\n{observation.toPlainText().strip()}")
+                    if linked_capa:
+                        old_items = parse_capa_actions(linked_capa["actions_json"] if "actions_json" in linked_capa.keys() else "[]")
+                        preserved = []
+                        for action_text in actions:
+                            match = next((x for x in old_items if safe(x.get("action")) == action_text), None)
+                            evidence = list((match or {}).get("evidence") or [])
+                            preserved.append({"action": action_text, "evidence": evidence, "has_evidence": bool(evidence)})
+                        db.execute("UPDATE capa SET finding=?,corrective_action=?,responsible=?,priority=?,target_date=?,actions_json=?,observation_text=? WHERE id=?",
+                            (finding_text, corrective_text, edits["responsible"].text().strip(), priority.currentText(), target.date().toString("yyyy-MM-dd"), json.dumps(preserved, ensure_ascii=False), observation.toPlainText().strip(), linked_capa["id"]))
+                        capa_number = old_capa_no
+                    else:
+                        capa_number = next_number("HSE-CAPA", "capa")
+                        capa_actions = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
+                        db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text)
+                            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (capa_number, "HSE Inspection", number, finding_text, "", corrective_text, "", edits["responsible"].text().strip(), priority.currentText(), target.date().toString("yyyy-MM-dd"), "Open", "", "", datetime.now().isoformat(), json.dumps(capa_actions, ensure_ascii=False), "Pending Approval", "", "", 0, "Open", observation.toPlainText().strip()))
+                        db.execute("UPDATE observations SET capa_number=? WHERE id=?", (capa_number, row["id"]))
                 dialog.accept()
                 refresh()
                 if need_capa and capa_number:
-                    QMessageBox.information(
-                        self, "CAPA Tracking",
-                        f"Observation {number} saved.\n\n"
-                        f"CAPA Required = Yes\n"
-                        f"{len(actions)} corrective action(s) sent to CAPA Tracking Register as {capa_number}."
-                    )
+                    QMessageBox.information(self, "CAPA Tracking", f"Observation {number} saved.\n\nCAPA Required = Yes\nLinked CAPA: {capa_number}")
             except Exception as e:
                 logging.exception("Observation save failed")
                 QMessageBox.critical(dialog, "Save Error", f"Unable to save observation.\n\n{e}")
