@@ -9,6 +9,8 @@ import json
 import re
 import html
 import calendar
+import io
+from urllib.parse import unquote
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -33,6 +35,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet
 from openpyxl import Workbook
+from PIL import Image as PILImage
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, PatternFill, Border, Side, Font
 from openpyxl.cell.cell import MergedCell
@@ -962,8 +965,85 @@ def xml_safe(value):
     return "".join(ch for ch in text if ch in "\t\n\r" or ord(ch) >= 32)
 
 
+def resolve_attachment_path(stored_path):
+    """Resolve attachment paths saved by older app versions and packaged builds."""
+    raw = unquote(safe(stored_path).strip().strip('"'))
+    if not raw:
+        return None
+    if raw.lower().startswith("file://"):
+        raw = raw[7:]
+    if len(raw) >= 3 and raw[0] == "/" and raw[2] == ":":
+        raw = raw[1:]
+    candidates = []
+    try:
+        direct = Path(raw).expanduser()
+        candidates.append(direct)
+        candidates.append(Path(raw.replace("\\", "/")).expanduser())
+    except Exception:
+        pass
+    normalized = raw.replace("\\", "/")
+    basename = normalized.rstrip("/").split("/")[-1]
+    if basename:
+        candidates.extend([ATTACH_DIR / basename, APP_DIR / basename, REPORT_DIR / basename])
+    # Relative paths from older versions may have been stored relative to cwd or app root.
+    if not Path(normalized).is_absolute():
+        candidates.extend([APP_DIR / normalized, ATTACH_DIR / normalized, Path.cwd() / normalized])
+    seen = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            if candidate.is_file():
+                return candidate
+        except Exception:
+            continue
+    return None
+
+
+def attachment_image_stream(stored_path):
+    """Return a normalized PNG stream for Office/PDF exports, or None if not an image."""
+    fp = resolve_attachment_path(stored_path)
+    if not fp:
+        return None
+    try:
+        with PILImage.open(fp) as image:
+            image.load()
+            if image.mode not in ("RGB", "RGBA"):
+                image = image.convert("RGBA" if "transparency" in image.info else "RGB")
+            stream = io.BytesIO()
+            image.save(stream, format="PNG")
+            stream.seek(0)
+            return stream
+    except Exception:
+        return None
+
+
+def observation_all_attachments(record_id):
+    """Merge observation and close-out attachments without duplicating the same file."""
+    combined = []
+    seen = set()
+    for item in attachment_rows("observation_attachments", record_id):
+        path = safe(item["file_path"])
+        key = path.casefold()
+        if path and key not in seen:
+            seen.add(key)
+            combined.append({"file_path": path, "attachment_type": safe(item["attachment_type"])})
+    for item in db.fetchall(
+        "SELECT file_path, 'Close-out Evidence' AS attachment_type FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id",
+        (record_id,)
+    ):
+        path = safe(item["file_path"])
+        key = path.casefold()
+        if path and key not in seen:
+            seen.add(key)
+            combined.append({"file_path": path, "attachment_type": safe(item["attachment_type"])})
+    return combined
+
+
 def attachment_names(table_name, record_id):
-    return "; ".join(Path(safe(r["file_path"])).name for r in attachment_rows(table_name, record_id))
+    return "; ".join(Path(safe(r["file_path"]).replace("\\", "/")).name for r in attachment_rows(table_name, record_id))
 
 
 def attachment_export_map(table_name):
@@ -1676,9 +1756,8 @@ def observation_export_rows(record_ids=None):
             if key == "__serial__":
                 value=serial
             elif key == "__attachments__":
-                _names = [Path(safe(a["file_path"])).name for a in attachment_rows("observation_attachments", row["id"]) if safe(a["file_path"])]
-                _close_names = [Path(safe(a["file_path"])).name for a in db.fetchall("SELECT file_path FROM observation_closeout_evidence WHERE observation_id=?", (row["id"],)) if safe(a["file_path"])]
-                value = "; ".join(dict.fromkeys(_names + _close_names))
+                _names = [Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]) if safe(a["file_path"])]
+                value = "; ".join(dict.fromkeys(_names))
             elif key == "__corrective_actions__":
                 value=format_corrective_actions_display(row)
             elif key == "__capa_required__":
@@ -1705,11 +1784,12 @@ def observation_word_sequence():
 
 def observation_attachment_images(record_id):
     result=[]
-    for a in attachment_rows("observation_attachments", record_id):
-        p=Path(safe(a["file_path"]))
-        if p.exists() and p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
-            result.append((p, safe(a["attachment_type"])))
+    for a in observation_all_attachments(record_id):
+        fp=resolve_attachment_path(a["file_path"])
+        if fp and attachment_image_stream(fp):
+            result.append((fp, safe(a["attachment_type"])))
     return result
+
 
 def set_docx_landscape(document):
     section=document.sections[0]
@@ -1731,7 +1811,7 @@ def add_observation_attachments_to_docx(document, observation_rows):
     hdr[2].text = "Attachment / Evidence"
     any_attachment = False
     for serial, obs in enumerate(observation_rows, 1):
-        attachments = attachment_rows("observation_attachments", obs["id"])
+        attachments = observation_all_attachments(obs["id"])
         if not attachments:
             continue
         any_attachment = True
@@ -1739,19 +1819,17 @@ def add_observation_attachments_to_docx(document, observation_rows):
         cells[0].text = str(serial)
         cells[1].text = safe(obs["number"])
         for idx, a in enumerate(attachments):
-            path = Path(safe(a["file_path"]))
+            path = resolve_attachment_path(a["file_path"])
             if idx:
                 cells[2].add_paragraph()
             p = cells[2].paragraphs[-1]
             p.paragraph_format.space_after = Pt(0)
-            run = p.add_run(path.name)
+            run = p.add_run(path.name if path else Path(safe(a["file_path"]).replace("\\", "/")).name)
             run.font.size = Pt(7)
-            if path.exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
-                try:
-                    p.add_run("  ")
-                    p.add_run().add_picture(str(path), width=Inches(0.55))
-                except Exception:
-                    pass
+            image_stream = attachment_image_stream(path) if path else None
+            if image_stream:
+                p.add_run("  ")
+                p.add_run().add_picture(image_stream, width=Inches(0.85))
     if not any_attachment:
         cells = table.add_row().cells
         cells[0].merge(cells[2])
@@ -1762,10 +1840,10 @@ def add_observation_attachments_to_docx(document, observation_rows):
 
 def add_observation_evidence_gallery_to_docx(document, observation_rows):
     """Embed original observation photo evidence at readable size in the Word report."""
-    supported_images = {".png", ".jpg", ".jpeg", ".bmp"}
+    supported_images = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
     gallery_entries = []
     for obs in observation_rows:
-        attachments = attachment_rows("observation_attachments", obs["id"])
+        attachments = observation_all_attachments(obs["id"])
         if attachments:
             gallery_entries.append((obs, attachments))
     if not gallery_entries:
@@ -1789,13 +1867,15 @@ def add_observation_evidence_gallery_to_docx(document, observation_rows):
         other_files = []
         missing_files = []
         for attachment in attachments:
-            file_path = Path(safe(attachment["file_path"]))
-            if not file_path.exists() or not file_path.is_file():
-                missing_files.append(file_path.name or "Unavailable attachment")
-            elif file_path.suffix.lower() in supported_images:
+            stored = safe(attachment["file_path"])
+            file_path = resolve_attachment_path(stored)
+            display_name = file_path.name if file_path else Path(stored.replace("\\", "/")).name
+            if not file_path:
+                missing_files.append(display_name or "Unavailable attachment")
+            elif file_path.suffix.lower() in supported_images and attachment_image_stream(file_path):
                 images.append((file_path, safe(attachment["attachment_type"])))
             else:
-                other_files.append((file_path.name, safe(attachment["attachment_type"])))
+                other_files.append((display_name, safe(attachment["attachment_type"])))
 
         # Two-column layout keeps photos large while using the landscape page efficiently.
         for start in range(0, len(images), 2):
@@ -1816,7 +1896,10 @@ def add_observation_evidence_gallery_to_docx(document, observation_rows):
                 image_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 image_paragraph.paragraph_format.space_after = Pt(2)
                 try:
-                    image_paragraph.add_run().add_picture(str(image_path), width=Inches(3.55))
+                    image_stream = attachment_image_stream(image_path)
+                    if not image_stream:
+                        raise ValueError("The image could not be decoded")
+                    image_paragraph.add_run().add_picture(image_stream, width=Inches(3.55))
                 except Exception as exc:
                     logging.exception("Unable to embed observation evidence image: %s", image_path)
                     image_paragraph.add_run(f"Unable to embed image: {image_path.name}").font.size = Pt(8)
@@ -1855,12 +1938,12 @@ def add_observation_evidence_gallery_to_docx(document, observation_rows):
 
 def add_observation_images_to_workbook(workbook, observation_rows):
     """Embed observation photographs in a dedicated Excel evidence gallery sheet."""
-    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
     entries = []
     for obs in observation_rows:
-        for attachment in attachment_rows("observation_attachments", obs["id"]):
-            fp = Path(safe(attachment["file_path"]))
-            if fp.is_file() and fp.suffix.lower() in image_exts:
+        for attachment in observation_all_attachments(obs["id"]):
+            fp = resolve_attachment_path(attachment["file_path"])
+            if fp and fp.suffix.lower() in image_exts and attachment_image_stream(fp):
                 entries.append((obs, attachment, fp))
     if not entries:
         return
@@ -1884,7 +1967,14 @@ def add_observation_images_to_workbook(workbook, observation_rows):
         ws.cell(row_no, 4, safe(attachment["attachment_type"]))
         ws.cell(row_no, 5, fp.name)
         try:
-            image = XLImage(str(fp))
+            image_stream = attachment_image_stream(fp)
+            if not image_stream:
+                raise ValueError("Image could not be decoded")
+            image = XLImage(image_stream)
+            # Keep stream alive until the workbook is written.
+            if not hasattr(workbook, "_observation_image_streams"):
+                workbook._observation_image_streams = []
+            workbook._observation_image_streams.append(image_stream)
             scale = min(220 / max(image.width, 1), 145 / max(image.height, 1), 1.0)
             image.width = max(1, int(image.width * scale))
             image.height = max(1, int(image.height * scale))
@@ -1903,12 +1993,12 @@ def add_observation_images_to_workbook(workbook, observation_rows):
 
 def add_observation_images_to_pdf_story(story, observation_rows, available_width):
     """Append embedded photo evidence to an observation PDF report."""
-    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
     gallery = []
     for obs in observation_rows:
-        for attachment in attachment_rows("observation_attachments", obs["id"]):
-            fp = Path(safe(attachment["file_path"]))
-            if fp.is_file() and fp.suffix.lower() in image_exts:
+        for attachment in observation_all_attachments(obs["id"]):
+            fp = resolve_attachment_path(attachment["file_path"])
+            if fp and fp.suffix.lower() in image_exts and attachment_image_stream(fp):
                 gallery.append((obs, attachment, fp))
     if not gallery:
         return
@@ -1922,10 +2012,14 @@ def add_observation_images_to_pdf_story(story, observation_rows, available_width
         ))
         try:
             from reportlab.lib.utils import ImageReader
-            iw, ih = ImageReader(str(fp)).getSize()
+            image_stream = attachment_image_stream(fp)
+            if not image_stream:
+                raise ValueError("Image could not be decoded")
+            iw, ih = ImageReader(image_stream).getSize()
             max_w, max_h = min(available_width * 0.72, 430), 300
             scale = min(max_w / max(iw, 1), max_h / max(ih, 1), 1.0)
-            story.append(RLImage(str(fp), width=iw * scale, height=ih * scale))
+            image_stream.seek(0)
+            story.append(RLImage(image_stream, width=iw * scale, height=ih * scale))
             story.append(Paragraph(xml_safe(safe(attachment["attachment_type"])), styles["Normal"]))
         except Exception:
             logging.exception("Unable to embed observation image in PDF: %s", fp)
@@ -1961,7 +2055,7 @@ def generate_observation_docx(path, record_ids=None):
     widths = [0.40, 0.75, 0.95, 0.90, 0.95, 1.85, 1.40, 0.95, 1.90, 0.80]
     for values, row in zip(data[:1000], rows[:1000]):
         cells = table.add_row().cells
-        attachments = attachment_rows("observation_attachments", row["id"])
+        attachments = observation_all_attachments(row["id"])
         for c, name in enumerate(preferred):
             cell = cells[c]
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -6138,6 +6232,37 @@ class MainWindow(QMainWindow):
         table.setWordWrap(True); table.setAlternatingRowColors(True); register_layout.addWidget(table)
         tabs.addTab(register_page, "Observation Register")
 
+        def ensure_observation_capa_link(obs_row):
+            """Repair a missing observation-to-CAPA register link without creating duplicates."""
+            try:
+                if not int(obs_row["capa_required"] or 0):
+                    return safe(obs_row["capa_number"])
+                capa_no = safe(obs_row["capa_number"]).strip()
+                linked = db.fetchone("SELECT id,number FROM capa WHERE number=?", (capa_no,)) if capa_no else None
+                if not linked:
+                    linked = db.fetchone(
+                        "SELECT id,number FROM capa WHERE reference_number=? AND lower(source) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
+                        (safe(obs_row["number"]),)
+                    )
+                if linked:
+                    if capa_no != safe(linked["number"]):
+                        db.execute("UPDATE observations SET capa_number=? WHERE id=?", (safe(linked["number"]), obs_row["id"]))
+                    return safe(linked["number"])
+                actions = parse_corrective_actions(obs_row)
+                if not actions:
+                    return capa_no
+                new_no = next_number("HSE-CAPA", "capa")
+                action_items = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
+                finding = f"Observation {safe(obs_row['number'])}\n{safe(obs_row['observation'])}"
+                db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (new_no,"HSE Inspection",safe(obs_row["number"]),finding,"",format_corrective_actions_display(actions),"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"])))
+                db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_row["id"]))
+                return new_no
+            except Exception:
+                logging.exception("Unable to reconcile observation CAPA link for ID %s", safe(obs_row["id"]))
+                return safe(obs_row["capa_number"])
+
         def load():
             term = search.text().strip(); category_filter = getattr(self, "observation_dashboard_filter", "")
             query = "SELECT * FROM observations"; clauses=[]; params=[]
@@ -6149,10 +6274,11 @@ class MainWindow(QMainWindow):
             query += " ORDER BY id DESC"
             rows=db.fetchall(query,tuple(params)); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
-                attachments=attachment_names("observation_attachments",row["id"])
+                linked_capa_no = ensure_observation_capa_link(row)
+                attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
-                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,safe(row["capa_number"]) or "—",attachments or "No attachment"]
+                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
                 for c,value in enumerate(values):
                     item=QTableWidgetItem(safe(value)); item.setToolTip(safe(value)); table.setItem(r,c,item)
                 if overdue(row["target_date"],row["status"]):
@@ -6161,20 +6287,30 @@ class MainWindow(QMainWindow):
                 table.setRowHeight(r,max(48,18+16*max(1,len(parse_corrective_actions(row)))))
 
         def selected_observation_ids(require_one=False):
-            indexes=table.selectionModel().selectedRows(0) if table.selectionModel() else []; ids=[]
-            for index in indexes:
-                item=table.item(index.row(),0)
+            ids=[]
+            selection=table.selectionModel()
+            indexes=selection.selectedRows(0) if selection else []
+            selected_rows={ix.row() for ix in indexes}
+            # Some Qt selection modes return selectedItems but no selectedRows;
+            # normalize both paths so Delete/Edit/Attachments use the same row IDs.
+            if not selected_rows:
+                selected_rows={item.row() for item in table.selectedItems()}
+            if not selected_rows and table.currentRow() >= 0:
+                selected_rows={table.currentRow()}
+            for row_index in sorted(selected_rows):
+                item=table.item(row_index,0)
                 if item:
                     try:
                         oid=int(item.text())
                         if oid not in ids: ids.append(oid)
-                    except Exception: pass
-            if not ids and table.currentRow()>=0 and table.item(table.currentRow(),0):
-                try: ids=[int(table.item(table.currentRow(),0).text())]
-                except Exception: ids=[]
+                    except (TypeError, ValueError):
+                        logging.exception("Invalid observation row ID at row %s", row_index)
             if require_one and len(ids)!=1:
-                QMessageBox.warning(self,"Observation","Select exactly one observation for this action."); return []
-            if not ids: QMessageBox.warning(self,"Observation","Select at least one observation first.")
+                message = "Select one observation only. Multiple rows are selected." if len(ids)>1 else "Select one observation first."
+                QMessageBox.warning(self,"Observation",message)
+                return []
+            if not ids:
+                QMessageBox.warning(self,"Observation","Select at least one observation first.")
             return ids
 
         def draft_selected_card():
@@ -6228,7 +6364,11 @@ class MainWindow(QMainWindow):
                 if fp and fp not in capa_paths:
                     try: Path(fp).unlink(missing_ok=True)
                     except Exception: logging.exception("Unable to remove observation close-out evidence")
-            db.execute("DELETE FROM observations WHERE id=?",(obs_id,)); load(); refresh_closeout_open(); refresh_closeout_evidence()
+            with db.conn:
+                db.conn.execute("DELETE FROM observation_closeout_evidence WHERE observation_id=?", (obs_id,))
+                db.conn.execute("DELETE FROM observation_attachments WHERE observation_id=?", (obs_id,))
+                db.conn.execute("DELETE FROM observations WHERE id=?", (obs_id,))
+            load(); refresh_closeout_open(); refresh_closeout_evidence()
 
         clear_filter.clicked.connect(lambda: (setattr(self,"observation_dashboard_filter",""),search.clear(),load()))
         search.textChanged.connect(load)
@@ -6271,7 +6411,7 @@ class MainWindow(QMainWindow):
             approved_rows = db.fetchall("""SELECT DISTINCT o.* FROM observations o
                 JOIN observation_closeout_evidence ce ON ce.observation_id=o.id
                 WHERE lower(ce.review_status)='approved'
-                  AND lower(COALESCE(o.status,''))='pending verification'""")
+                  AND lower(COALESCE(o.status,'')) NOT IN ('closed','cancelled')""")
             for approved_obs in approved_rows:
                 if int(approved_obs["capa_required"] or 0):
                     capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (safe(approved_obs["capa_number"]),))
@@ -6292,10 +6432,21 @@ class MainWindow(QMainWindow):
                 JOIN observations o ON o.id=ce.observation_id ORDER BY ce.id DESC""")
             evidence_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
-                vals=[r["id"],r["batch_id"],r["number"],"Yes" if safe(r["capa_number"]) else "No",Path(safe(r["file_path"])).name,safe(r["submitted_by"]),safe(r["submitted_at"]),safe(r["review_status"]),safe(r["reviewed_by"])]
-                for j,val in enumerate(vals): evidence_table.setItem(i,j,QTableWidgetItem(safe(val)))
-                if safe(r["review_status"])=="Pending Review": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
-                elif safe(r["review_status"])=="Rejected": evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
+                stored_path=safe(r["file_path"])
+                display_name=Path(stored_path.replace("\\", "/")).name
+                review_status=safe(r["review_status"]) or "Pending Review"
+                vals=[r["id"],r["batch_id"],r["number"],"Yes" if safe(r["capa_number"]) else "No",display_name,safe(r["submitted_by"]),safe(r["submitted_at"]),review_status,safe(r["reviewed_by"])]
+                for j,val in enumerate(vals):
+                    cell=QTableWidgetItem(safe(val))
+                    if j==7:
+                        cell.setToolTip(f"Review: {review_status}\nReviewed by: {safe(r['reviewed_by'])}\nComments: {safe(r['review_comments'])}")
+                    if j==4:
+                        resolved=resolve_attachment_path(stored_path)
+                        cell.setToolTip(str(resolved) if resolved else f"Attachment not found: {stored_path}")
+                    evidence_table.setItem(i,j,cell)
+                if review_status=="Pending Review": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
+                elif review_status=="Rejected": evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
+                elif review_status=="Approved": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkGreen)
 
         def upload_closeout_evidence():
             indexes=open_table.selectionModel().selectedRows(0) if open_table.selectionModel() else []
@@ -6393,12 +6544,19 @@ class MainWindow(QMainWindow):
                                     new_status = f"CAPA In Progress ({pct}% complete / {100-pct}% open)"
                                     db.conn.execute("UPDATE observations SET status=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(new_status,name,now[:10],f"Close-out evidence approved; CAPA actions {pct}% complete, {100-pct}% open",comments,oid))
                                 db.conn.execute("UPDATE capa SET observation_closeout_status=? WHERE id=?",(f"Approved by {name} on {now[:10]}",linked_capa["id"]))
+                                refreshed_capa = db.conn.execute("SELECT * FROM capa WHERE id=?", (linked_capa["id"],)).fetchone()
+                                if refreshed_capa:
+                                    sync_observation_from_capa(refreshed_capa)
                             else:
                                 db.conn.execute("UPDATE observations SET status='CAPA Link Missing',verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(name,now[:10],"Close-out evidence approved but linked CAPA record was not found",comments,oid))
                         else:
                             db.conn.execute("UPDATE observations SET status='In Progress',verification=?,closeout_comments=? WHERE id=?",("Close-out evidence returned for correction",comments,oid))
-                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}.")
+                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}. The evidence submission register and linked observation/CAPA status have been refreshed.")
                 refresh_closeout_open(); refresh_closeout_evidence(); load()
+                for evidence_row in range(evidence_table.rowCount()):
+                    if evidence_table.item(evidence_row,1) and evidence_table.item(evidence_row,1).text()==batch:
+                        evidence_table.selectRow(evidence_row)
+                        break
             except Exception as e:
                 logging.exception("Observation close-out review failed"); QMessageBox.critical(self,"Review Error",str(e))
 
@@ -9709,6 +9867,10 @@ class MainWindow(QMainWindow):
             rows = db.fetchall("SELECT * FROM capa ORDER BY id DESC")
             table.setRowCount(len(rows))
             for r, row in enumerate(rows):
+                if safe(row["source"]).strip().casefold() in ("hse inspection", "observation", "hse observation") and safe(row["reference_number"]).strip():
+                    linked_obs = db.fetchone("SELECT id,capa_number FROM observations WHERE number=?", (safe(row["reference_number"]),))
+                    if linked_obs and safe(linked_obs["capa_number"]) != safe(row["number"]):
+                        db.execute("UPDATE observations SET capa_required=1,capa_number=? WHERE id=?", (safe(row["number"]), linked_obs["id"]))
                 actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
                 done, total, pct, action_status = capa_actions_completion(actions)
                 try:
