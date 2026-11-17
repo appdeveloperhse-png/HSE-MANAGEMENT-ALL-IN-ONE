@@ -47,7 +47,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.20"
+APP_VERSION = "1.4.21"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -735,6 +735,7 @@ class Database:
             "completion_pct": "INTEGER DEFAULT 0",
             "action_status": "TEXT DEFAULT 'Open'",
             "observation_text": "TEXT DEFAULT ''",
+            "observation_closeout_status": "TEXT DEFAULT 'Pending'",
         }
         for col, definition in capa_extra.items():
             if col not in capa_cols:
@@ -1065,7 +1066,9 @@ def parse_capa_actions(source):
             if isinstance(evidence, str):
                 evidence = [evidence] if evidence.strip() else []
             evidence = [safe(p) for p in evidence if safe(p).strip()]
-            has_ev = bool(item.get("has_evidence")) or any(Path(p).exists() for p in evidence)
+            existing_evidence = [p for p in evidence if Path(p).is_file()]
+            # A persisted legacy flag is accepted only when no evidence paths were stored.
+            has_ev = bool(existing_evidence) or (bool(item.get("has_evidence")) and not evidence)
             if action:
                 out.append({"action": action, "evidence": evidence, "has_evidence": has_ev})
         else:
@@ -1080,7 +1083,7 @@ def capa_actions_completion(actions):
     total = len(items)
     if total == 0:
         return 0, 0, 0, "Open"
-    done = sum(1 for x in items if x.get("has_evidence") or x.get("evidence"))
+    done = sum(1 for x in items if x.get("has_evidence") and (not x.get("evidence") or any(Path(p).is_file() for p in x.get("evidence", []))))
     pct = int(round(100 * done / total))
     if done == 0:
         status = "Open"
@@ -1092,7 +1095,7 @@ def capa_actions_completion(actions):
 
 
 def sync_observation_from_capa(capa_row):
-    """When CAPA tracking completes/approves, push status back to the linked observation only."""
+    """Synchronize a linked HSE observation from CAPA progress and approval."""
     ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "")
     if not ref:
         return
@@ -1103,23 +1106,36 @@ def sync_observation_from_capa(capa_row):
         capa_row["actions_json"] if "actions_json" in capa_row.keys() else "[]"
     )
     approval = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "")
-    new_status = safe(obs["status"])
+    approved_closeout = db.fetchone(
+        "SELECT id FROM observation_closeout_evidence WHERE observation_id=? AND lower(review_status)='approved' LIMIT 1",
+        (obs["id"],)
+    )
+    closeout_ok = bool(approved_closeout)
+    open_pct = 100 if approval in ("Rejected", "Not Approved") else 100-pct
+    if approval in ("Rejected", "Not Approved"):
+        new_status = f"CAPA Rework Required ({pct}% evidenced / {open_pct}% open for rework)"
+    elif total == 0 or pct < 100:
+        new_status = f"CAPA In Progress ({pct}% complete / {open_pct}% open)"
+    elif approval in ("Approved", "CAPA Approved"):
+        new_status = "Closed" if closeout_ok else "Awaiting Close-out Verification"
+    else:
+        new_status = "Awaiting CAPA Approval"
+
     comments = safe(obs["closeout_comments"]) if "closeout_comments" in obs.keys() else ""
-    note = f"CAPA {safe(capa_row['number'])}: {action_status} ({pct}%)"
-    if approval:
-        note += f" | Approval: {approval}"
+    note = f"CAPA {safe(capa_row['number'])}: {done}/{total} actions evidenced; {pct}% complete; {open_pct}% open; approval: {approval or 'Pending Approval'}"
     if note not in comments:
         comments = (comments + "\n" + note).strip() if comments else note
-    if action_status == "CAPA Action Complete" and approval in ("Approved", "CAPA Approved"):
-        new_status = "Closed"
-    elif action_status == "CAPA Action Complete":
-        new_status = "Pending Verification"
-    elif action_status == "Pending":
-        new_status = "In Progress"
-    db.execute(
-        "UPDATE observations SET status=?, closeout_comments=? WHERE id=?",
-        (new_status, comments, obs["id"])
-    )
+    verification = safe(capa_row["verification"] if "verification" in capa_row.keys() else "")
+    if new_status == "Closed":
+        db.execute(
+            "UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification='CAPA actions and close-out evidence approved',closeout_comments=? WHERE id=?",
+            (today(), safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), today(), comments, obs["id"])
+        )
+    else:
+        db.execute(
+            "UPDATE observations SET status=?,verification=?,closeout_comments=? WHERE id=?",
+            (new_status, verification or new_status, comments, obs["id"])
+        )
 
 
 # ============================================================
@@ -1660,7 +1676,9 @@ def observation_export_rows(record_ids=None):
             if key == "__serial__":
                 value=serial
             elif key == "__attachments__":
-                value=attachment_names("observation_attachments", row["id"])
+                _names = [Path(safe(a["file_path"])).name for a in attachment_rows("observation_attachments", row["id"]) if safe(a["file_path"])]
+                _close_names = [Path(safe(a["file_path"])).name for a in db.fetchall("SELECT file_path FROM observation_closeout_evidence WHERE observation_id=?", (row["id"],)) if safe(a["file_path"])]
+                value = "; ".join(dict.fromkeys(_names + _close_names))
             elif key == "__corrective_actions__":
                 value=format_corrective_actions_display(row)
             elif key == "__capa_required__":
@@ -1833,6 +1851,86 @@ def add_observation_evidence_gallery_to_docx(document, observation_rows):
                 cells[2].text = "File not found at saved location"
             style_docx_table(file_table, header=True, font_size=8)
         document.add_paragraph().paragraph_format.space_after = Pt(3)
+
+
+def add_observation_images_to_workbook(workbook, observation_rows):
+    """Embed observation photographs in a dedicated Excel evidence gallery sheet."""
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+    entries = []
+    for obs in observation_rows:
+        for attachment in attachment_rows("observation_attachments", obs["id"]):
+            fp = Path(safe(attachment["file_path"]))
+            if fp.is_file() and fp.suffix.lower() in image_exts:
+                entries.append((obs, attachment, fp))
+    if not entries:
+        return
+    ws = workbook.create_sheet("Photo Evidence")
+    ws.append(["Observation No.", "Date", "Location", "Attachment Type", "Image File", "Embedded Image"])
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="17365D")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 14
+    ws.column_dimensions["C"].width = 24
+    ws.column_dimensions["D"].width = 22
+    ws.column_dimensions["E"].width = 34
+    ws.column_dimensions["F"].width = 30
+    row_no = 2
+    for obs, attachment, fp in entries:
+        ws.cell(row_no, 1, safe(obs["number"]))
+        ws.cell(row_no, 2, safe(obs["obs_date"]))
+        ws.cell(row_no, 3, safe(obs["location"]))
+        ws.cell(row_no, 4, safe(attachment["attachment_type"]))
+        ws.cell(row_no, 5, fp.name)
+        try:
+            image = XLImage(str(fp))
+            scale = min(220 / max(image.width, 1), 145 / max(image.height, 1), 1.0)
+            image.width = max(1, int(image.width * scale))
+            image.height = max(1, int(image.height * scale))
+            ws.add_image(image, f"F{row_no}")
+            ws.row_dimensions[row_no].height = 112
+        except Exception:
+            logging.exception("Unable to embed observation image in Excel: %s", fp)
+            ws.cell(row_no, 6, "Image could not be embedded")
+            ws.row_dimensions[row_no].height = 24
+        for c in range(1, 6):
+            ws.cell(row_no, c).alignment = Alignment(vertical="center", wrap_text=True)
+        row_no += 1
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:F{max(1, row_no-1)}"
+
+
+def add_observation_images_to_pdf_story(story, observation_rows, available_width):
+    """Append embedded photo evidence to an observation PDF report."""
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif"}
+    gallery = []
+    for obs in observation_rows:
+        for attachment in attachment_rows("observation_attachments", obs["id"]):
+            fp = Path(safe(attachment["file_path"]))
+            if fp.is_file() and fp.suffix.lower() in image_exts:
+                gallery.append((obs, attachment, fp))
+    if not gallery:
+        return
+    styles = getSampleStyleSheet()
+    story.append(Spacer(1, 12))
+    story.append(Paragraph("PHOTO EVIDENCE / ATTACHMENTS", styles["Heading1"]))
+    for obs, attachment, fp in gallery:
+        story.append(Paragraph(
+            xml_safe(f"{safe(obs['number'])} | {safe(obs['obs_date'])} | {safe(obs['location'])} | {fp.name}"),
+            styles["Heading3"]
+        ))
+        try:
+            from reportlab.lib.utils import ImageReader
+            iw, ih = ImageReader(str(fp)).getSize()
+            max_w, max_h = min(available_width * 0.72, 430), 300
+            scale = min(max_w / max(iw, 1), max_h / max(ih, 1), 1.0)
+            story.append(RLImage(str(fp), width=iw * scale, height=ih * scale))
+            story.append(Paragraph(xml_safe(safe(attachment["attachment_type"])), styles["Normal"]))
+        except Exception:
+            logging.exception("Unable to embed observation image in PDF: %s", fp)
+            story.append(Paragraph(xml_safe(f"Image could not be embedded: {fp.name}"), styles["Normal"]))
+        story.append(Spacer(1, 8))
 
 
 def generate_observation_docx(path, record_ids=None):
@@ -4025,6 +4123,9 @@ class MainWindow(QMainWindow):
                 longest = max((len(str(c.value or "")) for c in col), default=10)
                 ws.column_dimensions[letter].width = min(max(longest + 2, 12), 40)
             ws.freeze_panes = "A3"
+            if table_name == "observations":
+                _obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
+                add_observation_images_to_workbook(wb, _obs_rows)
             wb.save(path)
             self.show_export_success(path)
         except Exception as exc:
@@ -4085,6 +4186,9 @@ class MainWindow(QMainWindow):
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]))
             story.append(t)
+            if table_name == "observations":
+                _obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
+                add_observation_images_to_pdf_story(story, _obs_rows, available_width)
             doc.build(story)
             self.show_export_success(path)
         except Exception as exc:
@@ -6162,6 +6266,21 @@ class MainWindow(QMainWindow):
         tabs.addTab(close_page,"Close-out & Verification")
 
         def refresh_closeout_open():
+            # Reconcile legacy rows that were approved in the evidence register but
+            # retained the old Pending Verification status.
+            approved_rows = db.fetchall("""SELECT DISTINCT o.* FROM observations o
+                JOIN observation_closeout_evidence ce ON ce.observation_id=o.id
+                WHERE lower(ce.review_status)='approved'
+                  AND lower(COALESCE(o.status,''))='pending verification'""")
+            for approved_obs in approved_rows:
+                if int(approved_obs["capa_required"] or 0):
+                    capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (safe(approved_obs["capa_number"]),))
+                    if capa_row:
+                        sync_observation_from_capa(capa_row)
+                    else:
+                        db.execute("UPDATE observations SET status='CAPA Link Missing',verification='Close-out evidence approved; linked CAPA record not found' WHERE id=?", (approved_obs["id"],))
+                else:
+                    db.execute("UPDATE observations SET status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),verification='Close-out Approved' WHERE id=?", (today(), approved_obs["id"]))
             rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
             open_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
@@ -6257,10 +6376,25 @@ class MainWindow(QMainWindow):
                         note=f"Close-out evidence {decision.lower()} by {name} on {now}. {comment}".strip()
                         comments=(old+"\n"+note).strip() if old else note
                         if approved and not int(obs["capa_required"] or 0):
-                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Approved",comments,oid))
+                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Close-out Approved",comments,oid))
                         elif approved and int(obs["capa_required"] or 0):
-                            # Evidence is reviewed here, but the linked CAPA approval remains the authority for final closure.
-                            db.conn.execute("UPDATE observations SET status='Pending Verification',verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(name,now[:10],"Close-out evidence approved; linked CAPA approval still required",comments,oid))
+                            capa_no = safe(obs["capa_number"])
+                            linked_capa = db.conn.execute("SELECT * FROM capa WHERE number=?",(capa_no,)).fetchone() if capa_no else None
+                            if linked_capa:
+                                done,total,pct,action_status = capa_actions_completion(linked_capa["actions_json"] if "actions_json" in linked_capa.keys() else "[]")
+                                approval_status = safe(linked_capa["approval_status"])
+                                if pct >= 100 and approval_status in ("Approved", "CAPA Approved"):
+                                    new_status = "Closed"
+                                    db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Close-out and CAPA actions approved",comments,oid))
+                                elif pct >= 100:
+                                    new_status = "Awaiting CAPA Approval"
+                                    db.conn.execute("UPDATE observations SET status=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(new_status,name,now[:10],f"Close-out evidence approved; CAPA actions complete ({pct}%), awaiting approval",comments,oid))
+                                else:
+                                    new_status = f"CAPA In Progress ({pct}% complete / {100-pct}% open)"
+                                    db.conn.execute("UPDATE observations SET status=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(new_status,name,now[:10],f"Close-out evidence approved; CAPA actions {pct}% complete, {100-pct}% open",comments,oid))
+                                db.conn.execute("UPDATE capa SET observation_closeout_status=? WHERE id=?",(f"Approved by {name} on {now[:10]}",linked_capa["id"]))
+                            else:
+                                db.conn.execute("UPDATE observations SET status='CAPA Link Missing',verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(name,now[:10],"Close-out evidence approved but linked CAPA record was not found",comments,oid))
                         else:
                             db.conn.execute("UPDATE observations SET status='In Progress',verification=?,closeout_comments=? WHERE id=?",("Close-out evidence returned for correction",comments,oid))
                 QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}.")
@@ -6273,6 +6407,12 @@ class MainWindow(QMainWindow):
 
         # ---------------- Specific Inspection Report tab ----------------
         report_page=QWidget(); report_layout=QVBoxLayout(report_page)
+        report_page.setStyleSheet("""
+            QLabel { color: #17365D; font-weight: 600; }
+            QGroupBox { color: #17365D; font-weight: 700; border: 1px solid #8FAAC4; border-radius: 6px; margin-top: 8px; padding-top: 8px; }
+            QGroupBox::title { color: #17365D; font-weight: 700; subcontrol-origin: margin; left: 10px; padding: 0 4px; }
+            QHeaderView::section { color: #17365D; font-weight: 700; background: #DCEAF6; padding: 5px; }
+        """)
         report_intro=QLabel(
             "Choose the observation type and inspection date, load the matching records, "
             "then select only the observations that must appear in the report."
@@ -9545,8 +9685,8 @@ class MainWindow(QMainWindow):
         table = QTableWidget()
         headers = [
             "ID", "S.No.", "CAPA No.", "Reference (Observation / Incident)", "Finding / Incident Details", "Corrective Action(s)",
-            "Evidence Progress", "Completion %", "Action Status", "Approval", "Approved By",
-            "Priority", "Responsible", "Target Date", "Overdue"
+            "Evidence Progress", "Completion %", "Open %", "Action Status", "Approval", "Approved By",
+            "Observation Close-out", "Priority", "Responsible", "Target Date", "Overdue"
         ]
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -9584,10 +9724,12 @@ class MainWindow(QMainWindow):
                 except Exception:
                     observed = safe(row["finding"])
                 progress = f"{done}/{total} with evidence" if total else "No actions"
+                open_pct = 100 if approval in ("Rejected", "Not Approved") else 100-pct
                 actions_display = format_corrective_actions_display([a["action"] for a in actions])
                 vals = [
                     row["id"], r + 1, row["number"], row["reference_number"], observed, actions_display,
-                    progress, f"{pct}%", action_status, approval, approved_by or "—",
+                    progress, f"{pct}%", f"{open_pct}%", action_status, approval, approved_by or "—",
+                    (safe(row["observation_closeout_status"]) or "Pending") if safe(row["source"]) == "HSE Inspection" else "—",
                     row["priority"], row["responsible"], row["target_date"],
                     "OVERDUE" if overdue(row["target_date"], row["status"]) else ""
                 ]
@@ -9595,7 +9737,7 @@ class MainWindow(QMainWindow):
                     item = QTableWidgetItem(safe(v))
                     item.setToolTip(safe(v))
                     table.setItem(r, c, item)
-                status_item = table.item(r, 8)
+                status_item = table.item(r, 9)
                 if action_status == "CAPA Action Complete":
                     status_item.setForeground(Qt.GlobalColor.darkGreen)
                 elif action_status == "Pending":
@@ -9718,13 +9860,14 @@ class MainWindow(QMainWindow):
                 done, total, pct, action_status = capa_actions_completion(actions)
                 db.execute(
                     """UPDATE capa SET actions_json=?, completion_pct=?, action_status=?,
-                       corrective_action=?, status=? WHERE id=?""",
+                       corrective_action=?, status=?, approval_status='Pending Approval',
+                       approved_by='', approved_date='', verification='' WHERE id=?""",
                     (
                         json.dumps(actions, ensure_ascii=False),
                         pct,
                         action_status,
                         format_corrective_actions_display([a["action"] for a in actions]),
-                        "Closed" if action_status == "CAPA Action Complete" else ("In Progress" if pct > 0 else "Open"),
+                        "Awaiting Approval" if action_status == "CAPA Action Complete" else ("In Progress" if pct > 0 else "Open"),
                         capa_id,
                     )
                 )
@@ -9755,8 +9898,25 @@ class MainWindow(QMainWindow):
                 return
             dialog = QDialog(self)
             dialog.setWindowTitle(f"CAPA Approval — {row['number']}")
-            dialog.resize(420, 220)
+            dialog.resize(760, 520)
             form = QFormLayout(dialog)
+            _actions_for_review = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
+            _done_review, _total_review, _pct_review, _action_status_review = capa_actions_completion(_actions_for_review)
+            review_summary = QLabel(f"Completion: {_pct_review}%  |  Open: {100-_pct_review}%  |  Actions evidenced: {_done_review}/{_total_review}")
+            review_summary.setStyleSheet("font-weight:700;color:#17365D;padding:6px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:4px;")
+            form.addRow("Action Progress:", review_summary)
+            review_grid = QTableWidget(len(_actions_for_review), 3)
+            review_grid.setHorizontalHeaderLabels(["S.No.", "Corrective Action", "Evidence Files"])
+            review_grid.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            review_grid.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            review_grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            for _i, _action in enumerate(_actions_for_review):
+                review_grid.setItem(_i, 0, QTableWidgetItem(str(_i+1)))
+                review_grid.setItem(_i, 1, QTableWidgetItem(_action["action"]))
+                _evidence_names = [Path(fp).name for fp in (_action.get("evidence") or []) if Path(fp).is_file()]
+                review_grid.setItem(_i, 2, QTableWidgetItem(", ".join(_evidence_names) or "No evidence uploaded"))
+            review_grid.setMinimumHeight(min(240, max(100, 42 * len(_actions_for_review) + 38)))
+            form.addRow("Corrective Action Review:", review_grid)
             approval = QComboBox()
             approval.addItems(["Pending Approval", "Approved", "Not Approved", "Rejected"])
             try:
@@ -9764,8 +9924,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             approved_by = QLineEdit(safe(row["approved_by"]) if "approved_by" in row.keys() else "")
+            review_comments = QTextEdit()
+            review_comments.setPlaceholderText("Enter approval comments or list the corrective actions that must be reworked...")
+            review_comments.setMaximumHeight(78)
             form.addRow("CAPA Approval:", approval)
             form.addRow("Approved By:", approved_by)
+            form.addRow("Review Comments:", review_comments)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
             form.addRow(buttons)
 
@@ -9773,10 +9937,16 @@ class MainWindow(QMainWindow):
                 if approval.currentText() in ("Approved", "Not Approved", "Rejected") and not approved_by.text().strip():
                     QMessageBox.warning(dialog, "Required", "Enter the name of the person approving / rejecting.")
                     return
+                if approval.currentText() in ("Approved", "CAPA Approved"):
+                    _done, _total, _pct, _action_status = capa_actions_completion(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
+                    if _total == 0 or _pct < 100:
+                        QMessageBox.warning(dialog, "CAPA Not Ready for Approval", f"All corrective actions must have evidence before approval.\n\nCurrent completion: {_pct}%\nOpen: {100-_pct}%")
+                        return
                 adate = today() if approval.currentText() != "Pending Approval" else ""
+                _status = "Closed" if approval.currentText() in ("Approved", "CAPA Approved") else ("Rework Required" if approval.currentText() in ("Rejected", "Not Approved") else "Awaiting Approval")
                 db.execute(
-                    "UPDATE capa SET approval_status=?, approved_by=?, approved_date=? WHERE id=?",
-                    (approval.currentText(), approved_by.text().strip(), adate, capa_id)
+                    "UPDATE capa SET approval_status=?, approved_by=?, approved_date=?, status=?, verification=? WHERE id=?",
+                    (approval.currentText(), approved_by.text().strip(), adate, _status, review_comments.toPlainText().strip(), capa_id)
                 )
                 updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
                 if updated:
@@ -12588,6 +12758,9 @@ class MainWindow(QMainWindow):
                         ws.add_image(img, "E1")
                     except Exception:
                         pass
+                if table_name == "observations":
+                    _obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
+                    add_observation_images_to_workbook(wb, _obs_rows)
                 wb.save(path)
                 QMessageBox.information(self, "Export", f"Saved:\n{path}")
             except Exception as exc:
