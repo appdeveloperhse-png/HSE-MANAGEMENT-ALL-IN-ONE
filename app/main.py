@@ -1146,8 +1146,9 @@ def parse_capa_actions(source):
             if isinstance(evidence, str):
                 evidence = [evidence] if evidence.strip() else []
             evidence = [safe(p) for p in evidence if safe(p).strip()]
-            existing_evidence = [p for p in evidence if Path(p).is_file()]
-            # A persisted legacy flag is accepted only when no evidence paths were stored.
+            existing_evidence = [p for p in evidence if resolve_attachment_path(p)]
+            # Resolve old absolute/relative/gallery paths before deciding whether
+            # evidence is genuinely present; file names alone never count.
             has_ev = bool(existing_evidence) or (bool(item.get("has_evidence")) and not evidence)
             if action:
                 out.append({"action": action, "evidence": evidence, "has_evidence": has_ev})
@@ -1163,7 +1164,7 @@ def capa_actions_completion(actions):
     total = len(items)
     if total == 0:
         return 0, 0, 0, "Open"
-    done = sum(1 for x in items if x.get("has_evidence") and (not x.get("evidence") or any(Path(p).is_file() for p in x.get("evidence", []))))
+    done = sum(1 for x in items if x.get("has_evidence") and (not x.get("evidence") or any(resolve_attachment_path(p) for p in x.get("evidence", []))))
     pct = int(round(100 * done / total))
     if done == 0:
         status = "Open"
@@ -1175,47 +1176,95 @@ def capa_actions_completion(actions):
 
 
 def sync_observation_from_capa(capa_row):
-    """Synchronize a linked HSE observation from CAPA progress and approval."""
-    ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "")
+    """Keep an HSE observation synchronized with its linked CAPA and latest close-out decision."""
+    ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "").strip()
+    capa_no = safe(capa_row["number"] if "number" in capa_row.keys() else "").strip()
     if not ref:
         return
     obs = db.fetchone("SELECT * FROM observations WHERE number=?", (ref,))
     if not obs:
         return
+
     done, total, pct, action_status = capa_actions_completion(
         capa_row["actions_json"] if "actions_json" in capa_row.keys() else "[]"
     )
-    approval = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "")
-    approved_closeout = db.fetchone(
-        "SELECT id FROM observation_closeout_evidence WHERE observation_id=? AND lower(review_status)='approved' LIMIT 1",
-        (obs["id"],)
+    approval = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
+    is_approved = approval in ("approved", "capa approved")
+    is_rejected = approval in ("rejected", "not approved")
+
+    # Only the latest submission controls the current close-out state. An older
+    # approved batch must not override a newer pending/rejected submission.
+    latest_closeout = db.fetchone(
+        "SELECT review_status,reviewed_by,reviewed_at FROM observation_closeout_evidence "
+        "WHERE observation_id=? ORDER BY id DESC LIMIT 1", (obs["id"],)
     )
-    closeout_ok = bool(approved_closeout)
-    open_pct = 100 if approval in ("Rejected", "Not Approved") else 100-pct
-    if approval in ("Rejected", "Not Approved"):
-        new_status = f"CAPA Rework Required ({pct}% evidenced / {open_pct}% open for rework)"
+    closeout_ok = bool(latest_closeout and safe(latest_closeout["review_status"]).strip().casefold() == "approved")
+    open_pct = 100 if is_rejected else max(0, 100 - pct)
+
+    if is_rejected:
+        new_status = f"CAPA Rework Required ({pct}% complete / {open_pct}% open)"
     elif total == 0 or pct < 100:
         new_status = f"CAPA In Progress ({pct}% complete / {open_pct}% open)"
-    elif approval in ("Approved", "CAPA Approved"):
-        new_status = "Closed" if closeout_ok else "Awaiting Close-out Verification"
+    elif is_approved:
+        latest_review = safe(latest_closeout["review_status"]).strip().casefold() if latest_closeout else ""
+        new_status = "Closed" if closeout_ok else ("Close-out Evidence Returned" if latest_review in ("rejected", "returned") else "Awaiting Close-out Verification")
     else:
         new_status = "Awaiting CAPA Approval"
 
-    comments = safe(obs["closeout_comments"]) if "closeout_comments" in obs.keys() else ""
-    note = f"CAPA {safe(capa_row['number'])}: {done}/{total} actions evidenced; {pct}% complete; {open_pct}% open; approval: {approval or 'Pending Approval'}"
-    if note not in comments:
-        comments = (comments + "\n" + note).strip() if comments else note
-    verification = safe(capa_row["verification"] if "verification" in capa_row.keys() else "")
+    comments = safe(obs["closeout_comments"] if "closeout_comments" in obs.keys() else "")
+    note = f"CAPA {capa_no}: {done}/{total} actions evidenced; {pct}% complete; {open_pct}% open; approval: {approval or 'pending approval'}"
+    # Keep the latest progress note rather than appending duplicates on every refresh.
+    lines = [line for line in comments.splitlines() if not line.startswith(f"CAPA {capa_no}:")]
+    lines.append(note)
+    comments = "\n".join(line for line in lines if line.strip())
+    verified_by = safe(latest_closeout["reviewed_by"]) if closeout_ok else safe(obs["verified_by"] if "verified_by" in obs.keys() else "")
+    verified_date = safe(latest_closeout["reviewed_at"])[:10] if closeout_ok else safe(obs["verification_date"] if "verification_date" in obs.keys() else "")
+
     if new_status == "Closed":
         db.execute(
-            "UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification='CAPA actions and close-out evidence approved',closeout_comments=? WHERE id=?",
-            (today(), safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), today(), comments, obs["id"])
+            "UPDATE observations SET capa_required=1,capa_number=?,status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),closed_by=?,verified_by=?,verification_date=?,verification='CAPA actions and latest close-out evidence approved',closeout_comments=? WHERE id=?",
+            (capa_no, today(), verified_by or safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), verified_by or safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else ""), verified_date or today(), comments, obs["id"])
         )
     else:
         db.execute(
-            "UPDATE observations SET status=?,verification=?,closeout_comments=? WHERE id=?",
-            (new_status, verification or new_status, comments, obs["id"])
+            "UPDATE observations SET capa_required=1,capa_number=?,status=?,verification=?,closeout_comments=? WHERE id=?",
+            (capa_no, new_status, new_status, comments, obs["id"])
         )
+    # Persist the same percentage/status values used by the Observation Register.
+    try:
+        db.execute("UPDATE capa SET completion_pct=?,action_status=? WHERE id=?", (pct, action_status, capa_row["id"]))
+    except Exception:
+        logging.exception("Unable to persist CAPA progress for %s", capa_no)
+
+
+def ensure_observation_capa_record(obs_row):
+    """Ensure CAPA=Yes observations always have a visible, uniquely linked CAPA record."""
+    if not obs_row or not int(obs_row["capa_required"] or 0):
+        return safe(obs_row["capa_number"]) if obs_row else ""
+    obs_no = safe(obs_row["number"]).strip()
+    capa_no = safe(obs_row["capa_number"]).strip()
+    linked = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
+    if not linked and obs_no:
+        linked = db.fetchone(
+            "SELECT * FROM capa WHERE reference_number=? AND lower(COALESCE(source,'')) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
+            (obs_no,)
+        )
+    if linked:
+        actual_no = safe(linked["number"])
+        if actual_no != capa_no:
+            db.execute("UPDATE observations SET capa_number=? WHERE id=?", (actual_no, obs_row["id"]))
+        return actual_no
+
+    actions = parse_corrective_actions(obs_row)
+    action_items = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
+    corrective = format_corrective_actions_display(actions) if actions else "Corrective action to be defined"
+    finding = f"Observation {obs_no}\n{safe(obs_row['observation'])}"
+    new_no = next_number("HSE-CAPA", "capa")
+    db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (new_no,"HSE Inspection",obs_no,finding,"",corrective,"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"])))
+    db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_row["id"]))
+    return new_no
 
 
 # ============================================================
@@ -6388,7 +6437,7 @@ class MainWindow(QMainWindow):
         intro=QLabel("Select one or more open observations, upload close-out evidence, then submit it for review. CAPA-linked evidence is also copied to the linked CAPA record.")
         intro.setWordWrap(True); intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); close_layout.addWidget(intro)
         close_layout.addWidget(QLabel("A. Open observations awaiting close-out evidence"))
-        open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No."]
+        open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No.","CAPA Progress","Close-out Review"]
         open_table.setColumnCount(len(open_headers)); open_table.setHorizontalHeaderLabels(open_headers); open_table.setColumnHidden(0,True)
         open_table.setSelectionBehavior(QAbstractItemView.SelectRows); open_table.setSelectionMode(QAbstractItemView.ExtendedSelection); open_table.setAlternatingRowColors(True)
         open_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); open_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(open_table,2)
@@ -6396,7 +6445,7 @@ class MainWindow(QMainWindow):
         upload_closeout=QPushButton("Upload Close-out Evidence for Selected"); refresh_open=QPushButton("Refresh Open List")
         submit_row.addWidget(submitter,1); submit_row.addWidget(upload_closeout); submit_row.addWidget(refresh_open); close_layout.addLayout(submit_row)
         close_layout.addWidget(QLabel("B. Evidence submissions awaiting / completed review"))
-        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","CAPA","Evidence File","Submitted By","Submitted At","Review Status","Reviewed By"]
+        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","CAPA","Evidence File","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","CAPA Progress"]
         evidence_table.setColumnCount(len(ev_headers)); evidence_table.setHorizontalHeaderLabels(ev_headers); evidence_table.setColumnHidden(0,True)
         evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows); evidence_table.setSelectionMode(QAbstractItemView.SingleSelection); evidence_table.setAlternatingRowColors(True)
         evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); evidence_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(evidence_table,2)
@@ -6406,36 +6455,52 @@ class MainWindow(QMainWindow):
         tabs.addTab(close_page,"Close-out & Verification")
 
         def refresh_closeout_open():
-            # Reconcile legacy rows that were approved in the evidence register but
-            # retained the old Pending Verification status.
-            approved_rows = db.fetchall("""SELECT DISTINCT o.* FROM observations o
-                JOIN observation_closeout_evidence ce ON ce.observation_id=o.id
-                WHERE lower(ce.review_status)='approved'
-                  AND lower(COALESCE(o.status,'')) NOT IN ('closed','cancelled')""")
-            for approved_obs in approved_rows:
-                if int(approved_obs["capa_required"] or 0):
-                    capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (safe(approved_obs["capa_number"]),))
+            # Reconcile every linked CAPA first, then display the same current status
+            # and latest close-out decision in section A and section B.
+            obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
+            for obs_row in obs_rows:
+                if int(obs_row["capa_required"] or 0):
+                    capa_no = ensure_observation_capa_record(obs_row)
+                    capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
                     if capa_row:
                         sync_observation_from_capa(capa_row)
                     else:
-                        db.execute("UPDATE observations SET status='CAPA Link Missing',verification='Close-out evidence approved; linked CAPA record not found' WHERE id=?", (approved_obs["id"],))
+                        db.execute("UPDATE observations SET status='CAPA Link Missing',verification='CAPA Required is Yes but no linked CAPA record could be created' WHERE id=?", (obs_row["id"],))
                 else:
-                    db.execute("UPDATE observations SET status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),verification='Close-out Approved' WHERE id=?", (today(), approved_obs["id"]))
+                    latest = db.fetchone("SELECT review_status,reviewed_by,reviewed_at FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (obs_row["id"],))
+                    if latest and safe(latest["review_status"]).strip().casefold()=="approved" and safe(obs_row["status"]).casefold()!="closed":
+                        db.execute("UPDATE observations SET status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved' WHERE id=?", (today(),safe(latest["reviewed_by"]),safe(latest["reviewed_by"]),safe(latest["reviewed_at"])[:10] or today(),obs_row["id"]))
+
             rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
             open_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
-                vals=[r["id"],r["number"],r["obs_date"],r["obs_type"],r["observation"],r["responsible"],r["status"],"Yes" if int(r["capa_required"] or 0) else "No",safe(r["capa_number"]) or "—"]
+                latest = db.fetchone("SELECT review_status FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (r["id"],))
+                closeout_status = safe(latest["review_status"]) if latest else "Not Submitted"
+                capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (safe(r["capa_number"]),)) if safe(r["capa_number"]) else None
+                if capa_row:
+                    _done,_total,_pct,_action_status = capa_actions_completion(capa_row["actions_json"] if "actions_json" in capa_row.keys() else capa_row["corrective_action"])
+                    progress = f"{_pct}% complete / {100-_pct}% open"
+                else:
+                    progress = "—"
+                vals=[r["id"],r["number"],r["obs_date"],r["obs_type"],r["observation"],r["responsible"],r["status"],"Yes" if int(r["capa_required"] or 0) else "No",safe(r["capa_number"]) or "—",progress,closeout_status]
                 for j,val in enumerate(vals): open_table.setItem(i,j,QTableWidgetItem(safe(val)))
 
         def refresh_closeout_evidence():
-            rows=db.fetchall("""SELECT ce.*,o.number,o.capa_number FROM observation_closeout_evidence ce
-                JOIN observations o ON o.id=ce.observation_id ORDER BY ce.id DESC""")
+            rows=db.fetchall("""SELECT ce.*,o.number,o.capa_number,o.status AS observation_status,o.id AS obs_id
+                FROM observation_closeout_evidence ce JOIN observations o ON o.id=ce.observation_id
+                ORDER BY ce.id DESC""")
             evidence_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
                 stored_path=safe(r["file_path"])
                 display_name=Path(stored_path.replace("\\", "/")).name
                 review_status=safe(r["review_status"]) or "Pending Review"
-                vals=[r["id"],r["batch_id"],r["number"],"Yes" if safe(r["capa_number"]) else "No",display_name,safe(r["submitted_by"]),safe(r["submitted_at"]),review_status,safe(r["reviewed_by"])]
+                capa_row=db.fetchone("SELECT * FROM capa WHERE number=?", (safe(r["capa_number"]),)) if safe(r["capa_number"]) else None
+                if capa_row:
+                    _done,_total,_pct,_action_status=capa_actions_completion(capa_row["actions_json"] if "actions_json" in capa_row.keys() else capa_row["corrective_action"])
+                    progress=f"{_pct}% complete / {100-_pct}% open"
+                else:
+                    progress="—"
+                vals=[r["id"],r["batch_id"],r["number"],"Yes" if safe(r["capa_number"]) else "No",display_name,safe(r["submitted_by"]),safe(r["submitted_at"]),review_status,safe(r["reviewed_by"]),safe(r["observation_status"]),progress]
                 for j,val in enumerate(vals):
                     cell=QTableWidgetItem(safe(val))
                     if j==7:
@@ -6444,9 +6509,9 @@ class MainWindow(QMainWindow):
                         resolved=resolve_attachment_path(stored_path)
                         cell.setToolTip(str(resolved) if resolved else f"Attachment not found: {stored_path}")
                     evidence_table.setItem(i,j,cell)
-                if review_status=="Pending Review": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
-                elif review_status=="Rejected": evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
-                elif review_status=="Approved": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkGreen)
+                if review_status.casefold()=="pending review": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
+                elif review_status.casefold() in ("rejected","returned"): evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
+                elif review_status.casefold()=="approved": evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkGreen)
 
         def upload_closeout_evidence():
             indexes=open_table.selectionModel().selectedRows(0) if open_table.selectionModel() else []
@@ -6481,6 +6546,8 @@ class MainWindow(QMainWindow):
                             db.conn.execute("INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,'Pending Review')",(batch,oid,str(dest),by,now))
                             db.conn.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)",(oid,str(dest),"Close-out Evidence"))
                             capa_no=safe(obs["capa_number"])
+                            if int(obs["capa_required"] or 0):
+                                capa_no=ensure_observation_capa_record(obs)
                             if int(obs["capa_required"] or 0) and capa_no:
                                 capa=db.conn.execute("SELECT id,closeout_evidence FROM capa WHERE number=?",(capa_no,)).fetchone()
                                 if capa:
@@ -6521,37 +6588,31 @@ class MainWindow(QMainWindow):
                 with db.conn:
                     db.conn.execute("UPDATE observation_closeout_evidence SET review_status=?,reviewed_by=?,reviewed_at=?,review_comments=? WHERE batch_id=?",(decision,name,now,comment,batch))
                     for item in rows:
-                        oid=int(item["observation_id"]); obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
+                        oid=int(item["observation_id"])
+                        obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
                         if not obs: continue
                         old=safe(obs["closeout_comments"])
                         note=f"Close-out evidence {decision.lower()} by {name} on {now}. {comment}".strip()
                         comments=(old+"\n"+note).strip() if old else note
-                        if approved and not int(obs["capa_required"] or 0):
-                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Close-out Approved",comments,oid))
-                        elif approved and int(obs["capa_required"] or 0):
-                            capa_no = safe(obs["capa_number"])
-                            linked_capa = db.conn.execute("SELECT * FROM capa WHERE number=?",(capa_no,)).fetchone() if capa_no else None
-                            if linked_capa:
-                                done,total,pct,action_status = capa_actions_completion(linked_capa["actions_json"] if "actions_json" in linked_capa.keys() else "[]")
-                                approval_status = safe(linked_capa["approval_status"])
-                                if pct >= 100 and approval_status in ("Approved", "CAPA Approved"):
-                                    new_status = "Closed"
-                                    db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],"Close-out and CAPA actions approved",comments,oid))
-                                elif pct >= 100:
-                                    new_status = "Awaiting CAPA Approval"
-                                    db.conn.execute("UPDATE observations SET status=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(new_status,name,now[:10],f"Close-out evidence approved; CAPA actions complete ({pct}%), awaiting approval",comments,oid))
-                                else:
-                                    new_status = f"CAPA In Progress ({pct}% complete / {100-pct}% open)"
-                                    db.conn.execute("UPDATE observations SET status=?,verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(new_status,name,now[:10],f"Close-out evidence approved; CAPA actions {pct}% complete, {100-pct}% open",comments,oid))
-                                db.conn.execute("UPDATE capa SET observation_closeout_status=? WHERE id=?",(f"Approved by {name} on {now[:10]}",linked_capa["id"]))
-                                refreshed_capa = db.conn.execute("SELECT * FROM capa WHERE id=?", (linked_capa["id"],)).fetchone()
-                                if refreshed_capa:
-                                    sync_observation_from_capa(refreshed_capa)
-                            else:
-                                db.conn.execute("UPDATE observations SET status='CAPA Link Missing',verified_by=?,verification_date=?,verification=?,closeout_comments=? WHERE id=?",(name,now[:10],"Close-out evidence approved but linked CAPA record was not found",comments,oid))
-                        else:
-                            db.conn.execute("UPDATE observations SET status='In Progress',verification=?,closeout_comments=? WHERE id=?",("Close-out evidence returned for correction",comments,oid))
-                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}. The evidence submission register and linked observation/CAPA status have been refreshed.")
+                        if not approved:
+                            db.conn.execute("UPDATE observations SET status='Close-out Evidence Returned',verification='Close-out evidence returned for correction',closeout_comments=? WHERE id=?",(comments,oid))
+                            if int(obs["capa_required"] or 0) and safe(obs["capa_number"]):
+                                db.conn.execute("UPDATE capa SET observation_closeout_status=? WHERE number=?",(f"Returned by {name} on {now[:10]}",safe(obs["capa_number"])))
+                            continue
+                        if not int(obs["capa_required"] or 0):
+                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved',closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],comments,oid))
+                            continue
+                        capa_no=ensure_observation_capa_record(obs)
+                        linked_capa=db.conn.execute("SELECT * FROM capa WHERE number=?",(capa_no,)).fetchone() if capa_no else None
+                        if not linked_capa:
+                            db.conn.execute("UPDATE observations SET status='CAPA Link Missing',verified_by=?,verification_date=?,verification='Close-out evidence approved but linked CAPA record was not found',closeout_comments=? WHERE id=?",(name,now[:10],comments,oid))
+                            continue
+                        db.conn.execute("UPDATE capa SET observation_closeout_status=? WHERE id=?",(f"Approved by {name} on {now[:10]}",linked_capa["id"]))
+                        # Store verifier details before shared sync recalculates status/progress.
+                        db.conn.execute("UPDATE observations SET verified_by=?,verification_date=?,closeout_comments=? WHERE id=?",(name,now[:10],comments,oid))
+                        refreshed_capa=db.conn.execute("SELECT * FROM capa WHERE id=?",(linked_capa["id"],)).fetchone()
+                        sync_observation_from_capa(refreshed_capa)
+                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}. Sections A and B, the Observation Register and the linked CAPA Register have been synchronized.")
                 refresh_closeout_open(); refresh_closeout_evidence(); load()
                 for evidence_row in range(evidence_table.rowCount()):
                     if evidence_table.item(evidence_row,1) and evidence_table.item(evidence_row,1).text()==batch:
@@ -6560,8 +6621,12 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logging.exception("Observation close-out review failed"); QMessageBox.critical(self,"Review Error",str(e))
 
-        upload_closeout.clicked.connect(upload_closeout_evidence); refresh_open.clicked.connect(refresh_closeout_open)
-        refresh_evidence.clicked.connect(refresh_closeout_evidence); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
+        def refresh_both_closeout_sections():
+            refresh_closeout_open()
+            refresh_closeout_evidence()
+
+        upload_closeout.clicked.connect(upload_closeout_evidence); refresh_open.clicked.connect(refresh_both_closeout_sections)
+        refresh_evidence.clicked.connect(refresh_both_closeout_sections); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
 
         # ---------------- Specific Inspection Report tab ----------------
         report_page=QWidget(); report_layout=QVBoxLayout(report_page)
@@ -9864,6 +9929,16 @@ class MainWindow(QMainWindow):
             return int(table.item(r, 0).text())
 
         def load():
+            # CAPA=Yes observations must always have a corresponding register row,
+            # even if the user opens CAPA Tracking before opening Observation Register.
+            for _obs in db.fetchall("SELECT * FROM observations WHERE COALESCE(capa_required,0)=1 ORDER BY id"):
+                try:
+                    _no = ensure_observation_capa_record(_obs)
+                    _linked = db.fetchone("SELECT * FROM capa WHERE number=?", (_no,)) if _no else None
+                    if _linked:
+                        sync_observation_from_capa(_linked)
+                except Exception:
+                    logging.exception("Observation-to-CAPA register reconciliation failed for %s", safe(_obs["number"]))
             rows = db.fetchall("SELECT * FROM capa ORDER BY id DESC")
             table.setRowCount(len(rows))
             for r, row in enumerate(rows):
