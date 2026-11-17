@@ -1741,6 +1741,100 @@ def add_observation_attachments_to_docx(document, observation_rows):
     style_docx_table(table, header=True, font_size=7)
 
 
+
+def add_observation_evidence_gallery_to_docx(document, observation_rows):
+    """Embed original observation photo evidence at readable size in the Word report."""
+    supported_images = {".png", ".jpg", ".jpeg", ".bmp"}
+    gallery_entries = []
+    for obs in observation_rows:
+        attachments = attachment_rows("observation_attachments", obs["id"])
+        if attachments:
+            gallery_entries.append((obs, attachments))
+    if not gallery_entries:
+        return
+
+    document.add_page_break()
+    document.add_heading("PHOTO EVIDENCE / ATTACHMENTS", level=1)
+    intro = document.add_paragraph(
+        "The following evidence files are attached to the observations selected for this report. "
+        "Photographs are embedded from the saved evidence files."
+    )
+    intro.paragraph_format.space_after = Pt(8)
+
+    for obs, attachments in gallery_entries:
+        heading = document.add_heading(
+            f"{safe(obs['number'])}  |  {safe(obs['obs_date'])}  |  {safe(obs['obs_type'])}",
+            level=2
+        )
+        heading.paragraph_format.keep_with_next = True
+        images = []
+        other_files = []
+        missing_files = []
+        for attachment in attachments:
+            file_path = Path(safe(attachment["file_path"]))
+            if not file_path.exists() or not file_path.is_file():
+                missing_files.append(file_path.name or "Unavailable attachment")
+            elif file_path.suffix.lower() in supported_images:
+                images.append((file_path, safe(attachment["attachment_type"])))
+            else:
+                other_files.append((file_path.name, safe(attachment["attachment_type"])))
+
+        # Two-column layout keeps photos large while using the landscape page efficiently.
+        for start in range(0, len(images), 2):
+            photo_table = document.add_table(rows=1, cols=2)
+            photo_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+            photo_table.autofit = False
+            for col in range(2):
+                cell = photo_table.rows[0].cells[col]
+                cell.width = Inches(4.85)
+                cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                item_index = start + col
+                if item_index >= len(images):
+                    cell.text = ""
+                    continue
+                image_path, attachment_type = images[item_index]
+                cell.text = ""
+                image_paragraph = cell.paragraphs[0]
+                image_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                image_paragraph.paragraph_format.space_after = Pt(2)
+                try:
+                    image_paragraph.add_run().add_picture(str(image_path), width=Inches(3.55))
+                except Exception as exc:
+                    logging.exception("Unable to embed observation evidence image: %s", image_path)
+                    image_paragraph.add_run(f"Unable to embed image: {image_path.name}").font.size = Pt(8)
+                caption = cell.add_paragraph()
+                caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                caption.paragraph_format.space_after = Pt(4)
+                caption_run = caption.add_run(image_path.name)
+                caption_run.bold = True
+                caption_run.font.size = Pt(8)
+                if attachment_type:
+                    detail = cell.add_paragraph(attachment_type)
+                    detail.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    detail.paragraph_format.space_after = Pt(4)
+                    for run in detail.runs:
+                        run.font.size = Pt(7)
+            style_docx_table(photo_table, header=False, font_size=8)
+
+        if other_files or missing_files:
+            file_table = document.add_table(rows=1, cols=3)
+            file_table.rows[0].cells[0].text = "File"
+            file_table.rows[0].cells[1].text = "Attachment Type"
+            file_table.rows[0].cells[2].text = "Availability"
+            for file_name, attachment_type in other_files:
+                cells = file_table.add_row().cells
+                cells[0].text = xml_safe(file_name)
+                cells[1].text = xml_safe(attachment_type)
+                cells[2].text = "Attached (non-image file)"
+            for file_name in missing_files:
+                cells = file_table.add_row().cells
+                cells[0].text = xml_safe(file_name)
+                cells[1].text = ""
+                cells[2].text = "File not found at saved location"
+            style_docx_table(file_table, header=True, font_size=8)
+        document.add_paragraph().paragraph_format.space_after = Pt(3)
+
+
 def generate_observation_docx(path, record_ids=None):
     """Professional observation register export that Word can open reliably.
     Avoids exact row heights and font overrides on drawing runs that corrupt OOXML.
@@ -1776,27 +1870,18 @@ def generate_observation_docx(path, record_ids=None):
             if name == "Evidence":
                 cell.text = ""
                 if not attachments:
-                    run = cell.paragraphs[0].add_run("None")
-                    run.font.size = Pt(7)
+                    run = cell.paragraphs[0].add_run("No evidence")
                 else:
-                    shown = 0
-                    for a in attachments:
-                        path2 = Path(safe(a["file_path"]))
-                        p2 = cell.paragraphs[0] if shown == 0 else cell.add_paragraph()
-                        p2.paragraph_format.space_after = Pt(0)
-                        p2.paragraph_format.space_before = Pt(0)
-                        embedded = False
-                        if path2.exists() and path2.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"} and shown < 3:
-                            try:
-                                p2.add_run().add_picture(str(path2), width=Inches(0.45))
-                                embedded = True
-                                shown += 1
-                            except Exception:
-                                embedded = False
-                        if not embedded:
-                            run = p2.add_run(xml_safe(path2.name or "attachment"))
-                            run.font.size = Pt(7)
-                            shown += 1
+                    image_count = sum(
+                        1 for a in attachments
+                        if Path(safe(a["file_path"])).suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
+                    )
+                    other_count = len(attachments) - image_count
+                    label = f"{image_count} photo(s) in Evidence Gallery"
+                    if other_count:
+                        label += f"; {other_count} other file(s) listed in gallery"
+                    run = cell.paragraphs[0].add_run(label)
+                run.font.size = Pt(7)
             elif name == "Observation Type":
                 cell.text = xml_safe(row["obs_type"])
             elif name == "Observation Detail":
@@ -1829,6 +1914,7 @@ def generate_observation_docx(path, record_ids=None):
                     if run.font.size is None:
                         run.font.size = Pt(8)
     style_docx_table(table, header=True, font_size=8)
+    add_observation_evidence_gallery_to_docx(doc, rows)
     add_docx_footer(doc)
     save_docx_validated(doc, path)
 
@@ -6187,63 +6273,191 @@ class MainWindow(QMainWindow):
 
         # ---------------- Specific Inspection Report tab ----------------
         report_page=QWidget(); report_layout=QVBoxLayout(report_page)
-        report_intro=QLabel("Fetch observations from the main register using the filters below, review the matching records, then generate a professional Word inspection report.")
-        report_intro.setWordWrap(True); report_intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); report_layout.addWidget(report_intro)
+        report_intro=QLabel(
+            "Choose the observation type and inspection date, load the matching records, "
+            "then select only the observations that must appear in the report."
+        )
+        report_intro.setWordWrap(True)
+        report_intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;")
+        report_layout.addWidget(report_intro)
+
         filters=QGridLayout(); report_layout.addLayout(filters)
         type_filter=QComboBox(); type_filter.addItem("All Observation Types"); type_filter.addItems(OBS_TYPES)
         category_filter=QComboBox(); category_filter.addItem("All Categories"); category_filter.addItems(CATEGORIES)
         project_filter=QLineEdit(); project_filter.setPlaceholderText("All projects / enter project name")
         location_filter=QLineEdit(); location_filter.setPlaceholderText("All locations / enter location")
-        use_dates=QCheckBox("Apply date range"); from_date=QDateEdit(); from_date.setCalendarPopup(True); from_date.setDate(datetime.now().date().replace(day=1))
-        to_date=QDateEdit(); to_date.setCalendarPopup(True); to_date.setDate(datetime.now().date())
-        filters.addWidget(QLabel("Observation Type"),0,0); filters.addWidget(type_filter,0,1)
-        filters.addWidget(QLabel("Category"),0,2); filters.addWidget(category_filter,0,3)
-        filters.addWidget(QLabel("Project"),1,0); filters.addWidget(project_filter,1,1)
-        filters.addWidget(QLabel("Location"),1,2); filters.addWidget(location_filter,1,3)
-        filters.addWidget(use_dates,2,0); filters.addWidget(QLabel("From"),2,1); filters.addWidget(from_date,2,2); filters.addWidget(QLabel("To"),2,3); filters.addWidget(to_date,2,4)
-        report_actions=QHBoxLayout(); show_matches=QPushButton("Show Matching Observations"); generate_report=QPushButton("Generate Professional Inspection Report"); generate_report.setEnabled(False)
-        report_actions.addWidget(show_matches); report_actions.addWidget(generate_report); report_layout.addLayout(report_actions)
-        match_label=QLabel("No filter results loaded."); report_layout.addWidget(match_label)
-        report_table=QTableWidget(); report_table.setColumnCount(7); report_table.setHorizontalHeaderLabels(["Observation No.","Date","Type","Category","Project","Location","Status"])
-        report_table.setSelectionBehavior(QAbstractItemView.SelectRows); report_table.setSelectionMode(QAbstractItemView.ExtendedSelection); report_table.setAlternatingRowColors(True)
-        report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); report_table.horizontalHeader().setStretchLastSection(True); report_layout.addWidget(report_table,1)
-        matched_ids=[]; matched_filters={}
+        use_exact_date=QCheckBox("Filter by exact inspection date")
+        use_exact_date.setChecked(True)
+        inspection_date=QDateEdit(); inspection_date.setCalendarPopup(True)
+        inspection_date.setDisplayFormat("dd-MMM-yyyy")
+        inspection_date.setDate(QDate.currentDate())
+        inspection_date.setEnabled(use_exact_date.isChecked())
+        use_exact_date.toggled.connect(inspection_date.setEnabled)
+
+        filters.addWidget(QLabel("Specific Inspection / Observation Type"),0,0)
+        filters.addWidget(type_filter,0,1)
+        filters.addWidget(QLabel("Inspection Date"),0,2)
+        filters.addWidget(inspection_date,0,3)
+        filters.addWidget(use_exact_date,1,0,1,2)
+        filters.addWidget(QLabel("Category"),1,2)
+        filters.addWidget(category_filter,1,3)
+        filters.addWidget(QLabel("Project"),2,0)
+        filters.addWidget(project_filter,2,1)
+        filters.addWidget(QLabel("Location"),2,2)
+        filters.addWidget(location_filter,2,3)
+
+        report_actions=QHBoxLayout()
+        show_matches=QPushButton("Show Matching Observations")
+        select_all_btn=QPushButton("Select All Matching")
+        clear_selection_btn=QPushButton("Clear Selection")
+        generate_report=QPushButton("Generate Report for Selected Observations")
+        generate_report.setEnabled(False)
+        report_actions.addWidget(show_matches)
+        report_actions.addWidget(select_all_btn)
+        report_actions.addWidget(clear_selection_btn)
+        report_actions.addWidget(generate_report)
+        report_layout.addLayout(report_actions)
+
+        match_label=QLabel("No filter results loaded.")
+        report_layout.addWidget(match_label)
+        report_table=QTableWidget()
+        report_table.setColumnCount(8)
+        report_table.setHorizontalHeaderLabels([
+            "Observation No.","Date","Type","Category","Project","Location","Status","Record ID"
+        ])
+        report_table.setColumnHidden(7, True)
+        report_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        report_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        report_table.setAlternatingRowColors(True)
+        report_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        report_table.horizontalHeader().setStretchLastSection(True)
+        report_layout.addWidget(report_table,1)
+
+        matched_ids=[]
+        matched_filters={}
+
+        def selected_report_observation_ids():
+            ids=[]
+            selection=report_table.selectionModel()
+            if selection:
+                for index in selection.selectedRows(0):
+                    id_item=report_table.item(index.row(),7)
+                    if id_item:
+                        try:
+                            record_id=int(id_item.text())
+                            if record_id not in ids:
+                                ids.append(record_id)
+                        except Exception:
+                            logging.exception("Unable to read selected observation ID for specific report")
+            return ids
+
+        def update_selected_report_state(*_args):
+            selected=selected_report_observation_ids()
+            generate_report.setEnabled(bool(selected))
+            if matched_ids:
+                match_label.setText(
+                    f"{len(matched_ids)} matching observation(s) loaded. "
+                    f"{len(selected)} observation(s) selected for the report."
+                )
+
         def show_matching_observations():
             nonlocal matched_ids, matched_filters
-            clauses=[]; params=[]
-            if type_filter.currentIndex()>0: clauses.append("obs_type=?"); params.append(type_filter.currentText())
-            if category_filter.currentIndex()>0: clauses.append("category=?"); params.append(category_filter.currentText())
-            if project_filter.text().strip(): clauses.append("project LIKE ?"); params.append("%"+project_filter.text().strip()+"%")
-            if location_filter.text().strip(): clauses.append("location LIKE ?"); params.append("%"+location_filter.text().strip()+"%")
-            if use_dates.isChecked():
-                if from_date.date()>to_date.date(): return QMessageBox.warning(self,"Date Filter","From date cannot be after To date.")
-                clauses.append("date(obs_date)>=date(?) AND date(obs_date)<=date(?)"); params.extend([from_date.date().toString("yyyy-MM-dd"),to_date.date().toString("yyyy-MM-dd")])
+            clauses=[]
+            params=[]
+            if type_filter.currentIndex()>0:
+                clauses.append("obs_type=?")
+                params.append(type_filter.currentText())
+            if use_exact_date.isChecked():
+                clauses.append("date(obs_date)=date(?)")
+                params.append(inspection_date.date().toString("yyyy-MM-dd"))
+            if category_filter.currentIndex()>0:
+                clauses.append("category=?")
+                params.append(category_filter.currentText())
+            if project_filter.text().strip():
+                clauses.append("project LIKE ?")
+                params.append("%"+project_filter.text().strip()+"%")
+            if location_filter.text().strip():
+                clauses.append("location LIKE ?")
+                params.append("%"+location_filter.text().strip()+"%")
+
             sql="SELECT id,number,obs_date,obs_type,category,project,location,status FROM observations"
-            if clauses: sql += " WHERE "+" AND ".join(clauses)
+            if clauses:
+                sql += " WHERE "+" AND ".join(clauses)
             sql += " ORDER BY obs_date,id"
-            rows=db.fetchall(sql,tuple(params)); matched_ids=[int(r["id"]) for r in rows]
-            matched_filters={"Observation Type":type_filter.currentText(),"Category":category_filter.currentText(),"Project":project_filter.text().strip() or "All","Location":location_filter.text().strip() or "All","Date Range":(from_date.date().toString("yyyy-MM-dd")+" to "+to_date.date().toString("yyyy-MM-dd")) if use_dates.isChecked() else "All dates"}
+            rows=db.fetchall(sql,tuple(params))
+            matched_ids=[int(r["id"]) for r in rows]
+            matched_filters={
+                "Observation Type":type_filter.currentText(),
+                "Inspection Date":inspection_date.date().toString("dd-MMM-yyyy") if use_exact_date.isChecked() else "All dates",
+                "Category":category_filter.currentText(),
+                "Project":project_filter.text().strip() or "All",
+                "Location":location_filter.text().strip() or "All",
+            }
             report_table.setRowCount(len(rows))
+            report_table.clearSelection()
             for i,r in enumerate(rows):
-                for j,val in enumerate([r["number"],r["obs_date"],r["obs_type"],r["category"],r["project"],r["location"],r["status"]]): report_table.setItem(i,j,QTableWidgetItem(safe(val)))
-            match_label.setText(f"{len(rows)} matching observation(s) fetched from the main register.")
-            generate_report.setEnabled(bool(rows))
+                values=[r["number"],r["obs_date"],r["obs_type"],r["category"],r["project"],r["location"],r["status"],r["id"]]
+                for j,value in enumerate(values):
+                    report_table.setItem(i,j,QTableWidgetItem(safe(value)))
+            generate_report.setEnabled(False)
+            match_label.setText(
+                f"{len(rows)} matching observation(s) found. Select one or more rows to generate a report."
+                if rows else "No observations match the selected filters."
+            )
+
+        def select_all_matching_observations():
+            if not matched_ids:
+                return QMessageBox.information(self,"Select Observations","Load matching observations first.")
+            report_table.selectAll()
+            update_selected_report_state()
+
+        def clear_report_selection():
+            report_table.clearSelection()
+            update_selected_report_state()
+
         def create_specific_report():
-            if not matched_ids: return QMessageBox.warning(self,"Report","Click Show Matching Observations first.")
-            path,_=QFileDialog.getSaveFileName(self,"Save Specific Inspection Report",f"Specific_Inspection_Report_{datetime.now().strftime('%Y%m%d')}.docx","Word Documents (*.docx)")
-            if not path: return
+            selected_ids=selected_report_observation_ids()
+            if not selected_ids:
+                return QMessageBox.warning(self,"Report","Select one or more observations from the matching list first.")
+            # Guard against stale rows if records were removed after the filter was loaded.
+            current_rows=db.fetchall(
+                "SELECT id FROM observations WHERE id IN ("+",".join("?" for _ in selected_ids)+")",
+                tuple(selected_ids)
+            )
+            valid_ids={int(r["id"]) for r in current_rows}
+            selected_ids=[oid for oid in selected_ids if oid in valid_ids]
+            if not selected_ids:
+                return QMessageBox.warning(self,"Report","The selected observations are no longer available. Reload the filters.")
+
+            path,_=QFileDialog.getSaveFileName(
+                self,"Save Specific Inspection Report",
+                f"Specific_Inspection_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx",
+                "Word Documents (*.docx)"
+            )
+            if not path:
+                return
             try:
-                if not path.lower().endswith(".docx"): path += ".docx"
-                generate_observation_docx(path,matched_ids)
+                if not path.lower().endswith(".docx"):
+                    path += ".docx"
+                generate_observation_docx(path,selected_ids)
                 doc=Document(path)
-                p=doc.add_paragraph("FILTER CRITERIA: "+" | ".join(f"{k}: {v}" for k,v in matched_filters.items()))
+                p=doc.add_paragraph(
+                    "SELECTION CRITERIA: "+" | ".join(f"{k}: {v}" for k,v in matched_filters.items())
+                )
                 p.paragraph_format.space_after=Pt(6)
-                if doc.tables: doc.tables[0]._tbl.addprevious(p._p)
+                if doc.tables:
+                    doc.tables[0]._tbl.addprevious(p._p)
                 save_docx_validated(doc,path)
                 self.show_export_success(path)
             except Exception as e:
-                logging.exception("Specific inspection report generation failed"); QMessageBox.critical(self,"Report Error",str(e))
-        show_matches.clicked.connect(show_matching_observations); generate_report.clicked.connect(create_specific_report)
+                logging.exception("Specific inspection report generation failed")
+                QMessageBox.critical(self,"Report Error",f"Unable to generate the selected-observation report.\n\n{e}")
+
+        show_matches.clicked.connect(show_matching_observations)
+        select_all_btn.clicked.connect(select_all_matching_observations)
+        clear_selection_btn.clicked.connect(clear_report_selection)
+        generate_report.clicked.connect(create_specific_report)
+        report_table.itemSelectionChanged.connect(update_selected_report_state)
         tabs.addTab(report_page,"Specific Inspection Report")
 
         layout.addWidget(tabs,1)
