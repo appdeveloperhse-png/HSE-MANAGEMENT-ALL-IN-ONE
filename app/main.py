@@ -1224,81 +1224,117 @@ def capa_actions_completion(actions):
 
 
 def sync_observation_from_capa(capa_row):
-    """Synchronize a CAPA-linked HSE observation and its close-out approval."""
+    """Synchronize a CAPA-linked HSE observation and its close-out approval.
+
+    CAPA Tracking is authoritative. When CAPA is Approved / Closed, the linked
+    HSE Inspection observation must become Closed + Approved. When CAPA is
+    rejected, the observation is returned. No other module is affected.
+    """
+    if not capa_row:
+        return
     ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "").strip()
     capa_no = safe(capa_row["number"] if "number" in capa_row.keys() else "").strip()
     linked_id = None
     try:
-        linked_id = int(capa_row["linked_observation_id"]) if "linked_observation_id" in capa_row.keys() and capa_row["linked_observation_id"] else None
+        raw_link = capa_row["linked_observation_id"] if "linked_observation_id" in capa_row.keys() else None
+        linked_id = int(raw_link) if raw_link not in (None, "", 0, "0") else None
     except Exception:
         linked_id = None
+
     obs = db.fetchone("SELECT * FROM observations WHERE id=?", (linked_id,)) if linked_id else None
     if not obs and ref:
         obs = db.fetchone("SELECT * FROM observations WHERE number=?", (ref,))
     if not obs and capa_no:
         obs = db.fetchone("SELECT * FROM observations WHERE capa_number=? ORDER BY id DESC LIMIT 1", (capa_no,))
+    # Last resort: match any observation that already points at this CAPA number in comments / verification
+    if not obs and capa_no:
+        obs = db.fetchone(
+            "SELECT * FROM observations WHERE COALESCE(capa_required,0)=1 AND (capa_number=? OR number=?) ORDER BY id DESC LIMIT 1",
+            (capa_no, ref or capa_no)
+        )
     if not obs:
+        logging.warning("sync_observation_from_capa: no observation found for CAPA %s (link=%s ref=%s)", capa_no, linked_id, ref)
         return
-    # Backfill the stable relationship for records created by earlier versions.
-    if linked_id is None:
-        try:
-            db.execute("UPDATE capa SET linked_observation_id=? WHERE id=?", (obs["id"], capa_row["id"]))
-        except Exception:
-            logging.exception("Unable to backfill CAPA-to-observation link")
+
+    # Always keep the stable CAPA <-> observation relationship.
+    try:
+        db.execute(
+            "UPDATE capa SET linked_observation_id=?, reference_number=COALESCE(NULLIF(reference_number,''), ?), source=CASE WHEN lower(COALESCE(source,'')) IN ('','other') THEN 'HSE Inspection' ELSE source END WHERE id=?",
+            (obs["id"], safe(obs["number"]), capa_row["id"])
+        )
+        if capa_no and safe(obs["capa_number"]) != capa_no:
+            db.execute("UPDATE observations SET capa_required=1, capa_number=? WHERE id=?", (capa_no, obs["id"]))
+        elif not int(obs["capa_required"] or 0):
+            db.execute("UPDATE observations SET capa_required=1, capa_number=? WHERE id=?", (capa_no or safe(obs["capa_number"]), obs["id"]))
+    except Exception:
+        logging.exception("Unable to backfill CAPA-to-observation link for %s", capa_no)
 
     actions = capa_row["actions_json"] if "actions_json" in capa_row.keys() else "[]"
     done, total, pct, action_status = capa_actions_completion(actions)
-    # Single approval workflow: CAPA action approval controls both registers.
-    # Keep legacy close-out fields readable for old records, but do not require a
-    # second close-out submission or approval stage.
+
     approval_key = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
     closeout_status = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip()
     closeout_key = closeout_status.casefold()
     capa_status_key = safe(capa_row["status"] if "status" in capa_row.keys() else "").strip().casefold()
-    # Treat the CAPA register's final/closed state as the source of truth.
-    # Older records may have status=Closed while legacy approval fields still say Pending.
-    is_approved = (approval_key in ("approved", "capa approved")
-                   or closeout_key in ("approved", "closed", "completed")
-                   or capa_status_key in ("closed", "complete", "completed", "approved"))
-    is_returned = approval_key in ("rejected", "not approved") or closeout_key in ("returned", "rejected", "not approved")
-    submitted_by = safe(capa_row["capa_closeout_submitted_by"] if "capa_closeout_submitted_by" in capa_row.keys() else "")
-    approved_by = (safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else "")
-                   or safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else ""))
-    approved_at = (safe(capa_row["approved_date"] if "approved_date" in capa_row.keys() else "")
-                   or safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else ""))
-    if approval_key in ("pending approval", "awaiting approval"):
-        closeout_key = "submitted for review"
+    obs_closeout_key = safe(capa_row["observation_closeout_status"] if "observation_closeout_status" in capa_row.keys() else "").strip().casefold()
 
-    # CAPA and Observation use one shared close-out decision. Mirror the review
-    # state into the observation evidence ledger so either module shows the same result.
+    is_approved = (
+        approval_key in ("approved", "capa approved")
+        or closeout_key in ("approved", "closed", "completed")
+        or capa_status_key in ("closed", "complete", "completed", "approved")
+        or obs_closeout_key.startswith("approved")
+    )
+    is_returned = (
+        approval_key in ("rejected", "not approved")
+        or closeout_key in ("returned", "rejected", "not approved")
+        or capa_status_key in ("rework required", "returned")
+    )
+
+    approved_by = (
+        safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else "")
+        or safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else "")
+    )
+    approved_at = (
+        safe(capa_row["approved_date"] if "approved_date" in capa_row.keys() else "")
+        or safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else "")
+    )
+
+    # Mirror CAPA decision onto observation close-out evidence rows.
     try:
         if is_approved:
-            # The CAPA approval closes the linked observation's entire evidence batch.
-            # Include legacy Draft/Pending labels so the register popup cannot keep
-            # displaying an obsolete pending state after CAPA is closed.
-            db.execute("""UPDATE observation_closeout_evidence
-                SET review_status='Approved',reviewed_by=?,reviewed_at=?,review_comments=?
-                WHERE observation_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN
-                ('deleted','void','cancelled')""",
-                (approved_by, approved_at or today(), safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else "CAPA close-out approved"), obs["id"]))
+            db.execute(
+                """UPDATE observation_closeout_evidence
+                   SET review_status='Approved', reviewed_by=?, reviewed_at=?, review_comments=?
+                   WHERE observation_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN
+                   ('deleted','void','cancelled')""",
+                (
+                    approved_by or "CAPA Reviewer",
+                    approved_at or today(),
+                    safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else "CAPA close-out approved"),
+                    obs["id"],
+                ),
+            )
         elif is_returned:
-            db.execute("""UPDATE observation_closeout_evidence
-                SET review_status='Rejected',reviewed_by=?,reviewed_at=?,review_comments=?
-                WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN
-                ('pending review','submitted for review')""",
-                (approved_by, approved_at, safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else ""), obs["id"]))
+            db.execute(
+                """UPDATE observation_closeout_evidence
+                   SET review_status='Rejected', reviewed_by=?, reviewed_at=?, review_comments=?
+                   WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN
+                   ('pending review','submitted for review','draft')""",
+                (
+                    approved_by,
+                    approved_at,
+                    safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else ""),
+                    obs["id"],
+                ),
+            )
     except Exception:
         logging.exception("Unable to mirror CAPA close-out decision to observation evidence history")
 
-    # The CAPA close-out approver's decision is authoritative for its linked observation.
-    # The CAPA reviewer decision is authoritative. Once CAPA is approved,
-    # the linked observation must close even when an older record has incomplete
-    # or legacy action metadata that cannot be recalculated reliably.
     if is_approved:
         new_status = "Closed"
     elif is_returned:
         new_status = "Close-out Evidence Returned"
-    elif closeout_key in ("submitted for review", "pending review"):
+    elif approval_key in ("pending approval", "awaiting approval") or closeout_key in ("submitted for review", "pending review"):
         new_status = "Pending Verification"
     elif total == 0 or pct < 100:
         new_status = f"CAPA In Progress ({pct}% complete / {100-pct}% open)"
@@ -1306,33 +1342,31 @@ def sync_observation_from_capa(capa_row):
         new_status = "Awaiting CAPA Close-out Submission"
 
     comments = safe(obs["closeout_comments"] if "closeout_comments" in obs.keys() else "")
-    note = f"CAPA {capa_no}: {done}/{total} actions evidenced; {pct}% complete; close-out approval: {closeout_status or 'Not Submitted'}"
+    note = (
+        f"CAPA {capa_no}: {done}/{total} actions evidenced; {pct}% complete; "
+        f"close-out approval: {closeout_status or safe(capa_row['approval_status'] if 'approval_status' in capa_row.keys() else '') or 'Not Submitted'}"
+    )
     lines = [line for line in comments.splitlines() if not line.startswith(f"CAPA {capa_no}:")]
     lines.append(note)
     comments = "\n".join(line for line in lines if line.strip())
 
     if new_status == "Closed":
-        closed_date = approved_at[:10] if approved_at else today()
+        closed_date = (approved_at[:10] if approved_at else today())
+        verifier = approved_by or safe(obs["verified_by"] if "verified_by" in obs.keys() else "") or "CAPA Reviewer"
         db.execute(
-            """UPDATE observations SET capa_required=1,capa_number=?,status='Closed',
-               closeout_date=COALESCE(NULLIF(closeout_date,''),?),closed_by=?,verified_by=?,
-               verification_date=?,verification='CAPA close-out approved in CAPA Tracking Register',
-               closeout_comments=? WHERE id=?""",
-            (capa_no, closed_date, approved_by, approved_by, closed_date, comments, obs["id"])
+            """UPDATE observations SET capa_required=1, capa_number=?, status='Closed',
+               closeout_date=COALESCE(NULLIF(closeout_date,''), ?),
+               closed_by=COALESCE(NULLIF(closed_by,''), ?),
+               verified_by=COALESCE(NULLIF(verified_by,''), ?),
+               verification_date=COALESCE(NULLIF(verification_date,''), ?),
+               verification='CAPA approved / closed in CAPA Tracking Register',
+               closeout_comments=?
+               WHERE id=?""",
+            (capa_no, closed_date, verifier, verifier, closed_date, comments, obs["id"]),
         )
-    else:
-        db.execute(
-            """UPDATE observations SET capa_required=1,capa_number=?,status=?,verification=?,
-               closeout_comments=? WHERE id=?""",
-            (capa_no, new_status, new_status, comments, obs["id"])
-        )
-    try:
-        db.execute("UPDATE capa SET completion_pct=?,action_status=? WHERE id=?", (pct, action_status, capa_row["id"]))
-        if new_status == "Closed":
-            # Keep CAPA register and Observation register aligned: Closed CAPA must also
-            # carry an Approved approval_status so HSE Inspection never shows Pending Approval.
+        try:
             db.execute(
-                """UPDATE capa SET status='Closed',
+                """UPDATE capa SET completion_pct=?, action_status=?, status='Closed',
                        approval_status=CASE
                            WHEN lower(trim(COALESCE(approval_status,''))) IN ('approved','capa approved') THEN approval_status
                            ELSE 'Approved'
@@ -1347,14 +1381,34 @@ def sync_observation_from_capa(capa_row):
                        capa_closeout_approved_at=COALESCE(NULLIF(trim(capa_closeout_approved_at),''), ?),
                        observation_closeout_status='Approved'
                    WHERE id=?""",
-                (approved_by or "CAPA Reviewer", approved_at or today(), approved_by or "CAPA Reviewer", approved_at or today(), capa_row["id"])
+                (pct, action_status, verifier, closed_date, verifier, approved_at or closed_date, capa_row["id"]),
             )
-    except Exception:
-        logging.exception("Unable to persist CAPA progress for %s", capa_no)
+        except Exception:
+            logging.exception("Unable to normalize closed CAPA %s", capa_no)
+    else:
+        db.execute(
+            """UPDATE observations SET capa_required=1, capa_number=?, status=?, verification=?,
+               closeout_comments=? WHERE id=?""",
+            (capa_no, new_status, new_status, comments, obs["id"]),
+        )
+        try:
+            db.execute(
+                "UPDATE capa SET completion_pct=?, action_status=? WHERE id=?",
+                (pct, action_status, capa_row["id"]),
+            )
+        except Exception:
+            logging.exception("Unable to persist CAPA progress for %s", capa_no)
 
 
 def ensure_observation_capa_record(obs_row):
-    """Return the CAPA record belonging to this observation without cross-linking records."""
+    """Return the CAPA number belonging to this observation without creating duplicate CAPAs.
+
+    Search order:
+      1. linked_observation_id
+      2. observation.capa_number
+      3. reference_number = observation number (any source)
+    Only create a new CAPA when no existing row can be found.
+    """
     if not obs_row or not int(obs_row["capa_required"] or 0):
         return safe(obs_row["capa_number"]) if obs_row else ""
     obs_id = int(obs_row["id"])
@@ -1362,22 +1416,19 @@ def ensure_observation_capa_record(obs_row):
     capa_no = safe(obs_row["capa_number"]).strip()
 
     linked = db.fetchone("SELECT * FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_id,))
+    if not linked and capa_no:
+        linked = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
     if not linked and obs_no:
         linked = db.fetchone(
-            "SELECT * FROM capa WHERE reference_number=? AND lower(COALESCE(source,'')) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
-            (obs_no,)
+            "SELECT * FROM capa WHERE reference_number=? ORDER BY id DESC LIMIT 1",
+            (obs_no,),
         )
-    if not linked and capa_no:
-        candidate = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
-        if candidate:
-            # Always reclaim the CAPA number for this observation. Creating a second
-            # CAPA would leave the approved record orphaned and the Inspection register
-            # showing a fresh Pending Approval row.
-            linked = candidate
     if linked:
         actual_no = safe(linked["number"])
-        db.execute("UPDATE capa SET linked_observation_id=?,reference_number=?,source='HSE Inspection' WHERE id=?",
-                   (obs_id, obs_no, linked["id"]))
+        db.execute(
+            "UPDATE capa SET linked_observation_id=?, reference_number=?, source=CASE WHEN lower(COALESCE(source,'')) IN ('','other') THEN 'HSE Inspection' ELSE source END WHERE id=?",
+            (obs_id, obs_no, linked["id"]),
+        )
         if actual_no != capa_no:
             db.execute("UPDATE observations SET capa_number=? WHERE id=?", (actual_no, obs_id))
         return actual_no
@@ -1387,11 +1438,20 @@ def ensure_observation_capa_record(obs_row):
     corrective = format_corrective_actions_display(actions) if actions else "Corrective action to be defined"
     finding = f"Observation {obs_no}\n{safe(obs_row['observation'])}"
     new_no = next_number("HSE-CAPA", "capa")
-    db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text,linked_observation_id)
+    db.execute(
+        """INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text,linked_observation_id)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (new_no,"HSE Inspection",obs_no,finding,"",corrective,"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"]),obs_id))
+        (
+            new_no, "HSE Inspection", obs_no, finding, "", corrective, "",
+            safe(obs_row["responsible"]), safe(obs_row["priority"]), safe(obs_row["target_date"]),
+            "Open", "", "", datetime.now().isoformat(),
+            json.dumps(action_items, ensure_ascii=False),
+            "Pending Approval", "", "", 0, "Open", safe(obs_row["observation"]), obs_id,
+        ),
+    )
     db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_id))
     return new_no
+
 
 
 def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
@@ -6643,39 +6703,11 @@ class MainWindow(QMainWindow):
         tabs.addTab(register_page, "Observation Register")
 
         def ensure_observation_capa_link(obs_row):
-            """Repair a missing observation-to-CAPA register link without creating duplicates."""
+            """Repair observation-to-CAPA link. Prefer existing CAPA; never spawn a second Pending CAPA."""
             try:
                 if not int(obs_row["capa_required"] or 0):
                     return safe(obs_row["capa_number"])
-                capa_no = safe(obs_row["capa_number"]).strip()
-                linked = db.fetchone("SELECT id,number FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_row["id"],))
-                if not linked:
-                    linked = db.fetchone(
-                        "SELECT id,number FROM capa WHERE reference_number=? AND lower(COALESCE(source,'')) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
-                        (safe(obs_row["number"]),)
-                    )
-                if not linked and capa_no:
-                    candidate = db.fetchone("SELECT id,number,linked_observation_id FROM capa WHERE number=?", (capa_no,))
-                    if candidate:
-                        # Re-link existing CAPA number; never invent a second Pending CAPA.
-                        linked = candidate
-                if linked:
-                    db.execute("UPDATE capa SET linked_observation_id=?,reference_number=?,source='HSE Inspection' WHERE id=?",
-                               (obs_row["id"], safe(obs_row["number"]), linked["id"]))
-                    if capa_no != safe(linked["number"]):
-                        db.execute("UPDATE observations SET capa_number=? WHERE id=?", (safe(linked["number"]), obs_row["id"]))
-                    return safe(linked["number"])
-                actions = parse_corrective_actions(obs_row)
-                if not actions:
-                    actions = ["Corrective action to be defined"]
-                new_no = next_number("HSE-CAPA", "capa")
-                action_items = [{"action": a, "evidence": [], "has_evidence": False} for a in actions]
-                finding = f"Observation {safe(obs_row['number'])}\n{safe(obs_row['observation'])}"
-                db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text,linked_observation_id)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (new_no,"HSE Inspection",safe(obs_row["number"]),finding,"",format_corrective_actions_display(actions),"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"]),obs_row["id"]))
-                db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_row["id"]))
-                return new_no
+                return ensure_observation_capa_record(obs_row)
             except Exception:
                 logging.exception("Unable to reconcile observation CAPA link for ID %s", safe(obs_row["id"]))
                 return safe(obs_row["capa_number"])
@@ -6709,6 +6741,27 @@ class MainWindow(QMainWindow):
                     if _linked_capa_state:
                         sync_observation_from_capa(_linked_capa_state)
                         row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
+                        # Hard guarantee: CAPA Approved/Closed must never leave Observation as Open / Pending Verification.
+                        _ak = safe(_linked_capa_state["approval_status"]).strip().casefold()
+                        _ck = safe(_linked_capa_state["capa_closeout_status"]).strip().casefold()
+                        _sk = safe(_linked_capa_state["status"]).strip().casefold()
+                        if (_ak in ("approved", "capa approved") or _ck in ("approved", "closed", "completed")
+                                or _sk in ("closed", "complete", "completed", "approved")):
+                            if safe(row["status"]).strip().casefold() != "closed":
+                                db.execute(
+                                    """UPDATE observations SET status='Closed',
+                                       closeout_date=COALESCE(NULLIF(closeout_date,''), ?),
+                                       closed_by=COALESCE(NULLIF(closed_by,''), ?),
+                                       verified_by=COALESCE(NULLIF(verified_by,''), ?),
+                                       verification_date=COALESCE(NULLIF(verification_date,''), ?),
+                                       verification='CAPA approved / closed in CAPA Tracking Register'
+                                       WHERE id=?""",
+                                    (today(),
+                                     safe(_linked_capa_state["approved_by"]) or safe(_linked_capa_state["capa_closeout_approved_by"]) or "CAPA Reviewer",
+                                     safe(_linked_capa_state["approved_by"]) or safe(_linked_capa_state["capa_closeout_approved_by"]) or "CAPA Reviewer",
+                                     today(), row["id"]),
+                                )
+                                row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
                 attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
@@ -10904,6 +10957,7 @@ class MainWindow(QMainWindow):
                     if _linked:
                         db.execute("UPDATE capa SET linked_observation_id=?,reference_number=?,source='HSE Inspection' WHERE id=?",
                                    (_obs["id"], safe(_obs["number"]), _linked["id"]))
+                        _linked = db.fetchone("SELECT * FROM capa WHERE id=?", (_linked["id"],)) or _linked
                         sync_observation_from_capa(_linked)
                 except Exception:
                     logging.exception("Observation-to-CAPA register reconciliation failed for %s", safe(_obs["number"]))
@@ -11214,7 +11268,57 @@ class MainWindow(QMainWindow):
                 )
                 updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
                 if updated:
+                    # Re-read after write so sync sees Approved / Closed fields, then force
+                    # the linked HSE Inspection observation to the same final state.
                     sync_observation_from_capa(updated)
+                    if _is_ok:
+                        _obs_targets = []
+                        try:
+                            if updated["linked_observation_id"]:
+                                _obs_targets.append(int(updated["linked_observation_id"]))
+                        except Exception:
+                            pass
+                        _ref = safe(updated["reference_number"]).strip()
+                        if _ref:
+                            _hit = db.fetchone("SELECT id FROM observations WHERE number=?", (_ref,))
+                            if _hit:
+                                _obs_targets.append(int(_hit["id"]))
+                        _cno = safe(updated["number"]).strip()
+                        if _cno:
+                            for _hit in db.fetchall("SELECT id FROM observations WHERE capa_number=?", (_cno,)):
+                                _obs_targets.append(int(_hit["id"]))
+                        for _oid in sorted(set(_obs_targets)):
+                            db.execute(
+                                """UPDATE observations SET capa_required=1, capa_number=?, status='Closed',
+                                   closeout_date=COALESCE(NULLIF(closeout_date,''), ?),
+                                   closed_by=COALESCE(NULLIF(closed_by,''), ?),
+                                   verified_by=COALESCE(NULLIF(verified_by,''), ?),
+                                   verification_date=COALESCE(NULLIF(verification_date,''), ?),
+                                   verification='CAPA approved / closed in CAPA Tracking Register'
+                                   WHERE id=?""",
+                                (_cno, adate or today(), _reviewer, _reviewer, adate or today(), _oid),
+                            )
+                            db.execute(
+                                """UPDATE observation_closeout_evidence
+                                   SET review_status='Approved', reviewed_by=?, reviewed_at=?,
+                                       review_comments=COALESCE(NULLIF(review_comments,''), ?)
+                                   WHERE observation_id=? AND lower(trim(COALESCE(review_status,'')))
+                                         NOT IN ('deleted','void','cancelled')""",
+                                (_reviewer, _now, review_comments.toPlainText().strip() or "CAPA approved", _oid),
+                            )
+                    elif _is_returned:
+                        try:
+                            _oid = int(updated["linked_observation_id"]) if updated["linked_observation_id"] else None
+                        except Exception:
+                            _oid = None
+                        if not _oid and safe(updated["reference_number"]).strip():
+                            _hit = db.fetchone("SELECT id FROM observations WHERE number=?", (safe(updated["reference_number"]).strip(),))
+                            _oid = int(_hit["id"]) if _hit else None
+                        if _oid:
+                            db.execute(
+                                "UPDATE observations SET status=?, verification=? WHERE id=?",
+                                ("Close-out Evidence Returned", "CAPA returned / not approved in CAPA Tracking Register", _oid),
+                            )
                 dialog.accept()
                 load()
 
