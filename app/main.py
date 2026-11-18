@@ -1254,12 +1254,18 @@ def sync_observation_from_capa(capa_row):
     approval_key = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
     closeout_status = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip()
     closeout_key = closeout_status.casefold()
-    is_approved = (approval_key in ("approved", "capa approved") or closeout_key == "approved"
-                   or safe(capa_row["status"] if "status" in capa_row.keys() else "").strip().casefold() == "closed")
+    capa_status_key = safe(capa_row["status"] if "status" in capa_row.keys() else "").strip().casefold()
+    # Treat the CAPA register's final/closed state as the source of truth.
+    # Older records may have status=Closed while legacy approval fields still say Pending.
+    is_approved = (approval_key in ("approved", "capa approved")
+                   or closeout_key in ("approved", "closed", "completed")
+                   or capa_status_key in ("closed", "complete", "completed", "approved"))
     is_returned = approval_key in ("rejected", "not approved") or closeout_key in ("returned", "rejected", "not approved")
     submitted_by = safe(capa_row["capa_closeout_submitted_by"] if "capa_closeout_submitted_by" in capa_row.keys() else "")
-    approved_by = safe(capa_row["approved_by"] if approval_key in ("approved", "capa approved") else (capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else ""))
-    approved_at = safe(capa_row["approved_date"] if approval_key in ("approved", "capa approved") else (capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else ""))
+    approved_by = (safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else "")
+                   or safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else ""))
+    approved_at = (safe(capa_row["approved_date"] if "approved_date" in capa_row.keys() else "")
+                   or safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else ""))
     if approval_key in ("pending approval", "awaiting approval"):
         closeout_key = "submitted for review"
 
@@ -1267,11 +1273,14 @@ def sync_observation_from_capa(capa_row):
     # state into the observation evidence ledger so either module shows the same result.
     try:
         if is_approved:
+            # The CAPA approval closes the linked observation's entire evidence batch.
+            # Include legacy Draft/Pending labels so the register popup cannot keep
+            # displaying an obsolete pending state after CAPA is closed.
             db.execute("""UPDATE observation_closeout_evidence
                 SET review_status='Approved',reviewed_by=?,reviewed_at=?,review_comments=?
-                WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN
-                ('pending review','submitted for review')""",
-                (approved_by, approved_at, safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else ""), obs["id"]))
+                WHERE observation_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN
+                ('deleted','void','cancelled')""",
+                (approved_by, approved_at or today(), safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else "CAPA close-out approved"), obs["id"]))
         elif is_returned:
             db.execute("""UPDATE observation_closeout_evidence
                 SET review_status='Rejected',reviewed_by=?,reviewed_at=?,review_comments=?
@@ -6672,6 +6681,13 @@ class MainWindow(QMainWindow):
             rows=db.fetchall(query,tuple(params)); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
                 linked_capa_no = ensure_observation_capa_link(row)
+                # Re-read after CAPA reconciliation; never render a stale pre-sync snapshot.
+                row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"])) or row
+                if int(row["capa_required"] or 0) and linked_capa_no:
+                    _linked_capa_state = db.fetchone("SELECT * FROM capa WHERE number=?", (linked_capa_no,))
+                    if _linked_capa_state:
+                        sync_observation_from_capa(_linked_capa_state)
+                        row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"])) or row
                 attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
@@ -6679,7 +6695,9 @@ class MainWindow(QMainWindow):
                 linked_approval = db.fetchone("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (row["id"],)) if capa_req == "Yes" else None
                 if not linked_approval and linked_capa_no:
                     linked_approval = db.fetchone("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status FROM capa WHERE number=?", (linked_capa_no,))
-                if linked_approval and safe(linked_approval["approval_status"]).strip().casefold() in ("approved", "capa approved"):
+                if linked_approval and (safe(linked_approval["approval_status"]).strip().casefold() in ("approved", "capa approved")
+                                        or safe(linked_approval["capa_closeout_status"]).strip().casefold() in ("approved", "closed", "completed")
+                                        or safe(linked_approval["status"]).strip().casefold() in ("closed", "complete", "completed", "approved")):
                     approval_status = "Approved"
                 elif linked_approval and safe(linked_approval["approval_status"]).strip().casefold() in ("rejected", "not approved"):
                     approval_status = "Rejected"
