@@ -1246,14 +1246,7 @@ def sync_observation_from_capa(capa_row):
         obs = db.fetchone("SELECT * FROM observations WHERE number=?", (ref,))
     if not obs and capa_no:
         obs = db.fetchone("SELECT * FROM observations WHERE capa_number=? ORDER BY id DESC LIMIT 1", (capa_no,))
-    # Last resort: match any observation that already points at this CAPA number in comments / verification
-    if not obs and capa_no:
-        obs = db.fetchone(
-            "SELECT * FROM observations WHERE COALESCE(capa_required,0)=1 AND (capa_number=? OR number=?) ORDER BY id DESC LIMIT 1",
-            (capa_no, ref or capa_no)
-        )
     if not obs:
-        logging.warning("sync_observation_from_capa: no observation found for CAPA %s (link=%s ref=%s)", capa_no, linked_id, ref)
         return
 
     # Always keep the stable CAPA <-> observation relationship.
@@ -1280,9 +1273,7 @@ def sync_observation_from_capa(capa_row):
 
     is_approved = (
         approval_key in ("approved", "capa approved")
-        or closeout_key in ("approved", "closed", "completed")
-        or capa_status_key in ("closed", "complete", "completed", "approved")
-        or obs_closeout_key.startswith("approved")
+        or closeout_key == "approved"
     )
     is_returned = (
         approval_key in ("rejected", "not approved")
@@ -1386,11 +1377,21 @@ def sync_observation_from_capa(capa_row):
         except Exception:
             logging.exception("Unable to normalize closed CAPA %s", capa_no)
     else:
-        db.execute(
-            """UPDATE observations SET capa_required=1, capa_number=?, status=?, verification=?,
-               closeout_comments=? WHERE id=?""",
-            (capa_no, new_status, new_status, comments, obs["id"]),
-        )
+        # If an earlier bad sync closed this observation while CAPA is still pending, reopen it.
+        current = safe(obs["status"]).strip().casefold()
+        if current == "closed":
+            db.execute(
+                """UPDATE observations SET capa_required=1, capa_number=?, status=?, verification=?,
+                   closeout_comments=?, closeout_date='', closed_by='', verified_by='', verification_date=''
+                   WHERE id=?""",
+                (capa_no, new_status, new_status, comments, obs["id"]),
+            )
+        else:
+            db.execute(
+                """UPDATE observations SET capa_required=1, capa_number=?, status=?, verification=?,
+                   closeout_comments=? WHERE id=?""",
+                (capa_no, new_status, new_status, comments, obs["id"]),
+            )
         try:
             db.execute(
                 "UPDATE capa SET completion_pct=?, action_status=? WHERE id=?",
@@ -1401,28 +1402,40 @@ def sync_observation_from_capa(capa_row):
 
 
 def _capa_is_final(capa_row):
-    """True when CAPA is approved or closed (authoritative final state)."""
+    """True only when CAPA was explicitly Approved in CAPA Tracking."""
     if not capa_row:
         return False
     ak = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
     ck = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip().casefold()
-    sk = safe(capa_row["status"] if "status" in capa_row.keys() else "").strip().casefold()
-    return (
-        ak in ("approved", "capa approved")
-        or ck in ("approved", "closed", "completed")
-        or sk in ("closed", "complete", "completed", "approved")
-    )
+    # Explicit approval only — never treat bare status=Closed as approval.
+    return ak in ("approved", "capa approved") or ck == "approved"
 
 
 def _pick_best_capa(candidates):
-    """Prefer an Approved/Closed CAPA over a newer Pending duplicate."""
+    """Prefer an explicitly Approved CAPA over a newer Pending duplicate."""
     rows = [c for c in (candidates or []) if c]
     if not rows:
         return None
     finals = [c for c in rows if _capa_is_final(c)]
     pool = finals if finals else rows
-    # Highest id among preferred pool (most recent final, else most recent any)
     return max(pool, key=lambda c: int(c["id"]))
+
+
+def _capa_approval_label(capa_row):
+    """Text for the HSE Inspection 'Observation Approval' column."""
+    if not capa_row:
+        return "Not Submitted"
+    if _capa_is_final(capa_row):
+        return "Approved"
+    ak = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
+    ck = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip().casefold()
+    if ak in ("rejected", "not approved") or ck in ("returned", "rejected", "not approved"):
+        return "Rejected"
+    label = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip()
+    if label:
+        return label
+    label = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip()
+    return label or "Pending Approval"
 
 
 def ensure_observation_capa_record(obs_row):
@@ -6768,26 +6781,8 @@ class MainWindow(QMainWindow):
                         _pool.extend(db.fetchall("SELECT * FROM capa WHERE reference_number=? ORDER BY id DESC", (safe(_obs_sync["number"]),)))
                         _capa_sync = _pick_best_capa(_pool)
                     if _capa_sync:
+                        _capa_sync = db.fetchone("SELECT * FROM capa WHERE id=?", (_capa_sync["id"],)) or _capa_sync
                         sync_observation_from_capa(_capa_sync)
-                        # Final safety net: any Approved/Closed CAPA must close this observation now.
-                        if _capa_is_final(_capa_sync) and safe(db.fetchone("SELECT status FROM observations WHERE id=?", (_obs_sync["id"],))["status"]).casefold() != "closed":
-                            db.execute(
-                                """UPDATE observations SET status='Closed', capa_required=1, capa_number=?,
-                                   closeout_date=COALESCE(NULLIF(closeout_date,''),?),
-                                   closed_by=COALESCE(NULLIF(closed_by,''),?),
-                                   verified_by=COALESCE(NULLIF(verified_by,''),?),
-                                   verification_date=COALESCE(NULLIF(verification_date,''),?),
-                                   verification='CAPA approved / closed in CAPA Tracking Register'
-                                   WHERE id=?""",
-                                (
-                                    safe(_capa_sync["number"]),
-                                    today(),
-                                    safe(_capa_sync["approved_by"]) or safe(_capa_sync["capa_closeout_approved_by"]) or "CAPA Reviewer",
-                                    safe(_capa_sync["approved_by"]) or safe(_capa_sync["capa_closeout_approved_by"]) or "CAPA Reviewer",
-                                    today(),
-                                    _obs_sync["id"],
-                                ),
-                            )
                 except Exception:
                     logging.exception("Observation status synchronization failed for %s", safe(_obs_sync["number"]))
             term = search.text().strip(); category_filter = getattr(self, "observation_dashboard_filter", "")
@@ -6801,77 +6796,36 @@ class MainWindow(QMainWindow):
             rows=db.fetchall(query,tuple(params)); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
                 linked_capa_no = ensure_observation_capa_link(row)
-                # Re-read after CAPA reconciliation; never render a stale pre-sync snapshot.
                 row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
-                if int(row["capa_required"] or 0) and linked_capa_no:
-                    _linked_capa_state = db.fetchone("SELECT * FROM capa WHERE number=?", (linked_capa_no,))
-                    if _linked_capa_state:
-                        sync_observation_from_capa(_linked_capa_state)
+                linked_approval = None
+                if int(row["capa_required"] or 0):
+                    if linked_capa_no:
+                        linked_approval = db.fetchone("SELECT * FROM capa WHERE number=?", (linked_capa_no,))
+                    if not linked_approval:
+                        linked_approval = _pick_best_capa(list(db.fetchall("SELECT * FROM capa WHERE linked_observation_id=? ORDER BY id DESC", (row["id"],))))
+                    if linked_approval:
+                        linked_approval = db.fetchone("SELECT * FROM capa WHERE id=?", (linked_approval["id"],)) or linked_approval
+                        sync_observation_from_capa(linked_approval)
                         row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
-                        # Hard guarantee: CAPA Approved/Closed must never leave Observation as Open / Pending Verification.
-                        _ak = safe(_linked_capa_state["approval_status"]).strip().casefold()
-                        _ck = safe(_linked_capa_state["capa_closeout_status"]).strip().casefold()
-                        _sk = safe(_linked_capa_state["status"]).strip().casefold()
-                        if (_ak in ("approved", "capa approved") or _ck in ("approved", "closed", "completed")
-                                or _sk in ("closed", "complete", "completed", "approved")):
-                            if safe(row["status"]).strip().casefold() != "closed":
-                                db.execute(
-                                    """UPDATE observations SET status='Closed',
-                                       closeout_date=COALESCE(NULLIF(closeout_date,''), ?),
-                                       closed_by=COALESCE(NULLIF(closed_by,''), ?),
-                                       verified_by=COALESCE(NULLIF(verified_by,''), ?),
-                                       verification_date=COALESCE(NULLIF(verification_date,''), ?),
-                                       verification='CAPA approved / closed in CAPA Tracking Register'
-                                       WHERE id=?""",
-                                    (today(),
-                                     safe(_linked_capa_state["approved_by"]) or safe(_linked_capa_state["capa_closeout_approved_by"]) or "CAPA Reviewer",
-                                     safe(_linked_capa_state["approved_by"]) or safe(_linked_capa_state["capa_closeout_approved_by"]) or "CAPA Reviewer",
-                                     today(), row["id"]),
-                                )
-                                row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
+                        linked_approval = db.fetchone("SELECT * FROM capa WHERE id=?", (linked_approval["id"],)) or linked_approval
+                        linked_capa_no = safe(linked_approval["number"])
                 attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
                 latest_approval = db.fetchone("SELECT review_status,reviewed_by,reviewed_at,review_comments FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (row["id"],))
-                # Prefer the CAPA number on the observation (authoritative link), then linked_observation_id.
-                linked_approval = None
-                if capa_req == "Yes":
-                    _cand = []
-                    if linked_capa_no:
-                        _by_no = db.fetchone("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status,id FROM capa WHERE number=?", (linked_capa_no,))
-                        if _by_no:
-                            _cand.append(_by_no)
-                    for _c in db.fetchall("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status,id FROM capa WHERE linked_observation_id=? ORDER BY id DESC", (row["id"],)):
-                        if all(int(x["id"]) != int(_c["id"]) for x in _cand):
-                            _cand.append(_c)
-                    if not _cand and safe(row["number"]):
-                        for _c in db.fetchall("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status,id FROM capa WHERE reference_number=? ORDER BY id DESC", (safe(row["number"]),)):
-                            if all(int(x["id"]) != int(_c["id"]) for x in _cand):
-                                _cand.append(_c)
-                    linked_approval = _pick_best_capa(_cand)
-                _capa_approved = bool(linked_approval and (
-                    safe(linked_approval["approval_status"]).strip().casefold() in ("approved", "capa approved")
-                    or safe(linked_approval["capa_closeout_status"]).strip().casefold() in ("approved", "closed", "completed")
-                    or safe(linked_approval["status"]).strip().casefold() in ("closed", "complete", "completed", "approved")
-                    or safe(row["status"]).strip().casefold() == "closed"
-                ))
-                if _capa_approved:
-                    approval_status = "Approved"
-                elif linked_approval and safe(linked_approval["approval_status"]).strip().casefold() in ("rejected", "not approved"):
-                    approval_status = "Rejected"
-                elif linked_approval:
-                    approval_status = safe(linked_approval["capa_closeout_status"]) or safe(linked_approval["approval_status"]) or "Pending"
+                # Observation Approval column mirrors CAPA Tracking approval_status exactly.
+                if linked_approval is not None:
+                    approval_status = _capa_approval_label(linked_approval)
+                    approval_by = safe(linked_approval["approved_by"]) or safe(linked_approval["capa_closeout_approved_by"])
+                    approval_date = (safe(linked_approval["approved_date"]) or safe(linked_approval["capa_closeout_approved_at"]))[:10]
+                elif latest_approval:
+                    approval_status = safe(latest_approval["review_status"]) or "Not Submitted"
+                    approval_by = safe(latest_approval["reviewed_by"])
+                    approval_date = safe(latest_approval["reviewed_at"])[:10]
                 else:
-                    approval_status = safe(latest_approval["review_status"]) if latest_approval else "Not Submitted"
-                # Observation status itself is authoritative once CAPA sync has closed it.
-                if safe(row["status"]).strip().casefold() == "closed" and approval_status not in ("Rejected",):
-                    approval_status = "Approved"
-                approval_by = (safe(linked_approval["approved_by"]) or safe(linked_approval["capa_closeout_approved_by"])) if linked_approval else (safe(latest_approval["reviewed_by"]) if latest_approval else "")
-                approval_date = (safe(linked_approval["approved_date"]) or safe(linked_approval["capa_closeout_approved_at"]))[:10] if linked_approval else (safe(latest_approval["reviewed_at"])[:10] if latest_approval else "")
-                if not approval_by and safe(row["verified_by"]).strip():
-                    approval_by = safe(row["verified_by"])
-                if not approval_date and safe(row["verification_date"]).strip():
-                    approval_date = safe(row["verification_date"])[:10]
+                    approval_status = "Not Submitted"
+                    approval_by = ""
+                    approval_date = ""
                 approval_display = approval_status + (f" | {approval_by} | {approval_date}" if approval_by else "")
                 values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],approval_display,row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
                 for c,value in enumerate(values):
@@ -7351,17 +7305,7 @@ class MainWindow(QMainWindow):
                 if capa_row:
                     _done,_total,_pct,_action_status = capa_actions_completion(capa_row["actions_json"] if "actions_json" in capa_row.keys() else capa_row["corrective_action"])
                     progress = f"{_pct}% complete / {100-_pct}% open"
-                    _appr = safe(capa_row["approval_status"]).strip().casefold()
-                    _cos = safe(capa_row["capa_closeout_status"]).strip().casefold()
-                    _st = safe(capa_row["status"]).strip().casefold()
-                    if _appr in ("approved", "capa approved") or _cos in ("approved", "closed", "completed") or _st in ("closed", "complete", "completed", "approved"):
-                        closeout_status = "Approved"
-                    elif _appr in ("rejected", "not approved") or _cos in ("returned", "rejected"):
-                        closeout_status = safe(capa_row["approval_status"]) or "Rejected"
-                    elif _appr in ("pending approval", "awaiting approval"):
-                        closeout_status = safe(capa_row["approval_status"])
-                    else:
-                        closeout_status = safe(capa_row["capa_closeout_status"]) or closeout_status
+                    closeout_status = _capa_approval_label(capa_row)
                 else:
                     progress = "—"
                 vals=[r["id"],r["number"],r["obs_date"],r["obs_type"],r["observation"],r["responsible"],r["status"],"Yes" if int(r["capa_required"] or 0) else "No",safe(r["capa_number"]) or "—",progress,closeout_status]
