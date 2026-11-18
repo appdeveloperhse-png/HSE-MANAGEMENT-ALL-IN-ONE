@@ -1231,13 +1231,19 @@ def sync_observation_from_capa(capa_row):
 
     actions = capa_row["actions_json"] if "actions_json" in capa_row.keys() else "[]"
     done, total, pct, action_status = capa_actions_completion(actions)
+    # Single approval workflow: CAPA action approval controls both registers.
+    # Keep legacy close-out fields readable for old records, but do not require a
+    # second close-out submission or approval stage.
+    approval_key = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
     closeout_status = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip()
     closeout_key = closeout_status.casefold()
-    is_approved = closeout_key == "approved"
-    is_returned = closeout_key in ("returned", "rejected", "not approved")
+    is_approved = approval_key in ("approved", "capa approved") or closeout_key == "approved"
+    is_returned = approval_key in ("rejected", "not approved") or closeout_key in ("returned", "rejected", "not approved")
     submitted_by = safe(capa_row["capa_closeout_submitted_by"] if "capa_closeout_submitted_by" in capa_row.keys() else "")
-    approved_by = safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else "")
-    approved_at = safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else "")
+    approved_by = safe(capa_row["approved_by"] if approval_key in ("approved", "capa approved") else (capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else ""))
+    approved_at = safe(capa_row["approved_date"] if approval_key in ("approved", "capa approved") else (capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else ""))
+    if approval_key in ("pending approval", "awaiting approval"):
+        closeout_key = "submitted for review"
 
     # CAPA and Observation use one shared close-out decision. Mirror the review
     # state into the observation evidence ledger so either module shows the same result.
@@ -6514,7 +6520,7 @@ class MainWindow(QMainWindow):
 
         # ---------------- Open Observations / Observation Approval tab ----------------
         close_page=QWidget(); close_layout=QVBoxLayout(close_page)
-        intro=QLabel("For CAPA-linked observations, close-out evidence is shared with the CAPA register. Attach and submit once from either module; one reviewer decision updates both registers. Double-click an observation to open this close-out workspace.")
+        intro=QLabel("CAPA-required observations are closed through one workflow in CAPA Tracking: attach evidence under Manager Action Evidence, submit once, and approve once. Their status is synchronized here automatically. This workspace is only for observations that do not require CAPA.")
         intro.setWordWrap(True); intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); close_layout.addWidget(intro)
         close_layout.addWidget(QLabel("A. Open observations awaiting close-out evidence"))
         open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No.","CAPA Progress","Close-out Review"]
@@ -6534,7 +6540,7 @@ class MainWindow(QMainWindow):
             submit_row.addWidget(_btn, 1 + _i // 3, _i % 3)
         close_layout.addLayout(submit_row)
         approval_page=QWidget(); approval_layout=QVBoxLayout(approval_page)
-        approval_intro=QLabel("Submitted observation close-out evidence appears here for reviewer action. Select a submission to approve or reject it and record comments.")
+        approval_intro=QLabel("This approval list is only for observations that do not require CAPA. CAPA-linked observations are reviewed once in CAPA Tracking; their approval is synchronized automatically.")
         approval_intro.setWordWrap(True); approval_intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); approval_layout.addWidget(approval_intro)
         approval_layout.addWidget(QLabel("Submitted observations awaiting / completed review"))
         evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","CAPA","Evidence File","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","CAPA Progress"]
@@ -6608,7 +6614,11 @@ class MainWindow(QMainWindow):
                 oid = None
             if oid is None:
                 return
-            # Route the selected register record into the single close-out workspace.
+            _obs_for_route = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
+            if _obs_for_route and int(_obs_for_route["capa_required"] or 0):
+                QMessageBox.information(self, "CAPA Close-out", "This observation is linked to CAPA. Use CAPA Tracking Register → Manager Action Evidence → Submit for Approval → Approve / Reject CAPA. Evidence and the final decision are synchronized to this Observation Register automatically.")
+                return
+            # Non-CAPA observations use the Observation close-out workspace.
             refresh_closeout_open()
             for _row in range(open_table.rowCount()):
                 if open_table.item(_row, 0) and safe(open_table.item(_row, 0).text()) == str(oid):
@@ -6637,7 +6647,7 @@ class MainWindow(QMainWindow):
                     if latest and safe(latest["review_status"]).strip().casefold()=="approved" and safe(obs_row["status"]).casefold()!="closed":
                         db.execute("UPDATE observations SET status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved' WHERE id=?", (today(),safe(latest["reviewed_by"]),safe(latest["reviewed_by"]),safe(latest["reviewed_at"])[:10] or today(),obs_row["id"]))
 
-            rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
+            rows=db.fetchall("SELECT * FROM observations WHERE COALESCE(capa_required,0)=0 AND lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
             open_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
                 latest = db.fetchone("SELECT review_status FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (r["id"],))
@@ -6654,7 +6664,7 @@ class MainWindow(QMainWindow):
         def refresh_closeout_evidence():
             rows=db.fetchall("""SELECT ce.*,o.number,o.capa_number,o.status AS observation_status,o.id AS obs_id
                 FROM observation_closeout_evidence ce JOIN observations o ON o.id=ce.observation_id
-                ORDER BY ce.id DESC""")
+                WHERE COALESCE(o.capa_required,0)=0 ORDER BY ce.id DESC""")
             evidence_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
                 stored_path=safe(r["file_path"])
@@ -6700,6 +6710,8 @@ class MainWindow(QMainWindow):
                     for oid in ids:
                         obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
                         if not obs or safe(obs["status"]).lower() in ("closed","cancelled"): continue
+                        if int(obs["capa_required"] or 0):
+                            raise ValueError("This observation is CAPA-linked. Attach evidence once under Manager Action Evidence in CAPA Tracking, then submit and approve there.")
                         batch=f"OBS-CO-{oid}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
                         for src_name in paths:
                             source=Path(src_name)
@@ -6755,6 +6767,8 @@ class MainWindow(QMainWindow):
                         if not obs or safe(obs["status"]).casefold() in ("closed","cancelled"):
                             continue
                         if int(obs["capa_required"] or 0):
+                            raise ValueError("This observation is CAPA-linked. Submit its Manager Action Evidence once from CAPA Tracking; a separate Observation close-out submission is not required.")
+                        if int(obs["capa_required"] or 0):
                             linked_no = ensure_observation_capa_record(obs)
                             linked_capa = db.conn.execute("SELECT * FROM capa WHERE number=?", (linked_no,)).fetchone() if linked_no else None
                             if not linked_capa:
@@ -6806,6 +6820,9 @@ class MainWindow(QMainWindow):
             if not approved and not comment: return QMessageBox.warning(self,"Review Comment Required","Enter the reason for rejecting / returning the evidence.")
             rows=db.fetchall("SELECT DISTINCT observation_id FROM observation_closeout_evidence WHERE batch_id=?",(batch,))
             if not rows: return QMessageBox.warning(self,"Review","The selected submission could not be found.")
+            _linked_review = db.fetchone("SELECT COALESCE(capa_required,0) AS capa_required FROM observations WHERE id=?", (rows[0]["observation_id"],))
+            if _linked_review and int(_linked_review["capa_required"] or 0):
+                return QMessageBox.information(self,"Single CAPA Approval","This observation is CAPA-linked. Review and approve it once in CAPA Tracking using Approve / Reject CAPA. The Observation Register will update automatically.")
             state_row=db.fetchone("SELECT review_status FROM observation_closeout_evidence WHERE batch_id=? ORDER BY id DESC LIMIT 1",(batch,))
             if not state_row or safe(state_row["review_status"]).casefold() not in ("pending review","submitted for review"):
                 return QMessageBox.warning(self,"Not Submitted","Only evidence explicitly submitted for review can be approved or returned.")
@@ -10194,9 +10211,8 @@ class MainWindow(QMainWindow):
     def capa(self):
         w, layout = self.page("CAPA Tracking Register")
         info = QLabel(
-            "Tracks formal corrective actions linked from HSE observations and incident investigations. "
-            "Upload evidence against each corrective action. Completion % = actions with evidence ÷ total actions. "
-            "100% = CAPA Action Complete. Approval is separate (Approved / Not Approved)."
+            "Single CAPA workflow: attach evidence under Manager Action Evidence, submit once, then approve or reject once. "
+            "The linked Observation Register is updated automatically. Completion % = corrective actions with evidence ÷ total actions."
         )
         info.setWordWrap(True)
         info.setStyleSheet("color:#245486;padding:4px;")
@@ -10204,8 +10220,8 @@ class MainWindow(QMainWindow):
 
         toolbar = QGridLayout()
         btns = {}
-        _capa_actions = ["+ New CAPA", "Refresh Register", "Open Linked Observation", "Manage Action Evidence", "Submit Actions for Approval", "Manage Close-out Evidence",
-                         "CAPA Close-out Approval", "Set Approval", "Delete Selected", "Export CSV", "Export Excel", "Export PDF", "Export Word"]
+        _capa_actions = ["+ New CAPA", "Refresh Register", "Open Linked Observation", "Manager Action Evidence", "Submit for Approval",
+                         "Approve / Reject CAPA", "Delete Selected", "Export CSV", "Export Excel", "Export PDF", "Export Word"]
         for _i, text_label in enumerate(_capa_actions):
             b = QPushButton(text_label)
             b.setMinimumHeight(34)
@@ -10219,7 +10235,7 @@ class MainWindow(QMainWindow):
         headers = [
             "ID", "S.No.", "CAPA No.", "Reference (Observation / Incident)", "Finding / Incident Details", "Corrective Action(s)",
             "Evidence Progress", "Completion %", "Open %", "Action Status", "Approval", "Approved By",
-            "Observation Close-out", "Close-out Approval", "Priority", "Responsible", "Target Date", "Overdue"
+            "Observation Status", "Priority", "Responsible", "Target Date", "Overdue"
         ]
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -10290,8 +10306,7 @@ class MainWindow(QMainWindow):
                 vals = [
                     row["id"], r + 1, row["number"], row["reference_number"], observed, actions_display,
                     progress, f"{pct}%", f"{open_pct}%", action_status, approval, approved_by or "—",
-                    (safe(row["observation_closeout_status"]) or "Pending") if safe(row["source"]).strip().casefold() in ("hse inspection", "observation", "hse observation") else "—",
-                    safe(row["capa_closeout_status"]) or "Not Submitted",
+                    (safe(db.fetchone("SELECT status FROM observations WHERE id=?", (row["linked_observation_id"],))["status"]) if row["linked_observation_id"] and db.fetchone("SELECT id FROM observations WHERE id=?", (row["linked_observation_id"],)) else (safe(row["observation_closeout_status"]) or "Pending")) if safe(row["source"]).strip().casefold() in ("hse inspection", "observation", "hse observation") else "—",
                     row["priority"], row["responsible"], row["target_date"],
                     "OVERDUE" if overdue(row["target_date"], row["status"]) else ""
                 ]
@@ -10356,13 +10371,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Actions Not Complete", f"All corrective actions need evidence before submission.\n\nProgress: {pct}% ({done}/{total})")
                 return
             now = datetime.now().isoformat(timespec="seconds")
-            db.execute("UPDATE capa SET completion_pct=?,action_status=?,approval_status='Pending Approval',status='Awaiting Approval',approved_by='',approved_date='',verification=? WHERE id=?",
-                       (pct, action_status, f"Submitted for approval by {safe(db.setting('current_user','') or db.setting('username',''))} on {now}", capa_id))
+            _submitter = safe(db.setting('current_user','') or db.setting('username','')).strip()
+            db.execute("""UPDATE capa SET completion_pct=?,action_status=?,approval_status='Pending Approval',
+                       status='Awaiting Approval',approved_by='',approved_date='',
+                       capa_closeout_status='Submitted for Review',capa_closeout_submitted_by=?,
+                       capa_closeout_submitted_at=?,capa_closeout_approved_by='',capa_closeout_approved_at='',
+                       capa_closeout_comments='',observation_closeout_status='Submitted for Review',verification=? WHERE id=?""",
+                       (pct, action_status, _submitter, now, f"Manager action evidence submitted for approval by {_submitter} on {now}", capa_id))
             updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
             if updated:
                 sync_observation_from_capa(updated)
             load()
-            QMessageBox.information(self, "Submitted for Approval", "All corrective actions are 100% complete and the CAPA is now awaiting reviewer approval.")
+            QMessageBox.information(self, "Submitted for Approval", "Manager Action Evidence has been submitted. One CAPA approval will update both the CAPA and linked Observation registers.")
 
         def manage_evidence():
             capa_id = selected_capa_id()
@@ -10371,8 +10391,8 @@ class MainWindow(QMainWindow):
             row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
             if not row:
                 return
-            if safe(row["capa_closeout_status"] if "capa_closeout_status" in row.keys() else "").casefold() == "approved":
-                QMessageBox.information(self, "CAPA Closed", "This CAPA close-out has been approved. Its evidence and approval history are retained as a permanent record and cannot be edited here.")
+            if safe(row["approval_status"] if "approval_status" in row.keys() else "").casefold() in ("approved", "capa approved") or safe(row["capa_closeout_status"] if "capa_closeout_status" in row.keys() else "").casefold() == "approved":
+                QMessageBox.information(self, "CAPA Closed", "This CAPA has been approved. Its manager action evidence and approval history are retained as a permanent record.")
                 return
             actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else "[]")
             if not actions:
@@ -10385,6 +10405,7 @@ class MainWindow(QMainWindow):
             dialog = QDialog(self)
             dialog.setWindowTitle(f"CAPA Action Evidence — {row['number']}")
             dialog.resize(900, 560)
+            fit_dialog_to_desktop(dialog, 0.90, 0.82)
             v = QVBoxLayout(dialog)
             v.addWidget(QLabel(
                 f"<b>{safe(row['number'])}</b> | Ref: {safe(row['reference_number'])}<br>"
@@ -10470,8 +10491,10 @@ class MainWindow(QMainWindow):
                 done, total, pct, action_status = capa_actions_completion(actions)
                 db.execute(
                     """UPDATE capa SET actions_json=?, completion_pct=?, action_status=?,
-                       corrective_action=?, status=?, approval_status='Pending Approval',
-                       approved_by='', approved_date='', verification='' WHERE id=?""",
+                       corrective_action=?, status=?, approval_status='Draft',
+                       approved_by='', approved_date='', verification='',
+                       capa_closeout_status='Draft',capa_closeout_approved_by='',capa_closeout_approved_at='',
+                       capa_closeout_comments='',observation_closeout_status='Draft' WHERE id=?""",
                     (
                         json.dumps(actions, ensure_ascii=False),
                         pct,
@@ -10703,8 +10726,8 @@ class MainWindow(QMainWindow):
             if capa_id is None:
                 return
             row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
-            if row and safe(row["capa_closeout_status"]).strip().casefold() == "approved":
-                QMessageBox.warning(self, "Permanent CAPA Record", "An approved CAPA close-out is retained as a permanent historical register record. Its evidence, approval details, dates and final status cannot be deleted.")
+            if row and (safe(row["approval_status"]).strip().casefold() in ("approved", "capa approved") or safe(row["capa_closeout_status"]).strip().casefold() == "approved"):
+                QMessageBox.warning(self, "Permanent CAPA Record", "An approved CAPA is retained as a permanent historical register record. Its evidence, approval details, dates and final status cannot be deleted.")
                 return
             self.delete_selected_record(table, "capa", "capa_attachments", "CAPA", load)
 
@@ -10753,6 +10776,9 @@ class MainWindow(QMainWindow):
             form.addRow(buttons)
 
             def save_approval():
+                if approval.currentText() in ("Approved", "CAPA Approved", "Not Approved", "Rejected") and safe(row["approval_status"]).strip().casefold() not in ("pending approval", "awaiting approval"):
+                    QMessageBox.warning(dialog, "Submission Required", "Submit the Manager Action Evidence first using 'Submit for Approval'. The reviewer can then approve or reject it here.")
+                    return
                 if approval.currentText() in ("Approved", "Not Approved", "Rejected") and not approved_by.text().strip():
                     QMessageBox.warning(dialog, "Required", "Enter the name of the person approving / rejecting.")
                     return
@@ -10762,10 +10788,19 @@ class MainWindow(QMainWindow):
                         QMessageBox.warning(dialog, "CAPA Not Ready for Approval", f"All corrective actions must have evidence before approval.\n\nCurrent completion: {_pct}%\nOpen: {100-_pct}%")
                         return
                 adate = today() if approval.currentText() != "Pending Approval" else ""
-                _status = "Closed" if approval.currentText() in ("Approved", "CAPA Approved") else ("Rework Required" if approval.currentText() in ("Rejected", "Not Approved") else "Awaiting Approval")
+                _is_ok = approval.currentText() in ("Approved", "CAPA Approved")
+                _is_returned = approval.currentText() in ("Rejected", "Not Approved")
+                _status = "Closed" if _is_ok else ("Rework Required" if _is_returned else "Awaiting Approval")
+                _reviewer = approved_by.text().strip()
+                _now = datetime.now().isoformat(timespec="seconds")
+                _legacy_closeout = "Approved" if _is_ok else ("Returned" if _is_returned else "Submitted for Review")
                 db.execute(
-                    "UPDATE capa SET approval_status=?, approved_by=?, approved_date=?, status=?, verification=? WHERE id=?",
-                    (approval.currentText(), approved_by.text().strip(), adate, _status, review_comments.toPlainText().strip(), capa_id)
+                    """UPDATE capa SET approval_status=?, approved_by=?, approved_date=?, status=?, verification=?,
+                       capa_closeout_status=?,capa_closeout_approved_by=?,capa_closeout_approved_at=?,
+                       capa_closeout_comments=?,observation_closeout_status=? WHERE id=?""",
+                    (approval.currentText(), _reviewer, adate, _status, review_comments.toPlainText().strip(),
+                     _legacy_closeout, _reviewer if _is_ok or _is_returned else "", _now if _is_ok or _is_returned else "",
+                     review_comments.toPlainText().strip(), f"{_legacy_closeout} by {_reviewer}" if _is_ok or _is_returned else "Submitted for Review", capa_id)
                 )
                 updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
                 if updated:
@@ -10780,11 +10815,9 @@ class MainWindow(QMainWindow):
         btns["+ New CAPA"].clicked.connect(lambda: self.capa_form(load))
         btns["Refresh Register"].clicked.connect(refresh_register)
         btns["Open Linked Observation"].clicked.connect(open_linked_observation)
-        btns["Manage Action Evidence"].clicked.connect(manage_evidence)
-        btns["Submit Actions for Approval"].clicked.connect(submit_actions_for_approval)
-        btns["Manage Close-out Evidence"].clicked.connect(manage_capa_closeout_evidence)
-        btns["CAPA Close-out Approval"].clicked.connect(approve_capa_closeout)
-        btns["Set Approval"].clicked.connect(set_approval)
+        btns["Manager Action Evidence"].clicked.connect(manage_evidence)
+        btns["Submit for Approval"].clicked.connect(submit_actions_for_approval)
+        btns["Approve / Reject CAPA"].clicked.connect(set_approval)
         btns["Delete Selected"].clicked.connect(delete_selected_capa)
         btns["Export CSV"].clicked.connect(lambda: self.export_csv("capa"))
         btns["Export Excel"].clicked.connect(lambda: self.export_excel("capa"))
