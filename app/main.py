@@ -1254,7 +1254,8 @@ def sync_observation_from_capa(capa_row):
     approval_key = safe(capa_row["approval_status"] if "approval_status" in capa_row.keys() else "").strip().casefold()
     closeout_status = safe(capa_row["capa_closeout_status"] if "capa_closeout_status" in capa_row.keys() else "").strip()
     closeout_key = closeout_status.casefold()
-    is_approved = approval_key in ("approved", "capa approved") or closeout_key == "approved"
+    is_approved = (approval_key in ("approved", "capa approved") or closeout_key == "approved"
+                   or safe(capa_row["status"] if "status" in capa_row.keys() else "").strip().casefold() == "closed")
     is_returned = approval_key in ("rejected", "not approved") or closeout_key in ("returned", "rejected", "not approved")
     submitted_by = safe(capa_row["capa_closeout_submitted_by"] if "capa_closeout_submitted_by" in capa_row.keys() else "")
     approved_by = safe(capa_row["approved_by"] if approval_key in ("approved", "capa approved") else (capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else ""))
@@ -1325,25 +1326,31 @@ def sync_observation_from_capa(capa_row):
 
 
 def ensure_observation_capa_record(obs_row):
-    """Ensure CAPA=Yes observations always have a visible, uniquely linked CAPA record."""
+    """Return the CAPA record belonging to this observation without cross-linking records."""
     if not obs_row or not int(obs_row["capa_required"] or 0):
         return safe(obs_row["capa_number"]) if obs_row else ""
+    obs_id = int(obs_row["id"])
     obs_no = safe(obs_row["number"]).strip()
     capa_no = safe(obs_row["capa_number"]).strip()
-    linked = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
-    if not linked:
-        linked = db.fetchone("SELECT * FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_row["id"],))
+
+    linked = db.fetchone("SELECT * FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_id,))
     if not linked and obs_no:
         linked = db.fetchone(
             "SELECT * FROM capa WHERE reference_number=? AND lower(COALESCE(source,'')) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
             (obs_no,)
         )
+    if not linked and capa_no:
+        candidate = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
+        if candidate:
+            owner = candidate["linked_observation_id"] if "linked_observation_id" in candidate.keys() else None
+            if not owner or int(owner) == obs_id:
+                linked = candidate
     if linked:
         actual_no = safe(linked["number"])
         db.execute("UPDATE capa SET linked_observation_id=?,reference_number=?,source='HSE Inspection' WHERE id=?",
-                   (obs_row["id"], obs_no, linked["id"]))
+                   (obs_id, obs_no, linked["id"]))
         if actual_no != capa_no:
-            db.execute("UPDATE observations SET capa_number=? WHERE id=?", (actual_no, obs_row["id"]))
+            db.execute("UPDATE observations SET capa_number=? WHERE id=?", (actual_no, obs_id))
         return actual_no
 
     actions = parse_corrective_actions(obs_row)
@@ -1353,8 +1360,8 @@ def ensure_observation_capa_record(obs_row):
     new_no = next_number("HSE-CAPA", "capa")
     db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at,actions_json,approval_status,approved_by,approved_date,completion_pct,action_status,observation_text,linked_observation_id)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (new_no,"HSE Inspection",obs_no,finding,"",corrective,"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"]),obs_row["id"]))
-    db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_row["id"]))
+        (new_no,"HSE Inspection",obs_no,finding,"",corrective,"",safe(obs_row["responsible"]),safe(obs_row["priority"]),safe(obs_row["target_date"]),"Open","","",datetime.now().isoformat(),json.dumps(action_items,ensure_ascii=False),"Pending Approval","","",0,"Open",safe(obs_row["observation"]),obs_id))
+    db.execute("UPDATE observations SET capa_number=? WHERE id=?", (new_no, obs_id))
     return new_no
 
 
@@ -6612,14 +6619,16 @@ class MainWindow(QMainWindow):
                 if not int(obs_row["capa_required"] or 0):
                     return safe(obs_row["capa_number"])
                 capa_no = safe(obs_row["capa_number"]).strip()
-                linked = db.fetchone("SELECT id,number FROM capa WHERE number=?", (capa_no,)) if capa_no else None
+                linked = db.fetchone("SELECT id,number FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_row["id"],))
                 if not linked:
                     linked = db.fetchone(
-                        "SELECT id,number FROM capa WHERE reference_number=? AND lower(source) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
+                        "SELECT id,number FROM capa WHERE reference_number=? AND lower(COALESCE(source,'')) IN ('hse inspection','observation','hse observation') ORDER BY id DESC LIMIT 1",
                         (safe(obs_row["number"]),)
                     )
-                if not linked:
-                    linked = db.fetchone("SELECT id,number FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (obs_row["id"],))
+                if not linked and capa_no:
+                    candidate = db.fetchone("SELECT id,number,linked_observation_id FROM capa WHERE number=?", (capa_no,))
+                    if candidate and (not candidate["linked_observation_id"] or int(candidate["linked_observation_id"]) == int(obs_row["id"])):
+                        linked = candidate
                 if linked:
                     db.execute("UPDATE capa SET linked_observation_id=?,reference_number=?,source='HSE Inspection' WHERE id=?",
                                (obs_row["id"], safe(obs_row["number"]), linked["id"]))
@@ -6667,10 +6676,19 @@ class MainWindow(QMainWindow):
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
                 latest_approval = db.fetchone("SELECT review_status,reviewed_by,reviewed_at,review_comments FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (row["id"],))
-                linked_approval = db.fetchone("SELECT capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at FROM capa WHERE number=?", (linked_capa_no,)) if linked_capa_no else None
-                approval_status = safe(linked_approval["capa_closeout_status"]) if linked_approval else (safe(latest_approval["review_status"]) if latest_approval else "Not Submitted")
-                approval_by = safe(linked_approval["capa_closeout_approved_by"]) if linked_approval else (safe(latest_approval["reviewed_by"]) if latest_approval else "")
-                approval_date = safe(linked_approval["capa_closeout_approved_at"])[:10] if linked_approval else (safe(latest_approval["reviewed_at"])[:10] if latest_approval else "")
+                linked_approval = db.fetchone("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (row["id"],)) if capa_req == "Yes" else None
+                if not linked_approval and linked_capa_no:
+                    linked_approval = db.fetchone("SELECT approval_status,approved_by,approved_date,capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at,status FROM capa WHERE number=?", (linked_capa_no,))
+                if linked_approval and safe(linked_approval["approval_status"]).strip().casefold() in ("approved", "capa approved"):
+                    approval_status = "Approved"
+                elif linked_approval and safe(linked_approval["approval_status"]).strip().casefold() in ("rejected", "not approved"):
+                    approval_status = "Rejected"
+                elif linked_approval:
+                    approval_status = safe(linked_approval["capa_closeout_status"]) or safe(linked_approval["approval_status"]) or "Pending"
+                else:
+                    approval_status = safe(latest_approval["review_status"]) if latest_approval else "Not Submitted"
+                approval_by = (safe(linked_approval["approved_by"]) or safe(linked_approval["capa_closeout_approved_by"])) if linked_approval else (safe(latest_approval["reviewed_by"]) if latest_approval else "")
+                approval_date = (safe(linked_approval["approved_date"]) or safe(linked_approval["capa_closeout_approved_at"]))[:10] if linked_approval else (safe(latest_approval["reviewed_at"])[:10] if latest_approval else "")
                 approval_display = approval_status + (f" | {approval_by} | {approval_date}" if approval_by else "")
                 values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],approval_display,row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
                 for c,value in enumerate(values):
@@ -6818,9 +6836,144 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Open Observations", "Select an open observation first.")
                 return None
             try:
-                return int(open_table.item(r, 0).text())
+                item = open_table.item(r, 0)
+                value = item.data(Qt.ItemDataRole.UserRole) if item else None
+                return int(value if value is not None else item.text())
             except Exception:
                 return None
+
+        def open_simple_observation_evidence_dialog(oid):
+            obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
+            if not obs:
+                return QMessageBox.warning(self, "Observation", f"Observation ID {oid} could not be found. Refresh the register and try again.")
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Observation Close-out Evidence — {safe(obs['number'])}")
+            dialog.resize(820, 560)
+            fit_dialog_to_desktop(dialog, 0.90, 0.86)
+            outer = QVBoxLayout(dialog)
+            title = QLabel(f"<b>{safe(obs['number'])}</b> — {safe(obs['observation'])}")
+            title.setWordWrap(True)
+            outer.addWidget(title)
+            action_text = format_corrective_actions_display(obs)
+            action_label = QLabel("Corrective action(s):\n" + (action_text or "No corrective action recorded"))
+            action_label.setWordWrap(True)
+            outer.addWidget(action_label)
+            submitter_box = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
+            submitter_box.setPlaceholderText("Submitted by (name / ID)")
+            outer.addWidget(submitter_box)
+            evidence_table = QTableWidget(0, 4)
+            evidence_table.setHorizontalHeaderLabels(["ID", "Evidence File", "Added / Submitted", "Status"])
+            evidence_table.setColumnHidden(0, True)
+            evidence_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            evidence_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            evidence_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            outer.addWidget(evidence_table, 1)
+
+            def refresh_files():
+                rows = db.fetchall("SELECT * FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC", (oid,))
+                evidence_table.setRowCount(len(rows))
+                for i, ev in enumerate(rows):
+                    evidence_table.setItem(i, 0, QTableWidgetItem(str(ev["id"])))
+                    evidence_table.setItem(i, 1, QTableWidgetItem(Path(safe(ev["file_path"]).replace('\\','/')).name))
+                    evidence_table.setItem(i, 2, QTableWidgetItem(safe(ev["submitted_at"])))
+                    evidence_table.setItem(i, 3, QTableWidgetItem(safe(ev["review_status"]) or "Draft"))
+
+            def add_files():
+                paths, _ = QFileDialog.getOpenFileNames(dialog, "Attach Close-out Evidence", "", "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+                if not paths:
+                    return
+                batch = f"OBS-CO-{oid}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+                now = datetime.now().isoformat(timespec="seconds")
+                saved = []
+                try:
+                    with db.conn:
+                        for src in paths:
+                            source = Path(src)
+                            if not source.is_file():
+                                continue
+                            dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{source.name}"
+                            n = 1
+                            while dest.exists():
+                                dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{n}_{source.name}"
+                                n += 1
+                            shutil.copy2(source, dest)
+                            saved.append(dest)
+                            db.conn.execute("INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,'Draft')", (batch, oid, str(dest), submitter_box.text().strip(), now))
+                            db.conn.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)", (oid, str(dest), "Close-out Evidence"))
+                    if not saved:
+                        raise ValueError("No valid evidence files were selected.")
+                    refresh_files()
+                except Exception as exc:
+                    logging.exception("Simple observation evidence upload failed")
+                    QMessageBox.critical(dialog, "Evidence Upload", str(exc))
+
+            def delete_file():
+                r = evidence_table.currentRow()
+                if r < 0 or not evidence_table.item(r, 0):
+                    return QMessageBox.warning(dialog, "Delete Evidence", "Select an evidence file first.")
+                evidence_id = int(evidence_table.item(r, 0).text())
+                ev = db.fetchone("SELECT * FROM observation_closeout_evidence WHERE id=? AND observation_id=?", (evidence_id, oid))
+                if not ev:
+                    return QMessageBox.warning(dialog, "Delete Evidence", "The selected evidence record could not be found.")
+                if safe(ev["review_status"]).casefold() not in ("draft", "rejected", "returned", "close-out evidence returned"):
+                    return QMessageBox.warning(dialog, "Evidence Locked", "Submitted evidence cannot be deleted while it is under review or after approval.")
+                fp = safe(ev["file_path"])
+                with db.conn:
+                    db.conn.execute("DELETE FROM observation_closeout_evidence WHERE id=?", (evidence_id,))
+                    db.conn.execute("DELETE FROM observation_attachments WHERE observation_id=? AND file_path=? AND attachment_type='Close-out Evidence'", (oid, fp))
+                if fp:
+                    try: Path(fp).unlink(missing_ok=True)
+                    except Exception: logging.exception("Unable to remove observation close-out file")
+                refresh_files()
+
+            def view_file():
+                r = evidence_table.currentRow()
+                if r < 0 or not evidence_table.item(r, 0):
+                    return QMessageBox.warning(dialog, "View Evidence", "Select an evidence file first.")
+                ev = db.fetchone("SELECT file_path FROM observation_closeout_evidence WHERE id=?", (int(evidence_table.item(r, 0).text()),))
+                path = resolve_attachment_path(safe(ev["file_path"])) if ev else None
+                if not path:
+                    return QMessageBox.warning(dialog, "View Evidence", "The evidence file could not be found on disk.")
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+            def submit_files():
+                if not submitter_box.text().strip():
+                    return QMessageBox.warning(dialog, "Submitter Required", "Enter the name / ID of the person submitting the evidence.")
+                drafts = db.fetchall("SELECT DISTINCT batch_id FROM observation_closeout_evidence WHERE observation_id=? AND lower(COALESCE(review_status,''))='draft'", (oid,))
+                if not drafts:
+                    return QMessageBox.warning(dialog, "No Draft Evidence", "Attach at least one evidence file before submitting.")
+                now = datetime.now().isoformat(timespec="seconds")
+                with db.conn:
+                    for item in drafts:
+                        db.conn.execute("UPDATE observation_closeout_evidence SET review_status='Pending Review',submitted_by=?,submitted_at=? WHERE observation_id=? AND batch_id=? AND lower(COALESCE(review_status,''))='draft'", (submitter_box.text().strip(), now, oid, safe(item["batch_id"])))
+                    # A simple observation moves to verification, never to Cancelled on submission.
+                    db.conn.execute("UPDATE observations SET status='Pending Verification',verification='Close-out evidence submitted for review' WHERE id=? AND lower(COALESCE(status,'')) NOT IN ('closed')", (oid,))
+                refresh_files()
+                refresh_closeout_open(); refresh_closeout_evidence(); load()
+                QMessageBox.information(dialog, "Submitted", "Evidence submitted for review. The observation status is Pending Verification.")
+                dialog.accept()
+
+            controls = QHBoxLayout()
+            add_btn = QPushButton("Attach Evidence")
+            view_btn = QPushButton("View")
+            delete_btn = QPushButton("Delete")
+            save_btn = QPushButton("Save & Exit")
+            submit_btn = QPushButton("Submit for Approval")
+            close_btn = QPushButton("Close")
+            for b in (add_btn, view_btn, delete_btn, save_btn, submit_btn, close_btn):
+                b.setMinimumHeight(34)
+            for b in (add_btn, view_btn, delete_btn): controls.addWidget(b)
+            controls.addStretch(1)
+            controls.addWidget(save_btn); controls.addWidget(submit_btn); controls.addWidget(close_btn)
+            outer.addLayout(controls)
+            add_btn.clicked.connect(add_files)
+            view_btn.clicked.connect(view_file)
+            delete_btn.clicked.connect(delete_file)
+            save_btn.clicked.connect(lambda: (refresh_closeout_open(), refresh_closeout_evidence(), load(), dialog.accept()))
+            submit_btn.clicked.connect(submit_files)
+            close_btn.clicked.connect(dialog.reject)
+            refresh_files()
+            dialog.exec()
 
         def edit_open_observation():
             oid = selected_open_observation_id()
@@ -6835,8 +6988,8 @@ class MainWindow(QMainWindow):
             obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
             if not obs:
                 return QMessageBox.warning(self, "Observation", "The selected observation could not be found.")
-            if safe(obs["status"]).casefold() in ("closed", "cancelled"):
-                return QMessageBox.information(self, "Observation Closed", "This observation is already closed. Its evidence and approval history remain available in the registers.")
+            if safe(obs["status"]).casefold() == "closed":
+                return QMessageBox.information(self, "Observation Closed", "This observation is genuinely Closed. Its evidence and approval history remain available in the registers.")
             if int(obs["capa_required"] or 0):
                 capa_no = ensure_observation_capa_record(obs)
                 capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
@@ -6844,7 +6997,7 @@ class MainWindow(QMainWindow):
                     return QMessageBox.warning(self, "CAPA Link Missing", "The linked CAPA record could not be found. Refresh the CAPA Tracking Register and try again.")
                 open_capa_action_evidence_dialog(self, capa_row["id"], on_saved=lambda: (refresh_both_closeout_sections(), load()))
             else:
-                upload_closeout_evidence()
+                open_simple_observation_evidence_dialog(int(oid))
 
         def delete_open_observation():
             oid = selected_open_observation_id()
@@ -6872,7 +7025,8 @@ class MainWindow(QMainWindow):
         def open_selected_closeout_workspace(row_index, _column=0):
             try:
                 item = open_table.item(row_index, 0)
-                oid = int(item.text()) if item else None
+                value = item.data(Qt.ItemDataRole.UserRole) if item else None
+                oid = int(value if value is not None else item.text()) if item else None
             except Exception:
                 oid = None
             if oid is None:
@@ -6885,7 +7039,7 @@ class MainWindow(QMainWindow):
             if obs_for_popup and int(obs_for_popup["capa_required"] or 0):
                 open_observation_action_evidence(oid)
 
-        open_table.cellClicked.connect(open_selected_closeout_workspace)
+        open_table.cellDoubleClicked.connect(open_selected_closeout_workspace)
 
         def open_register_observation_closeout(row_index, _column=0):
             try:
@@ -6904,15 +7058,8 @@ class MainWindow(QMainWindow):
                 else:
                     QMessageBox.warning(self, "CAPA Link Missing", "The linked CAPA record could not be found.")
                 return
-            # Non-CAPA observations use the Observation close-out workspace.
-            refresh_closeout_open()
-            for _row in range(open_table.rowCount()):
-                if open_table.item(_row, 0) and safe(open_table.item(_row, 0).text()) == str(oid):
-                    open_table.selectRow(_row)
-                    tabs.setCurrentWidget(close_page)
-                    open_table.setFocus()
-                    return
-            QMessageBox.information(self, "Observation Close-out", "This observation is already closed/cancelled or is not awaiting close-out. Its history remains in the Observation Register.")
+            # Non-CAPA observations open their own attachment / submit popup as well.
+            open_simple_observation_evidence_dialog(int(oid))
 
         table.cellDoubleClicked.connect(open_register_observation_closeout)
 
@@ -6921,6 +7068,11 @@ class MainWindow(QMainWindow):
             # and latest close-out decision in section A and section B.
             obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
             for obs_row in obs_rows:
+                # Repair legacy records accidentally marked Cancelled despite having active close-out evidence.
+                _active_evidence = db.fetchone("SELECT 1 FROM observation_closeout_evidence WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN ('draft','pending review','submitted for review','rejected','returned') LIMIT 1", (obs_row["id"],))
+                if safe(obs_row["status"]).casefold() == "cancelled" and _active_evidence:
+                    db.execute("UPDATE observations SET status='Pending Verification',verification='Close-out evidence is active; status restored from erroneous Cancelled value' WHERE id=?", (obs_row["id"],))
+                    obs_row = db.fetchone("SELECT * FROM observations WHERE id=?", (obs_row["id"],))
                 if int(obs_row["capa_required"] or 0):
                     capa_no = ensure_observation_capa_record(obs_row)
                     capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
@@ -6933,20 +7085,26 @@ class MainWindow(QMainWindow):
                     if latest and safe(latest["review_status"]).strip().casefold()=="approved" and safe(obs_row["status"]).casefold()!="closed":
                         db.execute("UPDATE observations SET status='Closed',closeout_date=COALESCE(NULLIF(closeout_date,''),?),closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved' WHERE id=?", (today(),safe(latest["reviewed_by"]),safe(latest["reviewed_by"]),safe(latest["reviewed_at"])[:10] or today(),obs_row["id"]))
 
-            rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open')) NOT IN ('closed','cancelled') ORDER BY id DESC")
+            rows=db.fetchall("SELECT * FROM observations WHERE lower(COALESCE(status,'Open'))<>'closed' AND (lower(COALESCE(status,'Open'))<>'cancelled' OR EXISTS (SELECT 1 FROM observation_closeout_evidence ce WHERE ce.observation_id=observations.id AND lower(COALESCE(ce.review_status,'')) IN ('draft','pending review','submitted for review','rejected','returned'))) ORDER BY id DESC")
             open_table.setRowCount(len(rows))
             for i,r in enumerate(rows):
                 latest = db.fetchone("SELECT review_status FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (r["id"],))
                 closeout_status = safe(latest["review_status"]) if latest else "Not Submitted"
-                capa_row = db.fetchone("SELECT * FROM capa WHERE linked_observation_id=? OR number=? ORDER BY id DESC LIMIT 1", (r["id"], safe(r["capa_number"])))
+                capa_row = db.fetchone("SELECT * FROM capa WHERE linked_observation_id=? ORDER BY id DESC LIMIT 1", (r["id"],))
+                if not capa_row and safe(r["capa_number"]):
+                    capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (safe(r["capa_number"]),))
                 if capa_row:
                     _done,_total,_pct,_action_status = capa_actions_completion(capa_row["actions_json"] if "actions_json" in capa_row.keys() else capa_row["corrective_action"])
                     progress = f"{_pct}% complete / {100-_pct}% open"
-                    closeout_status = safe(capa_row["capa_closeout_status"]) or safe(capa_row["approval_status"]) or closeout_status
+                    closeout_status = safe(capa_row["approval_status"]) if safe(capa_row["approval_status"]).strip().casefold() in ("approved", "rejected", "not approved", "pending approval", "awaiting approval") else (safe(capa_row["capa_closeout_status"]) or closeout_status)
                 else:
                     progress = "—"
                 vals=[r["id"],r["number"],r["obs_date"],r["obs_type"],r["observation"],r["responsible"],r["status"],"Yes" if int(r["capa_required"] or 0) else "No",safe(r["capa_number"]) or "—",progress,closeout_status]
-                for j,val in enumerate(vals): open_table.setItem(i,j,QTableWidgetItem(safe(val)))
+                for j,val in enumerate(vals):
+                    _cell = QTableWidgetItem(safe(val))
+                    if j == 0:
+                        _cell.setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+                    open_table.setItem(i,j,_cell)
 
         def refresh_closeout_evidence():
             rows=db.fetchall("""SELECT ce.*,o.number,o.capa_number,o.status AS observation_status,o.id AS obs_id
@@ -6982,10 +7140,14 @@ class MainWindow(QMainWindow):
             for ix in indexes:
                 it=open_table.item(ix.row(),0)
                 if it:
-                    try: ids.append(int(it.text()))
+                    try:
+                        _value = it.data(Qt.ItemDataRole.UserRole)
+                        ids.append(int(_value if _value is not None else it.text()))
                     except Exception: pass
             if not ids and open_table.currentRow()>=0 and open_table.item(open_table.currentRow(),0):
-                ids=[int(open_table.item(open_table.currentRow(),0).text())]
+                _item = open_table.item(open_table.currentRow(),0)
+                _value = _item.data(Qt.ItemDataRole.UserRole)
+                ids=[int(_value if _value is not None else _item.text())]
             if not ids: return QMessageBox.warning(self,"Close-out Evidence","Select at least one open observation.")
             by=submitter.text().strip()
             if not by: return QMessageBox.warning(self,"Submitter Required","Enter the name / ID of the person submitting the evidence.")
@@ -7036,10 +7198,14 @@ class MainWindow(QMainWindow):
             for ix in indexes:
                 it=open_table.item(ix.row(),0)
                 if it:
-                    try: ids.append(int(it.text()))
+                    try:
+                        _value = it.data(Qt.ItemDataRole.UserRole)
+                        ids.append(int(_value if _value is not None else it.text()))
                     except Exception: pass
             if not ids and open_table.currentRow()>=0 and open_table.item(open_table.currentRow(),0):
-                ids=[int(open_table.item(open_table.currentRow(),0).text())]
+                _item = open_table.item(open_table.currentRow(),0)
+                _value = _item.data(Qt.ItemDataRole.UserRole)
+                ids=[int(_value if _value is not None else _item.text())]
             if not ids:
                 return QMessageBox.warning(self,"Submit Close-out","Select at least one observation with attached draft evidence.")
             by=submitter.text().strip()
@@ -7051,7 +7217,9 @@ class MainWindow(QMainWindow):
                 with db.conn:
                     for oid in ids:
                         obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
-                        if not obs or safe(obs["status"]).casefold() in ("closed","cancelled"):
+                        if not obs:
+                            raise ValueError(f"Selected observation ID {oid} could not be found. Refresh the register and select it again.")
+                        if safe(obs["status"]).casefold() == "closed":
                             continue
                         if int(obs["capa_required"] or 0):
                             linked_no = ensure_observation_capa_record(obs)
@@ -7086,7 +7254,7 @@ class MainWindow(QMainWindow):
                                 capa_closeout_submitted_by=?,capa_closeout_submitted_at=?,
                                 capa_closeout_approved_by='',capa_closeout_approved_at='',capa_closeout_comments=''
                                 WHERE number=?""",(by,now,capa_no))
-                        db.conn.execute("UPDATE observations SET status='Pending Verification' WHERE id=?",(oid,))
+                        db.conn.execute("UPDATE observations SET status='Pending Verification',verification='Close-out evidence submitted for review' WHERE id=?",(oid,))
                         submitted.append(safe(obs["number"]))
                 for oid in ids:
                     obs=db.fetchone("SELECT * FROM observations WHERE id=?",(oid,))
@@ -7633,7 +7801,7 @@ class MainWindow(QMainWindow):
         follow_card, follow_grid = make_card("FOLLOW-UP & CLASSIFICATION")
         priority = QComboBox(); priority.addItems(PRIORITIES)
         target = QDateEdit(); target.setCalendarPopup(True); target.setDate(datetime.now().date())
-        status = QComboBox(); status.addItems([x for x in STATUSES if x != "Closed"])
+        status = QComboBox(); status.addItems([x for x in STATUSES if x not in ("Closed", "Cancelled")])
         capa_required = QComboBox(); capa_required.addItems(["No", "Yes"])
         capa_required.setToolTip(
             "Select Yes when formal CAPA tracking is required. All observation details and corrective actions "
@@ -7685,6 +7853,9 @@ class MainWindow(QMainWindow):
             existing_status = safe(existing["status"]) or "Open"
             if existing_status == "Closed":
                 status.addItem("Closed")
+            elif existing_status == "Cancelled":
+                # Cancelled is not a normal observation workflow state. Reopen it for correction.
+                existing_status = "Open"
             status.setCurrentText(existing_status)
             capa_required.setCurrentText("Yes" if int(existing["capa_required"] or 0) else "No")
             attachment_label.setText("Existing evidence: " + (attachment_names("observation_attachments", record_id) or "None") + "\nNew files can be added without removing existing evidence.")
@@ -7718,6 +7889,11 @@ class MainWindow(QMainWindow):
             try:
                 need_capa = capa_required.currentText() == "Yes"
                 old_capa_no = safe(existing["capa_number"]) if existing else ""
+                if existing and status.currentText() == "Cancelled":
+                    _active = db.fetchone("SELECT 1 FROM observation_closeout_evidence WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN ('draft','pending review','submitted for review','rejected','returned') LIMIT 1", (record_id,))
+                    if _active:
+                        status.setCurrentText("Pending Verification")
+                        QMessageBox.information(dialog, "Status Corrected", "This observation has active close-out evidence. Its status has been kept as Pending Verification, not Cancelled.")
                 if old_capa_no and not need_capa:
                     need_capa = True
                     capa_required.setCurrentText("Yes")
