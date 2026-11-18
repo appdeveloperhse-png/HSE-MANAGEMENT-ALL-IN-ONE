@@ -50,7 +50,23 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.21"
+APP_VERSION = "1.4.22"
+
+
+def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
+    """Keep module dialogs inside the usable desktop area on smaller displays."""
+    try:
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return
+        area = screen.availableGeometry()
+        max_w = max(640, int(area.width() * width_ratio))
+        max_h = max(480, int(area.height() * height_ratio))
+        dialog.setMaximumSize(min(max_w, area.width()), min(max_h, area.height()))
+        current = dialog.size()
+        dialog.resize(min(current.width(), max_w), min(current.height(), max_h))
+    except Exception:
+        logging.exception("Unable to fit dialog to desktop")
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -1222,6 +1238,24 @@ def sync_observation_from_capa(capa_row):
     submitted_by = safe(capa_row["capa_closeout_submitted_by"] if "capa_closeout_submitted_by" in capa_row.keys() else "")
     approved_by = safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else "")
     approved_at = safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else "")
+
+    # CAPA and Observation use one shared close-out decision. Mirror the review
+    # state into the observation evidence ledger so either module shows the same result.
+    try:
+        if is_approved:
+            db.execute("""UPDATE observation_closeout_evidence
+                SET review_status='Approved',reviewed_by=?,reviewed_at=?,review_comments=?
+                WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN
+                ('pending review','submitted for review')""",
+                (approved_by, approved_at, safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else ""), obs["id"]))
+        elif is_returned:
+            db.execute("""UPDATE observation_closeout_evidence
+                SET review_status='Rejected',reviewed_by=?,reviewed_at=?,review_comments=?
+                WHERE observation_id=? AND lower(COALESCE(review_status,'')) IN
+                ('pending review','submitted for review')""",
+                (approved_by, approved_at, safe(capa_row["capa_closeout_comments"] if "capa_closeout_comments" in capa_row.keys() else ""), obs["id"]))
+    except Exception:
+        logging.exception("Unable to mirror CAPA close-out decision to observation evidence history")
 
     # The CAPA close-out approver's decision is authoritative for its linked observation.
     if is_approved and total > 0 and pct == 100:
@@ -6285,10 +6319,9 @@ class MainWindow(QMainWindow):
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
-        toolbar = QHBoxLayout()
+        toolbar = QGridLayout()
         search = QLineEdit(); search.setPlaceholderText("Search observation no., location, responsible person, description, action...")
-        toolbar.addWidget(search)
-        clear_filter = QPushButton("Clear Category Filter"); toolbar.addWidget(clear_filter)
+        clear_filter = QPushButton("Clear Category Filter")
         add_button = QPushButton("+ New Observation")
         edit_button = QPushButton("Edit Selected")
         attachment_button = QPushButton("Attachments")
@@ -6300,8 +6333,12 @@ class MainWindow(QMainWindow):
         card_button = QPushButton("Draft STOP Card(s)")
         closeout_evidence_button = QPushButton("Close-out Evidence / Approval")
         closeout_evidence_button.setToolTip("Upload close-out evidence directly from the Observation Register and view its approval status.")
-        for b in [add_button, edit_button, attachment_button, closeout_evidence_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]:
-            b.setMinimumHeight(34); toolbar.addWidget(b)
+        toolbar.addWidget(search, 0, 0, 1, 3)
+        toolbar.addWidget(clear_filter, 0, 3)
+        _obs_toolbar_buttons = [add_button, edit_button, attachment_button, closeout_evidence_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]
+        for _i, _button in enumerate(_obs_toolbar_buttons):
+            _button.setMinimumHeight(34); _button.setMinimumWidth(118); _button.setToolTip(_button.text())
+            toolbar.addWidget(_button, 1 + _i // 5, _i % 5)
         layout.addLayout(toolbar)
 
         tabs = QTabWidget()
@@ -6477,20 +6514,25 @@ class MainWindow(QMainWindow):
 
         # ---------------- Open Observations / Observation Approval tab ----------------
         close_page=QWidget(); close_layout=QVBoxLayout(close_page)
-        intro=QLabel("Select one or more open observations, upload close-out evidence, then submit it for review. CAPA-linked evidence is also copied to the linked CAPA record.")
+        intro=QLabel("For CAPA-linked observations, close-out evidence is shared with the CAPA register. Attach and submit once from either module; one reviewer decision updates both registers. Double-click an observation to open this close-out workspace.")
         intro.setWordWrap(True); intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); close_layout.addWidget(intro)
         close_layout.addWidget(QLabel("A. Open observations awaiting close-out evidence"))
         open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No.","CAPA Progress","Close-out Review"]
         open_table.setColumnCount(len(open_headers)); open_table.setHorizontalHeaderLabels(open_headers); open_table.setColumnHidden(0,True)
         open_table.setSelectionBehavior(QAbstractItemView.SelectRows); open_table.setSelectionMode(QAbstractItemView.ExtendedSelection); open_table.setAlternatingRowColors(True)
         open_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); open_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(open_table,2)
-        submit_row=QHBoxLayout(); submitter=QLineEdit(); submitter.setPlaceholderText("Submitted by (name / ID)"); submitter.setText(safe(db.setting("current_user","") or db.setting("username","")))
-        upload_closeout=QPushButton("Attach Close-out Evidence for Selected")
-        submit_closeout=QPushButton("Submit Attached Evidence for Review")
-        open_edit=QPushButton("Edit / Open Selected Observation")
-        open_delete=QPushButton("Delete Selected Observation")
+        submit_row=QGridLayout(); submitter=QLineEdit(); submitter.setPlaceholderText("Submitted by (name / ID)"); submitter.setText(safe(db.setting("current_user","") or db.setting("username","")))
+        upload_closeout=QPushButton("Attach Close-out Evidence")
+        submit_closeout=QPushButton("Submit for Review")
+        open_edit=QPushButton("Open Observation")
+        open_delete=QPushButton("Delete Observation")
         refresh_open=QPushButton("Refresh Open List")
-        submit_row.addWidget(submitter,1); submit_row.addWidget(upload_closeout); submit_row.addWidget(submit_closeout); submit_row.addWidget(open_edit); submit_row.addWidget(open_delete); submit_row.addWidget(refresh_open); close_layout.addLayout(submit_row)
+        for _btn in (upload_closeout, submit_closeout, open_edit, open_delete, refresh_open):
+            _btn.setMinimumHeight(34); _btn.setMinimumWidth(125); _btn.setToolTip(_btn.text())
+        submit_row.addWidget(submitter,0,0,1,2)
+        for _i, _btn in enumerate((upload_closeout, submit_closeout, open_edit, open_delete, refresh_open)):
+            submit_row.addWidget(_btn, 1 + _i // 3, _i % 3)
+        close_layout.addLayout(submit_row)
         approval_page=QWidget(); approval_layout=QVBoxLayout(approval_page)
         approval_intro=QLabel("Submitted observation close-out evidence appears here for reviewer action. Select a submission to approve or reject it and record comments.")
         approval_intro.setWordWrap(True); approval_intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); approval_layout.addWidget(approval_intro)
@@ -6542,6 +6584,41 @@ class MainWindow(QMainWindow):
 
         open_edit.clicked.connect(edit_open_observation)
         open_delete.clicked.connect(delete_open_observation)
+
+        def open_selected_closeout_workspace(*_):
+            oid = selected_open_observation_id()
+            if oid is None:
+                return
+            # Double-clicking an open observation takes the user directly to its
+            # close-out workspace; linked corrective actions remain visible in CAPA.
+            tabs.setCurrentWidget(close_page)
+            for _row in range(open_table.rowCount()):
+                if open_table.item(_row, 0) and safe(open_table.item(_row, 0).text()) == str(oid):
+                    open_table.selectRow(_row)
+                    break
+            open_table.setFocus()
+
+        open_table.cellDoubleClicked.connect(lambda _r, _c: open_selected_closeout_workspace())
+
+        def open_register_observation_closeout(row_index, _column=0):
+            try:
+                _id_item = table.item(row_index, 0)
+                oid = int(_id_item.text()) if _id_item else None
+            except Exception:
+                oid = None
+            if oid is None:
+                return
+            # Route the selected register record into the single close-out workspace.
+            refresh_closeout_open()
+            for _row in range(open_table.rowCount()):
+                if open_table.item(_row, 0) and safe(open_table.item(_row, 0).text()) == str(oid):
+                    open_table.selectRow(_row)
+                    tabs.setCurrentWidget(close_page)
+                    open_table.setFocus()
+                    return
+            QMessageBox.information(self, "Observation Close-out", "This observation is already closed/cancelled or is not awaiting close-out. Its history remains in the Observation Register.")
+
+        table.cellDoubleClicked.connect(open_register_observation_closeout)
 
         def refresh_closeout_open():
             # Reconcile every linked CAPA first, then display the same current status
@@ -6748,10 +6825,15 @@ class MainWindow(QMainWindow):
                         comments=(old+"\n"+note).strip() if old else note
                         if not approved:
                             db.conn.execute("UPDATE observations SET status='Close-out Evidence Returned',verification='Close-out evidence returned for correction',closeout_comments=? WHERE id=?",(comments,oid))
-                            if int(obs["capa_required"] or 0) and safe(obs["capa_number"]):
-                                db.conn.execute("""UPDATE capa SET observation_closeout_status=?,
-                                    capa_closeout_status='Returned',capa_closeout_comments=? WHERE number=?""",
-                                    (f"Returned by {name} on {now[:10]}",comment,safe(obs["capa_number"])))
+                            if int(obs["capa_required"] or 0):
+                                capa_no = ensure_observation_capa_record(obs)
+                                linked_capa = db.conn.execute("SELECT * FROM capa WHERE number=?", (capa_no,)).fetchone() if capa_no else None
+                                if linked_capa:
+                                    db.conn.execute("""UPDATE capa SET observation_closeout_status=?,
+                                        capa_closeout_status='Returned',capa_closeout_approved_by=?,
+                                        capa_closeout_approved_at=?,capa_closeout_comments=?,status='Rework Required' WHERE id=?""",
+                                        (f"Returned by {name} on {now[:10]}",name,now,comment,linked_capa["id"]))
+                                    sync_observation_from_capa(db.conn.execute("SELECT * FROM capa WHERE id=?", (linked_capa["id"],)).fetchone())
                             continue
                         if not int(obs["capa_required"] or 0):
                             db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved',closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],comments,oid))
@@ -10120,13 +10202,16 @@ class MainWindow(QMainWindow):
         info.setStyleSheet("color:#245486;padding:4px;")
         layout.addWidget(info)
 
-        toolbar = QHBoxLayout()
+        toolbar = QGridLayout()
         btns = {}
-        for text_label in ["+ New CAPA", "Refresh Register", "Open Linked Observation", "Manage Action Evidence", "Submit Actions for Approval", "Manage Close-out Evidence",
-                           "CAPA Close-out Approval", "Set Approval", "Delete Selected",
-                           "Export CSV", "Export Excel", "Export PDF", "Export Word"]:
+        _capa_actions = ["+ New CAPA", "Refresh Register", "Open Linked Observation", "Manage Action Evidence", "Submit Actions for Approval", "Manage Close-out Evidence",
+                         "CAPA Close-out Approval", "Set Approval", "Delete Selected", "Export CSV", "Export Excel", "Export PDF", "Export Word"]
+        for _i, text_label in enumerate(_capa_actions):
             b = QPushButton(text_label)
-            toolbar.addWidget(b)
+            b.setMinimumHeight(34)
+            b.setMinimumWidth(125)
+            b.setToolTip(text_label)
+            toolbar.addWidget(b, _i // 4, _i % 4)
             btns[text_label] = b
         layout.addLayout(toolbar)
 
@@ -10437,6 +10522,7 @@ class MainWindow(QMainWindow):
             dialog = QDialog(self)
             dialog.setWindowTitle(f"CAPA Close-out Evidence — {safe(row['number'])}")
             dialog.resize(760, 460)
+            fit_dialog_to_desktop(dialog, 0.88, 0.78)
             v = QVBoxLayout(dialog)
             v.addWidget(QLabel(
                 f"CAPA: {safe(row['number'])}    |    Observation: {safe(row['reference_number']) or 'Not linked'}\n"
@@ -10541,11 +10627,17 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "CAPA Not Ready", f"All corrective actions must have evidence before close-out approval.\n\nCompletion: {pct}% ({done}/{total})")
                 return
             linked_obs = None
-            if safe(row["source"]).strip().casefold() in ("hse inspection", "observation", "hse observation"):
+            try:
+                if row["linked_observation_id"]:
+                    linked_obs = db.fetchone("SELECT * FROM observations WHERE id=?", (row["linked_observation_id"],))
+            except Exception:
+                linked_obs = None
+            if not linked_obs and safe(row["reference_number"]).strip():
                 linked_obs = db.fetchone("SELECT * FROM observations WHERE number=?", (safe(row["reference_number"]),))
             dialog = QDialog(self)
             dialog.setWindowTitle(f"CAPA Close-out Approval — {safe(row['number'])}")
             dialog.resize(650, 390)
+            fit_dialog_to_desktop(dialog, 0.82, 0.78)
             form = QFormLayout(dialog)
             summary = QLabel(f"CAPA: {safe(row['number'])}\nObservation: {safe(row['reference_number']) or 'Not linked'}\nEvidence progress: {pct}% ({done}/{total})\nCurrent status: {state}")
             summary.setWordWrap(True)
@@ -10704,7 +10796,8 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("New CAPA")
         dialog.resize(950, 850)
-        dialog.setMinimumSize(900, 720)
+        dialog.setMinimumSize(720, 520)
+        fit_dialog_to_desktop(dialog, 0.92, 0.88)
         outer = QVBoxLayout(dialog)
 
         title = QLabel("CORRECTIVE AND PREVENTIVE ACTION (CAPA) TRACKING")
