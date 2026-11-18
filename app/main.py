@@ -6682,12 +6682,12 @@ class MainWindow(QMainWindow):
             for r,row in enumerate(rows):
                 linked_capa_no = ensure_observation_capa_link(row)
                 # Re-read after CAPA reconciliation; never render a stale pre-sync snapshot.
-                row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"])) or row
+                row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
                 if int(row["capa_required"] or 0) and linked_capa_no:
                     _linked_capa_state = db.fetchone("SELECT * FROM capa WHERE number=?", (linked_capa_no,))
                     if _linked_capa_state:
                         sync_observation_from_capa(_linked_capa_state)
-                        row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"])) or row
+                        row = db.fetchone("SELECT * FROM observations WHERE id=?", (row["id"],)) or row
                 attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
