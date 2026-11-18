@@ -6278,14 +6278,16 @@ class MainWindow(QMainWindow):
         pdf_button = QPushButton("Export PDF")
         word_button = QPushButton("Export Word")
         card_button = QPushButton("Draft STOP Card(s)")
-        for b in [add_button, edit_button, attachment_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]:
+        closeout_evidence_button = QPushButton("Close-out Evidence / Approval")
+        closeout_evidence_button.setToolTip("Upload close-out evidence directly from the Observation Register and view its approval status.")
+        for b in [add_button, edit_button, attachment_button, closeout_evidence_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]:
             b.setMinimumHeight(34); toolbar.addWidget(b)
         layout.addLayout(toolbar)
 
         tabs = QTabWidget()
         register_page = QWidget(); register_layout = QVBoxLayout(register_page)
         table = QTableWidget()
-        headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status", "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
+        headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status", "Observation Approval", "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
         table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setColumnHidden(0, True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -6338,7 +6340,13 @@ class MainWindow(QMainWindow):
                 attachments="; ".join(Path(safe(a["file_path"]).replace("\\", "/")).name for a in observation_all_attachments(row["id"]))
                 try: capa_req="Yes" if int(row["capa_required"] or 0) else "No"
                 except Exception: capa_req="No"
-                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
+                latest_approval = db.fetchone("SELECT review_status,reviewed_by,reviewed_at,review_comments FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC LIMIT 1", (row["id"],))
+                linked_approval = db.fetchone("SELECT capa_closeout_status,capa_closeout_approved_by,capa_closeout_approved_at FROM capa WHERE number=?", (linked_capa_no,)) if linked_capa_no else None
+                approval_status = safe(linked_approval["capa_closeout_status"]) if linked_approval else (safe(latest_approval["review_status"]) if latest_approval else "Not Submitted")
+                approval_by = safe(linked_approval["capa_closeout_approved_by"]) if linked_approval else (safe(latest_approval["reviewed_by"]) if latest_approval else "")
+                approval_date = safe(linked_approval["capa_closeout_approved_at"])[:10] if linked_approval else (safe(latest_approval["reviewed_at"])[:10] if latest_approval else "")
+                approval_display = approval_status + (f" | {approval_by} | {approval_date}" if approval_by else "")
+                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],approval_display,row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
                 for c,value in enumerate(values):
                     item=QTableWidgetItem(safe(value)); item.setToolTip(safe(value)); table.setItem(r,c,item)
                 if overdue(row["target_date"],row["status"]):
@@ -6567,7 +6575,7 @@ class MainWindow(QMainWindow):
                                     db.conn.execute("INSERT INTO capa_attachments(capa_id,file_path,attachment_type) VALUES(?,?,?)",(capa["id"],str(dest),"Observation Close-out Evidence"))
                                     prior=safe(capa["closeout_evidence"])
                                     combined=(prior+";"+str(dest)).strip(";") if str(dest) not in prior.split(";") else prior
-                                    db.conn.execute("UPDATE capa SET closeout_evidence=? WHERE id=?",(combined,capa["id"]))
+                                    db.conn.execute("UPDATE capa SET closeout_evidence=?,capa_closeout_status=CASE WHEN lower(COALESCE(capa_closeout_status,'')) IN ('approved','submitted for review','pending review') THEN capa_closeout_status ELSE 'Draft' END WHERE id=?",(combined,capa["id"]))
                         # Submission is a separate action; the evidence remains Draft until explicitly submitted.
                 QMessageBox.information(self,"Evidence Attached","Close-out evidence has been attached as a draft. Select the observation and choose 'Submit Attached Evidence for Review' when ready.")
                 refresh_closeout_open(); refresh_closeout_evidence(); load()
@@ -6709,6 +6717,64 @@ class MainWindow(QMainWindow):
 
         upload_closeout.clicked.connect(upload_closeout_evidence); submit_closeout.clicked.connect(submit_attached_closeout_evidence); refresh_open.clicked.connect(refresh_both_closeout_sections)
         refresh_evidence.clicked.connect(refresh_both_closeout_sections); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
+
+        def upload_closeout_from_observation_register():
+            ids = selected_observation_ids(require_one=True)
+            if not ids:
+                return
+            oid = ids[0]
+            obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
+            if not obs:
+                return
+            if safe(obs["status"]).casefold() in ("closed", "cancelled"):
+                return QMessageBox.information(self, "Close-out Evidence", "This observation is already closed. Its evidence and approval history remain available for review.")
+            by, ok = QInputDialog.getText(self, "Upload Observation Close-out Evidence", "Uploaded by:", text=safe(db.setting("current_user", "") or db.setting("username", "")))
+            if not ok:
+                return
+            if not by.strip():
+                return QMessageBox.warning(self, "Submitter Required", "Enter the name / ID of the person uploading the evidence.")
+            paths, _ = QFileDialog.getOpenFileNames(self, "Select Observation Close-out Evidence", "", "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            if not paths:
+                return
+            batch = f"OBS-REG-CO-{oid}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+            saved = []
+            now = datetime.now().isoformat(timespec="seconds")
+            try:
+                with db.conn:
+                    capa_no = safe(obs["capa_number"])
+                    if int(obs["capa_required"] or 0):
+                        capa_no = ensure_observation_capa_record(obs)
+                    linked = db.conn.execute("SELECT id,closeout_evidence FROM capa WHERE number=?", (capa_no,)).fetchone() if capa_no else None
+                    for src in paths:
+                        source = Path(src)
+                        if not source.is_file():
+                            continue
+                        dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{source.name}"
+                        n = 1
+                        while dest.exists():
+                            dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{n}_{source.name}"
+                            n += 1
+                        shutil.copy2(source, dest)
+                        saved.append(dest)
+                        db.conn.execute("INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,'Draft')", (batch, oid, str(dest), by.strip(), now))
+                        db.conn.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)", (oid, str(dest), "Close-out Evidence"))
+                        if linked:
+                            db.conn.execute("INSERT INTO capa_attachments(capa_id,file_path,attachment_type) VALUES(?,?,?)", (linked["id"], str(dest), "CAPA Close-out Evidence"))
+                            prior = safe(linked["closeout_evidence"])
+                            combined = ";".join(dict.fromkeys([x for x in prior.split(";") + [str(dest)] if x]))
+                            db.conn.execute("UPDATE capa SET closeout_evidence=?,capa_closeout_status=CASE WHEN lower(COALESCE(capa_closeout_status,'')) IN ('approved','submitted for review','pending review') THEN capa_closeout_status ELSE 'Draft' END WHERE id=?", (combined, linked["id"]))
+                if not saved:
+                    raise ValueError("No selected evidence file could be read.")
+                load(); refresh_closeout_open(); refresh_closeout_evidence()
+                QMessageBox.information(self, "Evidence Attached", "Close-out evidence is saved as Draft and is visible in both the Observation Register and the linked CAPA Tracking Register. Submit it for review from the Close-out & Verification tab.")
+            except Exception as exc:
+                for fp in saved:
+                    try: fp.unlink(missing_ok=True)
+                    except Exception: pass
+                logging.exception("Observation-register close-out evidence upload failed")
+                QMessageBox.critical(self, "Upload Error", str(exc))
+
+        closeout_evidence_button.clicked.connect(upload_closeout_from_observation_register)
 
         # ---------------- Specific Inspection Report tab ----------------
         report_page=QWidget(); report_layout=QVBoxLayout(report_page)
@@ -10405,8 +10471,8 @@ class MainWindow(QMainWindow):
             if capa_id is None:
                 return
             row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
-            if row and safe(row["source"]).strip().casefold() in ("hse inspection", "observation", "hse observation") and safe(row["capa_closeout_status"]).casefold() == "approved":
-                QMessageBox.warning(self, "Permanent CAPA Record", "An approved CAPA linked to an observation is retained as a permanent register record and cannot be deleted.")
+            if row and safe(row["capa_closeout_status"]).strip().casefold() == "approved":
+                QMessageBox.warning(self, "Permanent CAPA Record", "An approved CAPA close-out is retained as a permanent historical register record. Its evidence, approval details, dates and final status cannot be deleted.")
                 return
             self.delete_selected_record(table, "capa", "capa_attachments", "CAPA", load)
 
