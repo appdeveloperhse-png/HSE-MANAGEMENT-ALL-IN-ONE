@@ -1606,7 +1606,11 @@ def ensure_observation_capa_record(obs_row):
 
 
 def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
-    """Single shared evidence workspace for CAPA and its linked observation."""
+    """Single shared evidence workspace for CAPA and its linked observation.
+
+    Each corrective action keeps its own independent evidence list. Adding
+    evidence to one action never replaces or clears evidence on any other action.
+    """
     row = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
     if not row:
         QMessageBox.warning(parent, "CAPA Evidence", "The linked CAPA record could not be found.")
@@ -1615,12 +1619,22 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
         QMessageBox.information(parent, "CAPA Closed", "This CAPA has already been approved. Its evidence and approval history are read-only.")
         return
 
-    actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
-    if not actions:
-        actions = [{"action": a, "evidence": [], "has_evidence": False} for a in parse_corrective_actions(row["corrective_action"])]
-    if not actions:
+    raw_actions = parse_capa_actions(row["actions_json"] if "actions_json" in row.keys() else row["corrective_action"])
+    if not raw_actions:
+        raw_actions = [{"action": a, "evidence": [], "has_evidence": False} for a in parse_corrective_actions(row["corrective_action"])]
+    if not raw_actions:
         QMessageBox.information(parent, "CAPA Evidence", "No corrective actions are listed for this CAPA.")
         return
+
+    # Deep-copy every action so evidence lists are independent (never shared).
+    actions = []
+    for item in raw_actions:
+        evidence = [safe(p) for p in (item.get("evidence") or []) if safe(p).strip()]
+        actions.append({
+            "action": safe(item.get("action") or item.get("text") or "").strip(),
+            "evidence": list(evidence),
+            "has_evidence": bool(evidence and any(resolve_attachment_path(p) for p in evidence)),
+        })
 
     dialog = QDialog(parent)
     dialog.setWindowTitle(f"Corrective Action Evidence — {safe(row['number'])}")
@@ -1629,7 +1643,9 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
     outer = QVBoxLayout(dialog)
     heading = QLabel(
         f"CAPA: {safe(row['number'])}    |    Observation: {safe(row['reference_number']) or 'Not linked'}\n"
-        "Attach evidence against each corrective action. Each action counts as complete when it has at least one readable attachment."
+        "Attach evidence against each corrective action independently. "
+        "Adding files to one action does not change evidence on any other action. "
+        "Each action counts as complete when it has at least one readable attachment."
     )
     heading.setWordWrap(True)
     heading.setStyleSheet("font-weight:600;color:#17365D;padding:6px;")
@@ -1660,6 +1676,8 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
         grid.setRowCount(len(actions))
         for i, action in enumerate(actions):
             evidence = [safe(fp) for fp in (action.get("evidence") or []) if safe(fp).strip()]
+            # Keep only this action's own list (never share references).
+            action["evidence"] = list(evidence)
             valid = [fp for fp in evidence if resolve_attachment_path(fp)]
             action["has_evidence"] = bool(valid)
             grid.setItem(i, 0, QTableWidgetItem(str(i + 1)))
@@ -1669,26 +1687,28 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
             cell = QWidget()
             row_layout = QHBoxLayout(cell)
             row_layout.setContentsMargins(2, 2, 2, 2)
-            add_edit = QPushButton("Add / Edit")
+            add_edit = QPushButton("Add Files")
+            replace_btn = QPushButton("Replace All")
             view = QPushButton("View")
             delete = QPushButton("Delete")
-            for button in (add_edit, view, delete):
+            for button in (add_edit, replace_btn, view, delete):
                 button.setMinimumHeight(28)
-            def add_files(index=i):
+
+            def add_files(index=i, replace=False):
+                # Always work on a fresh copy of THIS action's evidence only.
                 existing = list(actions[index].get("evidence") or [])
-                replace = False
-                if existing:
+                if replace and existing:
                     choice = QMessageBox.question(
-                        dialog, "Manage Action Evidence",
-                        "Choose Yes to replace the existing files, No to add more, or Cancel to keep them.",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
-                        QMessageBox.StandardButton.No
+                        dialog, "Replace Evidence",
+                        f"Replace ALL existing evidence files for Corrective Action {index + 1}?\n\n"
+                        "This only affects this action. Evidence on other corrective actions is not changed.",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No,
                     )
-                    if choice == QMessageBox.StandardButton.Cancel:
+                    if choice != QMessageBox.StandardButton.Yes:
                         return
-                    replace = choice == QMessageBox.StandardButton.Yes
                 paths, _ = QFileDialog.getOpenFileNames(
-                    dialog, "Attach Evidence to Corrective Action", "",
+                    dialog, f"Attach Evidence — Corrective Action {index + 1}", "",
                     "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
                 )
                 if not paths:
@@ -1710,9 +1730,15 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
                     except Exception:
                         logging.exception("CAPA action evidence copy failed")
                 if saved:
-                    actions[index]["evidence"] = saved if replace else list(dict.fromkeys(existing + saved))
+                    if replace:
+                        actions[index]["evidence"] = list(saved)
+                    else:
+                        # Append to this action only — never touch other actions.
+                        merged = list(dict.fromkeys(existing + saved))
+                        actions[index]["evidence"] = merged
                     actions[index]["has_evidence"] = True
                     refresh_grid()
+
             def view_files(index=i):
                 available = [fp for fp in (actions[index].get("evidence") or []) if resolve_attachment_path(fp)]
                 if not available:
@@ -1722,6 +1748,7 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
                     selected = next((fp for fp in available if Path(fp).name == choice), None)
                     if selected:
                         QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolve_attachment_path(selected))))
+
             def delete_file(index=i):
                 available = [fp for fp in (actions[index].get("evidence") or []) if safe(fp).strip()]
                 if not available:
@@ -1731,13 +1758,17 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
                     return
                 selected = next((fp for fp in available if Path(fp).name == choice), None)
                 if selected:
+                    # Only remove from this action's list.
                     actions[index]["evidence"] = [fp for fp in available if fp != selected]
                     actions[index]["has_evidence"] = bool(actions[index]["evidence"])
                     refresh_grid()
-            add_edit.clicked.connect(add_files)
-            view.clicked.connect(view_files)
-            delete.clicked.connect(delete_file)
+
+            add_edit.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=False))
+            replace_btn.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=True))
+            view.clicked.connect(lambda checked=False, idx=i: view_files(idx))
+            delete.clicked.connect(lambda checked=False, idx=i: delete_file(idx))
             row_layout.addWidget(add_edit)
+            row_layout.addWidget(replace_btn)
             row_layout.addWidget(view)
             row_layout.addWidget(delete)
             grid.setCellWidget(i, 4, cell)
@@ -1753,7 +1784,18 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
             QMessageBox.warning(dialog, "Submitter Required", "Enter the name / ID of the person submitting the evidence.")
             return False
         now = datetime.now().isoformat(timespec="seconds")
-        action_paths = {safe(fp) for item in actions for fp in (item.get("evidence") or []) if safe(fp).strip()}
+        # Build a clean, independent snapshot of every action's evidence.
+        snapshot = []
+        action_paths = set()
+        for i, item in enumerate(actions):
+            ev = [safe(fp) for fp in (item.get("evidence") or []) if safe(fp).strip()]
+            snapshot.append({
+                "action": safe(item.get("action") or "").strip(),
+                "evidence": list(ev),
+                "has_evidence": bool(ev and any(resolve_attachment_path(p) for p in ev)),
+            })
+            for fp in ev:
+                action_paths.add(safe(fp))
         try:
             with db.conn:
                 db.conn.execute("""UPDATE capa SET actions_json=?,completion_pct=?,action_status=?,corrective_action=?,
@@ -1761,9 +1803,9 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
                     capa_closeout_status=?,capa_closeout_submitted_by=?,capa_closeout_submitted_at=?,
                     capa_closeout_approved_by='',capa_closeout_approved_at='',capa_closeout_comments='',
                     observation_closeout_status=? WHERE id=?""",
-                    (json.dumps(actions, ensure_ascii=False), pct,
+                    (json.dumps(snapshot, ensure_ascii=False), pct,
                      "CAPA Action Complete" if pct == 100 else ("Pending" if pct else "Open"),
-                     format_corrective_actions_display([a["action"] for a in actions]),
+                     format_corrective_actions_display([a["action"] for a in snapshot]),
                      "Awaiting Approval" if submit else ("In Progress" if pct else "Open"),
                      "Pending Approval" if submit else "Draft",
                      f"Manager action evidence {'submitted for approval' if submit else 'saved'} by {submitter.text().strip()} on {now}",
@@ -1771,15 +1813,22 @@ def open_capa_action_evidence_dialog(parent, capa_id, on_saved=None):
                      submitter.text().strip() if submit else "", now if submit else "",
                      "Submitted for Review" if submit else "Draft", capa_id))
                 # Keep the attachment register in step with the action-level list.
-                existing_rows = db.conn.execute("SELECT id,file_path FROM capa_attachments WHERE capa_id=? AND lower(COALESCE(attachment_type,'')) LIKE 'action % evidence'", (capa_id,)).fetchall()
+                # Only touch rows tagged as action evidence; never wipe other attachment types.
+                existing_rows = db.conn.execute(
+                    "SELECT id,file_path FROM capa_attachments WHERE capa_id=? AND lower(COALESCE(attachment_type,'')) LIKE 'action % evidence'",
+                    (capa_id,),
+                ).fetchall()
                 existing_map = {safe(x["file_path"]): int(x["id"]) for x in existing_rows}
                 for old_path, old_id in existing_map.items():
                     if old_path not in action_paths:
                         db.conn.execute("DELETE FROM capa_attachments WHERE id=?", (old_id,))
-                for item in actions:
+                for i, item in enumerate(snapshot):
                     for fp in item.get("evidence") or []:
                         if safe(fp) and safe(fp) not in existing_map:
-                            db.conn.execute("INSERT INTO capa_attachments(capa_id,file_path,attachment_type) VALUES(?,?,?)", (capa_id, safe(fp), f"Action {actions.index(item)+1} Evidence"))
+                            db.conn.execute(
+                                "INSERT INTO capa_attachments(capa_id,file_path,attachment_type) VALUES(?,?,?)",
+                                (capa_id, safe(fp), f"Action {i+1} Evidence"),
+                            )
             updated = db.fetchone("SELECT * FROM capa WHERE id=?", (capa_id,))
             if updated:
                 sync_observation_from_capa(updated)
@@ -7546,7 +7595,8 @@ class MainWindow(QMainWindow):
             title.setWordWrap(True)
             outer.addWidget(title)
             intro = QLabel(
-                "Attach close-out evidence against each corrective action below. "
+                "Attach close-out evidence against each corrective action independently. "
+                "Adding files to one action does not change evidence on any other action. "
                 "Select a row to preview image evidence. Every corrective action should have evidence before Submit."
             )
             intro.setWordWrap(True)
@@ -7650,10 +7700,11 @@ class MainWindow(QMainWindow):
                     cell = QWidget()
                     row_layout = QHBoxLayout(cell)
                     row_layout.setContentsMargins(2, 2, 2, 2)
-                    add_edit = QPushButton("Add / Edit")
+                    add_edit = QPushButton("Add Files")
+                    replace_btn = QPushButton("Replace All")
                     view = QPushButton("View")
                     delete = QPushButton("Delete")
-                    for button in (add_edit, view, delete):
+                    for button in (add_edit, replace_btn, view, delete):
                         button.setMinimumHeight(28)
                         button.setStyleSheet(
                             "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:3px 8px;"
@@ -7661,19 +7712,19 @@ class MainWindow(QMainWindow):
                             "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
                         )
 
-                    def add_files(index=i):
+                    def add_files(index=i, replace=False):
+                        # Always work on a fresh copy of THIS action's evidence only.
                         existing = list(actions[index].get("evidence") or [])
-                        replace = False
-                        if existing:
+                        if replace and existing:
                             choice = QMessageBox.question(
-                                dialog, "Manage Action Evidence",
-                                "Choose Yes to replace the existing files, No to add more, or Cancel to keep them.",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                                dialog, "Replace Evidence",
+                                f"Replace ALL existing evidence files for Corrective Action {index + 1}?\n\n"
+                                "This only affects this action. Evidence on other corrective actions is not changed.",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No,
                             )
-                            if choice == QMessageBox.StandardButton.Cancel:
+                            if choice != QMessageBox.StandardButton.Yes:
                                 return
-                            replace = choice == QMessageBox.StandardButton.Yes
                         paths, _ = QFileDialog.getOpenFileNames(
                             dialog, f"Attach Evidence — Corrective Action {index + 1}", "",
                             "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)",
@@ -7697,7 +7748,11 @@ class MainWindow(QMainWindow):
                             except Exception:
                                 logging.exception("Observation action evidence copy failed")
                         if saved:
-                            actions[index]["evidence"] = saved if replace else list(dict.fromkeys(existing + saved))
+                            if replace:
+                                actions[index]["evidence"] = list(saved)
+                            else:
+                                # Append to this action only — never touch other actions.
+                                actions[index]["evidence"] = list(dict.fromkeys(existing + saved))
                             actions[index]["has_evidence"] = True
                             refresh_grid()
                             grid.selectRow(index)
@@ -7709,10 +7764,10 @@ class MainWindow(QMainWindow):
                             return QMessageBox.information(dialog, "Evidence", "No readable evidence is attached to this corrective action.")
                         choice, ok = QInputDialog.getItem(
                             dialog, "View Action Evidence", "Select a file to open:",
-                            [Path(str(fp).replace("\\\\", "/")).name for fp in available], 0, False,
+                            [Path(str(fp).replace("\\", "/")).name for fp in available], 0, False,
                         )
                         if ok and choice:
-                            selected = next((fp for fp in available if Path(str(fp).replace("\\\\", "/")).name == choice), None)
+                            selected = next((fp for fp in available if Path(str(fp).replace("\\", "/")).name == choice), None)
                             if selected:
                                 resolved = resolve_attachment_path(selected)
                                 if resolved:
@@ -7724,21 +7779,24 @@ class MainWindow(QMainWindow):
                             return QMessageBox.information(dialog, "Delete Evidence", "There is no evidence to delete.")
                         choice, ok = QInputDialog.getItem(
                             dialog, "Delete Action Evidence", "Select the file to remove:",
-                            [Path(str(fp).replace("\\\\", "/")).name for fp in available], 0, False,
+                            [Path(str(fp).replace("\\", "/")).name for fp in available], 0, False,
                         )
                         if not ok or not choice:
                             return
-                        selected = next((fp for fp in available if Path(str(fp).replace("\\\\", "/")).name == choice), None)
+                        selected = next((fp for fp in available if Path(str(fp).replace("\\", "/")).name == choice), None)
                         if selected:
+                            # Only remove from this action's list.
                             actions[index]["evidence"] = [fp for fp in available if fp != selected]
                             actions[index]["has_evidence"] = bool(actions[index]["evidence"])
                             refresh_grid()
                             show_preview_for_row(index)
 
-                    add_edit.clicked.connect(add_files)
-                    view.clicked.connect(view_files)
-                    delete.clicked.connect(delete_file)
+                    add_edit.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=False))
+                    replace_btn.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=True))
+                    view.clicked.connect(lambda checked=False, idx=i: view_files(idx))
+                    delete.clicked.connect(lambda checked=False, idx=i: delete_file(idx))
                     row_layout.addWidget(add_edit)
+                    row_layout.addWidget(replace_btn)
                     row_layout.addWidget(view)
                     row_layout.addWidget(delete)
                     grid.setCellWidget(i, 4, cell)
