@@ -7301,8 +7301,12 @@ class MainWindow(QMainWindow):
         headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status", "Observation Approval", "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
         table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setColumnHidden(0, True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)  # Observation Detail paragraph
-        table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)  # Corrective Action(s) paragraph
+        # Observation Detail (5) and Corrective Action(s) (9): professional width ~3 inches minimum each
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Interactive)
+        table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(5, 320)  # >= ~3.3 inches at 96 DPI
+        table.setColumnWidth(9, 320)
+        table.horizontalHeader().setMinimumSectionSize(80)
         table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setWordWrap(True); table.setAlternatingRowColors(True)
@@ -7402,7 +7406,11 @@ class MainWindow(QMainWindow):
                 # Row height from paragraph line count (observation + corrective actions)
                 _obs_lines = max(1, obs_para.count("\n") + 1 + max(0, (len(obs_para) // 60)))
                 _corr_lines = max(1, corr_para.count("\n") + 1 + max(0, (len(corr_para) // 60)))
-                table.setRowHeight(r, max(64, 20 + 16 * max(_obs_lines, _corr_lines, len(parse_corrective_actions(row)))))
+                table.setRowHeight(r, max(72, 22 + 16 * max(_obs_lines, _corr_lines, len(parse_corrective_actions(row)))))
+                if table.columnWidth(5) < 300:
+                    table.setColumnWidth(5, 320)
+                if table.columnWidth(9) < 300:
+                    table.setColumnWidth(9, 320)
 
         def selected_observation_ids(require_one=False):
             ids=[]
@@ -7568,7 +7576,12 @@ class MainWindow(QMainWindow):
         open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No.","CAPA Progress","Close-out Review"]
         open_table.setColumnCount(len(open_headers)); open_table.setHorizontalHeaderLabels(open_headers); open_table.setColumnHidden(0,True)
         open_table.setSelectionBehavior(QAbstractItemView.SelectRows); open_table.setSelectionMode(QAbstractItemView.SingleSelection); open_table.setAlternatingRowColors(True)
-        open_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); open_table.horizontalHeader().setStretchLastSection(True); close_layout.addWidget(open_table,2)
+        open_table.setWordWrap(True)
+        open_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        open_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)  # Observation
+        open_table.setColumnWidth(4, 320)  # ~3 inch minimum
+        open_table.horizontalHeader().setStretchLastSection(True)
+        close_layout.addWidget(open_table, 1)
         def _open_obs_detail_from_table(row_index, *_):
             try:
                 oid = None
@@ -7583,122 +7596,37 @@ class MainWindow(QMainWindow):
                         hit = db.fetchone("SELECT id FROM observations WHERE number=?", (num_item.text(),))
                         oid = int(hit["id"]) if hit else None
                 if oid:
-                    self._observation_detail_review_dialog(oid, mode="view", on_done=lambda: (refresh_closeout_open(), refresh_closeout_evidence(), load()))
+                    # Open close-out evidence dialog (cards with attach + preview), same box style as Approval
+                    obs_row = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
+                    if obs_row and int(obs_row["capa_required"] or 0):
+                        capa_no = ensure_observation_capa_record(obs_row) if int(obs_row["capa_required"] or 0) else safe(obs_row["capa_number"])
+                        capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,)) if capa_no else None
+                        if capa_row:
+                            open_capa_action_evidence_dialog(self, capa_row["id"], on_saved=lambda: (refresh_closeout_open(), refresh_closeout_evidence(), load()))
+                        else:
+                            open_simple_observation_evidence_dialog(oid)
+                    else:
+                        open_simple_observation_evidence_dialog(oid)
             except Exception:
                 logging.exception("Open observation detail failed")
         # Double-click opens per-action evidence workspace (connected later as open_selected_closeout_workspace)
-        open_preview_label = QLabel("Select an open observation to preview evidence. Double-click a row to attach evidence per corrective action.")
-        open_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        open_preview_label.setMinimumHeight(160)
-        open_preview_label.setWordWrap(True)
-        open_preview_label.setStyleSheet(
-            "background:#f1f5f9;border:2px solid #334155;border-radius:6px;"
-            "color:#061018;font-weight:700;padding:8px;"
+        open_preview_label = QLabel(
+            "Double-click a row (or use Open Close-out Evidence) to open the observation dialog — "
+            "observation detail, corrective actions and evidence cards with attach / preview appear there, same style as Observation Approval."
         )
+        open_preview_label.setWordWrap(True)
+        open_preview_label.setMaximumHeight(48)
+        open_preview_label.setStyleSheet("color:#061018;font-weight:700;padding:4px;")
         close_layout.addWidget(open_preview_label)
 
         def _preview_open_observation_evidence():
-            """Show first available image evidence for the selected open observation."""
-            try:
-                row = open_table.currentRow()
-                if row < 0:
-                    open_preview_label.setPixmap(QPixmap())
-                    open_preview_label.setText("Select an open observation to preview attached evidence images here. Double-click a row for full detail.")
-                    return
-                oid = None
-                id_item = open_table.item(row, 0)
-                if id_item and id_item.data(Qt.ItemDataRole.UserRole) is not None:
-                    oid = int(id_item.data(Qt.ItemDataRole.UserRole))
-                elif id_item and str(id_item.text()).isdigit():
-                    oid = int(id_item.text())
-                if oid is None:
-                    num_item = open_table.item(row, 1)
-                    if num_item:
-                        hit = db.fetchone("SELECT id FROM observations WHERE number=?", (num_item.text(),))
-                        oid = int(hit["id"]) if hit else None
-                if not oid:
-                    open_preview_label.setPixmap(QPixmap())
-                    open_preview_label.setText("Unable to resolve the selected observation.")
-                    return
-                image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
-                paths = []
-                for er in db.fetchall(
-                    "SELECT file_path FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC",
-                    (int(oid),),
-                ):
-                    paths.append(safe(er["file_path"]))
-                for item in observation_all_attachments(int(oid)):
-                    paths.append(safe(item.get("file_path")))
-                seen = set()
-                for fp in paths:
-                    key = (fp or "").replace("\\", "/").lower()
-                    if not key or key in seen:
-                        continue
-                    seen.add(key)
-                    resolved = resolve_attachment_path(fp)
-                    if resolved and resolved.suffix.lower() in image_exts and resolved.is_file():
-                        pix = QPixmap(str(resolved))
-                        if not pix.isNull():
-                            open_preview_label.setText("")
-                            open_preview_label.setPixmap(
-                                pix.scaled(920, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                            )
-                            return
-                open_preview_label.setPixmap(QPixmap())
-                if seen:
-                    open_preview_label.setText(
-                        f"{len(seen)} evidence file(s) attached. No image preview available for the file type(s).\n"
-                        "Double-click the row to open full observation detail and files."
-                    )
-                else:
-                    open_preview_label.setText(
-                        "No evidence attached yet for this observation.\n"
-                        "Use Open Close-out Evidence to attach files, then select the row again to preview."
-                    )
-            except Exception:
-                logging.exception("Open observation evidence preview failed")
-                open_preview_label.setPixmap(QPixmap())
-                open_preview_label.setText("Evidence preview unavailable.")
-
-        open_table.itemSelectionChanged.connect(_preview_open_observation_evidence)
-
-        submit_row=QGridLayout(); submit_row.setHorizontalSpacing(6); submit_row.setVerticalSpacing(4)
-        submitter=QLineEdit(); submitter.setPlaceholderText("Submitted by (name / ID)"); submitter.setText(safe(db.setting("current_user","") or db.setting("username","")))
-        upload_closeout=QPushButton("Open Close-out Evidence")
-        submit_closeout=QPushButton("Submit for Approval")
-        open_edit=QPushButton("Open Observation")
-        open_delete=QPushButton("Delete Observation")
-        refresh_open=QPushButton("Refresh Open List")
-        for _btn in (upload_closeout, submit_closeout, open_edit, open_delete, refresh_open):
-            _btn.setMinimumHeight(32); _btn.setMinimumWidth(0)
-            _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            _btn.setStyleSheet(
-                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 8px;"
-                "border:1px solid #0b3a63;border-radius:5px;}"
-                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+            """Evidence preview is shown inside the observation dialog, not on the main tab."""
+            open_preview_label.setText(
+                "Double-click a row (or use Open Close-out Evidence) to open the observation dialog — "
+                "observation detail, corrective actions and evidence cards with attach / preview appear there, same style as Observation Approval."
             )
-            _btn.setToolTip(_btn.text())
-        submit_row.addWidget(submitter,0,0,1,2)
-        for _i, _btn in enumerate((upload_closeout, submit_closeout, open_edit, open_delete, refresh_open)):
-            submit_row.addWidget(_btn, 1 + _i // 3, _i % 3)
-        close_layout.addLayout(submit_row)
-        approval_page=QWidget(); approval_layout=QVBoxLayout(approval_page)
-        approval_intro=QLabel(
-            "Submitted observation close-outs are listed here. Select a row and use the action buttons below, "
-            "or double-click a row to open every evidence card with Approve / Reject + remark per file. "
-            "CAPA-linked items are approved once in CAPA Tracking and synchronized automatically."
-        )
-        approval_intro.setWordWrap(True); approval_intro.setStyleSheet("color:#061018;padding:6px;font-weight:800;"); approval_layout.addWidget(approval_intro)
-        approval_section_lbl = QLabel("One row per observation. Action buttons stay visible at the bottom. Double-click for per-evidence Approve / Reject with remarks.")
-        approval_section_lbl.setStyleSheet("color:#061018;font-weight:800;")
-        approval_layout.addWidget(approval_section_lbl)
-        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","Observation Detail","Corrective Action(s)","CAPA","Evidence Files","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","Evidence Progress"]
-        evidence_table.setColumnCount(len(ev_headers)); evidence_table.setHorizontalHeaderLabels(ev_headers); evidence_table.setColumnHidden(0,True)
-        evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows); evidence_table.setSelectionMode(QAbstractItemView.SingleSelection); evidence_table.setAlternatingRowColors(True)
-        evidence_table.setWordWrap(True)
-        evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); evidence_table.horizontalHeader().setStretchLastSection(True)
-        evidence_table.setMinimumHeight(180)
-        approval_layout.addWidget(evidence_table, 1)
+
+
         def _approval_detail_from_table(row_index, *_):
             try:
                 oid = None
@@ -7811,7 +7739,11 @@ class MainWindow(QMainWindow):
             return oid
 
         def open_simple_observation_evidence_dialog(oid):
-            """Per corrective-action evidence workspace for non-CAPA observations."""
+            """Close-out evidence workspace: equal cards (same style as Approval section).
+
+            Observation + corrective actions open in a dialog with one card per
+            corrective action: preview, attach/remove evidence, then Save / Submit.
+            """
             obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
             if not obs:
                 return QMessageBox.warning(self, "Observation", f"Observation ID {oid} could not be found. Refresh the register and try again.")
@@ -7821,32 +7753,46 @@ class MainWindow(QMainWindow):
 
             dialog = QDialog(self)
             dialog.setWindowTitle(f"Observation Close-out Evidence — {safe(obs['number'])}")
-            dialog.resize(980, 640)
-            fit_dialog_to_desktop(dialog, 0.92, 0.88)
+            dialog.resize(1100, 820)
+            fit_dialog_to_desktop(dialog, 0.95, 0.94)
             dialog.setStyleSheet(
-                "QDialog{background:#eef2f7;}"
+                "QDialog{background:#e8eef5;}"
                 "QLabel{color:#061018;font-weight:700;}"
-                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:6px 12px;"
-                "border:1px solid #0b3a63;border-radius:5px;}"
-                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+                "QGroupBox{font-weight:900;color:#061018;border:2px solid #334155;border-radius:8px;margin-top:10px;padding-top:12px;background:#f5f8fc;}"
+                "QGroupBox::title{color:#061018;}"
+                "QTextEdit,QLineEdit{color:#061018;font-weight:600;border:1px solid #64748b;border-radius:4px;background:white;}"
+                "QPushButton{font-weight:800;padding:6px 12px;border-radius:5px;}"
             )
             outer = QVBoxLayout(dialog)
-            outer.setContentsMargins(12, 12, 12, 10)
+            outer.setContentsMargins(10, 10, 10, 8)
+            outer.setSpacing(8)
+
             title = QLabel(
                 f"<b style='font-size:15px;color:#061018;'>{html.escape(safe(obs['number']))}</b>"
                 f" &nbsp; <span style='color:#0b1f33;'>{html.escape(safe(obs['obs_type']))} | {html.escape(safe(obs['status']))}</span>"
+                f" &nbsp; <span style='color:#334155;'>{html.escape(safe(obs['location']))}</span>"
             )
             title.setTextFormat(Qt.TextFormat.RichText)
-            title.setWordWrap(True)
             outer.addWidget(title)
-            intro = QLabel(
-                "Attach close-out evidence against each corrective action independently. "
-                "Adding files to one action does not change evidence on any other action. "
-                "Select a row to preview image evidence. Every corrective action should have evidence before Submit."
-            )
-            intro.setWordWrap(True)
-            intro.setStyleSheet("color:#061018;font-weight:700;padding:4px 0;")
-            outer.addWidget(intro)
+
+            # Equal top boxes (same pattern as Approval dialog)
+            top_split = QHBoxLayout()
+            obs_box = QGroupBox("Observation Detail")
+            obs_lay = QVBoxLayout(obs_box)
+            obs_text = QTextEdit(); obs_text.setReadOnly(True)
+            obs_text.setPlainText(safe(obs["observation"]))
+            obs_text.setMaximumHeight(110)
+            obs_lay.addWidget(obs_text)
+            act_box = QGroupBox("Corrective Action(s)")
+            act_lay = QVBoxLayout(act_box)
+            act_text = QTextEdit(); act_text.setReadOnly(True)
+            act_text.setPlainText(format_corrective_actions_display(obs, numbered=True) or "\n".join(f"{i+1}. {a}" for i, a in enumerate(action_list)))
+            act_text.setMaximumHeight(110)
+            act_lay.addWidget(act_text)
+            top_split.addWidget(obs_box, 1)
+            top_split.addWidget(act_box, 1)
+            outer.addLayout(top_split)
+
             progress_label = QLabel()
             progress_label.setStyleSheet(
                 "font-weight:800;color:#061018;padding:7px;background:#E8F1FB;"
@@ -7855,6 +7801,7 @@ class MainWindow(QMainWindow):
             outer.addWidget(progress_label)
             submitter_box = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
             submitter_box.setPlaceholderText("Submitted by (name / ID)")
+            submitter_box.setMinimumHeight(32)
             outer.addWidget(submitter_box)
 
             # Load existing evidence grouped by action index from batch_id OBS-ACT-{oid}-{n}
@@ -7865,11 +7812,9 @@ class MainWindow(QMainWindow):
                     "SELECT * FROM observation_closeout_evidence WHERE observation_id=? AND batch_id=? ORDER BY id",
                     (oid, batch),
                 )
-                # Fallback: if no per-action batches exist yet, leave empty (legacy files stay visible in preview list)
                 evidence = [safe(r["file_path"]) for r in rows if safe(r["file_path"]).strip()]
                 actions.append({"action": act, "evidence": evidence, "has_evidence": bool(evidence), "batch": batch})
 
-            # Also surface any legacy (non OBS-ACT) close-out files under action 1 if that action has none
             legacy = db.fetchall(
                 "SELECT * FROM observation_closeout_evidence WHERE observation_id=? AND (batch_id IS NULL OR batch_id NOT LIKE ?) ORDER BY id",
                 (oid, f"OBS-ACT-{oid}-%"),
@@ -7878,93 +7823,102 @@ class MainWindow(QMainWindow):
                 actions[0]["evidence"] = [safe(r["file_path"]) for r in legacy if safe(r["file_path"]).strip()]
                 actions[0]["has_evidence"] = bool(actions[0]["evidence"])
 
-            grid = QTableWidget(len(actions), 5)
-            grid.setHorizontalHeaderLabels(["No.", "Corrective Action", "Evidence Files", "Files", "Manage Evidence"])
-            grid.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            grid.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-            grid.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-            grid.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            grid.setAlternatingRowColors(True)
-            outer.addWidget(grid, 1)
-
-            preview_label = QLabel("Select a corrective action row to preview its image evidence here.")
-            preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            preview_label.setMinimumHeight(160)
-            preview_label.setStyleSheet(
-                "background:#ffffff;border:1px solid #64748b;border-radius:6px;color:#061018;font-weight:700;"
-            )
-            outer.addWidget(preview_label)
-
             new_files = []
+            cards_host = QWidget()
+            cards_grid = QGridLayout(cards_host)
+            cards_grid.setSpacing(12)
+            cards_grid.setContentsMargins(6, 6, 6, 6)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setMinimumHeight(360)
+            scroll.setWidget(cards_host)
+            outer.addWidget(scroll, 1)
 
             def progress():
-                done = sum(1 for a in actions if any(resolve_attachment_path(fp) for fp in (a.get("evidence") or [])))
                 total = len(actions)
+                done = sum(1 for a in actions if a.get("has_evidence") and any(resolve_attachment_path(p) for p in (a.get("evidence") or [])))
                 pct = int(round(100 * done / total)) if total else 0
-                progress_label.setText(
-                    f"Evidence progress: {pct}%  |  {done} of {total} corrective action(s) have evidence  |  {total - done} remaining"
-                )
+                progress_label.setText(f"Evidence progress: {pct}%  |  {done} of {total} corrective actions with evidence  |  {total - done} remaining")
                 return done, total, pct
 
-            def show_preview_for_row(row_index):
-                if row_index is None or row_index < 0 or row_index >= len(actions):
-                    preview_label.setPixmap(QPixmap())
-                    preview_label.setText("Select a corrective action row to preview its image evidence here.")
-                    return
-                files = [fp for fp in (actions[row_index].get("evidence") or []) if resolve_attachment_path(fp)]
-                image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
-                for fp in files:
-                    resolved = resolve_attachment_path(fp)
-                    if resolved and resolved.suffix.lower() in image_exts:
-                        pix = QPixmap(str(resolved))
-                        if not pix.isNull():
-                            preview_label.setText("")
-                            preview_label.setPixmap(
-                                pix.scaled(900, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                            )
-                            return
-                if files:
-                    names = ", ".join(Path(str(fp).replace("\\\\", "/")).name for fp in files[:4])
-                    preview_label.setPixmap(QPixmap())
-                    preview_label.setText(f"Attached: {names}\n(No image preview for this file type — use View to open.)")
-                else:
-                    preview_label.setPixmap(QPixmap())
-                    preview_label.setText("No evidence attached to this corrective action yet.")
-
-            def refresh_grid():
-                grid.setRowCount(len(actions))
+            def refresh_cards():
+                while cards_grid.count():
+                    item = cards_grid.takeAt(0)
+                    w = item.widget()
+                    if w is not None:
+                        w.deleteLater()
+                cols = 2
                 for i, action in enumerate(actions):
                     evidence = [safe(fp) for fp in (action.get("evidence") or []) if safe(fp).strip()]
+                    action["evidence"] = list(evidence)
                     valid = [fp for fp in evidence if resolve_attachment_path(fp)]
                     action["has_evidence"] = bool(valid)
-                    grid.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-                    grid.setItem(i, 1, QTableWidgetItem(action["action"]))
-                    grid.setItem(i, 2, QTableWidgetItem("\\n".join(Path(fp.replace("\\\\", "/")).name for fp in valid) or "No evidence attached"))
-                    grid.setItem(i, 3, QTableWidgetItem(f"{len(valid)} file(s)"))
-                    cell = QWidget()
-                    row_layout = QHBoxLayout(cell)
-                    row_layout.setContentsMargins(2, 2, 2, 2)
-                    add_edit = QPushButton("Add Files")
+
+                    card = QGroupBox(f"Corrective Action {i + 1}")
+                    card.setMinimumWidth(420)
+                    card.setMinimumHeight(340)
+                    card.setMaximumHeight(420)
+                    card_lay = QVBoxLayout(card)
+                    card_lay.setSpacing(6)
+
+                    act_lbl = QLabel(html.escape(action["action"][:400]))
+                    act_lbl.setWordWrap(True)
+                    act_lbl.setStyleSheet("font-weight:700;color:#061018;")
+                    card_lay.addWidget(act_lbl)
+
+                    preview = QLabel()
+                    preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    preview.setFixedHeight(180)
+                    preview.setStyleSheet("background:#ffffff;border:1px solid #94a3b8;border-radius:4px;")
+                    if valid:
+                        first = resolve_attachment_path(valid[0])
+                        stream = attachment_image_stream(first) if first else None
+                        if stream:
+                            try:
+                                pix = QPixmap()
+                                pix.loadFromData(stream.read())
+                                if not pix.isNull():
+                                    preview.setPixmap(
+                                        pix.scaled(380, 170, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                                    )
+                                else:
+                                    preview.setText(Path(valid[0].replace("\\", "/")).name)
+                            except Exception:
+                                preview.setText(Path(valid[0].replace("\\", "/")).name)
+                        else:
+                            names = "\n".join(Path(fp.replace("\\", "/")).name for fp in valid)
+                            preview.setText(names or "Evidence attached")
+                    else:
+                        preview.setText("No evidence attached yet")
+                    card_lay.addWidget(preview)
+
+                    files_lbl = QLabel(
+                        f"{len(valid)} file(s): " + (", ".join(Path(fp.replace('\\', '/')).name for fp in valid) if valid else "none")
+                    )
+                    files_lbl.setWordWrap(True)
+                    files_lbl.setStyleSheet("color:#334155;font-weight:600;")
+                    card_lay.addWidget(files_lbl)
+
+                    btn_row = QHBoxLayout()
+                    add_btn = QPushButton("Add Files")
                     replace_btn = QPushButton("Replace All")
-                    view = QPushButton("View")
-                    delete = QPushButton("Delete")
-                    for button in (add_edit, replace_btn, view, delete):
-                        button.setMinimumHeight(28)
-                        button.setStyleSheet(
+                    view_btn = QPushButton("View")
+                    del_btn = QPushButton("Delete")
+                    for b in (add_btn, replace_btn, view_btn, del_btn):
+                        b.setMinimumHeight(34)
+                        b.setStyleSheet(
                             "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:3px 8px;"
                             "border:1px solid #0b3a63;border-radius:4px;}"
                             "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
                         )
 
                     def add_files(index=i, replace=False):
-                        # Always work on a fresh copy of THIS action's evidence only.
                         existing = list(actions[index].get("evidence") or [])
                         if replace and existing:
                             choice = QMessageBox.question(
                                 dialog, "Replace Evidence",
                                 f"Replace ALL existing evidence files for Corrective Action {index + 1}?\n\n"
-                                "This only affects this action. Evidence on other corrective actions is not changed.",
+                                "This only affects this action.",
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                                 QMessageBox.StandardButton.No,
                             )
@@ -7996,12 +7950,9 @@ class MainWindow(QMainWindow):
                             if replace:
                                 actions[index]["evidence"] = list(saved)
                             else:
-                                # Append to this action only — never touch other actions.
                                 actions[index]["evidence"] = list(dict.fromkeys(existing + saved))
                             actions[index]["has_evidence"] = True
-                            refresh_grid()
-                            grid.selectRow(index)
-                            show_preview_for_row(index)
+                            refresh_cards()
 
                     def view_files(index=i):
                         available = [fp for fp in (actions[index].get("evidence") or []) if resolve_attachment_path(fp)]
@@ -8030,36 +7981,28 @@ class MainWindow(QMainWindow):
                             return
                         selected = next((fp for fp in available if Path(str(fp).replace("\\", "/")).name == choice), None)
                         if selected:
-                            # Only remove from this action's list.
                             actions[index]["evidence"] = [fp for fp in available if fp != selected]
                             actions[index]["has_evidence"] = bool(actions[index]["evidence"])
-                            refresh_grid()
-                            show_preview_for_row(index)
+                            refresh_cards()
 
-                    add_edit.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=False))
+                    add_btn.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=False))
                     replace_btn.clicked.connect(lambda checked=False, idx=i: add_files(idx, replace=True))
-                    view.clicked.connect(lambda checked=False, idx=i: view_files(idx))
-                    delete.clicked.connect(lambda checked=False, idx=i: delete_file(idx))
-                    row_layout.addWidget(add_edit)
-                    row_layout.addWidget(replace_btn)
-                    row_layout.addWidget(view)
-                    row_layout.addWidget(delete)
-                    grid.setCellWidget(i, 4, cell)
-                    grid.setRowHeight(i, 56)
+                    view_btn.clicked.connect(lambda checked=False, idx=i: view_files(idx))
+                    del_btn.clicked.connect(lambda checked=False, idx=i: delete_file(idx))
+                    btn_row.addWidget(add_btn)
+                    btn_row.addWidget(replace_btn)
+                    btn_row.addWidget(view_btn)
+                    btn_row.addWidget(del_btn)
+                    card_lay.addLayout(btn_row)
+                    cards_grid.addWidget(card, i // cols, i % cols)
                 progress()
-
-            def on_row_changed():
-                show_preview_for_row(grid.currentRow())
-
-            grid.itemSelectionChanged.connect(on_row_changed)
-            grid.cellClicked.connect(lambda r, _c: show_preview_for_row(r))
 
             def persist(submit=False):
                 done, total, pct = progress()
                 if submit and (total == 0 or pct < 100):
                     QMessageBox.warning(
                         dialog, "Evidence Incomplete",
-                        f"Attach evidence to every corrective action before submitting.\\n\\nProgress: {pct}% ({done}/{total}).",
+                        f"Attach evidence to every corrective action before submitting.\n\nProgress: {pct}% ({done}/{total}).",
                     )
                     return False
                 if submit and not submitter_box.text().strip():
@@ -8069,7 +8012,6 @@ class MainWindow(QMainWindow):
                 submitter_name = submitter_box.text().strip()
                 try:
                     with db.conn:
-                        # Rebuild per-action evidence rows
                         for i, action in enumerate(actions):
                             batch = action["batch"]
                             db.conn.execute(
@@ -8084,7 +8026,6 @@ class MainWindow(QMainWindow):
                                     "INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,?)",
                                     (batch, oid, safe(fp), submitter_name, now, status),
                                 )
-                                # Keep observation_attachments in sync for exports
                                 exists = db.conn.execute(
                                     "SELECT id FROM observation_attachments WHERE observation_id=? AND file_path=?",
                                     (oid, safe(fp)),
@@ -8099,8 +8040,6 @@ class MainWindow(QMainWindow):
                                 "UPDATE observations SET status=?, verification=? WHERE id=?",
                                 ("Pending Verification", f"Close-out evidence submitted by {submitter_name} on {now}", oid),
                             )
-                    if on_saved := None:
-                        pass
                     try:
                         refresh_closeout_open()
                         refresh_closeout_evidence()
@@ -8125,7 +8064,9 @@ class MainWindow(QMainWindow):
             submit_btn = QPushButton("Submit for Approval")
             close_btn = QPushButton("Close")
             for b in (save_btn, submit_btn, close_btn):
-                b.setMinimumHeight(36)
+                b.setMinimumHeight(40)
+            save_btn.setStyleSheet("QPushButton{background:#0f4c81;color:white;}")
+            submit_btn.setStyleSheet("QPushButton{background:#0f4c81;color:white;}")
             controls.addWidget(save_btn)
             controls.addWidget(submit_btn)
             controls.addStretch(1)
@@ -8134,11 +8075,9 @@ class MainWindow(QMainWindow):
             save_btn.clicked.connect(lambda: (persist(False) and dialog.accept()))
             submit_btn.clicked.connect(lambda: (persist(True) and dialog.accept()))
             close_btn.clicked.connect(dialog.reject)
-            refresh_grid()
-            if actions:
-                grid.selectRow(0)
-                show_preview_for_row(0)
+            refresh_cards()
             dialog.exec()
+
 
         def edit_open_observation():
             oid = selected_open_observation_id()
