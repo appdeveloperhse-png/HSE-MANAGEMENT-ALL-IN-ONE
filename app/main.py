@@ -7006,17 +7006,22 @@ class MainWindow(QMainWindow):
         closeout_evidence_button.setToolTip("Open the linked corrective-action evidence workspace. Attach, review, save and submit evidence once.")
         refresh_button = QPushButton("Refresh Status")
         refresh_button.setToolTip("Re-sync observation status and approval from CAPA Tracking Register (Approved CAPA => Closed).")
-        refresh_button.setStyleSheet("font-weight:700;background:#0b1f33;color:white;padding:5px 10px;")
+        refresh_button.setStyleSheet("font-weight:800;background:#0f4c81;color:#ffffff;padding:6px 12px;border:1px solid #0b3a63;border-radius:5px;")
         toolbar.addWidget(search, 0, 0, 1, 3)
         toolbar.addWidget(clear_filter, 0, 3)
         toolbar.addWidget(refresh_button, 0, 4)
         _obs_toolbar_buttons = [add_button, edit_button, attachment_button, closeout_evidence_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]
         for _i, _button in enumerate(_obs_toolbar_buttons):
-            _button.setMinimumHeight(30)
+            _button.setMinimumHeight(32)
             _button.setMinimumWidth(0)
-            _button.setMaximumHeight(34)
+            _button.setMaximumHeight(36)
             _button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            _button.setStyleSheet("font-weight:700;padding:4px 8px;color:#0b1f33;")
+            _button.setStyleSheet(
+                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 8px;"
+                "border:1px solid #0b3a63;border-radius:5px;}"
+                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+                "QPushButton:pressed{background:#082f52;color:#ffffff;}"
+            )
             _button.setToolTip(_button.text())
             # 5 columns so all action buttons stay on-screen on typical laptop widths
             toolbar.addWidget(_button, 1 + _i // 5, _i % 5)
@@ -7301,8 +7306,8 @@ class MainWindow(QMainWindow):
                     self._observation_detail_review_dialog(oid, mode="view", on_done=lambda: (refresh_closeout_open(), refresh_closeout_evidence(), load()))
             except Exception:
                 logging.exception("Open observation detail failed")
-        open_table.cellDoubleClicked.connect(_open_obs_detail_from_table)
-        open_preview_label = QLabel("Select an open observation to preview attached evidence images here. Double-click a row for full detail.")
+        # Double-click opens per-action evidence workspace (connected later as open_selected_closeout_workspace)
+        open_preview_label = QLabel("Select an open observation to preview evidence. Double-click a row to attach evidence per corrective action.")
         open_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         open_preview_label.setMinimumHeight(160)
         open_preview_label.setWordWrap(True)
@@ -7387,7 +7392,11 @@ class MainWindow(QMainWindow):
         for _btn in (upload_closeout, submit_closeout, open_edit, open_delete, refresh_open):
             _btn.setMinimumHeight(32); _btn.setMinimumWidth(0)
             _btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            _btn.setStyleSheet("font-weight:700;padding:4px 8px;color:#061018;")
+            _btn.setStyleSheet(
+                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 8px;"
+                "border:1px solid #0b3a63;border-radius:5px;}"
+                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+            )
             _btn.setToolTip(_btn.text())
         submit_row.addWidget(submitter,0,0,1,2)
         for _i, _btn in enumerate((upload_closeout, submit_closeout, open_edit, open_delete, refresh_open)):
@@ -7430,9 +7439,21 @@ class MainWindow(QMainWindow):
         for _ab in (approve_btn, reject_btn, refresh_evidence):
             _ab.setMinimumHeight(32); _ab.setMinimumWidth(0)
             _ab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            _ab.setStyleSheet("font-weight:800;padding:4px 8px;")
-        approve_btn.setStyleSheet("font-weight:800;padding:4px 8px;background:#0b1f33;color:white;")
-        reject_btn.setStyleSheet("font-weight:800;padding:4px 8px;background:#7f1d1d;color:white;")
+        approve_btn.setStyleSheet(
+            "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
+            "border:1px solid #0b3a63;border-radius:5px;}"
+            "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+        )
+        reject_btn.setStyleSheet(
+            "QPushButton{background:#7f1d1d;color:#ffffff;font-weight:800;padding:5px 10px;"
+            "border:1px solid #5f1515;border-radius:5px;}"
+            "QPushButton:hover{background:#5f1515;color:#ffffff;}"
+        )
+        refresh_evidence.setStyleSheet(
+            "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
+            "border:1px solid #0b3a63;border-radius:5px;}"
+            "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+        )
         review_row.addWidget(reviewer, 0, 0, 1, 2)
         review_row.addWidget(reviewer_comments, 0, 2, 1, 2)
         review_row.addWidget(approve_btn, 1, 0)
@@ -7496,168 +7517,324 @@ class MainWindow(QMainWindow):
             return oid
 
         def open_simple_observation_evidence_dialog(oid):
+            """Per corrective-action evidence workspace for non-CAPA observations."""
             obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
             if not obs:
                 return QMessageBox.warning(self, "Observation", f"Observation ID {oid} could not be found. Refresh the register and try again.")
+            action_list = parse_corrective_actions(obs)
+            if not action_list:
+                action_list = ["Corrective action to be defined"]
+
             dialog = QDialog(self)
             dialog.setWindowTitle(f"Observation Close-out Evidence — {safe(obs['number'])}")
-            dialog.resize(820, 560)
-            fit_dialog_to_desktop(dialog, 0.90, 0.86)
+            dialog.resize(980, 640)
+            fit_dialog_to_desktop(dialog, 0.92, 0.88)
+            dialog.setStyleSheet(
+                "QDialog{background:#eef2f7;}"
+                "QLabel{color:#061018;font-weight:700;}"
+                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:6px 12px;"
+                "border:1px solid #0b3a63;border-radius:5px;}"
+                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+            )
             outer = QVBoxLayout(dialog)
-            title = QLabel(f"<b>{safe(obs['number'])}</b> — {safe(obs['observation'])}")
+            outer.setContentsMargins(12, 12, 12, 10)
+            title = QLabel(
+                f"<b style='font-size:15px;color:#061018;'>{html.escape(safe(obs['number']))}</b>"
+                f" &nbsp; <span style='color:#0b1f33;'>{html.escape(safe(obs['obs_type']))} | {html.escape(safe(obs['status']))}</span>"
+            )
+            title.setTextFormat(Qt.TextFormat.RichText)
             title.setWordWrap(True)
             outer.addWidget(title)
-            action_text = format_corrective_actions_display(obs)
-            action_label = QLabel("Corrective action(s):\n" + (action_text or "No corrective action recorded"))
-            action_label.setWordWrap(True)
-            outer.addWidget(action_label)
+            intro = QLabel(
+                "Attach close-out evidence against each corrective action below. "
+                "Select a row to preview image evidence. Every corrective action should have evidence before Submit."
+            )
+            intro.setWordWrap(True)
+            intro.setStyleSheet("color:#061018;font-weight:700;padding:4px 0;")
+            outer.addWidget(intro)
+            progress_label = QLabel()
+            progress_label.setStyleSheet(
+                "font-weight:800;color:#061018;padding:7px;background:#E8F1FB;"
+                "border:1px solid #64748b;border-radius:4px;"
+            )
+            outer.addWidget(progress_label)
             submitter_box = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
             submitter_box.setPlaceholderText("Submitted by (name / ID)")
             outer.addWidget(submitter_box)
-            evidence_table = QTableWidget(0, 4)
-            evidence_table.setHorizontalHeaderLabels(["ID", "Evidence File", "Added / Submitted", "Status"])
-            evidence_table.setColumnHidden(0, True)
-            evidence_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-            evidence_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            evidence_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            outer.addWidget(evidence_table, 1)
-            preview_label = QLabel("Select an evidence row to preview images here.")
+
+            # Load existing evidence grouped by action index from batch_id OBS-ACT-{oid}-{n}
+            actions = []
+            for i, act in enumerate(action_list):
+                batch = f"OBS-ACT-{oid}-{i+1}"
+                rows = db.fetchall(
+                    "SELECT * FROM observation_closeout_evidence WHERE observation_id=? AND batch_id=? ORDER BY id",
+                    (oid, batch),
+                )
+                # Fallback: if no per-action batches exist yet, leave empty (legacy files stay visible in preview list)
+                evidence = [safe(r["file_path"]) for r in rows if safe(r["file_path"]).strip()]
+                actions.append({"action": act, "evidence": evidence, "has_evidence": bool(evidence), "batch": batch})
+
+            # Also surface any legacy (non OBS-ACT) close-out files under action 1 if that action has none
+            legacy = db.fetchall(
+                "SELECT * FROM observation_closeout_evidence WHERE observation_id=? AND (batch_id IS NULL OR batch_id NOT LIKE ?) ORDER BY id",
+                (oid, f"OBS-ACT-{oid}-%"),
+            )
+            if legacy and actions and not actions[0]["evidence"]:
+                actions[0]["evidence"] = [safe(r["file_path"]) for r in legacy if safe(r["file_path"]).strip()]
+                actions[0]["has_evidence"] = bool(actions[0]["evidence"])
+
+            grid = QTableWidget(len(actions), 5)
+            grid.setHorizontalHeaderLabels(["No.", "Corrective Action", "Evidence Files", "Files", "Manage Evidence"])
+            grid.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            grid.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            grid.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+            grid.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            grid.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            grid.setAlternatingRowColors(True)
+            outer.addWidget(grid, 1)
+
+            preview_label = QLabel("Select a corrective action row to preview its image evidence here.")
             preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            preview_label.setMinimumHeight(180)
-            preview_label.setStyleSheet("background:#ffffff;border:1px solid #64748b;border-radius:6px;color:#0f172a;font-weight:600;")
+            preview_label.setMinimumHeight(160)
+            preview_label.setStyleSheet(
+                "background:#ffffff;border:1px solid #64748b;border-radius:6px;color:#061018;font-weight:700;"
+            )
             outer.addWidget(preview_label)
 
-            def refresh_files():
-                rows = db.fetchall("SELECT * FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC", (oid,))
-                evidence_table.setRowCount(len(rows))
-                for i, ev in enumerate(rows):
-                    evidence_table.setItem(i, 0, QTableWidgetItem(str(ev["id"])))
-                    evidence_table.setItem(i, 1, QTableWidgetItem(Path(safe(ev["file_path"]).replace("\\", "/")).name))
-                    evidence_table.setItem(i, 2, QTableWidgetItem(safe(ev["submitted_at"])))
-                    evidence_table.setItem(i, 3, QTableWidgetItem(safe(ev["review_status"]) or "Draft"))
-                    evidence_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, safe(ev["file_path"]))
-                if rows:
-                    evidence_table.selectRow(0)
-                    show_selected_preview()
+            new_files = []
+
+            def progress():
+                done = sum(1 for a in actions if any(resolve_attachment_path(fp) for fp in (a.get("evidence") or [])))
+                total = len(actions)
+                pct = int(round(100 * done / total)) if total else 0
+                progress_label.setText(
+                    f"Evidence progress: {pct}%  |  {done} of {total} corrective action(s) have evidence  |  {total - done} remaining"
+                )
+                return done, total, pct
+
+            def show_preview_for_row(row_index):
+                if row_index is None or row_index < 0 or row_index >= len(actions):
+                    preview_label.setPixmap(QPixmap())
+                    preview_label.setText("Select a corrective action row to preview its image evidence here.")
+                    return
+                files = [fp for fp in (actions[row_index].get("evidence") or []) if resolve_attachment_path(fp)]
+                image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+                for fp in files:
+                    resolved = resolve_attachment_path(fp)
+                    if resolved and resolved.suffix.lower() in image_exts:
+                        pix = QPixmap(str(resolved))
+                        if not pix.isNull():
+                            preview_label.setText("")
+                            preview_label.setPixmap(
+                                pix.scaled(900, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                            )
+                            return
+                if files:
+                    names = ", ".join(Path(str(fp).replace("\\\\", "/")).name for fp in files[:4])
+                    preview_label.setPixmap(QPixmap())
+                    preview_label.setText(f"Attached: {names}\n(No image preview for this file type — use View to open.)")
                 else:
                     preview_label.setPixmap(QPixmap())
-                    preview_label.setText("No evidence attached yet. Use Attach Evidence to add files.")
+                    preview_label.setText("No evidence attached to this corrective action yet.")
 
-            def show_selected_preview():
-                r = evidence_table.currentRow()
-                if r < 0 or not evidence_table.item(r, 0):
-                    preview_label.setPixmap(QPixmap())
-                    preview_label.setText("Select an evidence row to preview images here.")
-                    return
-                fp = safe(evidence_table.item(r, 0).data(Qt.ItemDataRole.UserRole))
-                resolved = resolve_attachment_path(fp)
-                image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
-                if resolved and resolved.suffix.lower() in image_exts:
-                    pix = QPixmap(str(resolved))
-                    if not pix.isNull():
-                        preview_label.setText("")
-                        preview_label.setPixmap(pix.scaled(820, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                        return
-                preview_label.setPixmap(QPixmap())
-                name = Path(str(fp).replace("\\", "/")).name if fp else "file"
-                preview_label.setText(f"{name}\nPreview not available for this file type. Use View to open the file.")
+            def refresh_grid():
+                grid.setRowCount(len(actions))
+                for i, action in enumerate(actions):
+                    evidence = [safe(fp) for fp in (action.get("evidence") or []) if safe(fp).strip()]
+                    valid = [fp for fp in evidence if resolve_attachment_path(fp)]
+                    action["has_evidence"] = bool(valid)
+                    grid.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                    grid.setItem(i, 1, QTableWidgetItem(action["action"]))
+                    grid.setItem(i, 2, QTableWidgetItem("\\n".join(Path(fp.replace("\\\\", "/")).name for fp in valid) or "No evidence attached"))
+                    grid.setItem(i, 3, QTableWidgetItem(f"{len(valid)} file(s)"))
+                    cell = QWidget()
+                    row_layout = QHBoxLayout(cell)
+                    row_layout.setContentsMargins(2, 2, 2, 2)
+                    add_edit = QPushButton("Add / Edit")
+                    view = QPushButton("View")
+                    delete = QPushButton("Delete")
+                    for button in (add_edit, view, delete):
+                        button.setMinimumHeight(28)
+                        button.setStyleSheet(
+                            "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:3px 8px;"
+                            "border:1px solid #0b3a63;border-radius:4px;}"
+                            "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+                        )
 
-            def add_files():
-                paths, _ = QFileDialog.getOpenFileNames(dialog, "Attach Close-out Evidence", "", "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
-                if not paths:
-                    return
-                batch = f"OBS-CO-{oid}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
-                now = datetime.now().isoformat(timespec="seconds")
-                saved = []
-                try:
-                    with db.conn:
-                        for src in paths:
-                            source = Path(src)
+                    def add_files(index=i):
+                        existing = list(actions[index].get("evidence") or [])
+                        replace = False
+                        if existing:
+                            choice = QMessageBox.question(
+                                dialog, "Manage Action Evidence",
+                                "Choose Yes to replace the existing files, No to add more, or Cancel to keep them.",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.No,
+                            )
+                            if choice == QMessageBox.StandardButton.Cancel:
+                                return
+                            replace = choice == QMessageBox.StandardButton.Yes
+                        paths, _ = QFileDialog.getOpenFileNames(
+                            dialog, f"Attach Evidence — Corrective Action {index + 1}", "",
+                            "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)",
+                        )
+                        if not paths:
+                            return
+                        saved = []
+                        for source_name in paths:
+                            source = Path(source_name)
                             if not source.is_file():
                                 continue
-                            dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{source.name}"
-                            n = 1
+                            dest = ATTACH_DIR / f"{safe(obs['number'])}_A{index+1}_{source.name}"
+                            counter = 1
                             while dest.exists():
-                                dest = ATTACH_DIR / f"{safe(obs['number'])}_Closeout_{n}_{source.name}"
-                                n += 1
-                            shutil.copy2(source, dest)
-                            saved.append(dest)
-                            db.conn.execute("INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,'Draft')", (batch, oid, str(dest), submitter_box.text().strip(), now))
-                            db.conn.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)", (oid, str(dest), "Close-out Evidence"))
-                    if not saved:
-                        raise ValueError("No valid evidence files were selected.")
-                    refresh_files()
-                except Exception as exc:
-                    logging.exception("Simple observation evidence upload failed")
-                    QMessageBox.critical(dialog, "Evidence Upload", str(exc))
+                                dest = ATTACH_DIR / f"{safe(obs['number'])}_A{index+1}_{counter}_{source.name}"
+                                counter += 1
+                            try:
+                                shutil.copy2(source, dest)
+                                saved.append(str(dest))
+                                new_files.append(dest)
+                            except Exception:
+                                logging.exception("Observation action evidence copy failed")
+                        if saved:
+                            actions[index]["evidence"] = saved if replace else list(dict.fromkeys(existing + saved))
+                            actions[index]["has_evidence"] = True
+                            refresh_grid()
+                            grid.selectRow(index)
+                            show_preview_for_row(index)
 
-            def delete_file():
-                r = evidence_table.currentRow()
-                if r < 0 or not evidence_table.item(r, 0):
-                    return QMessageBox.warning(dialog, "Delete Evidence", "Select an evidence file first.")
-                evidence_id = int(evidence_table.item(r, 0).text())
-                ev = db.fetchone("SELECT * FROM observation_closeout_evidence WHERE id=? AND observation_id=?", (evidence_id, oid))
-                if not ev:
-                    return QMessageBox.warning(dialog, "Delete Evidence", "The selected evidence record could not be found.")
-                if safe(ev["review_status"]).casefold() not in ("draft", "rejected", "returned", "close-out evidence returned"):
-                    return QMessageBox.warning(dialog, "Evidence Locked", "Submitted evidence cannot be deleted while it is under review or after approval.")
-                fp = safe(ev["file_path"])
-                with db.conn:
-                    db.conn.execute("DELETE FROM observation_closeout_evidence WHERE id=?", (evidence_id,))
-                    db.conn.execute("DELETE FROM observation_attachments WHERE observation_id=? AND file_path=? AND attachment_type='Close-out Evidence'", (oid, fp))
-                if fp:
-                    try: Path(fp).unlink(missing_ok=True)
-                    except Exception: logging.exception("Unable to remove observation close-out file")
-                refresh_files()
+                    def view_files(index=i):
+                        available = [fp for fp in (actions[index].get("evidence") or []) if resolve_attachment_path(fp)]
+                        if not available:
+                            return QMessageBox.information(dialog, "Evidence", "No readable evidence is attached to this corrective action.")
+                        choice, ok = QInputDialog.getItem(
+                            dialog, "View Action Evidence", "Select a file to open:",
+                            [Path(str(fp).replace("\\\\", "/")).name for fp in available], 0, False,
+                        )
+                        if ok and choice:
+                            selected = next((fp for fp in available if Path(str(fp).replace("\\\\", "/")).name == choice), None)
+                            if selected:
+                                resolved = resolve_attachment_path(selected)
+                                if resolved:
+                                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved)))
 
-            def view_file():
-                r = evidence_table.currentRow()
-                if r < 0 or not evidence_table.item(r, 0):
-                    return QMessageBox.warning(dialog, "View Evidence", "Select an evidence file first.")
-                ev = db.fetchone("SELECT file_path FROM observation_closeout_evidence WHERE id=?", (int(evidence_table.item(r, 0).text()),))
-                path = resolve_attachment_path(safe(ev["file_path"])) if ev else None
-                if not path:
-                    return QMessageBox.warning(dialog, "View Evidence", "The evidence file could not be found on disk.")
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+                    def delete_file(index=i):
+                        available = [fp for fp in (actions[index].get("evidence") or []) if safe(fp).strip()]
+                        if not available:
+                            return QMessageBox.information(dialog, "Delete Evidence", "There is no evidence to delete.")
+                        choice, ok = QInputDialog.getItem(
+                            dialog, "Delete Action Evidence", "Select the file to remove:",
+                            [Path(str(fp).replace("\\\\", "/")).name for fp in available], 0, False,
+                        )
+                        if not ok or not choice:
+                            return
+                        selected = next((fp for fp in available if Path(str(fp).replace("\\\\", "/")).name == choice), None)
+                        if selected:
+                            actions[index]["evidence"] = [fp for fp in available if fp != selected]
+                            actions[index]["has_evidence"] = bool(actions[index]["evidence"])
+                            refresh_grid()
+                            show_preview_for_row(index)
 
-            def submit_files():
-                if not submitter_box.text().strip():
-                    return QMessageBox.warning(dialog, "Submitter Required", "Enter the name / ID of the person submitting the evidence.")
-                drafts = db.fetchall("SELECT DISTINCT batch_id FROM observation_closeout_evidence WHERE observation_id=? AND lower(COALESCE(review_status,''))='draft'", (oid,))
-                if not drafts:
-                    return QMessageBox.warning(dialog, "No Draft Evidence", "Attach at least one evidence file before submitting.")
+                    add_edit.clicked.connect(add_files)
+                    view.clicked.connect(view_files)
+                    delete.clicked.connect(delete_file)
+                    row_layout.addWidget(add_edit)
+                    row_layout.addWidget(view)
+                    row_layout.addWidget(delete)
+                    grid.setCellWidget(i, 4, cell)
+                    grid.setRowHeight(i, 56)
+                progress()
+
+            def on_row_changed():
+                show_preview_for_row(grid.currentRow())
+
+            grid.itemSelectionChanged.connect(on_row_changed)
+            grid.cellClicked.connect(lambda r, _c: show_preview_for_row(r))
+
+            def persist(submit=False):
+                done, total, pct = progress()
+                if submit and (total == 0 or pct < 100):
+                    QMessageBox.warning(
+                        dialog, "Evidence Incomplete",
+                        f"Attach evidence to every corrective action before submitting.\\n\\nProgress: {pct}% ({done}/{total}).",
+                    )
+                    return False
+                if submit and not submitter_box.text().strip():
+                    QMessageBox.warning(dialog, "Submitter Required", "Enter the name / ID of the person submitting the evidence.")
+                    return False
                 now = datetime.now().isoformat(timespec="seconds")
-                with db.conn:
-                    for item in drafts:
-                        db.conn.execute("UPDATE observation_closeout_evidence SET review_status='Pending Review',submitted_by=?,submitted_at=? WHERE observation_id=? AND batch_id=? AND lower(COALESCE(review_status,''))='draft'", (submitter_box.text().strip(), now, oid, safe(item["batch_id"])))
-                    # A simple observation moves to verification, never to Cancelled on submission.
-                    db.conn.execute("UPDATE observations SET status='Pending Verification',verification='Close-out evidence submitted for review' WHERE id=? AND lower(COALESCE(status,'')) NOT IN ('closed')", (oid,))
-                refresh_files()
-                refresh_closeout_open(); refresh_closeout_evidence(); load()
-                QMessageBox.information(dialog, "Submitted", "Evidence submitted for review. The observation status is Pending Verification.")
-                dialog.accept()
+                submitter_name = submitter_box.text().strip()
+                try:
+                    with db.conn:
+                        # Rebuild per-action evidence rows
+                        for i, action in enumerate(actions):
+                            batch = action["batch"]
+                            db.conn.execute(
+                                "DELETE FROM observation_closeout_evidence WHERE observation_id=? AND batch_id=?",
+                                (oid, batch),
+                            )
+                            status = "Pending Review" if submit else "Draft"
+                            for fp in action.get("evidence") or []:
+                                if not safe(fp).strip():
+                                    continue
+                                db.conn.execute(
+                                    "INSERT INTO observation_closeout_evidence(batch_id,observation_id,file_path,submitted_by,submitted_at,review_status) VALUES(?,?,?,?,?,?)",
+                                    (batch, oid, safe(fp), submitter_name, now, status),
+                                )
+                                # Keep observation_attachments in sync for exports
+                                exists = db.conn.execute(
+                                    "SELECT id FROM observation_attachments WHERE observation_id=? AND file_path=?",
+                                    (oid, safe(fp)),
+                                ).fetchone()
+                                if not exists:
+                                    db.conn.execute(
+                                        "INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)",
+                                        (oid, safe(fp), f"Action {i+1} Close-out Evidence"),
+                                    )
+                        if submit:
+                            db.conn.execute(
+                                "UPDATE observations SET status=?, verification=? WHERE id=?",
+                                ("Pending Verification", f"Close-out evidence submitted by {submitter_name} on {now}", oid),
+                            )
+                    if on_saved := None:
+                        pass
+                    try:
+                        refresh_closeout_open()
+                        refresh_closeout_evidence()
+                        load()
+                    except Exception:
+                        logging.exception("refresh after observation evidence save failed")
+                    QMessageBox.information(
+                        dialog,
+                        "Submitted" if submit else "Saved",
+                        "Evidence submitted for review. Observation status is Pending Verification."
+                        if submit else
+                        "Close-out evidence saved as Draft. You can return later to add more files or Submit for Approval.",
+                    )
+                    return True
+                except Exception as exc:
+                    logging.exception("Observation multi-action evidence save failed")
+                    QMessageBox.critical(dialog, "Save Failed", str(exc))
+                    return False
 
             controls = QHBoxLayout()
-            add_btn = QPushButton("Attach Evidence")
-            view_btn = QPushButton("View")
-            delete_btn = QPushButton("Delete")
             save_btn = QPushButton("Save & Exit")
             submit_btn = QPushButton("Submit for Approval")
             close_btn = QPushButton("Close")
-            for b in (add_btn, view_btn, delete_btn, save_btn, submit_btn, close_btn):
-                b.setMinimumHeight(34)
-            for b in (add_btn, view_btn, delete_btn): controls.addWidget(b)
+            for b in (save_btn, submit_btn, close_btn):
+                b.setMinimumHeight(36)
+            controls.addWidget(save_btn)
+            controls.addWidget(submit_btn)
             controls.addStretch(1)
-            controls.addWidget(save_btn); controls.addWidget(submit_btn); controls.addWidget(close_btn)
+            controls.addWidget(close_btn)
             outer.addLayout(controls)
-            evidence_table.itemSelectionChanged.connect(show_selected_preview)
-            add_btn.clicked.connect(add_files)
-            view_btn.clicked.connect(view_file)
-            delete_btn.clicked.connect(delete_file)
-            save_btn.clicked.connect(lambda: (refresh_closeout_open(), refresh_closeout_evidence(), load(), dialog.accept()))
-            submit_btn.clicked.connect(submit_files)
+            save_btn.clicked.connect(lambda: (persist(False) and dialog.accept()))
+            submit_btn.clicked.connect(lambda: (persist(True) and dialog.accept()))
             close_btn.clicked.connect(dialog.reject)
-            refresh_files()
+            refresh_grid()
+            if actions:
+                grid.selectRow(0)
+                show_preview_for_row(0)
             dialog.exec()
 
         def edit_open_observation():
@@ -8343,11 +8520,12 @@ class MainWindow(QMainWindow):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("Edit HSE Observation / Inspection" if existing else "New HSE Observation / Inspection")
-        dialog.resize(1120, 900)
-        dialog.setMinimumSize(900, 700)
+        dialog.resize(980, 720)
+        dialog.setMinimumSize(720, 560)
+        fit_dialog_to_desktop(dialog, 0.92, 0.88)
         dialog.setStyleSheet("""
             QDialog { background: #dce3ec; }
-            QLabel#formTitle { color: #061018; font-size: 22px; font-weight: 900; }
+            QLabel#formTitle { color: #061018; font-size: 20px; font-weight: 900; }
             QLabel#formSubtitle { color: #0b1f33; font-size: 12px; font-weight: 700; }
             QGroupBox {
                 background: #f1f5f9; border: 2px solid #334155; border-radius: 10px;
@@ -8366,12 +8544,12 @@ class MainWindow(QMainWindow):
                 color: #061018; background: #ffffff; selection-background-color: #cbd5e1;
             }
             QPushButton {
-                background: #cbd5e1; color: #061018; border: 1px solid #334155;
+                background: #0f4c81; color: #ffffff; border: 1px solid #0b3a63;
                 border-radius: 6px; padding: 8px 13px; font-weight: 800;
             }
-            QPushButton:hover { background: #94a3b8; }
-            QPushButton#primaryAction { background: #0b1f33; color: white; border: 0; }
-            QPushButton#primaryAction:hover { background: #061018; }
+            QPushButton:hover { background: #0b3a63; color: #ffffff; }
+            QPushButton#primaryAction { background: #0f4c81; color: #ffffff; border: 1px solid #0b3a63; font-weight: 900; }
+            QPushButton#primaryAction:hover { background: #0b3a63; color: #ffffff; }
             QScrollArea { border: 0; background: transparent; }
             QLabel { color: #061018; font-weight: 700; }
         """)
@@ -8582,12 +8760,23 @@ class MainWindow(QMainWindow):
         scroll_area.setWidget(content)
         outer.addWidget(scroll_area, 1)
 
+        # Keep Save / Cancel always visible at the bottom of the dialog (outside scroll area)
         buttons = QDialogButtonBox()
         save_button = buttons.addButton("Save & Exit" if existing else "Save & Exit", QDialogButtonBox.ButtonRole.AcceptRole)
         cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
         save_button.setObjectName("primaryAction")
-        save_button.setMinimumHeight(42)
-        cancel_button.setMinimumHeight(42)
+        save_button.setMinimumHeight(40)
+        cancel_button.setMinimumHeight(40)
+        save_button.setStyleSheet(
+            "QPushButton{background:#0f4c81;color:#ffffff;font-weight:900;padding:8px 18px;"
+            "border:1px solid #0b3a63;border-radius:6px;}"
+            "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+        )
+        cancel_button.setStyleSheet(
+            "QPushButton{background:#475569;color:#ffffff;font-weight:800;padding:8px 18px;"
+            "border:1px solid #334155;border-radius:6px;}"
+            "QPushButton:hover{background:#334155;color:#ffffff;}"
+        )
         outer.addWidget(buttons)
         cancel_button.clicked.connect(dialog.reject)
 
