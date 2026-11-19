@@ -6870,56 +6870,59 @@ class MainWindow(QMainWindow):
 
 
     def _observation_detail_review_dialog(self, observation_id, mode="view", on_done=None):
-        """Show observation detail, all multi-action evidence, and one-step approve/reject.
+        """Review dialog: one equal card per close-out evidence with Approve/Reject + remark.
 
-        Approver sees every attached evidence image in one dialog. Rejecting any
-        evidence rejects the whole observation; per-file rejection comments are
-        required so the submitter knows which evidence failed.
+        All evidence images are shown in equal-sized boxes (not one wide strip).
+        Each card has its own Approve / Reject and remark field. Finalizing with
+        any Reject returns the whole observation; all Approve closes it.
         """
         obs = db.fetchone("SELECT * FROM observations WHERE id=?", (int(observation_id),))
         if not obs:
             QMessageBox.warning(self, "Observation", "The selected observation could not be found.")
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle(f"Observation Detail — {safe(obs['number'])}")
-        dialog.resize(1020, 780)
-        fit_dialog_to_desktop(dialog, 0.94, 0.92)
+        dialog.setWindowTitle(f"Observation Evidence Review — {safe(obs['number'])}")
+        dialog.resize(1100, 820)
+        fit_dialog_to_desktop(dialog, 0.95, 0.94)
         dialog.setStyleSheet(
-            "QDialog{background:#dce3ec;}"
+            "QDialog{background:#e8eef5;}"
             "QLabel{color:#061018;font-weight:700;}"
-            "QGroupBox{font-weight:900;color:#061018;border:2px solid #334155;border-radius:8px;margin-top:10px;padding-top:12px;}"
+            "QGroupBox{font-weight:900;color:#061018;border:2px solid #334155;border-radius:8px;margin-top:10px;padding-top:12px;background:#f5f8fc;}"
             "QGroupBox::title{color:#061018;}"
-            "QTextEdit,QLineEdit{color:#061018;font-weight:700;border:2px solid #334155;border-radius:5px;background:white;}"
-            "QPushButton{font-weight:800;padding:8px 14px;}"
+            "QTextEdit,QLineEdit{color:#061018;font-weight:600;border:1px solid #64748b;border-radius:4px;background:white;}"
+            "QPushButton{font-weight:800;padding:6px 12px;border-radius:5px;}"
         )
         root = QVBoxLayout(dialog)
+        root.setContentsMargins(10, 10, 10, 8)
+        root.setSpacing(8)
+
         title = QLabel(
-            f"<b style='font-size:16px;color:#061018;'>{html.escape(safe(obs['number']))}</b>"
-            f" &nbsp; <span style='color:#0b1f33;font-weight:700;'>{html.escape(safe(obs['obs_type']))} | {html.escape(safe(obs['status']))}</span>"
+            f"<b style='font-size:15px;color:#061018;'>{html.escape(safe(obs['number']))}</b>"
+            f" &nbsp; <span style='color:#0b1f33;'>{html.escape(safe(obs['obs_type']))} | {html.escape(safe(obs['status']))}</span>"
+            f" &nbsp; <span style='color:#334155;'>{html.escape(safe(obs['location']))}</span>"
         )
         title.setTextFormat(Qt.TextFormat.RichText)
         root.addWidget(title)
-        meta = QLabel(
-            f"<b>Date:</b> {html.escape(safe(obs['obs_date']))} &nbsp; "
-            f"<b>Location:</b> {html.escape(safe(obs['location']))} &nbsp; "
-            f"<b>Responsible:</b> {html.escape(safe(obs['responsible']))} &nbsp; "
-            f"<b>CAPA:</b> {html.escape(safe(obs['capa_number']) or '—')} &nbsp; "
-            f"<b>Priority:</b> {html.escape(safe(obs['priority']))}"
-        )
-        meta.setTextFormat(Qt.TextFormat.RichText)
-        meta.setWordWrap(True)
-        root.addWidget(meta)
+
+        # Compact observation + corrective actions (equal height side-by-side)
+        top_split = QHBoxLayout()
         obs_box = QGroupBox("Observation Detail")
         obs_lay = QVBoxLayout(obs_box)
-        obs_text = QTextEdit(); obs_text.setReadOnly(True); obs_text.setPlainText(safe(obs["observation"]))
-        obs_text.setMinimumHeight(80); obs_lay.addWidget(obs_text); root.addWidget(obs_box)
+        obs_text = QTextEdit(); obs_text.setReadOnly(True)
+        obs_text.setPlainText(safe(obs["observation"]))
+        obs_text.setMaximumHeight(110)
+        obs_lay.addWidget(obs_text)
         act_box = QGroupBox("Corrective Action(s)")
         act_lay = QVBoxLayout(act_box)
         act_text = QTextEdit(); act_text.setReadOnly(True)
         act_text.setPlainText(format_corrective_actions_display(obs, numbered=True) or "No corrective action recorded")
-        act_text.setMinimumHeight(80); act_lay.addWidget(act_text); root.addWidget(act_box)
+        act_text.setMaximumHeight(110)
+        act_lay.addWidget(act_text)
+        top_split.addWidget(obs_box, 1)
+        top_split.addWidget(act_box, 1)
+        root.addLayout(top_split)
 
-        # Load ALL close-out evidence for this observation (every corrective action)
+        # Load evidence
         evidence_rows = list(db.fetchall(
             """SELECT id, file_path, review_status, submitted_by, submitted_at, reviewed_by, reviewed_at,
                       review_comments, batch_id
@@ -6929,7 +6932,6 @@ class MainWindow(QMainWindow):
                ORDER BY id""",
             (int(observation_id),),
         ))
-        # Also include observation_attachments tagged as close-out if not already listed
         existing_paths = {safe(r["file_path"]).casefold() for r in evidence_rows}
         for att in db.fetchall(
             "SELECT file_path, attachment_type FROM observation_attachments WHERE observation_id=? ORDER BY id",
@@ -6946,59 +6948,69 @@ class MainWindow(QMainWindow):
                 })
                 existing_paths.add(fp.casefold())
 
-        ev_box = QGroupBox(f"Attached Evidence / Preview  ({len(evidence_rows)} file(s) — all corrective actions)")
+        ev_box = QGroupBox(f"Close-out Evidence  —  {len(evidence_rows)} file(s)  (one card per evidence)")
         ev_lay = QVBoxLayout(ev_box)
-        note = QLabel(
-            "All evidence for every corrective action is shown below. "
-            "Approve accepts the whole observation. "
-            "If any evidence is not acceptable, reject the observation and enter a comment for each rejected file so the submitter knows what to correct. "
-            "After rejection the submitter must resubmit ALL evidence together."
+        hint = QLabel(
+            "Each evidence has its own card with Approve / Reject and a remark field. "
+            "Decide every card, then Finalize. Any Reject returns the whole observation — submitter must resubmit all evidence together."
         )
-        note.setWordWrap(True)
-        note.setStyleSheet("color:#061018;font-weight:700;padding:4px;")
-        ev_lay.addWidget(note)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        gallery = QWidget(); gallery_lay = QVBoxLayout(gallery); gallery_lay.setSpacing(12)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#334155;font-weight:600;padding:2px;")
+        ev_lay.addWidget(hint)
 
-        # Per-file reject comment widgets (used only in review mode)
-        per_file_comments = []  # list of (evidence_row_dict, QLineEdit or None)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setMinimumHeight(360)
+        cards_host = QWidget()
+        cards_grid = QGridLayout(cards_host)
+        cards_grid.setSpacing(12)
+        cards_grid.setContentsMargins(6, 6, 6, 6)
+
+        # Per-card decision: index -> {"decision": "Approved"|"Rejected"|None, "remark": QLineEdit, "status_lbl": QLabel, "er": row}
+        card_state = []
+
+        def _action_label(batch):
+            batch = safe(batch)
+            if batch.startswith("OBS-ACT-"):
+                try:
+                    return f"Corrective Action {batch.rsplit('-', 1)[-1]}"
+                except Exception:
+                    pass
+            return "Close-out Evidence"
 
         if not evidence_rows:
-            empty = QLabel("No close-out evidence has been submitted for this observation yet.")
-            empty.setStyleSheet("color:#7f1d1d;")
-            gallery_lay.addWidget(empty)
+            empty = QLabel("No close-out evidence submitted for this observation.")
+            empty.setStyleSheet("color:#7f1d1d;font-weight:800;")
+            cards_grid.addWidget(empty, 0, 0)
         else:
-            for idx, er in enumerate(evidence_rows, 1):
-                fp = safe(er["file_path"] if not isinstance(er, dict) else er.get("file_path") or er["file_path"])
-                try:
-                    fp = safe(er["file_path"])
-                    status = safe(er["review_status"])
-                    batch = safe(er["batch_id"])
-                    submitted_by = safe(er["submitted_by"])
-                    submitted_at = safe(er["submitted_at"])
-                except Exception:
-                    fp = safe(er["file_path"] if "file_path" in er.keys() else "")
-                    status = safe(er["review_status"] if "review_status" in er.keys() else "")
-                    batch = safe(er["batch_id"] if "batch_id" in er.keys() else "")
-                    submitted_by = safe(er["submitted_by"] if "submitted_by" in er.keys() else "")
-                    submitted_at = safe(er["submitted_at"] if "submitted_at" in er.keys() else "")
-
-                action_label = ""
-                if batch.startswith("OBS-ACT-"):
-                    try:
-                        action_label = f"  |  Corrective Action {batch.rsplit('-', 1)[-1]}"
-                    except Exception:
-                        pass
+            cols = 2  # equal cards in a 2-column grid (balanced height/width)
+            for idx, er in enumerate(evidence_rows):
+                fp = safe(er["file_path"])
+                status = safe(er["review_status"])
+                batch = safe(er["batch_id"])
                 fname = Path(fp.replace("\\", "/")).name if fp else "(no file)"
-                header = QLabel(
-                    f"<b>Evidence {idx}:</b> {html.escape(fname)}{html.escape(action_label)}  |  "
-                    f"Status: {html.escape(status or '—')}  |  "
-                    f"Submitted by: {html.escape(submitted_by or '—')}  {html.escape((submitted_at or '')[:19])}"
-                )
-                header.setTextFormat(Qt.TextFormat.RichText)
-                header.setWordWrap(True)
-                gallery_lay.addWidget(header)
+                card = QGroupBox(f"Evidence {idx + 1}  |  {_action_label(batch)}")
+                card.setMinimumWidth(420)
+                card.setMinimumHeight(340)
+                card.setMaximumHeight(420)
+                card_lay = QVBoxLayout(card)
+                card_lay.setSpacing(6)
 
+                meta = QLabel(
+                    f"<b>File:</b> {html.escape(fname)}<br>"
+                    f"<b>Status:</b> {html.escape(status or '—')}  |  "
+                    f"<b>Submitted by:</b> {html.escape(safe(er['submitted_by']) or '—')}  "
+                    f"{html.escape((safe(er['submitted_at']) or '')[:19])}"
+                )
+                meta.setTextFormat(Qt.TextFormat.RichText)
+                meta.setWordWrap(True)
+                card_lay.addWidget(meta)
+
+                # Equal preview area
+                preview = QLabel()
+                preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                preview.setFixedHeight(180)
+                preview.setStyleSheet("background:#ffffff;border:1px solid #94a3b8;border-radius:4px;")
                 resolved = resolve_attachment_path(fp) if fp else None
                 img_stream = attachment_image_stream(resolved) if resolved else None
                 if img_stream:
@@ -7006,58 +7018,99 @@ class MainWindow(QMainWindow):
                         pix = QPixmap()
                         pix.loadFromData(img_stream.read())
                         if not pix.isNull():
-                            img_lbl = QLabel()
-                            img_lbl.setPixmap(pix.scaled(420, 320, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                            img_lbl.setStyleSheet("background:white;border:1px solid #64748b;padding:4px;")
-                            gallery_lay.addWidget(img_lbl)
+                            preview.setPixmap(
+                                pix.scaled(380, 170, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                            )
                         else:
-                            gallery_lay.addWidget(QLabel(f"Image could not be rendered: {fname}"))
+                            preview.setText("Image could not be rendered")
                     except Exception:
-                        gallery_lay.addWidget(QLabel(f"Image preview unavailable: {fname}"))
+                        preview.setText("Image preview unavailable")
                 else:
-                    open_btn = QPushButton(f"Open file: {fname}")
-                    def _open(path=str(resolved) if resolved else fp):
-                        if path and Path(path).is_file():
-                            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
-                        else:
-                            QMessageBox.warning(dialog, "File Missing", "The evidence file could not be found on disk.")
-                    open_btn.clicked.connect(_open)
-                    gallery_lay.addWidget(open_btn)
+                    if resolved and Path(resolved).is_file():
+                        open_btn = QPushButton(f"Open file: {fname}")
+                        def _open(path=str(resolved)):
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                        open_btn.clicked.connect(_open)
+                        card_lay.addWidget(open_btn)
+                        preview.setText("Non-image file — use Open")
+                    else:
+                        preview.setText("File missing on disk")
+                card_lay.addWidget(preview)
 
-                comment_edit = None
-                if mode == "review" and status.casefold() in ("pending review", "submitted for review", ""):
-                    comment_edit = QLineEdit()
-                    comment_edit.setPlaceholderText(
-                        f"If rejecting this evidence, explain why (Evidence {idx}: {fname})"
-                    )
-                    gallery_lay.addWidget(comment_edit)
-                per_file_comments.append((er, comment_edit))
-                gallery_lay.addWidget(QLabel(""))  # spacer
+                remark = QLineEdit()
+                remark.setPlaceholderText(f"Remark for Evidence {idx + 1} (required if Reject)")
+                remark.setMinimumHeight(30)
+                card_lay.addWidget(remark)
 
-        gallery_lay.addStretch(1)
-        scroll.setWidget(gallery)
-        scroll.setMinimumHeight(280)
-        ev_lay.addWidget(scroll)
+                status_lbl = QLabel("Decision: Not set")
+                status_lbl.setStyleSheet("color:#334155;font-weight:800;")
+                card_lay.addWidget(status_lbl)
+
+                btn_row = QHBoxLayout()
+                appr = QPushButton("Approve")
+                rej = QPushButton("Reject")
+                appr.setMinimumHeight(34)
+                rej.setMinimumHeight(34)
+                appr.setStyleSheet("QPushButton{background:#0f4c81;color:white;border:1px solid #0b3a63;}")
+                rej.setStyleSheet("QPushButton{background:#7f1d1d;color:white;border:1px solid #5f1515;}")
+                state = {"decision": None, "remark": remark, "status_lbl": status_lbl, "er": er, "appr": appr, "rej": rej}
+
+                def _set_decision(dec, st=state):
+                    st["decision"] = dec
+                    if dec == "Approved":
+                        st["status_lbl"].setText("Decision: APPROVED")
+                        st["status_lbl"].setStyleSheet("color:#166534;font-weight:900;")
+                        st["appr"].setStyleSheet("QPushButton{background:#166534;color:white;border:2px solid #14532d;}")
+                        st["rej"].setStyleSheet("QPushButton{background:#7f1d1d;color:white;border:1px solid #5f1515;}")
+                    else:
+                        st["status_lbl"].setText("Decision: REJECTED")
+                        st["status_lbl"].setStyleSheet("color:#7f1d1d;font-weight:900;")
+                        st["rej"].setStyleSheet("QPushButton{background:#7f1d1d;color:white;border:2px solid #450a0a;}")
+                        st["appr"].setStyleSheet("QPushButton{background:#0f4c81;color:white;border:1px solid #0b3a63;}")
+
+                appr.clicked.connect(lambda _=False, s=state: _set_decision("Approved", s))
+                rej.clicked.connect(lambda _=False, s=state: _set_decision("Rejected", s))
+                # Pre-fill if already reviewed
+                if status.casefold() == "approved":
+                    _set_decision("Approved", state)
+                elif status.casefold() in ("rejected", "returned"):
+                    _set_decision("Rejected", state)
+                    if safe(er["review_comments"]):
+                        remark.setText(safe(er["review_comments"])[:300])
+
+                if mode != "review" or status.casefold() not in ("pending review", "submitted for review", ""):
+                    if mode != "review":
+                        appr.setEnabled(False)
+                        rej.setEnabled(False)
+                        remark.setReadOnly(True)
+
+                btn_row.addWidget(appr)
+                btn_row.addWidget(rej)
+                card_lay.addLayout(btn_row)
+                card_state.append(state)
+                cards_grid.addWidget(card, idx // cols, idx % cols)
+
+        scroll.setWidget(cards_host)
+        ev_lay.addWidget(scroll, 1)
         root.addWidget(ev_box, 1)
 
         reviewer_name = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
         reviewer_name.setPlaceholderText("Reviewed / verified by (name / role)")
-        overall_comment = QTextEdit()
-        overall_comment.setPlaceholderText(
-            "Overall review comments. Required when rejecting. "
-            "Per-file rejection reasons above are also saved so the submitter knows which evidence failed."
-        )
-        overall_comment.setMaximumHeight(70)
+        reviewer_name.setMinimumHeight(32)
+        overall_comment = QLineEdit()
+        overall_comment.setPlaceholderText("Overall comment (optional on full approve; recommended on reject)")
+        overall_comment.setMinimumHeight(32)
         if mode == "review":
-            root.addWidget(QLabel("Reviewer"))
-            root.addWidget(reviewer_name)
-            root.addWidget(QLabel("Overall comments"))
-            root.addWidget(overall_comment)
+            form_row = QHBoxLayout()
+            form_row.addWidget(QLabel("Reviewer:"))
+            form_row.addWidget(reviewer_name, 1)
+            form_row.addWidget(QLabel("Overall:"))
+            form_row.addWidget(overall_comment, 2)
+            root.addLayout(form_row)
 
         btn_row = QHBoxLayout()
 
-        def _decide(approved):
+        def _finalize():
             if int(obs["capa_required"] or 0):
                 return QMessageBox.information(
                     dialog, "CAPA Approval Required",
@@ -7066,24 +7119,48 @@ class MainWindow(QMainWindow):
             name = reviewer_name.text().strip()
             if not name:
                 return QMessageBox.warning(dialog, "Reviewer Required", "Enter the reviewer name.")
-            overall = overall_comment.toPlainText().strip()
 
-            pending_items = []
-            for er, cedit in per_file_comments:
+            pending_states = []
+            for st in card_state:
+                er = st["er"]
                 try:
-                    st = safe(er["review_status"]).casefold()
+                    cur = safe(er["review_status"]).casefold()
                 except Exception:
-                    st = ""
-                if st in ("pending review", "submitted for review", ""):
-                    pending_items.append((er, cedit))
+                    cur = ""
+                # Only require decision on pending items; already decided can keep prior
+                if cur in ("pending review", "submitted for review", ""):
+                    pending_states.append(st)
 
-            if not pending_items:
-                return QMessageBox.warning(dialog, "No Pending Submission", "There is no submitted evidence awaiting review for this observation.")
+            if not pending_states:
+                # Nothing pending - allow closing approved/rejected view
+                return QMessageBox.information(dialog, "No Pending Evidence", "There is no submitted evidence awaiting a new decision.")
 
-            # Collect per-file rejection comments
+            undecided = [s for s in pending_states if not s["decision"]]
+            if undecided:
+                return QMessageBox.warning(
+                    dialog, "Decisions Incomplete",
+                    f"Set Approve or Reject on every evidence card before finalizing.\n"
+                    f"{len(undecided)} of {len(pending_states)} still not decided.",
+                )
+
+            any_reject = any(s["decision"] == "Rejected" for s in pending_states)
+            # Require remark on each rejected card
+            if any_reject:
+                missing = []
+                for i, s in enumerate(pending_states, 1):
+                    if s["decision"] == "Rejected" and not s["remark"].text().strip():
+                        missing.append(str(i))
+                if missing:
+                    return QMessageBox.warning(
+                        dialog, "Remark Required",
+                        f"Enter a remark on each rejected evidence card.\nMissing remark on evidence: {', '.join(missing)}",
+                    )
+
+            overall = overall_comment.text().strip()
+            now = datetime.now().isoformat(timespec="seconds")
             file_notes = []
-            any_reject_comment = False
-            for er, cedit in pending_items:
+            for s in pending_states:
+                er = s["er"]
                 fname = Path(safe(er["file_path"]).replace("\\", "/")).name
                 batch = safe(er["batch_id"])
                 action_bit = ""
@@ -7092,55 +7169,49 @@ class MainWindow(QMainWindow):
                         action_bit = f" (Action {batch.rsplit('-', 1)[-1]})"
                     except Exception:
                         pass
-                note = cedit.text().strip() if cedit else ""
-                if note:
-                    any_reject_comment = True
-                    file_notes.append(f"{fname}{action_bit}: {note}")
-                else:
-                    file_notes.append(f"{fname}{action_bit}")
+                remark = s["remark"].text().strip()
+                file_notes.append(f"{fname}{action_bit}: {s['decision']}" + (f" — {remark}" if remark else ""))
 
-            if not approved:
-                if not overall and not any_reject_comment:
-                    return QMessageBox.warning(
-                        dialog, "Comment Required",
-                        "Enter a rejection reason (overall comment and/or per-evidence comments) so the submitter knows which evidence to correct.",
-                    )
-
-            decision = "Approved" if approved else "Rejected"
-            now = datetime.now().isoformat(timespec="seconds")
-            if approved:
-                review_note = (
-                    f"Close-out evidence APPROVED by {name} on {now}. "
-                    f"All {len(pending_items)} evidence file(s) accepted together. {overall}"
-                ).strip()
-            else:
-                detail = "; ".join(file_notes)
+            if any_reject:
+                decision = "Rejected"
                 review_note = (
                     f"Close-out evidence REJECTED by {name} on {now}. "
-                    f"Entire observation close-out returned — resubmit ALL evidence together. "
-                    f"Evidence details: {detail}. Overall: {overall}"
+                    f"Entire observation returned — resubmit ALL evidence together. "
+                    f"Details: {'; '.join(file_notes)}. Overall: {overall}"
+                ).strip()
+            else:
+                decision = "Approved"
+                review_note = (
+                    f"Close-out evidence APPROVED by {name} on {now}. "
+                    f"All {len(pending_states)} evidence file(s) accepted. "
+                    f"Details: {'; '.join(file_notes)}. {overall}"
                 ).strip()
 
             try:
                 with db.conn:
-                    for er, _cedit in pending_items:
+                    for s in pending_states:
+                        er = s["er"]
                         eid = er["id"] if "id" in er.keys() else None
                         if eid is None:
                             continue
-                        # Attach specific per-file note into the row comment when rejecting
+                        row_decision = s["decision"]
+                        # Whole-observation rule: any reject => all pending marked Rejected
+                        if any_reject:
+                            row_decision = "Rejected"
+                        remark = s["remark"].text().strip()
+                        fname = Path(safe(er["file_path"]).replace("\\", "/")).name
                         row_comment = review_note
-                        if not approved and _cedit and _cedit.text().strip():
-                            fname = Path(safe(er["file_path"]).replace("\\", "/")).name
-                            row_comment = f"{review_note} | This file ({fname}): {_cedit.text().strip()}"
+                        if remark:
+                            row_comment = f"{review_note} | This file ({fname}): {remark}"
                         db.conn.execute(
                             """UPDATE observation_closeout_evidence
                                SET review_status=?, reviewed_by=?, reviewed_at=?, review_comments=?
                                WHERE id=?""",
-                            (decision, name, now, row_comment, int(eid)),
+                            (row_decision, name, now, row_comment, int(eid)),
                         )
                     old = safe(obs["closeout_comments"])
                     comments_txt = (old + "\n" + review_note).strip() if old else review_note
-                    if approved:
+                    if not any_reject:
                         db.conn.execute(
                             """UPDATE observations SET status='Closed', closeout_date=?, closed_by=?, verified_by=?,
                                verification_date=?, verification='Close-out Approved', closeout_comments=? WHERE id=?""",
@@ -7149,14 +7220,14 @@ class MainWindow(QMainWindow):
                     else:
                         db.conn.execute(
                             """UPDATE observations SET status='Close-out Evidence Returned',
-                               verification='Close-out evidence returned for correction — resubmit all evidence together',
+                               verification='Close-out evidence returned — resubmit all evidence together',
                                closeout_comments=? WHERE id=?""",
                             (comments_txt, int(observation_id)),
                         )
                 QMessageBox.information(
                     dialog, "Review Saved",
                     f"Observation marked {decision}.\n"
-                    + ("All evidence accepted." if approved else "All evidence returned. Submitter must resubmit every file together."),
+                    + ("All evidence accepted." if not any_reject else "Rejected evidence remarks saved. Submitter must resubmit all evidence together."),
                 )
                 dialog.accept()
                 if on_done:
@@ -7166,15 +7237,13 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(dialog, "Review Error", str(exc))
 
         if mode == "review":
-            approve_btn = QPushButton("Approve All Evidence")
-            reject_btn = QPushButton("Reject / Return (All Evidence)")
-            approve_btn.setStyleSheet("background:#0f4c81;color:white;font-weight:800;")
-            reject_btn.setStyleSheet("background:#7f1d1d;color:white;font-weight:800;")
-            approve_btn.clicked.connect(lambda: _decide(True))
-            reject_btn.clicked.connect(lambda: _decide(False))
-            btn_row.addWidget(approve_btn)
-            btn_row.addWidget(reject_btn)
+            finalize = QPushButton("Finalize Review Decisions")
+            finalize.setMinimumHeight(42)
+            finalize.setStyleSheet("QPushButton{background:#0f4c81;color:white;font-weight:900;font-size:13px;}")
+            finalize.clicked.connect(_finalize)
+            btn_row.addWidget(finalize)
         close_btn = QPushButton("Close")
+        close_btn.setMinimumHeight(42)
         close_btn.clicked.connect(dialog.reject)
         btn_row.addStretch(1)
         btn_row.addWidget(close_btn)
@@ -7231,9 +7300,14 @@ class MainWindow(QMainWindow):
         table = QTableWidget()
         headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Observation Detail", "Status", "Observation Approval", "Location", "Corrective Action(s)", "Target Date", "CAPA Required", "CAPA No.", "Attachments"]
         table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setColumnHidden(0, True)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)  # Observation Detail paragraph
+        table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)  # Corrective Action(s) paragraph
+        table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows); table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        table.setWordWrap(True); table.setAlternatingRowColors(True); register_layout.addWidget(table)
+        table.setWordWrap(True); table.setAlternatingRowColors(True)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        register_layout.addWidget(table)
         tabs.addTab(register_page, "Observation Register")
 
         def ensure_observation_capa_link(obs_row):
@@ -7310,16 +7384,25 @@ class MainWindow(QMainWindow):
                     approval_by = ""
                     approval_date = ""
                 approval_display = approval_status + (f" | {approval_by} | {approval_date}" if approval_by else "")
-                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],row["observation"],row["status"],approval_display,row["location"],format_corrective_actions_display(row),row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
+                # Show Observation Detail and Corrective Action(s) as wrapped paragraphs (not a single long line).
+                obs_para = safe(row["observation"]).replace("\r", "\n").strip()
+                corr_para = format_corrective_actions_display(row, numbered=True) or safe(row["corrective_action"])
+                values=[row["id"],r+1,row["number"],row["obs_date"],row["obs_type"],obs_para,row["status"],approval_display,row["location"],corr_para,row["target_date"],capa_req,linked_capa_no or "—",attachments or "No attachment"]
                 for c,value in enumerate(values):
                     item=QTableWidgetItem(safe(value)); item.setToolTip(safe(value))
                     if c == 0:
                         item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+                    # Observation Detail (5) and Corrective Action(s) (9) wrap as multi-line paragraphs
+                    if c in (5, 9):
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
                     table.setItem(r,c,item)
                 if overdue(row["target_date"],row["status"]):
                     table.item(r,9).setForeground(Qt.GlobalColor.red); table.item(r,6).setForeground(Qt.GlobalColor.red)
                 if capa_req=="Yes": table.item(r,10).setForeground(Qt.GlobalColor.darkBlue)
-                table.setRowHeight(r,max(48,18+16*max(1,len(parse_corrective_actions(row)))))
+                # Row height from paragraph line count (observation + corrective actions)
+                _obs_lines = max(1, obs_para.count("\n") + 1 + max(0, (len(obs_para) // 60)))
+                _corr_lines = max(1, corr_para.count("\n") + 1 + max(0, (len(corr_para) // 60)))
+                table.setRowHeight(r, max(64, 20 + 16 * max(_obs_lines, _corr_lines, len(parse_corrective_actions(row)))))
 
         def selected_observation_ids(require_one=False):
             ids=[]
@@ -7601,19 +7684,21 @@ class MainWindow(QMainWindow):
         close_layout.addLayout(submit_row)
         approval_page=QWidget(); approval_layout=QVBoxLayout(approval_page)
         approval_intro=QLabel(
-            "Submitted observation close-outs are listed here (observation detail, corrective actions and evidence). "
-            "Double-click a row to open the full observation with image previews and Approve / Reject / Return. "
+            "Submitted observation close-outs are listed here. Select a row and use the action buttons below, "
+            "or double-click a row to open every evidence card with Approve / Reject + remark per file. "
             "CAPA-linked items are approved once in CAPA Tracking and synchronized automatically."
         )
         approval_intro.setWordWrap(True); approval_intro.setStyleSheet("color:#061018;padding:6px;font-weight:800;"); approval_layout.addWidget(approval_intro)
-        approval_section_lbl = QLabel("One row per observation (all multi-action evidence combined). Double-click to review every attached image. Approve once, or reject with per-evidence comments — submitter must then resubmit all evidence together.")
+        approval_section_lbl = QLabel("One row per observation. Action buttons stay visible at the bottom. Double-click for per-evidence Approve / Reject with remarks.")
         approval_section_lbl.setStyleSheet("color:#061018;font-weight:800;")
         approval_layout.addWidget(approval_section_lbl)
         evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","Observation Detail","Corrective Action(s)","CAPA","Evidence Files","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","Evidence Progress"]
         evidence_table.setColumnCount(len(ev_headers)); evidence_table.setHorizontalHeaderLabels(ev_headers); evidence_table.setColumnHidden(0,True)
         evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows); evidence_table.setSelectionMode(QAbstractItemView.SingleSelection); evidence_table.setAlternatingRowColors(True)
         evidence_table.setWordWrap(True)
-        evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); evidence_table.horizontalHeader().setStretchLastSection(True); approval_layout.addWidget(evidence_table,2)
+        evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); evidence_table.horizontalHeader().setStretchLastSection(True)
+        evidence_table.setMinimumHeight(180)
+        approval_layout.addWidget(evidence_table, 1)
         def _approval_detail_from_table(row_index, *_):
             try:
                 oid = None
@@ -7629,12 +7714,19 @@ class MainWindow(QMainWindow):
             except Exception:
                 logging.exception("Approval observation detail failed")
         evidence_table.cellDoubleClicked.connect(_approval_detail_from_table)
-        review_row=QGridLayout(); review_row.setHorizontalSpacing(6); review_row.setVerticalSpacing(4)
+        # Action bar always visible under the table (not pushed off-screen)
+        review_row=QGridLayout(); review_row.setHorizontalSpacing(8); review_row.setVerticalSpacing(6)
         reviewer=QLineEdit(); reviewer.setPlaceholderText("Reviewed / verified by (name / role)")
+        reviewer.setMinimumHeight(34)
         reviewer_comments=QLineEdit(); reviewer_comments.setPlaceholderText("Review comments / reason for rejection")
-        approve_btn=QPushButton("Approve Close-out"); reject_btn=QPushButton("Reject / Return"); refresh_evidence=QPushButton("Refresh Submissions")
-        for _ab in (approve_btn, reject_btn, refresh_evidence):
-            _ab.setMinimumHeight(32); _ab.setMinimumWidth(0)
+        reviewer_comments.setMinimumHeight(34)
+        approve_btn=QPushButton("Approve Close-out")
+        reject_btn=QPushButton("Reject / Return")
+        open_review_btn=QPushButton("Open Evidence Review")
+        refresh_evidence=QPushButton("Refresh Submissions")
+        for _ab in (approve_btn, reject_btn, open_review_btn, refresh_evidence):
+            _ab.setMinimumHeight(40)
+            _ab.setMinimumWidth(140)
             _ab.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         approve_btn.setStyleSheet(
             "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
@@ -7651,11 +7743,16 @@ class MainWindow(QMainWindow):
             "border:1px solid #0b3a63;border-radius:5px;}"
             "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
         )
-        review_row.addWidget(reviewer, 0, 0, 1, 2)
-        review_row.addWidget(reviewer_comments, 0, 2, 1, 2)
-        review_row.addWidget(approve_btn, 1, 0)
-        review_row.addWidget(reject_btn, 1, 1)
-        review_row.addWidget(refresh_evidence, 1, 2)
+        review_row.addWidget(QLabel("Reviewer:"), 0, 0)
+        review_row.addWidget(reviewer, 0, 1, 1, 3)
+        review_row.addWidget(QLabel("Comments:"), 1, 0)
+        review_row.addWidget(reviewer_comments, 1, 1, 1, 3)
+        review_row.addWidget(approve_btn, 2, 0)
+        review_row.addWidget(reject_btn, 2, 1)
+        review_row.addWidget(open_review_btn, 2, 2)
+        review_row.addWidget(refresh_evidence, 2, 3)
+        for _c in range(4):
+            review_row.setColumnStretch(_c, 1)
         approval_layout.addLayout(review_row)
         tabs.addTab(close_page,"Open Observations")
         tabs.addTab(approval_page,"Observation Approval")
@@ -8608,6 +8705,8 @@ class MainWindow(QMainWindow):
 
         upload_closeout.clicked.connect(lambda: open_observation_action_evidence()); submit_closeout.clicked.connect(submit_attached_closeout_evidence); refresh_open.clicked.connect(refresh_both_closeout_sections)
         refresh_evidence.clicked.connect(refresh_both_closeout_sections); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
+        open_review_btn.clicked.connect(lambda: _approval_detail_from_table(evidence_table.currentRow()) if evidence_table.currentRow() >= 0 else QMessageBox.information(self, "Select Row", "Select an observation submission first, then open evidence review."))
+        refresh_evidence.clicked.connect(lambda: (refresh_closeout_evidence(), refresh_closeout_open()))
 
         def upload_closeout_from_observation_register():
             ids = selected_observation_ids(require_one=True)
