@@ -1223,6 +1223,101 @@ def capa_actions_completion(actions):
     return done, total, pct, status
 
 
+def reconcile_all_capa_linked_observations():
+    """Force HSE Inspection statuses to match CAPA Tracking approvals.
+
+    Called from Observation Register refresh so Approved CAPAs always show
+    Closed + Approved on the linked observation, and pending CAPAs do not.
+    """
+    # 1) Every CAPA that is explicitly Approved must close its linked observation(s).
+    approved_rows = db.fetchall(
+        """SELECT * FROM capa
+           WHERE lower(trim(COALESCE(approval_status,''))) IN ('approved','capa approved')
+              OR lower(trim(COALESCE(capa_closeout_status,''))) = 'approved'
+           ORDER BY id"""
+    )
+    for capa_row in approved_rows:
+        try:
+            sync_observation_from_capa(capa_row)
+        except Exception:
+            logging.exception("reconcile: sync failed for CAPA %s", safe(capa_row["number"] if "number" in capa_row.keys() else ""))
+        # Direct status write — do not rely only on sync side-effects.
+        targets = []
+        try:
+            lid = capa_row["linked_observation_id"] if "linked_observation_id" in capa_row.keys() else None
+            if lid not in (None, "", 0, "0"):
+                targets.append(int(lid))
+        except Exception:
+            pass
+        ref = safe(capa_row["reference_number"] if "reference_number" in capa_row.keys() else "").strip()
+        cno = safe(capa_row["number"] if "number" in capa_row.keys() else "").strip()
+        if ref:
+            hit = db.fetchone("SELECT id FROM observations WHERE number=?", (ref,))
+            if hit:
+                targets.append(int(hit["id"]))
+        if cno:
+            for hit in db.fetchall("SELECT id FROM observations WHERE capa_number=?", (cno,)):
+                targets.append(int(hit["id"]))
+        reviewer = (
+            safe(capa_row["approved_by"] if "approved_by" in capa_row.keys() else "")
+            or safe(capa_row["capa_closeout_approved_by"] if "capa_closeout_approved_by" in capa_row.keys() else "")
+            or "CAPA Reviewer"
+        )
+        adate = (
+            safe(capa_row["approved_date"] if "approved_date" in capa_row.keys() else "")
+            or safe(capa_row["capa_closeout_approved_at"] if "capa_closeout_approved_at" in capa_row.keys() else "")
+            or today()
+        )
+        adate = adate[:10] if adate else today()
+        for oid in sorted(set(targets)):
+            db.execute(
+                """UPDATE observations SET capa_required=1, capa_number=COALESCE(NULLIF(capa_number,''), ?),
+                   status='Closed',
+                   closeout_date=COALESCE(NULLIF(closeout_date,''), ?),
+                   closed_by=COALESCE(NULLIF(closed_by,''), ?),
+                   verified_by=COALESCE(NULLIF(verified_by,''), ?),
+                   verification_date=COALESCE(NULLIF(verification_date,''), ?),
+                   verification='CAPA approved in CAPA Tracking Register'
+                   WHERE id=?""",
+                (cno, adate, reviewer, reviewer, adate, oid),
+            )
+            try:
+                db.execute(
+                    """UPDATE observation_closeout_evidence
+                       SET review_status='Approved',
+                           reviewed_by=COALESCE(NULLIF(reviewed_by,''), ?),
+                           reviewed_at=COALESCE(NULLIF(reviewed_at,''), ?)
+                       WHERE observation_id=?
+                         AND lower(trim(COALESCE(review_status,''))) NOT IN ('deleted','void','cancelled')""",
+                    (reviewer, adate, oid),
+                )
+            except Exception:
+                logging.exception("reconcile: evidence update failed for observation %s", oid)
+
+    # 2) Observations still marked Closed while their CAPA is only Pending must be reopened.
+    pending_closed = db.fetchall(
+        """SELECT o.id AS oid, c.id AS cid, c.number AS cno
+           FROM observations o
+           JOIN capa c ON (
+                c.linked_observation_id = o.id
+                OR (COALESCE(o.capa_number,'') != '' AND c.number = o.capa_number)
+                OR (c.reference_number = o.number)
+           )
+           WHERE COALESCE(o.capa_required,0)=1
+             AND lower(trim(COALESCE(o.status,''))) = 'closed'
+             AND lower(trim(COALESCE(c.approval_status,''))) IN ('pending approval','awaiting approval','')
+             AND lower(trim(COALESCE(c.capa_closeout_status,''))) NOT IN ('approved')
+             AND lower(trim(COALESCE(c.status,''))) NOT IN ('closed')"""
+    )
+    for row in pending_closed:
+        try:
+            capa_row = db.fetchone("SELECT * FROM capa WHERE id=?", (row["cid"],))
+            if capa_row:
+                sync_observation_from_capa(capa_row)
+        except Exception:
+            logging.exception("reconcile: reopen pending CAPA observation %s", row["oid"])
+
+
 def sync_observation_from_capa(capa_row):
     """Synchronize a CAPA-linked HSE observation and its close-out approval.
 
@@ -6740,8 +6835,12 @@ class MainWindow(QMainWindow):
         card_button = QPushButton("Draft STOP Card(s)")
         closeout_evidence_button = QPushButton("Manage Action Evidence")
         closeout_evidence_button.setToolTip("Open the linked corrective-action evidence workspace. Attach, review, save and submit evidence once.")
-        toolbar.addWidget(search, 0, 0, 1, 3)
-        toolbar.addWidget(clear_filter, 0, 3)
+        refresh_button = QPushButton("Refresh Status")
+        refresh_button.setToolTip("Re-sync observation status and approval from CAPA Tracking Register (Approved CAPA => Closed).")
+        refresh_button.setStyleSheet("font-weight:700;background:#17365D;color:white;padding:6px 12px;")
+        toolbar.addWidget(search, 0, 0, 1, 2)
+        toolbar.addWidget(clear_filter, 0, 2)
+        toolbar.addWidget(refresh_button, 0, 3)
         _obs_toolbar_buttons = [add_button, edit_button, attachment_button, closeout_evidence_button, delete_button, export_button, excel_button, pdf_button, word_button, card_button]
         for _i, _button in enumerate(_obs_toolbar_buttons):
             _button.setMinimumHeight(34); _button.setMinimumWidth(118); _button.setToolTip(_button.text())
@@ -6769,6 +6868,11 @@ class MainWindow(QMainWindow):
                 return safe(obs_row["capa_number"])
 
         def load():
+            # Authoritative CAPA -> Observation status pass (Approved CAPA => Closed).
+            try:
+                reconcile_all_capa_linked_observations()
+            except Exception:
+                logging.exception("Observation CAPA reconcile failed")
             # Refresh CAPA-linked observation statuses from the authoritative CAPA record
             # before taking the row snapshot used by the Observation Register.
             for _obs_sync in db.fetchall("SELECT * FROM observations WHERE COALESCE(capa_required,0)=1 ORDER BY id"):
@@ -6953,6 +7057,28 @@ class MainWindow(QMainWindow):
         search.textChanged.connect(load)
         def refresh_observation_views():
             load(); refresh_closeout_open(); refresh_closeout_evidence()
+        def refresh_all_observation_tabs():
+            """User-triggered refresh: CAPA approvals applied to Observation Register + Approval tabs."""
+            try:
+                reconcile_all_capa_linked_observations()
+            except Exception:
+                logging.exception("Manual observation refresh reconcile failed")
+            load()
+            try:
+                refresh_closeout_open()
+            except Exception:
+                logging.exception("refresh_closeout_open failed")
+            try:
+                refresh_closeout_evidence()
+            except Exception:
+                logging.exception("refresh_closeout_evidence failed")
+            QMessageBox.information(
+                self, "Statuses Refreshed",
+                "Observation statuses and approvals have been re-synced from CAPA Tracking.\n\n"
+                "CAPA Approved  →  Observation Closed + Approved\n"
+                "CAPA Pending   →  Observation stays open / pending verification"
+            )
+        refresh_button.clicked.connect(refresh_all_observation_tabs)
         add_button.clicked.connect(lambda: self.observation_form(refresh_observation_views))
         def edit_selected_observation():
             ids=selected_observation_ids(require_one=True)
@@ -6966,6 +7092,14 @@ class MainWindow(QMainWindow):
         close_page=QWidget(); close_layout=QVBoxLayout(close_page)
         intro=QLabel("Select or double-click an open observation to manage evidence against its corrective actions. CAPA-linked observations use the same evidence, submission and approval workflow as CAPA Tracking; non-CAPA observations retain their close-out review workflow.")
         intro.setWordWrap(True); intro.setStyleSheet("color:#24476b;padding:6px;font-weight:600;"); close_layout.addWidget(intro)
+        _close_refresh_row = QHBoxLayout()
+        refresh_open_status_btn = QPushButton("Refresh Status from CAPA Tracking")
+        refresh_open_status_btn.setToolTip("Re-read CAPA Tracking approvals and update observation statuses on this tab.")
+        refresh_open_status_btn.setStyleSheet("font-weight:700;background:#17365D;color:white;padding:6px 12px;")
+        refresh_open_status_btn.clicked.connect(refresh_all_observation_tabs)
+        _close_refresh_row.addWidget(refresh_open_status_btn)
+        _close_refresh_row.addStretch(1)
+        close_layout.addLayout(_close_refresh_row)
         close_layout.addWidget(QLabel("A. Open observations awaiting close-out evidence"))
         open_table=QTableWidget(); open_headers=["ID","Observation No.","Date","Type","Observation","Responsible","Status","CAPA Required","CAPA No.","CAPA Progress","Close-out Review"]
         open_table.setColumnCount(len(open_headers)); open_table.setHorizontalHeaderLabels(open_headers); open_table.setColumnHidden(0,True)
@@ -7827,6 +7961,22 @@ class MainWindow(QMainWindow):
         report_table.itemSelectionChanged.connect(update_selected_report_state)
         tabs.addTab(report_page,"Specific Inspection Report")
 
+        def _on_observation_tab_changed(index):
+            # Keep every HSE Inspection tab aligned with CAPA Tracking when the user switches tabs.
+            try:
+                reconcile_all_capa_linked_observations()
+            except Exception:
+                logging.exception("Tab-change CAPA reconcile failed")
+            load()
+            try:
+                refresh_closeout_open()
+            except Exception:
+                logging.exception("Tab-change refresh_closeout_open failed")
+            try:
+                refresh_closeout_evidence()
+            except Exception:
+                logging.exception("Tab-change refresh_closeout_evidence failed")
+        tabs.currentChanged.connect(_on_observation_tab_changed)
         layout.addWidget(tabs,1)
         load(); refresh_closeout_open(); refresh_closeout_evidence()
 
@@ -11296,6 +11446,10 @@ class MainWindow(QMainWindow):
                     # Re-read after write so sync sees Approved / Closed fields, then force
                     # the linked HSE Inspection observation to the same final state.
                     sync_observation_from_capa(updated)
+                    try:
+                        reconcile_all_capa_linked_observations()
+                    except Exception:
+                        logging.exception("Post-approval CAPA reconcile failed")
                     if _is_ok:
                         _obs_targets = []
                         try:
