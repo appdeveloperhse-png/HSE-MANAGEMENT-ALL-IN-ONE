@@ -6870,15 +6870,20 @@ class MainWindow(QMainWindow):
 
 
     def _observation_detail_review_dialog(self, observation_id, mode="view", on_done=None):
-        """Show observation detail, corrective actions and evidence image previews."""
+        """Show observation detail, all multi-action evidence, and one-step approve/reject.
+
+        Approver sees every attached evidence image in one dialog. Rejecting any
+        evidence rejects the whole observation; per-file rejection comments are
+        required so the submitter knows which evidence failed.
+        """
         obs = db.fetchone("SELECT * FROM observations WHERE id=?", (int(observation_id),))
         if not obs:
             QMessageBox.warning(self, "Observation", "The selected observation could not be found.")
             return
         dialog = QDialog(self)
         dialog.setWindowTitle(f"Observation Detail — {safe(obs['number'])}")
-        dialog.resize(980, 720)
-        fit_dialog_to_desktop(dialog, 0.92, 0.90)
+        dialog.resize(1020, 780)
+        fit_dialog_to_desktop(dialog, 0.94, 0.92)
         dialog.setStyleSheet(
             "QDialog{background:#dce3ec;}"
             "QLabel{color:#061018;font-weight:700;}"
@@ -6907,132 +6912,275 @@ class MainWindow(QMainWindow):
         obs_box = QGroupBox("Observation Detail")
         obs_lay = QVBoxLayout(obs_box)
         obs_text = QTextEdit(); obs_text.setReadOnly(True); obs_text.setPlainText(safe(obs["observation"]))
-        obs_text.setMinimumHeight(90); obs_lay.addWidget(obs_text); root.addWidget(obs_box)
+        obs_text.setMinimumHeight(80); obs_lay.addWidget(obs_text); root.addWidget(obs_box)
         act_box = QGroupBox("Corrective Action(s)")
         act_lay = QVBoxLayout(act_box)
         act_text = QTextEdit(); act_text.setReadOnly(True)
         act_text.setPlainText(format_corrective_actions_display(obs, numbered=True) or "No corrective action recorded")
-        act_text.setMinimumHeight(90); act_lay.addWidget(act_text); root.addWidget(act_box)
-        ev_box = QGroupBox("Attached Evidence / Preview")
-        ev_lay = QVBoxLayout(ev_box)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True)
-        gallery = QWidget(); gallery_lay = QVBoxLayout(gallery); gallery_lay.setSpacing(10)
+        act_text.setMinimumHeight(80); act_lay.addWidget(act_text); root.addWidget(act_box)
+
+        # Load ALL close-out evidence for this observation (every corrective action)
         evidence_rows = list(db.fetchall(
-            "SELECT file_path, review_status, submitted_by, submitted_at FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id DESC",
+            """SELECT id, file_path, review_status, submitted_by, submitted_at, reviewed_by, reviewed_at,
+                      review_comments, batch_id
+               FROM observation_closeout_evidence
+               WHERE observation_id=?
+                 AND lower(trim(COALESCE(review_status,''))) NOT IN ('deleted','void','cancelled')
+               ORDER BY id""",
             (int(observation_id),),
         ))
-        if not evidence_rows:
-            for item in observation_all_attachments(int(observation_id)):
+        # Also include observation_attachments tagged as close-out if not already listed
+        existing_paths = {safe(r["file_path"]).casefold() for r in evidence_rows}
+        for att in db.fetchall(
+            "SELECT file_path, attachment_type FROM observation_attachments WHERE observation_id=? ORDER BY id",
+            (int(observation_id),),
+        ):
+            fp = safe(att["file_path"])
+            if not fp or fp.casefold() in existing_paths:
+                continue
+            if "close" in safe(att["attachment_type"]).casefold() or "action" in safe(att["attachment_type"]).casefold():
                 evidence_rows.append({
-                    "file_path": item.get("file_path"),
-                    "review_status": safe(item.get("attachment_type")) or "Attachment",
-                    "submitted_by": "", "submitted_at": "",
+                    "id": None, "file_path": fp, "review_status": "Attached",
+                    "submitted_by": "", "submitted_at": "", "reviewed_by": "", "reviewed_at": "",
+                    "review_comments": "", "batch_id": "",
                 })
-        image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+                existing_paths.add(fp.casefold())
+
+        ev_box = QGroupBox(f"Attached Evidence / Preview  ({len(evidence_rows)} file(s) — all corrective actions)")
+        ev_lay = QVBoxLayout(ev_box)
+        note = QLabel(
+            "All evidence for every corrective action is shown below. "
+            "Approve accepts the whole observation. "
+            "If any evidence is not acceptable, reject the observation and enter a comment for each rejected file so the submitter knows what to correct. "
+            "After rejection the submitter must resubmit ALL evidence together."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#061018;font-weight:700;padding:4px;")
+        ev_lay.addWidget(note)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        gallery = QWidget(); gallery_lay = QVBoxLayout(gallery); gallery_lay.setSpacing(12)
+
+        # Per-file reject comment widgets (used only in review mode)
+        per_file_comments = []  # list of (evidence_row_dict, QLineEdit or None)
+
         if not evidence_rows:
-            empty = QLabel("No evidence files attached yet.")
-            empty.setStyleSheet("color:#334155;font-weight:600;padding:8px;")
+            empty = QLabel("No close-out evidence has been submitted for this observation yet.")
+            empty.setStyleSheet("color:#7f1d1d;")
             gallery_lay.addWidget(empty)
-        for item in evidence_rows:
-            try:
-                fp = safe(item["file_path"])
-            except Exception:
-                fp = safe(item.get("file_path") if isinstance(item, dict) else "")
-            resolved = resolve_attachment_path(fp)
-            name = Path(str(fp).replace("\\", "/")).name if fp else "Evidence"
-            try:
-                status = safe(item["review_status"]); by = safe(item["submitted_by"]); at = safe(item["submitted_at"])
-            except Exception:
-                status = safe(item.get("review_status") if isinstance(item, dict) else ""); by = ""; at = ""
-            block = QFrame(); block.setFrameShape(QFrame.Shape.StyledPanel)
-            block.setStyleSheet("QFrame{background:white;border:1px solid #94a3b8;border-radius:6px;}")
-            bl = QVBoxLayout(block)
-            head = QLabel(
-                f"<b>{html.escape(name)}</b> — {html.escape(status or 'Attached')}"
-                + (f" | {html.escape(by)}" if by else "")
-                + (f" | {html.escape(at)}" if at else "")
-            )
-            head.setTextFormat(Qt.TextFormat.RichText); head.setWordWrap(True); bl.addWidget(head)
-            if resolved and resolved.suffix.lower() in image_exts:
-                pix = QPixmap(str(resolved))
-                if not pix.isNull():
-                    img = QLabel(); img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    img.setPixmap(pix.scaled(860, 320, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-                    bl.addWidget(img)
-                else:
-                    bl.addWidget(QLabel("Image could not be loaded."))
-            else:
-                path_lbl = QLabel(str(resolved) if resolved else (fp or "File missing"))
-                path_lbl.setWordWrap(True); path_lbl.setStyleSheet("color:#334155;"); bl.addWidget(path_lbl)
-            open_btn = QPushButton("Open File")
-            if resolved and resolved.is_file():
-                open_btn.clicked.connect(lambda _=False, p=str(resolved): QDesktopServices.openUrl(QUrl.fromLocalFile(p)))
-            else:
-                open_btn.setEnabled(False)
-            bl.addWidget(open_btn, 0, Qt.AlignmentFlag.AlignLeft)
-            gallery_lay.addWidget(block)
-        gallery_lay.addStretch(1); scroll.setWidget(gallery); ev_lay.addWidget(scroll, 1); root.addWidget(ev_box, 1)
-        btn_row = QHBoxLayout()
-        if mode == "review":
-            reviewer = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
-            reviewer.setPlaceholderText("Reviewed / verified by (name / role)")
-            comments = QLineEdit(); comments.setPlaceholderText("Review comments / reason for rejection or return")
-            root.addWidget(reviewer); root.addWidget(comments)
-            def _decide(approved):
-                name = reviewer.text().strip(); comment = comments.text().strip()
-                if not name:
-                    return QMessageBox.warning(dialog, "Reviewer Required", "Enter the reviewer / verifier name.")
-                if not approved and not comment:
-                    return QMessageBox.warning(dialog, "Comment Required", "Enter the reason for reject / return.")
-                if int(obs["capa_required"] or 0):
-                    return QMessageBox.information(
-                        dialog, "CAPA Approval Required",
-                        "This observation is CAPA-linked. Approve or reject it once in CAPA Tracking → Approve / Reject CAPA."
-                    )
-                pending = db.fetchall(
-                    """SELECT DISTINCT batch_id FROM observation_closeout_evidence
-                       WHERE observation_id=? AND lower(trim(COALESCE(review_status,''))) IN ('pending review','submitted for review')""",
-                    (int(observation_id),),
-                )
-                if not pending:
-                    return QMessageBox.warning(dialog, "No Pending Submission", "There is no submitted evidence awaiting review for this observation.")
-                decision = "Approved" if approved else "Rejected"
-                now = datetime.now().isoformat(timespec="seconds")
+        else:
+            for idx, er in enumerate(evidence_rows, 1):
+                fp = safe(er["file_path"] if not isinstance(er, dict) else er.get("file_path") or er["file_path"])
                 try:
-                    with db.conn:
-                        for item in pending:
-                            db.conn.execute(
-                                "UPDATE observation_closeout_evidence SET review_status=?,reviewed_by=?,reviewed_at=?,review_comments=? WHERE batch_id=?",
-                                (decision, name, now, comment, safe(item["batch_id"])),
-                            )
-                        note = f"Close-out evidence {decision.lower()} by {name} on {now}. {comment}".strip()
-                        old = safe(obs["closeout_comments"]); comments_txt = (old + "\n" + note).strip() if old else note
-                        if approved:
-                            db.conn.execute(
-                                """UPDATE observations SET status='Closed', closeout_date=?, closed_by=?, verified_by=?,
-                                   verification_date=?, verification='Close-out Approved', closeout_comments=? WHERE id=?""",
-                                (now[:10], name, name, now[:10], comments_txt, int(observation_id)),
-                            )
+                    fp = safe(er["file_path"])
+                    status = safe(er["review_status"])
+                    batch = safe(er["batch_id"])
+                    submitted_by = safe(er["submitted_by"])
+                    submitted_at = safe(er["submitted_at"])
+                except Exception:
+                    fp = safe(er["file_path"] if "file_path" in er.keys() else "")
+                    status = safe(er["review_status"] if "review_status" in er.keys() else "")
+                    batch = safe(er["batch_id"] if "batch_id" in er.keys() else "")
+                    submitted_by = safe(er["submitted_by"] if "submitted_by" in er.keys() else "")
+                    submitted_at = safe(er["submitted_at"] if "submitted_at" in er.keys() else "")
+
+                action_label = ""
+                if batch.startswith("OBS-ACT-"):
+                    try:
+                        action_label = f"  |  Corrective Action {batch.rsplit('-', 1)[-1]}"
+                    except Exception:
+                        pass
+                fname = Path(fp.replace("\\", "/")).name if fp else "(no file)"
+                header = QLabel(
+                    f"<b>Evidence {idx}:</b> {html.escape(fname)}{html.escape(action_label)}  |  "
+                    f"Status: {html.escape(status or '—')}  |  "
+                    f"Submitted by: {html.escape(submitted_by or '—')}  {html.escape((submitted_at or '')[:19])}"
+                )
+                header.setTextFormat(Qt.TextFormat.RichText)
+                header.setWordWrap(True)
+                gallery_lay.addWidget(header)
+
+                resolved = resolve_attachment_path(fp) if fp else None
+                img_stream = attachment_image_stream(resolved) if resolved else None
+                if img_stream:
+                    try:
+                        pix = QPixmap()
+                        pix.loadFromData(img_stream.read())
+                        if not pix.isNull():
+                            img_lbl = QLabel()
+                            img_lbl.setPixmap(pix.scaled(420, 320, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+                            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                            img_lbl.setStyleSheet("background:white;border:1px solid #64748b;padding:4px;")
+                            gallery_lay.addWidget(img_lbl)
                         else:
-                            db.conn.execute(
-                                """UPDATE observations SET status='Close-out Evidence Returned',
-                                   verification='Close-out evidence returned for correction', closeout_comments=? WHERE id=?""",
-                                (comments_txt, int(observation_id)),
-                            )
-                    QMessageBox.information(dialog, "Review Saved", f"Observation marked {decision}.")
-                    dialog.accept()
-                    if on_done: on_done()
-                except Exception as exc:
-                    logging.exception("Observation detail review failed")
-                    QMessageBox.critical(dialog, "Review Error", str(exc))
-            approve_btn = QPushButton("Approve"); reject_btn = QPushButton("Reject / Return")
+                            gallery_lay.addWidget(QLabel(f"Image could not be rendered: {fname}"))
+                    except Exception:
+                        gallery_lay.addWidget(QLabel(f"Image preview unavailable: {fname}"))
+                else:
+                    open_btn = QPushButton(f"Open file: {fname}")
+                    def _open(path=str(resolved) if resolved else fp):
+                        if path and Path(path).is_file():
+                            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+                        else:
+                            QMessageBox.warning(dialog, "File Missing", "The evidence file could not be found on disk.")
+                    open_btn.clicked.connect(_open)
+                    gallery_lay.addWidget(open_btn)
+
+                comment_edit = None
+                if mode == "review" and status.casefold() in ("pending review", "submitted for review", ""):
+                    comment_edit = QLineEdit()
+                    comment_edit.setPlaceholderText(
+                        f"If rejecting this evidence, explain why (Evidence {idx}: {fname})"
+                    )
+                    gallery_lay.addWidget(comment_edit)
+                per_file_comments.append((er, comment_edit))
+                gallery_lay.addWidget(QLabel(""))  # spacer
+
+        gallery_lay.addStretch(1)
+        scroll.setWidget(gallery)
+        scroll.setMinimumHeight(280)
+        ev_lay.addWidget(scroll)
+        root.addWidget(ev_box, 1)
+
+        reviewer_name = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
+        reviewer_name.setPlaceholderText("Reviewed / verified by (name / role)")
+        overall_comment = QTextEdit()
+        overall_comment.setPlaceholderText(
+            "Overall review comments. Required when rejecting. "
+            "Per-file rejection reasons above are also saved so the submitter knows which evidence failed."
+        )
+        overall_comment.setMaximumHeight(70)
+        if mode == "review":
+            root.addWidget(QLabel("Reviewer"))
+            root.addWidget(reviewer_name)
+            root.addWidget(QLabel("Overall comments"))
+            root.addWidget(overall_comment)
+
+        btn_row = QHBoxLayout()
+
+        def _decide(approved):
+            if int(obs["capa_required"] or 0):
+                return QMessageBox.information(
+                    dialog, "CAPA Approval Required",
+                    "This observation is CAPA-linked. Approve or reject it once in CAPA Tracking → Approve / Reject CAPA.",
+                )
+            name = reviewer_name.text().strip()
+            if not name:
+                return QMessageBox.warning(dialog, "Reviewer Required", "Enter the reviewer name.")
+            overall = overall_comment.toPlainText().strip()
+
+            pending_items = []
+            for er, cedit in per_file_comments:
+                try:
+                    st = safe(er["review_status"]).casefold()
+                except Exception:
+                    st = ""
+                if st in ("pending review", "submitted for review", ""):
+                    pending_items.append((er, cedit))
+
+            if not pending_items:
+                return QMessageBox.warning(dialog, "No Pending Submission", "There is no submitted evidence awaiting review for this observation.")
+
+            # Collect per-file rejection comments
+            file_notes = []
+            any_reject_comment = False
+            for er, cedit in pending_items:
+                fname = Path(safe(er["file_path"]).replace("\\", "/")).name
+                batch = safe(er["batch_id"])
+                action_bit = ""
+                if batch.startswith("OBS-ACT-"):
+                    try:
+                        action_bit = f" (Action {batch.rsplit('-', 1)[-1]})"
+                    except Exception:
+                        pass
+                note = cedit.text().strip() if cedit else ""
+                if note:
+                    any_reject_comment = True
+                    file_notes.append(f"{fname}{action_bit}: {note}")
+                else:
+                    file_notes.append(f"{fname}{action_bit}")
+
+            if not approved:
+                if not overall and not any_reject_comment:
+                    return QMessageBox.warning(
+                        dialog, "Comment Required",
+                        "Enter a rejection reason (overall comment and/or per-evidence comments) so the submitter knows which evidence to correct.",
+                    )
+
+            decision = "Approved" if approved else "Rejected"
+            now = datetime.now().isoformat(timespec="seconds")
+            if approved:
+                review_note = (
+                    f"Close-out evidence APPROVED by {name} on {now}. "
+                    f"All {len(pending_items)} evidence file(s) accepted together. {overall}"
+                ).strip()
+            else:
+                detail = "; ".join(file_notes)
+                review_note = (
+                    f"Close-out evidence REJECTED by {name} on {now}. "
+                    f"Entire observation close-out returned — resubmit ALL evidence together. "
+                    f"Evidence details: {detail}. Overall: {overall}"
+                ).strip()
+
+            try:
+                with db.conn:
+                    for er, _cedit in pending_items:
+                        eid = er["id"] if "id" in er.keys() else None
+                        if eid is None:
+                            continue
+                        # Attach specific per-file note into the row comment when rejecting
+                        row_comment = review_note
+                        if not approved and _cedit and _cedit.text().strip():
+                            fname = Path(safe(er["file_path"]).replace("\\", "/")).name
+                            row_comment = f"{review_note} | This file ({fname}): {_cedit.text().strip()}"
+                        db.conn.execute(
+                            """UPDATE observation_closeout_evidence
+                               SET review_status=?, reviewed_by=?, reviewed_at=?, review_comments=?
+                               WHERE id=?""",
+                            (decision, name, now, row_comment, int(eid)),
+                        )
+                    old = safe(obs["closeout_comments"])
+                    comments_txt = (old + "\n" + review_note).strip() if old else review_note
+                    if approved:
+                        db.conn.execute(
+                            """UPDATE observations SET status='Closed', closeout_date=?, closed_by=?, verified_by=?,
+                               verification_date=?, verification='Close-out Approved', closeout_comments=? WHERE id=?""",
+                            (now[:10], name, name, now[:10], comments_txt, int(observation_id)),
+                        )
+                    else:
+                        db.conn.execute(
+                            """UPDATE observations SET status='Close-out Evidence Returned',
+                               verification='Close-out evidence returned for correction — resubmit all evidence together',
+                               closeout_comments=? WHERE id=?""",
+                            (comments_txt, int(observation_id)),
+                        )
+                QMessageBox.information(
+                    dialog, "Review Saved",
+                    f"Observation marked {decision}.\n"
+                    + ("All evidence accepted." if approved else "All evidence returned. Submitter must resubmit every file together."),
+                )
+                dialog.accept()
+                if on_done:
+                    on_done()
+            except Exception as exc:
+                logging.exception("Observation detail review failed")
+                QMessageBox.critical(dialog, "Review Error", str(exc))
+
+        if mode == "review":
+            approve_btn = QPushButton("Approve All Evidence")
+            reject_btn = QPushButton("Reject / Return (All Evidence)")
             approve_btn.setStyleSheet("background:#0f4c81;color:white;font-weight:800;")
             reject_btn.setStyleSheet("background:#7f1d1d;color:white;font-weight:800;")
-            approve_btn.clicked.connect(lambda: _decide(True)); reject_btn.clicked.connect(lambda: _decide(False))
-            btn_row.addWidget(approve_btn); btn_row.addWidget(reject_btn)
-        close_btn = QPushButton("Close"); close_btn.clicked.connect(dialog.reject)
-        btn_row.addStretch(1); btn_row.addWidget(close_btn); root.addLayout(btn_row)
+            approve_btn.clicked.connect(lambda: _decide(True))
+            reject_btn.clicked.connect(lambda: _decide(False))
+            btn_row.addWidget(approve_btn)
+            btn_row.addWidget(reject_btn)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.reject)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
         dialog.exec()
+
 
     def observations(self):
         w, layout = self.page("HSE Inspection Register")
@@ -7458,10 +7606,10 @@ class MainWindow(QMainWindow):
             "CAPA-linked items are approved once in CAPA Tracking and synchronized automatically."
         )
         approval_intro.setWordWrap(True); approval_intro.setStyleSheet("color:#061018;padding:6px;font-weight:800;"); approval_layout.addWidget(approval_intro)
-        approval_section_lbl = QLabel("Submitted observations awaiting / completed review — double-click a row for detailed review with evidence preview")
+        approval_section_lbl = QLabel("One row per observation (all multi-action evidence combined). Double-click to review every attached image. Approve once, or reject with per-evidence comments — submitter must then resubmit all evidence together.")
         approval_section_lbl.setStyleSheet("color:#061018;font-weight:800;")
         approval_layout.addWidget(approval_section_lbl)
-        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","Observation Detail","Corrective Action(s)","CAPA","Evidence File","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","CAPA Progress"]
+        evidence_table=QTableWidget(); ev_headers=["ID","Submission Ref.","Observation No.","Observation Detail","Corrective Action(s)","CAPA","Evidence Files","Submitted By","Submitted At","Review Status","Reviewed By","Observation Status","Evidence Progress"]
         evidence_table.setColumnCount(len(ev_headers)); evidence_table.setHorizontalHeaderLabels(ev_headers); evidence_table.setColumnHidden(0,True)
         evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows); evidence_table.setSelectionMode(QAbstractItemView.SingleSelection); evidence_table.setAlternatingRowColors(True)
         evidence_table.setWordWrap(True)
@@ -8027,23 +8175,112 @@ class MainWindow(QMainWindow):
                     open_table.setItem(i,j,_cell)
 
         def refresh_closeout_evidence():
-            """Show every submitted observation close-out, including CAPA submissions awaiting CAPA approval."""
+            """One approval row per observation (all multi-action evidence combined).
+
+            Non-CAPA submissions are grouped by observation_id so the approver
+            reviews the observation once. Evidence percentage is shown. CAPA-
+            linked rows remain one row per CAPA (unchanged behaviour).
+            """
             display_rows = []
+
+            # --- Non-CAPA: group every evidence file under a single observation row ---
             simple_rows = db.fetchall("""SELECT ce.*,o.number,o.capa_number,o.status AS observation_status,o.id AS obs_id,
                        o.observation AS obs_detail,o.corrective_action,o.corrective_actions_json
                 FROM observation_closeout_evidence ce JOIN observations o ON o.id=ce.observation_id
                 WHERE COALESCE(o.capa_required,0)=0
                 AND lower(COALESCE(ce.review_status,'')) IN ('pending review','submitted for review','approved','rejected','returned')
                 ORDER BY ce.id DESC""")
+            grouped = {}
             for r in simple_rows:
-                display_rows.append({"id":r["id"],"batch":safe(r["batch_id"]),"number":safe(r["number"]),
-                    "obs_id":int(r["obs_id"]),
-                    "obs_detail":safe(r["obs_detail"]),
-                    "corrective":format_corrective_actions_display(r) or safe(r["corrective_action"]),
-                    "capa":safe(r["capa_number"]),"file":safe(r["file_path"]),"submitted_by":safe(r["submitted_by"]),
-                    "submitted_at":safe(r["submitted_at"]),"review":safe(r["review_status"]),"reviewed_by":safe(r["reviewed_by"]),
-                    "obs_status":safe(r["observation_status"]),"capa_row":None,"comments":safe(r["review_comments"])} )
+                oid = int(r["obs_id"])
+                g = grouped.get(oid)
+                if g is None:
+                    g = {
+                        "id": f"OBS-{oid}",
+                        "batch": f"OBS-{safe(r['number'])}-CLOSEOUT",
+                        "number": safe(r["number"]),
+                        "obs_id": oid,
+                        "obs_detail": safe(r["obs_detail"]),
+                        "corrective": format_corrective_actions_display(r) or safe(r["corrective_action"]),
+                        "capa": safe(r["capa_number"]),
+                        "files": [],
+                        "file_ids": [],
+                        "submitted_by": safe(r["submitted_by"]),
+                        "submitted_at": safe(r["submitted_at"]),
+                        "reviews": [],
+                        "reviewed_by": safe(r["reviewed_by"]),
+                        "obs_status": safe(r["observation_status"]),
+                        "capa_row": None,
+                        "comments": [],
+                    }
+                    grouped[oid] = g
+                fp = safe(r["file_path"])
+                if fp and fp not in g["files"]:
+                    g["files"].append(fp)
+                    g["file_ids"].append(int(r["id"]))
+                status = safe(r["review_status"])
+                if status:
+                    g["reviews"].append(status)
+                if safe(r["submitted_at"]) > g["submitted_at"]:
+                    g["submitted_at"] = safe(r["submitted_at"])
+                    g["submitted_by"] = safe(r["submitted_by"])
+                if safe(r["reviewed_by"]):
+                    g["reviewed_by"] = safe(r["reviewed_by"])
+                cmt = safe(r["review_comments"])
+                if cmt and cmt not in g["comments"]:
+                    g["comments"].append(cmt)
 
+            for oid, g in grouped.items():
+                statuses = [s.casefold() for s in g["reviews"] if s]
+                if any(s in ("rejected", "returned") for s in statuses):
+                    overall = "Rejected"
+                elif statuses and all(s == "approved" for s in statuses):
+                    overall = "Approved"
+                elif any(s in ("pending review", "submitted for review") for s in statuses):
+                    overall = "Pending Review"
+                else:
+                    overall = g["reviews"][0] if g["reviews"] else "Pending Review"
+                total_files = len(g["files"])
+                # Progress: how many files are currently approved vs total submitted for this observation
+                approved_n = sum(1 for s in statuses if s == "approved")
+                pending_n = sum(1 for s in statuses if s in ("pending review", "submitted for review"))
+                if total_files:
+                    pct = int(round(100 * approved_n / total_files)) if overall == "Approved" else (
+                        int(round(100 * (total_files - pending_n) / total_files)) if pending_n < total_files else 0
+                    )
+                else:
+                    pct = 0
+                # For pending review, show evidence completeness as submitted count
+                if overall == "Pending Review":
+                    progress = f"{total_files} evidence file(s) — review once"
+                elif overall == "Approved":
+                    progress = f"100% approved ({total_files} file(s))"
+                elif overall == "Rejected":
+                    progress = f"Rejected — resubmit all evidence together"
+                else:
+                    progress = f"{pct}%"
+                file_names = "; ".join(Path(fp.replace("\\", "/")).name for fp in g["files"]) or "No files"
+                display_rows.append({
+                    "id": g["id"],
+                    "batch": g["batch"],
+                    "number": g["number"],
+                    "obs_id": g["obs_id"],
+                    "obs_detail": g["obs_detail"],
+                    "corrective": g["corrective"],
+                    "capa": g["capa"],
+                    "file": file_names,
+                    "submitted_by": g["submitted_by"],
+                    "submitted_at": g["submitted_at"],
+                    "review": overall,
+                    "reviewed_by": g["reviewed_by"],
+                    "obs_status": g["obs_status"],
+                    "capa_row": None,
+                    "comments": " | ".join(g["comments"]),
+                    "progress": progress,
+                    "file_count": total_files,
+                })
+
+            # --- CAPA-linked: one row per CAPA (unchanged) ---
             capa_rows = db.fetchall("""SELECT c.*,o.id AS obs_id,o.number AS obs_number,o.status AS observation_status,
                        o.observation AS obs_detail,o.corrective_action,o.corrective_actions_json
                 FROM capa c JOIN observations o ON (o.id=c.linked_observation_id OR (c.linked_observation_id IS NULL AND o.number=c.reference_number))
@@ -8054,44 +8291,62 @@ class MainWindow(QMainWindow):
             for c in capa_rows:
                 file_rows = db.fetchall("SELECT file_path FROM capa_attachments WHERE capa_id=? ORDER BY id", (c["id"],))
                 names = [Path(safe(x["file_path"]).replace("\\", "/")).name for x in file_rows if safe(x["file_path"])]
-                display_rows.append({"id":f"CAPA-{c['id']}","batch":safe(c["number"]),"number":safe(c["obs_number"]),
-                    "obs_id":int(c["obs_id"]),
-                    "obs_detail":safe(c["obs_detail"]),
-                    "corrective":format_corrective_actions_display(c) or safe(c["corrective_action"]),
-                    "capa":safe(c["number"]),"file":("CAPA action evidence: " + "; ".join(names)) if names else "CAPA action evidence attached",
-                    "submitted_by":safe(c["capa_closeout_submitted_by"]),"submitted_at":safe(c["capa_closeout_submitted_at"]),
-                    "review":safe(c["approval_status"]) or safe(c["capa_closeout_status"]) or "Pending Approval",
-                    "reviewed_by":safe(c["approved_by"]),"obs_status":safe(c["observation_status"]),"capa_row":c,"comments":safe(c["capa_closeout_comments"])} )
+                _done, _total, _pct, _action_status = capa_actions_completion(
+                    c["actions_json"] if "actions_json" in c.keys() else c["corrective_action"]
+                )
+                display_rows.append({
+                    "id": f"CAPA-{c['id']}",
+                    "batch": safe(c["number"]),
+                    "number": safe(c["obs_number"]),
+                    "obs_id": int(c["obs_id"]),
+                    "obs_detail": safe(c["obs_detail"]),
+                    "corrective": format_corrective_actions_display(c) or safe(c["corrective_action"]),
+                    "capa": safe(c["number"]),
+                    "file": ("CAPA action evidence: " + "; ".join(names)) if names else "CAPA action evidence attached",
+                    "submitted_by": safe(c["capa_closeout_submitted_by"]),
+                    "submitted_at": safe(c["capa_closeout_submitted_at"]),
+                    "review": safe(c["approval_status"]) or safe(c["capa_closeout_status"]) or "Pending Approval",
+                    "reviewed_by": safe(c["approved_by"]),
+                    "obs_status": safe(c["observation_status"]),
+                    "capa_row": c,
+                    "comments": safe(c["capa_closeout_comments"]),
+                    "progress": f"{_pct}% complete / {100-_pct}% open",
+                    "file_count": len(names),
+                })
 
             evidence_table.setRowCount(len(display_rows))
-            for i,r in enumerate(display_rows):
-                capa_row=r["capa_row"]
+            for i, r in enumerate(display_rows):
+                capa_row = r["capa_row"]
                 if capa_row:
-                    _done,_total,_pct,_action_status=capa_actions_completion(capa_row["actions_json"] if "actions_json" in capa_row.keys() else capa_row["corrective_action"])
-                    progress=f"{_pct}% complete / {100-_pct}% open"
-                    capa_label="Yes — CAPA approval"
+                    capa_label = "Yes — CAPA approval"
+                    progress = r.get("progress") or "—"
                 else:
-                    capa_label="No" if not r["capa"] else "Yes"
-                    progress="—"
-                vals=[r["id"],r["batch"],r["number"],r.get("obs_detail",""),r.get("corrective",""),capa_label,r["file"],r["submitted_by"],r["submitted_at"],r["review"],r["reviewed_by"],r["obs_status"],progress]
-                for j,val in enumerate(vals):
-                    cell=QTableWidgetItem(safe(val))
-                    if j==0:
+                    capa_label = "No" if not r["capa"] else "Yes"
+                    progress = r.get("progress") or "—"
+                vals = [
+                    r["id"], r["batch"], r["number"], r.get("obs_detail", ""), r.get("corrective", ""),
+                    capa_label, r["file"], r["submitted_by"], r["submitted_at"], r["review"],
+                    r["reviewed_by"], r["obs_status"], progress,
+                ]
+                for j, val in enumerate(vals):
+                    cell = QTableWidgetItem(safe(val))
+                    if j == 0:
                         try:
                             cell.setData(Qt.ItemDataRole.UserRole, int(r.get("obs_id") or 0) or None)
                         except Exception:
                             pass
-                    if j==9:
+                    if j == 9:
                         cell.setToolTip(f"Review: {r['review']}\nReviewed by: {r['reviewed_by']}\nComments: {r['comments']}")
-                    if j in (3,4,6):
+                    if j in (3, 4, 6):
                         cell.setToolTip(safe(val))
-                    evidence_table.setItem(i,j,cell)
+                    evidence_table.setItem(i, j, cell)
                 if "pending" in r["review"].casefold() or "awaiting" in r["review"].casefold():
-                    evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkBlue)
-                elif r["review"].casefold() in ("rejected","returned"):
-                    evidence_table.item(i,7).setForeground(Qt.GlobalColor.red)
-                elif r["review"].casefold()=="approved":
-                    evidence_table.item(i,7).setForeground(Qt.GlobalColor.darkGreen)
+                    evidence_table.item(i, 9).setForeground(Qt.GlobalColor.darkBlue)
+                elif r["review"].casefold() in ("rejected", "returned"):
+                    evidence_table.item(i, 9).setForeground(Qt.GlobalColor.red)
+                elif r["review"].casefold() == "approved":
+                    evidence_table.item(i, 9).setForeground(Qt.GlobalColor.darkGreen)
+
 
         def upload_closeout_evidence():
             indexes=open_table.selectionModel().selectedRows(0) if open_table.selectionModel() else []
@@ -8207,83 +8462,145 @@ class MainWindow(QMainWindow):
             return evidence_table.item(row,1).text()
 
         def review_closeout(approved):
-            batch=selected_evidence_batch()
-            if not batch: return
-            _selected_review_row=evidence_table.currentRow()
-            _selected_capa_cell=evidence_table.item(_selected_review_row,3) if _selected_review_row >= 0 else None
-            if _selected_capa_cell and safe(_selected_capa_cell.text()).startswith("Yes — CAPA approval"):
-                return QMessageBox.information(self,"CAPA Approval Required","This submitted observation is CAPA-linked. It is now visible here for tracking, but its approval must be completed once in CAPA Tracking → Approve / Reject CAPA. The Observation Register will synchronize automatically.")
-            name=reviewer.text().strip()
-            if not name: return QMessageBox.warning(self,"Reviewer Required","Enter the reviewer / verifier name and role.")
-            comment=reviewer_comments.text().strip()
-            if not approved and not comment: return QMessageBox.warning(self,"Review Comment Required","Enter the reason for rejecting / returning the evidence.")
-            rows=db.fetchall("SELECT DISTINCT observation_id FROM observation_closeout_evidence WHERE batch_id=?",(batch,))
-            if not rows: return QMessageBox.warning(self,"Review","The selected submission could not be found.")
-            _linked_review = db.fetchone("SELECT COALESCE(capa_required,0) AS capa_required FROM observations WHERE id=?", (rows[0]["observation_id"],))
+            """Approve or reject the whole observation close-out in one step.
+
+            Multi-action evidence is reviewed together: one decision applies to
+            every pending evidence file for that observation. Rejecting any
+            evidence rejects the observation; the submitter must resubmit all
+            evidence together.
+            """
+            row = evidence_table.currentRow()
+            if row < 0:
+                return QMessageBox.warning(self, "Review", "Select a close-out evidence submission first.")
+            id_item = evidence_table.item(row, 0)
+            batch_item = evidence_table.item(row, 1)
+            capa_cell = evidence_table.item(row, 5)
+            if capa_cell and safe(capa_cell.text()).startswith("Yes — CAPA approval"):
+                return QMessageBox.information(
+                    self, "CAPA Approval Required",
+                    "This submitted observation is CAPA-linked. It is visible here for tracking, "
+                    "but its approval must be completed once in CAPA Tracking → Approve / Reject CAPA. "
+                    "The Observation Register will synchronize automatically.",
+                )
+            name = reviewer.text().strip()
+            if not name:
+                return QMessageBox.warning(self, "Reviewer Required", "Enter the reviewer / verifier name and role.")
+            comment = reviewer_comments.text().strip()
+            if not approved and not comment:
+                return QMessageBox.warning(self, "Review Comment Required", "Enter the reason for rejecting / returning the evidence.")
+
+            # Resolve observation id from the grouped row
+            oid = None
+            if id_item and id_item.data(Qt.ItemDataRole.UserRole) is not None:
+                try:
+                    oid = int(id_item.data(Qt.ItemDataRole.UserRole))
+                except Exception:
+                    oid = None
+            if oid is None and evidence_table.item(row, 2):
+                hit = db.fetchone("SELECT id FROM observations WHERE number=?", (evidence_table.item(row, 2).text(),))
+                oid = int(hit["id"]) if hit else None
+            if oid is None:
+                # Legacy: fall back to batch_id lookup
+                batch = batch_item.text() if batch_item else ""
+                rows = db.fetchall("SELECT DISTINCT observation_id FROM observation_closeout_evidence WHERE batch_id=?", (batch,))
+                if not rows:
+                    return QMessageBox.warning(self, "Review", "The selected submission could not be found.")
+                oid = int(rows[0]["observation_id"])
+
+            _linked_review = db.fetchone("SELECT COALESCE(capa_required,0) AS capa_required FROM observations WHERE id=?", (oid,))
             if _linked_review and int(_linked_review["capa_required"] or 0):
-                return QMessageBox.information(self,"Single CAPA Approval","This observation is CAPA-linked. Review and approve it once in CAPA Tracking using Approve / Reject CAPA. The Observation Register will update automatically.")
-            state_row=db.fetchone("SELECT review_status FROM observation_closeout_evidence WHERE batch_id=? ORDER BY id DESC LIMIT 1",(batch,))
-            if not state_row or safe(state_row["review_status"]).casefold() not in ("pending review","submitted for review"):
-                return QMessageBox.warning(self,"Not Submitted","Only evidence explicitly submitted for review can be approved or returned.")
-            submitters=db.fetchall("SELECT DISTINCT submitted_by FROM observation_closeout_evidence WHERE batch_id=?",(batch,))
-            if any(safe(r["submitted_by"]).strip().casefold()==name.casefold() for r in submitters):
-                return QMessageBox.warning(self,"Independent Review Required","The reviewer must be a different person from the evidence submitter.")
-            decision="Approved" if approved else "Rejected"; now=datetime.now().isoformat(timespec="seconds")
+                return QMessageBox.information(
+                    self, "Single CAPA Approval",
+                    "This observation is CAPA-linked. Review and approve it once in CAPA Tracking using Approve / Reject CAPA. "
+                    "The Observation Register will update automatically.",
+                )
+
+            pending = db.fetchall(
+                """SELECT * FROM observation_closeout_evidence
+                   WHERE observation_id=?
+                     AND lower(trim(COALESCE(review_status,''))) IN ('pending review','submitted for review')
+                   ORDER BY id""",
+                (oid,),
+            )
+            if not pending:
+                return QMessageBox.warning(self, "Not Submitted", "Only evidence explicitly submitted for review can be approved or returned.")
+
+            submitters = {safe(r["submitted_by"]).strip().casefold() for r in pending if safe(r["submitted_by"]).strip()}
+            if name.casefold() in submitters:
+                return QMessageBox.warning(
+                    self, "Independent Review Required",
+                    "The reviewer must be different from the person who submitted the evidence.",
+                )
+
+            decision = "Approved" if approved else "Rejected"
+            now = datetime.now().isoformat(timespec="seconds")
+            obs = db.fetchone("SELECT * FROM observations WHERE id=?", (oid,))
+            if not obs:
+                return QMessageBox.warning(self, "Review", "Observation record not found.")
+
+            # Build rejection note that lists every evidence file (so submitter knows the full set must be resubmitted)
+            file_list = []
+            for r in pending:
+                fname = Path(safe(r["file_path"]).replace("\\", "/")).name
+                batch = safe(r["batch_id"])
+                label = f"{fname}"
+                if batch.startswith("OBS-ACT-"):
+                    try:
+                        action_no = batch.rsplit("-", 1)[-1]
+                        label = f"Action {action_no}: {fname}"
+                    except Exception:
+                        pass
+                file_list.append(label)
+            if approved:
+                review_note = (
+                    f"Close-out evidence APPROVED by {name} on {now}. "
+                    f"All {len(file_list)} evidence file(s) accepted together. {comment}"
+                ).strip()
+            else:
+                review_note = (
+                    f"Close-out evidence REJECTED by {name} on {now}. "
+                    f"Entire observation close-out returned — resubmit ALL evidence together. "
+                    f"Files in this submission: {'; '.join(file_list)}. "
+                    f"Reason: {comment}"
+                ).strip()
+
             try:
                 with db.conn:
-                    db.conn.execute("UPDATE observation_closeout_evidence SET review_status=?,reviewed_by=?,reviewed_at=?,review_comments=? WHERE batch_id=?",(decision,name,now,comment,batch))
-                    for item in rows:
-                        oid=int(item["observation_id"])
-                        obs=db.conn.execute("SELECT * FROM observations WHERE id=?",(oid,)).fetchone()
-                        if not obs: continue
-                        old=safe(obs["closeout_comments"])
-                        note=f"Close-out evidence {decision.lower()} by {name} on {now}. {comment}".strip()
-                        comments=(old+"\n"+note).strip() if old else note
-                        if not approved:
-                            db.conn.execute("UPDATE observations SET status='Close-out Evidence Returned',verification='Close-out evidence returned for correction',closeout_comments=? WHERE id=?",(comments,oid))
-                            if int(obs["capa_required"] or 0):
-                                capa_no = ensure_observation_capa_record(obs)
-                                linked_capa = db.conn.execute("SELECT * FROM capa WHERE number=?", (capa_no,)).fetchone() if capa_no else None
-                                if linked_capa:
-                                    db.conn.execute("""UPDATE capa SET observation_closeout_status=?,
-                                        capa_closeout_status='Returned',capa_closeout_approved_by=?,
-                                        capa_closeout_approved_at=?,capa_closeout_comments=?,status='Rework Required' WHERE id=?""",
-                                        (f"Returned by {name} on {now[:10]}",name,now,comment,linked_capa["id"]))
-                                    sync_observation_from_capa(db.conn.execute("SELECT * FROM capa WHERE id=?", (linked_capa["id"],)).fetchone())
-                            continue
-                        if not int(obs["capa_required"] or 0):
-                            db.conn.execute("UPDATE observations SET status='Closed',closeout_date=?,closed_by=?,verified_by=?,verification_date=?,verification='Close-out Approved',closeout_comments=? WHERE id=?",(now[:10],name,name,now[:10],comments,oid))
-                            continue
-                        capa_no=ensure_observation_capa_record(obs)
-                        linked_capa=db.conn.execute("SELECT * FROM capa WHERE number=?",(capa_no,)).fetchone() if capa_no else None
-                        if linked_capa:
-                            _done_close,_total_close,_pct_close,_action_close=capa_actions_completion(
-                                linked_capa["actions_json"] if "actions_json" in linked_capa.keys() else linked_capa["corrective_action"])
-                            if _total_close == 0 or _pct_close < 100:
-                                raise ValueError(f"CAPA close-out cannot be approved until all corrective actions have evidence. Current completion: {_pct_close}% ({_done_close}/{_total_close}).")
-                        if not linked_capa:
-                            db.conn.execute("UPDATE observations SET status='CAPA Link Missing',verified_by=?,verification_date=?,verification='Close-out evidence approved but linked CAPA record was not found',closeout_comments=? WHERE id=?",(name,now[:10],comments,oid))
-                            continue
-                        db.conn.execute("""UPDATE capa SET observation_closeout_status=?,
-                            capa_closeout_status='Approved',capa_closeout_approved_by=?,
-                            capa_closeout_approved_at=?,capa_closeout_comments=? WHERE id=?""",
-                            (f"Approved by {name} on {now[:10]}",name,now,comment,linked_capa["id"]))
-                        db.conn.execute("""UPDATE observation_closeout_evidence SET review_status='Approved',
-                            reviewed_by=?,reviewed_at=?,review_comments=? WHERE observation_id=?
-                            AND lower(COALESCE(review_status,'')) IN ('pending review','submitted for review')""",
-                            (name,now,comment,oid))
-                        # Store verifier details before shared sync recalculates status/progress.
-                        db.conn.execute("UPDATE observations SET verified_by=?,verification_date=?,closeout_comments=? WHERE id=?",(name,now[:10],comments,oid))
-                        refreshed_capa=db.conn.execute("SELECT * FROM capa WHERE id=?",(linked_capa["id"],)).fetchone()
-                        sync_observation_from_capa(refreshed_capa)
-                QMessageBox.information(self,"Review Saved",f"Submission {batch} marked {decision}. Sections A and B, the Observation Register and the linked CAPA Register have been synchronized.")
-                refresh_closeout_open(); refresh_closeout_evidence(); load()
-                for evidence_row in range(evidence_table.rowCount()):
-                    if evidence_table.item(evidence_row,1) and evidence_table.item(evidence_row,1).text()==batch:
-                        evidence_table.selectRow(evidence_row)
-                        break
+                    # One decision for every pending evidence row on this observation
+                    for r in pending:
+                        db.conn.execute(
+                            """UPDATE observation_closeout_evidence
+                               SET review_status=?, reviewed_by=?, reviewed_at=?, review_comments=?
+                               WHERE id=?""",
+                            (decision, name, now, review_note, int(r["id"])),
+                        )
+                    old = safe(obs["closeout_comments"])
+                    comments_txt = (old + "\n" + review_note).strip() if old else review_note
+                    if approved:
+                        db.conn.execute(
+                            """UPDATE observations SET status='Closed', closeout_date=?, closed_by=?, verified_by=?,
+                               verification_date=?, verification='Close-out Approved', closeout_comments=? WHERE id=?""",
+                            (now[:10], name, name, now[:10], comments_txt, oid),
+                        )
+                    else:
+                        db.conn.execute(
+                            """UPDATE observations SET status='Close-out Evidence Returned',
+                               verification='Close-out evidence returned for correction — resubmit all evidence together',
+                               closeout_comments=? WHERE id=?""",
+                            (comments_txt, oid),
+                        )
+                QMessageBox.information(
+                    self, "Review Saved",
+                    f"Observation {safe(obs['number'])} marked {decision}.\n"
+                    f"{'All evidence accepted.' if approved else 'All evidence returned — submitter must resubmit every file together.'}",
+                )
+                refresh_closeout_open()
+                refresh_closeout_evidence()
+                load()
             except Exception as e:
-                logging.exception("Observation close-out review failed"); QMessageBox.critical(self,"Review Error",str(e))
+                logging.exception("Observation close-out review failed")
+                QMessageBox.critical(self, "Review Error", str(e))
+
 
         def refresh_both_closeout_sections():
             refresh_closeout_open()
