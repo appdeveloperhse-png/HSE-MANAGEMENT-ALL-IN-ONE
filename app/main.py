@@ -4604,6 +4604,7 @@ class MainWindow(QMainWindow):
             "Training",
             "Manpower Details",
             "Chemical & SDS Register",
+            "Risk Assessment",
             "Reports",
             "Master Data",
             "Settings"
@@ -4678,10 +4679,13 @@ class MainWindow(QMainWindow):
                 w, layout = self.page("Chemical Register & SDS Management")
                 layout.addWidget(ChemicalSDSModule(self, db), 1)
             elif row == 9:
-                self.reports()
+                w, layout = self.page("Risk Assessment / JSA / JHA")
+                layout.addWidget(RiskAssessmentModule(self, db), 1)
             elif row == 10:
-                self.master_data()
+                self.reports()
             elif row == 11:
+                self.master_data()
+            elif row == 12:
                 self.settings_page()
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
@@ -19920,6 +19924,1134 @@ class ChemicalSDSModule(QWidget):
             self.refresh_sds_sections()
         if hasattr(self, "coshh_table"):
             self.refresh_coshh()
+
+
+# ============================================================
+# RISK ASSESSMENT MODULE  (additive – does not alter other modules)
+# Types: Risk Assessment | JSA | JHA | Dynamic Risk Assessment
+# Library: Construction + Oil & Gas activities with auto-fill
+# ============================================================
+
+RA_TYPES = [
+    "Risk Assessment",
+    "Job Safety Analysis (JSA)",
+    "Job Hazard Analysis (JHA)",
+    "Dynamic Risk Assessment",
+]
+
+RA_SECTORS = [
+    "Construction",
+    "Oil & Gas",
+    "Construction – Oil & Gas Interface",
+]
+
+# Likelihood / Severity labels (5x5)
+RA_LIKELIHOOD = [
+    (1, "Rare"),
+    (2, "Unlikely"),
+    (3, "Possible"),
+    (4, "Likely"),
+    (5, "Almost Certain"),
+]
+RA_SEVERITY = [
+    (1, "Insignificant"),
+    (2, "Minor"),
+    (3, "Moderate"),
+    (4, "Major"),
+    (5, "Catastrophic"),
+]
+
+# Risk bands: score = L x S
+def ra_band(score):
+    try:
+        s = int(score)
+    except Exception:
+        s = 0
+    if s <= 4:
+        return "Low"
+    if s <= 9:
+        return "Medium"
+    if s <= 15:
+        return "High"
+    return "Extreme"
+
+
+def ra_band_color(band):
+    return {
+        "Low": "#C6E0B4",
+        "Medium": "#FFE699",
+        "High": "#F8CBAD",
+        "Extreme": "#FF6B6B",
+    }.get(band, "#FFFFFF")
+
+
+def ra_score_color(score):
+    return ra_band_color(ra_band(score))
+
+
+# Built-in activity library (industry-standard style content for Construction / Oil & Gas)
+# Each activity supports both "Risk Assessment" rows and "JSA/JHA" step breakdown.
+RA_LIBRARY = {
+    "Construction": {
+        "Working at Height – Scaffold / Edge Work": {
+            "who": "Scaffolders, trades working at height, workers below, supervisors, visitors",
+            "hazards": "Fall from scaffold/platform/edge; falling tools or materials; scaffold collapse or instability; contact with overhead power lines",
+            "existing_controls": "Scaffold designed and tagged by competent person; daily pre-use inspection; full body harness with twin lanyard where edge protection is open; tool lanyards; exclusion zone below; minimum clearance from power lines",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Permit to work for height activities; rescue plan briefed; weather stop-work criteria; toolbox talk before each shift",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, full body harness, safety glasses, gloves",
+            "steps": [
+                ("Plan work and inspect scaffold / edge protection", "Incomplete design, damaged components, unprotected edges", "Confirm scaffold tag in date; inspect boards, ties, guardrails; establish exclusion zone"),
+                ("Access scaffold / work platform", "Fall during access; unstable ladder", "Use designated access only; three points of contact; no climbing on braces"),
+                ("Position materials and tools", "Dropped objects; overload of platform", "Use hoist/lift where practicable; tool lanyards; respect SWL markings"),
+                ("Perform task at height", "Fall from edge; contact with services", "Guardrails/toeboards in place or harness anchored; maintain 3 m clearance from live lines"),
+                ("Dismantle / demobilise", "Collapse during dismantling; falling parts", "Follow sequence in design method; exclusive zone; competent supervision"),
+            ],
+        },
+        "Excavation / Trenching": {
+            "who": "Excavator operators, ground workers, banksmen, nearby trades, public at fence line",
+            "hazards": "Trench collapse / engulfment; struck by plant; underground services strike; falls into excavation; contaminated ground / atmosphere",
+            "existing_controls": "Service drawings and CAT scan before dig; trench support or batter as per design; edge protection and barriers; banksman for plant; gas testing if deep or contaminated",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Daily excavation inspection by competent person; stop-work if water ingress or wall movement; emergency rescue plan",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves; gas detector where required",
+            "steps": [
+                ("Locate underground services", "Service strike – gas, electric, water", "Obtain drawings; mark services; hand dig within tolerance zones"),
+                ("Set out excavation and barriers", "Public/worker fall into open trench", "Barriers and warning signs before digging starts"),
+                ("Excavate with plant", "Struck by machine; collapse of sides", "Banksman; keep spoil away from edge; install support progressively"),
+                ("Work inside excavation", "Collapse; atmosphere; access failure", "Inspect support; ladder access within 8 m; gas test if required"),
+                ("Backfill and reinstate", "Plant movement; incomplete reinstatement", "Controlled plant movements; compact in layers; remove barriers only when safe"),
+            ],
+        },
+        "Lifting Operations – Crane / Mobile Crane": {
+            "who": "Crane operator, slingers/signallers, riggers, workers in lift radius, public",
+            "hazards": "Load drop; crane overturn; struck by swinging load; contact with overhead lines; inadequate ground bearing",
+            "existing_controls": "Appointed person lift plan; certified crane and lifting accessories; exclusion zone; tag lines; overhead line proximity assessment",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Trial lift where needed; wind speed limits; daily checklist; radio communication protocol",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves",
+            "steps": [
+                ("Review lift plan and inspect gear", "Wrong capacity; defective sling/shackle", "Verify SWL, certificates, colour code; check soft ground pads"),
+                ("Establish exclusion zone", "Personnel under load path", "Barriers/spotters; no one under suspended load"),
+                ("Attach load and take initial strain", "Unstable load; unexpected movement", "Correct hitch; trial lift a few cm; check balance"),
+                ("Lift, slew and place load", "Swing; contact structures/lines", "Follow signals; tag lines; observe clearance envelope"),
+                ("Detach and demobilise", "Load shift on landing; residual energy", "Confirm load stable before releasing; store gear correctly"),
+            ],
+        },
+        "Hot Work – Welding / Cutting": {
+            "who": "Welders, fire watch, adjacent trades, confined space attendants",
+            "hazards": "Fire/explosion; burns; fume inhalation; eye damage (arc); residual heat ignition",
+            "existing_controls": "Hot work permit; gas test in hazardous areas; fire watch during and after; extinguishers; screens; fume extraction",
+            "likelihood": 3, "severity": 4,
+            "additional_controls": "Remove combustibles 15 m or cover; isolate systems; post-work fire watch minimum 30–60 min",
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Welding helmet, gloves, FR clothing, safety boots, respirator as required",
+            "steps": [
+                ("Obtain permit and prepare area", "Combustibles; flammable atmosphere", "Permit issued; gas test; clear or protect combustibles"),
+                ("Set up equipment and screens", "Electric shock; UV exposure to others", "Inspect leads; earth correctly; erect screens"),
+                ("Perform welding / cutting", "Fire; burns; fumes", "Fire watch present; extraction on; correct PPE"),
+                ("Complete work and cool down", "Delayed fire from hot slag", "Fire watch continues; remove cylinders to safe area"),
+            ],
+        },
+        "Confined Space Entry": {
+            "who": "Entrants, attendant, rescue team, supervisors",
+            "hazards": "Oxygen deficiency / toxic / flammable atmosphere; engulfment; difficult rescue; heat stress",
+            "existing_controls": "Confined space permit; atmospheric testing and continuous monitoring; forced ventilation; standby person; rescue plan and equipment",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "No lone entry; communication checks; time limits; emergency drill familiarity",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "As per permit – may include SCBA/escape set, harness, detector, communication",
+            "steps": [
+                ("Isolate and prepare space", "Energy release; residual product", "LOTO; drain/purge; verify isolations"),
+                ("Test atmosphere", "Undetected hazardous atmosphere", "Test top/middle/bottom; record readings; continuous monitor"),
+                ("Enter and perform task", "Atmosphere change; injury inside", "Attendant maintains count; entrant on lifeline if required"),
+                ("Exit and close permit", "Incomplete isolation restoration", "Account for all persons; cancel permit; restore systems under control"),
+            ],
+        },
+        "Manual Handling / Material Movement": {
+            "who": "Labourers, trades, delivery crews",
+            "hazards": "Musculoskeletal injury; crush from dropped load; slips while carrying",
+            "existing_controls": "Mechanical aids preferred; team lift for heavy items; clear routes; training in kinetic lifting",
+            "likelihood": 4, "severity": 3,
+            "additional_controls": "Break loads; rest breaks; assess weight before lift; gloves with grip",
+            "residual_l": 2, "residual_s": 3,
+            "ppe": "Safety boots, gloves, hard hat as area requires",
+            "steps": [
+                ("Assess load and route", "Overweight; obstructed path", "Check weight/shape; clear path; use trolley if possible"),
+                ("Lift and carry", "Back strain; drop", "Bend knees, keep load close; team lift signals"),
+                ("Place load", "Crush fingers; unstable stack", "Set down controlled; stack within height limits"),
+            ],
+        },
+        "Electrical Work – Temporary Power / Isolation": {
+            "who": "Electricians, users of temporary supplies, other trades",
+            "hazards": "Electric shock; arc flash; fire from overloaded circuits",
+            "existing_controls": "Competent persons only; LOTO; RCD protection; inspected temporary distribution; insulated tools",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Prove dead before work; barriers on live panels; weather protection of boards",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Insulating gloves where required, safety glasses, FR clothing as task demands",
+            "steps": [
+                ("Plan isolation", "Wrong circuit; residual energy", "Identify circuit; notify affected parties"),
+                ("Isolate and lock out", "Unexpected re-energisation", "Apply locks/tags; stored energy released"),
+                ("Prove dead and work", "Contact with live parts", "Test instrument proved; work within safe zone"),
+                ("Restore and test", "Incorrect reconnection", "Remove LOTO only by isolator; functional test"),
+            ],
+        },
+        "Demolition / Structural Alteration": {
+            "who": "Demolition crew, plant operators, adjacent occupants, public",
+            "hazards": "Uncontrolled collapse; falling debris; asbestos/lead exposure; service strikes",
+            "existing_controls": "Structural survey; method statement; exclusion zones; soft strip before structural take-down; asbestos survey",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Temporary works design; continuous supervision; dust suppression; air monitoring if required",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility, RPE for dust, eye protection",
+            "steps": [
+                ("Survey and soft strip", "Hidden services; ACM", "Confirm surveys; licensed removal if ACM present"),
+                ("Establish exclusion and plant positions", "Public exposure; plant instability", "Hoarding/barriers; outrigger pads"),
+                ("Controlled demolition sequence", "Premature collapse", "Follow engineered sequence; remote methods where practicable"),
+                ("Clear debris and make safe", "Sharp materials; residual instability", "Sort waste streams; temporary support until stable"),
+            ],
+        },
+    },
+    "Oil & Gas": {
+        "Hot Work in Process Area": {
+            "who": "Welders, fire watch, process operators, adjacent units",
+            "hazards": "Fire/explosion from residual hydrocarbons; gas release; burns",
+            "existing_controls": "Hot work permit; continuous gas monitoring (LEL); depressurise/isolate/purge; fire watch; extinguishers/deluge awareness",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "SIMOPS review; wind direction awareness; stop if LEL rises",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "FR clothing, hard hat, safety glasses, gloves, gas detector",
+            "steps": [
+                ("Isolate and gas-free system", "Residual hydrocarbon", "Blind/LOTO; purge; prove gas-free"),
+                ("Issue hot work permit", "Incomplete controls", "Authorised issuer; gas readings recorded"),
+                ("Execute hot work", "Ignition of release", "Continuous LEL monitor; fire watch"),
+                ("Cool down and close permit", "Smouldering fire", "Fire watch duration met; reinstatement controlled"),
+            ],
+        },
+        "H2S / Toxic Gas Area Work": {
+            "who": "Field operators, maintenance crews, visitors in area",
+            "hazards": "H2S exposure – rapid incapacitation; flammability",
+            "existing_controls": "Continuous H2S monitors with alarm; escape sets; wind socks; muster points; buddy system",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Pre-job briefing on H2S zones; SCBA for certain tasks; rescue plan",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Personal H2S detector, escape respirator, FR clothing, hard hat",
+            "steps": [
+                ("Check monitors and wind", "Undetected H2S", "Bump-test detectors; note wind sock"),
+                ("Enter area / perform task", "Sudden release", "Buddy; know muster route; stop-work authority"),
+                ("Exit on alarm", "Delayed evacuation", "Immediate muster; account for personnel"),
+            ],
+        },
+        "Well Servicing / Tripping Pipe": {
+            "who": "Drill crew, derrickman, floorhands, toolpusher",
+            "hazards": "Struck by pipe/tongs; pinch points; dropped objects from derrick; slips on oily floor",
+            "existing_controls": "Competent crew; PPE; designated hand placement; stabilise elevators; housekeeping",
+            "likelihood": 4, "severity": 4,
+            "additional_controls": "Pre-tour JSA; exclude non-essential personnel from floor; communication with driller",
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Hard hat, safety glasses, steel-toe boots, gloves, FR clothing",
+            "steps": [
+                ("Prepare floor and equipment", "Slips; defective elevators", "Clean floor; inspect elevators/tongs"),
+                ("Make up / break out connections", "Pinch points; chain strike", "Hands on handles only; controlled spinning chain"),
+                ("Trip pipe in/out of hole", "Swinging stands; dropped objects", "Derrickman tails pipe; look up policy"),
+            ],
+        },
+        "Line Breaking / Process Opening": {
+            "who": "Mechanical fitters, operators, fire watch if hot work follows",
+            "hazards": "Release of pressure/product; chemical exposure; fire",
+            "existing_controls": "Line break permit; depressurise/drain/purge; PPE for product; splash protection; spill control",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Crack flange away from body; standby person; emergency shower access",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Chemical-resistant gloves/apron as SDS requires, face shield, FR clothing",
+            "steps": [
+                ("Verify isolation and energy zero", "Pressure residual", "Gauge reads zero; bleed points open"),
+                ("Break first flange carefully", "Spray of product", "Stand aside; contain drips"),
+                ("Complete opening and clean", "Exposure during cleaning", "Use approved method; dispose residues correctly"),
+            ],
+        },
+        "Pressure Testing": {
+            "who": "Test crew, operators, exclusion zone boundary watchers",
+            "hazards": "Stored energy rupture; projectile failure; high-pressure injection",
+            "existing_controls": "Written test procedure; calibrated gauges; exclusion zone; gradual pressurisation; certified blinds/equipment",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "No personnel in line of fire; communication before pressure up",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety glasses, safety boots, FR clothing",
+            "steps": [
+                ("Verify test pack and blinds", "Wrong rating", "Check design pressure vs test pressure"),
+                ("Pressurise in stages", "Sudden failure", "Hold points; inspect for leaks from safe distance"),
+                ("Depressurise and normalise", "Trapped pressure", "Vent safely; remove blinds under procedure"),
+            ],
+        },
+        "Simultaneous Operations (SIMOPS)": {
+            "who": "All crews in shared area – construction, operations, contractors",
+            "hazards": "Conflicting activities; ignition sources near hydrocarbons; vehicle/pedestrian interface",
+            "existing_controls": "SIMOPS matrix and permit coordination; daily coordination meeting; shared exclusion zones",
+            "likelihood": 3, "severity": 4,
+            "additional_controls": "Named SIMOPS coordinator; stop-work if conflict arises",
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "As per area and task permits",
+            "steps": [
+                ("Identify overlapping work", "Unknown interfaces", "Review permits and plot plans"),
+                ("Agree controls and timing", "Concurrent high-risk tasks", "Stagger critical steps; shared radio channel"),
+                ("Execute with continuous liaison", "Change not communicated", "Hourly check-ins; update board"),
+            ],
+        },
+    },
+    "Construction – Oil & Gas Interface": {
+        "Brownfield Construction in Live Plant": {
+            "who": "Construction contractors, operations, permit issuers",
+            "hazards": "Ignition in classified area; process upset from construction; dropped objects onto live equipment",
+            "existing_controls": "PTW system; area classification awareness; drop zones; SIMOPS; gas testing",
+            "likelihood": 3, "severity": 5,
+            "additional_controls": "Spark control; night-work limits; operations representative on site",
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "FR clothing in process areas, hard hat, safety glasses, detectors as required",
+            "steps": [
+                ("Obtain area permits", "Work without authorisation", "Valid PTW and certificates before mobilise"),
+                ("Establish protection of live equipment", "Impact damage", "Crash decks/covers; exclusion"),
+                ("Perform construction task", "Ignition / interference", "Follow permit conditions; continuous monitoring"),
+                ("Hand back and close permits", "Open isolations left", "Joint inspection with operations"),
+            ],
+        },
+    },
+}
+
+
+class RiskAssessmentModule(QWidget):
+    """Risk Assessment / JSA / JHA / Dynamic RA module – additive only."""
+
+    def __init__(self, parent_window, db):
+        super().__init__(parent_window)
+        self.host = parent_window
+        self.db = db
+        self.current_rows = []  # working table data (list of dicts)
+        self.current_meta = {}
+        self._ensure_schema()
+        self._build_ui()
+        self.refresh_register()
+
+    def _ensure_schema(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS risk_assessments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT UNIQUE,
+            ra_type TEXT NOT NULL,
+            sector TEXT DEFAULT '',
+            activity TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            assessor TEXT DEFAULT '',
+            assessment_date TEXT DEFAULT '',
+            review_date TEXT DEFAULT '',
+            status TEXT DEFAULT 'Draft',
+            ppe TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            rows_json TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT '',
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_ra_number ON risk_assessments(number);
+        CREATE INDEX IF NOT EXISTS idx_ra_type ON risk_assessments(ra_type);
+        """)
+        self.db.conn.commit()
+
+    def _actor(self):
+        return os.environ.get("USERNAME") or os.environ.get("USER") or "User"
+
+    def _next_number(self):
+        year = datetime.now().year
+        row = self.db.fetchone(
+            "SELECT number FROM risk_assessments WHERE number LIKE ? ORDER BY id DESC LIMIT 1",
+            (f"HSE-RA-{year}-%",)
+        )
+        n = 1
+        if row:
+            try:
+                n = int(str(row["number"]).split("-")[-1]) + 1
+            except Exception:
+                n = 1
+        return f"HSE-RA-{year}-{n:05d}"
+
+    # ---------- UI ----------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        head = QLabel("RISK ASSESSMENT  |  JSA  |  JHA  |  DYNAMIC RA")
+        head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:7px;")
+        root.addWidget(head)
+        note = QLabel(
+            "Select the assessment type, sector and activity. Library content for Construction and Oil & Gas "
+            "auto-fills hazards, who might be harmed, controls and (for JSA/JHA) job steps. "
+            "Review every field for site conditions before saving or exporting. "
+            "Risk scores use Likelihood × Severity (1–5). Colours follow the matrix on the Risk Matrix tab."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("padding:8px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:4px;color:#17365D;")
+        root.addWidget(note)
+
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self._build_create_tab()
+        self._build_matrix_tab()
+        self._build_register_tab()
+
+    def _build_create_tab(self):
+        w = QWidget()
+        self.tabs.addTab(w, "1. Create / Edit Assessment")
+        lay = QVBoxLayout(w)
+
+        form = QGridLayout()
+        self.cmb_type = QComboBox()
+        self.cmb_type.addItems(RA_TYPES)
+        self.cmb_sector = QComboBox()
+        self.cmb_sector.addItems(RA_SECTORS)
+        self.cmb_activity = QComboBox()
+        self.cmb_activity.setEditable(True)
+        self.cmb_activity.setMinimumWidth(280)
+        self.txt_title = QLineEdit()
+        self.txt_project = QLineEdit()
+        self.txt_location = QLineEdit()
+        self.txt_department = QLineEdit()
+        self.txt_assessor = QLineEdit(self._actor())
+        self.dt_assess = QDateEdit(QDate.currentDate())
+        self.dt_assess.setCalendarPopup(True)
+        self.dt_assess.setDisplayFormat("yyyy-MM-dd")
+        self.dt_review = QDateEdit(QDate.currentDate().addMonths(12))
+        self.dt_review.setCalendarPopup(True)
+        self.dt_review.setDisplayFormat("yyyy-MM-dd")
+        self.txt_ppe = QTextEdit()
+        self.txt_ppe.setFixedHeight(52)
+        self.txt_remarks = QTextEdit()
+        self.txt_remarks.setFixedHeight(52)
+
+        r = 0
+        form.addWidget(QLabel("Assessment Type *"), r, 0)
+        form.addWidget(self.cmb_type, r, 1)
+        form.addWidget(QLabel("Sector / Industry *"), r, 2)
+        form.addWidget(self.cmb_sector, r, 3)
+        r += 1
+        form.addWidget(QLabel("Activity *"), r, 0)
+        form.addWidget(self.cmb_activity, r, 1, 1, 3)
+        r += 1
+        form.addWidget(QLabel("Title"), r, 0)
+        form.addWidget(self.txt_title, r, 1, 1, 3)
+        r += 1
+        form.addWidget(QLabel("Project"), r, 0)
+        form.addWidget(self.txt_project, r, 1)
+        form.addWidget(QLabel("Location"), r, 2)
+        form.addWidget(self.txt_location, r, 3)
+        r += 1
+        form.addWidget(QLabel("Department"), r, 0)
+        form.addWidget(self.txt_department, r, 1)
+        form.addWidget(QLabel("Assessor"), r, 2)
+        form.addWidget(self.txt_assessor, r, 3)
+        r += 1
+        form.addWidget(QLabel("Assessment Date"), r, 0)
+        form.addWidget(self.dt_assess, r, 1)
+        form.addWidget(QLabel("Next Review"), r, 2)
+        form.addWidget(self.dt_review, r, 3)
+        r += 1
+        form.addWidget(QLabel("Required PPE"), r, 0)
+        form.addWidget(self.txt_ppe, r, 1, 1, 3)
+        r += 1
+        form.addWidget(QLabel("Remarks / Site Notes"), r, 0)
+        form.addWidget(self.txt_remarks, r, 1, 1, 3)
+        lay.addLayout(form)
+
+        btn_row = QHBoxLayout()
+        b_load = QPushButton("Load Library → Auto-Fill Form")
+        b_load.setStyleSheet("background:#2E7D32;font-weight:bold;")
+        b_load.clicked.connect(self._load_from_library)
+        b_add = QPushButton("Add Blank Row")
+        b_add.clicked.connect(self._add_blank_row)
+        b_del = QPushButton("Delete Selected Row")
+        b_del.clicked.connect(self._delete_row)
+        b_save = QPushButton("Save Assessment")
+        b_save.clicked.connect(self._save)
+        b_export = QPushButton("Export to Word (Landscape)")
+        b_export.clicked.connect(self._export_word)
+        b_clear = QPushButton("Clear Form")
+        b_clear.clicked.connect(self._clear_form)
+        for b in (b_load, b_add, b_del, b_save, b_export, b_clear):
+            btn_row.addWidget(b)
+        lay.addLayout(btn_row)
+
+        self.table = QTableWidget(0, 0)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self.table, 1)
+
+        self.lbl_format = QLabel("")
+        self.lbl_format.setStyleSheet("color:#17365D;font-weight:600;padding:4px;")
+        lay.addWidget(self.lbl_format)
+
+        self.cmb_type.currentTextChanged.connect(self._on_type_changed)
+        self.cmb_sector.currentTextChanged.connect(self._refresh_activities)
+        self._refresh_activities()
+        self._on_type_changed(self.cmb_type.currentText())
+        self._editing_id = None
+
+    def _build_matrix_tab(self):
+        w = QWidget()
+        self.tabs.addTab(w, "2. Risk Matrix (5×5)")
+        lay = QVBoxLayout(w)
+        intro = QLabel(
+            "Risk Score = Likelihood × Severity. "
+            "Low (1–4) green · Medium (5–9) yellow · High (10–15) orange · Extreme (16–25) red. "
+            "Use the same scores in the assessment table. Colour coding updates when you change Likelihood or Severity."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:8px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;")
+        lay.addWidget(intro)
+
+        scales = QHBoxLayout()
+        lik = QLabel(
+            "<b>Likelihood</b><br>1 Rare – exceptional circumstances<br>"
+            "2 Unlikely – could happen sometime<br>3 Possible – might occur occasionally<br>"
+            "4 Likely – will probably occur<br>5 Almost Certain – expected in most circumstances"
+        )
+        sev = QLabel(
+            "<b>Severity (Consequence)</b><br>1 Insignificant – no injury<br>"
+            "2 Minor – first aid<br>3 Moderate – medical treatment / lost time<br>"
+            "4 Major – serious injury / permanent disability risk<br>5 Catastrophic – fatality / multiple serious"
+        )
+        for lab in (lik, sev):
+            lab.setWordWrap(True)
+            lab.setStyleSheet("padding:10px;background:white;border:1px solid #CCD3DA;border-radius:4px;")
+            scales.addWidget(lab)
+        lay.addLayout(scales)
+
+        self.matrix = QTableWidget(6, 6)
+        self.matrix.setFixedHeight(320)
+        headers_s = [""] + [f"{s} – {n}" for s, n in RA_SEVERITY]
+        headers_l = [""] + [f"{s} – {n}" for s, n in RA_LIKELIHOOD]
+        self.matrix.setHorizontalHeaderLabels(headers_s)
+        for i, h in enumerate(headers_l):
+            self.matrix.setVerticalHeaderItem(i, QTableWidgetItem(h if i else "L \\ S"))
+        # Axis labels
+        self.matrix.setItem(0, 0, QTableWidgetItem("L ↓  S →"))
+        for c, (sv, _) in enumerate(RA_SEVERITY, 1):
+            self.matrix.setItem(0, c, QTableWidgetItem(str(sv)))
+            self.matrix.item(0, c).setBackground(QBrush(QColor("#17365D")))
+            self.matrix.item(0, c).setForeground(QBrush(QColor("white")))
+            self.matrix.item(0, c).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        for r, (lk, _) in enumerate(RA_LIKELIHOOD, 1):
+            self.matrix.setItem(r, 0, QTableWidgetItem(str(lk)))
+            self.matrix.item(r, 0).setBackground(QBrush(QColor("#17365D")))
+            self.matrix.item(r, 0).setForeground(QBrush(QColor("white")))
+            self.matrix.item(r, 0).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            for c, (sv, _) in enumerate(RA_SEVERITY, 1):
+                score = lk * sv
+                band = ra_band(score)
+                it = QTableWidgetItem(f"{score}\n{band}")
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it.setBackground(QBrush(QColor(ra_band_color(band))))
+                if band in ("High", "Extreme"):
+                    it.setForeground(QBrush(QColor("#202020")))
+                f = it.font()
+                f.setBold(True)
+                it.setFont(f)
+                self.matrix.setItem(r, c, it)
+        self.matrix.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.matrix.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.matrix.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        lay.addWidget(self.matrix)
+
+        legend = QLabel(
+            "Action guidance:  Low – monitor routine controls ·  Medium – ensure controls in place and supervised ·  "
+            "High – management approval before work ·  Extreme – do not proceed until risk is reduced."
+        )
+        legend.setWordWrap(True)
+        legend.setStyleSheet("padding:8px;font-weight:600;color:#17365D;")
+        lay.addWidget(legend)
+        lay.addStretch(1)
+
+    def _build_register_tab(self):
+        w = QWidget()
+        self.tabs.addTab(w, "3. Assessment Register")
+        lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.reg_search = QLineEdit()
+        self.reg_search.setPlaceholderText("Search number, activity, project…")
+        self.reg_search.textChanged.connect(self.refresh_register)
+        b_open = QPushButton("Open Selected")
+        b_open.clicked.connect(self._open_selected)
+        b_del = QPushButton("Delete Selected")
+        b_del.clicked.connect(self._delete_selected)
+        b_exp = QPushButton("Export Selected to Word")
+        b_exp.clicked.connect(self._export_selected_word)
+        b_ref = QPushButton("Refresh")
+        b_ref.clicked.connect(self.refresh_register)
+        bar.addWidget(self.reg_search, 1)
+        for b in (b_open, b_del, b_exp, b_ref):
+            bar.addWidget(b)
+        lay.addLayout(bar)
+        self.reg_table = QTableWidget(0, 9)
+        self.reg_table.setHorizontalHeaderLabels([
+            "ID", "Number", "Type", "Sector", "Activity", "Project", "Date", "Assessor", "Status"
+        ])
+        self.reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.reg_table.setAlternatingRowColors(True)
+        self.reg_table.horizontalHeader().setStretchLastSection(True)
+        self.reg_table.doubleClicked.connect(lambda *_: self._open_selected())
+        lay.addWidget(self.reg_table, 1)
+
+    # ---------- type / activity ----------
+    def _refresh_activities(self, *_):
+        sector = self.cmb_sector.currentText()
+        acts = list(RA_LIBRARY.get(sector, {}).keys())
+        current = self.cmb_activity.currentText()
+        self.cmb_activity.blockSignals(True)
+        self.cmb_activity.clear()
+        self.cmb_activity.addItems(acts)
+        if current:
+            ix = self.cmb_activity.findText(current)
+            if ix >= 0:
+                self.cmb_activity.setCurrentIndex(ix)
+            else:
+                self.cmb_activity.setEditText(current)
+        self.cmb_activity.blockSignals(False)
+
+    def _on_type_changed(self, ra_type):
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        if is_jsa:
+            cols = ["Step No.", "Job Step", "Hazards", "Control Measures / Safe Procedure",
+                    "L", "S", "Risk", "Band", "Responsible"]
+            self.lbl_format.setText(
+                "Format: Job Safety / Hazard Analysis — activity is broken into sequential steps with hazards and controls."
+            )
+        elif "Dynamic" in ra_type:
+            cols = ["No.", "Hazard / Change Observed", "Who Might Be Harmed", "Immediate Control",
+                    "L", "S", "Risk", "Band", "Action / Stop Work?", "By Whom"]
+            self.lbl_format.setText(
+                "Format: Dynamic Risk Assessment — point-of-work assessment for changing conditions; use Stop Work if Extreme."
+            )
+        else:
+            cols = ["No.", "Activity / Task", "Hazards", "Who Might Be Harmed", "Existing Controls",
+                    "L", "S", "Risk", "Band", "Additional Controls", "Residual L", "Residual S",
+                    "Residual Risk", "Residual Band"]
+            self.lbl_format.setText(
+                "Format: Formal Risk Assessment — activity-level hazards, people at risk, existing and additional controls, residual risk."
+            )
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setRowCount(0)
+        self.current_rows = []
+
+    def _library_entry(self):
+        sector = self.cmb_sector.currentText()
+        activity = self.cmb_activity.currentText().strip()
+        return RA_LIBRARY.get(sector, {}).get(activity)
+
+    def _load_from_library(self):
+        entry = self._library_entry()
+        activity = self.cmb_activity.currentText().strip()
+        if not activity:
+            QMessageBox.warning(self, "Activity Required", "Select or enter an activity.")
+            return
+        if not entry:
+            QMessageBox.information(
+                self, "No Library Match",
+                "No library template for this activity. You can still enter rows manually or pick a listed activity."
+            )
+            self.txt_title.setText(activity)
+            return
+
+        self.txt_title.setText(f"{self.cmb_type.currentText()} – {activity}")
+        self.txt_ppe.setPlainText(entry.get("ppe", ""))
+        ra_type = self.cmb_type.currentText()
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        self.table.setRowCount(0)
+        self.current_rows = []
+
+        if is_jsa:
+            for i, (step, haz, ctrl) in enumerate(entry.get("steps") or [], 1):
+                L = entry.get("likelihood", 3)
+                S = entry.get("severity", 4)
+                # Slight variation per step residual thinking: use base scores
+                score = L * S
+                row = {
+                    "step_no": str(i),
+                    "job_step": step,
+                    "hazards": haz,
+                    "controls": ctrl,
+                    "L": L, "S": S, "risk": score, "band": ra_band(score),
+                    "responsible": self.txt_assessor.text().strip() or "Supervisor",
+                }
+                self.current_rows.append(row)
+                self._append_jsa_row(row)
+        elif "Dynamic" in ra_type:
+            L = entry.get("likelihood", 3)
+            S = entry.get("severity", 4)
+            score = L * S
+            row = {
+                "no": "1",
+                "hazard": entry.get("hazards", ""),
+                "who": entry.get("who", ""),
+                "control": entry.get("existing_controls", ""),
+                "L": L, "S": S, "risk": score, "band": ra_band(score),
+                "action": "Proceed with controls" if score <= 9 else "Additional controls / escalate",
+                "by_whom": self.txt_assessor.text().strip() or "Supervisor",
+            }
+            self.current_rows.append(row)
+            self._append_dynamic_row(row)
+        else:
+            L = entry.get("likelihood", 3)
+            S = entry.get("severity", 5)
+            score = L * S
+            rL = entry.get("residual_l", 2)
+            rS = entry.get("residual_s", S)
+            rscore = rL * rS
+            row = {
+                "no": "1",
+                "activity": activity,
+                "hazards": entry.get("hazards", ""),
+                "who": entry.get("who", ""),
+                "existing": entry.get("existing_controls", ""),
+                "L": L, "S": S, "risk": score, "band": ra_band(score),
+                "additional": entry.get("additional_controls", ""),
+                "rL": rL, "rS": rS, "rrisk": rscore, "rband": ra_band(rscore),
+            }
+            self.current_rows.append(row)
+            self._append_ra_row(row)
+
+        self._colorize_risk_columns()
+        QMessageBox.information(
+            self, "Library Loaded",
+            f"Template for “{activity}” loaded. Review and adjust Likelihood/Severity and site-specific details before saving."
+        )
+
+    def _set_item(self, r, c, text, editable=True):
+        it = QTableWidgetItem(_s(text))
+        if not editable:
+            it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.table.setItem(r, c, it)
+        return it
+
+    def _append_ra_row(self, row):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        vals = [
+            row.get("no", r + 1), row.get("activity", ""), row.get("hazards", ""),
+            row.get("who", ""), row.get("existing", ""),
+            row.get("L", 3), row.get("S", 3), row.get("risk", 9), row.get("band", ""),
+            row.get("additional", ""), row.get("rL", 2), row.get("rS", 3),
+            row.get("rrisk", 6), row.get("rband", ""),
+        ]
+        for c, v in enumerate(vals):
+            self._set_item(r, c, v)
+
+    def _append_jsa_row(self, row):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        vals = [
+            row.get("step_no", r + 1), row.get("job_step", ""), row.get("hazards", ""),
+            row.get("controls", ""), row.get("L", 3), row.get("S", 3),
+            row.get("risk", 9), row.get("band", ""), row.get("responsible", ""),
+        ]
+        for c, v in enumerate(vals):
+            self._set_item(r, c, v)
+
+    def _append_dynamic_row(self, row):
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+        vals = [
+            row.get("no", r + 1), row.get("hazard", ""), row.get("who", ""),
+            row.get("control", ""), row.get("L", 3), row.get("S", 3),
+            row.get("risk", 9), row.get("band", ""), row.get("action", ""),
+            row.get("by_whom", ""),
+        ]
+        for c, v in enumerate(vals):
+            self._set_item(r, c, v)
+
+    def _add_blank_row(self):
+        ra_type = self.cmb_type.currentText()
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        r = self.table.rowCount()
+        if is_jsa:
+            row = {"step_no": r + 1, "job_step": "", "hazards": "", "controls": "",
+                   "L": 3, "S": 3, "risk": 9, "band": "Medium", "responsible": ""}
+            self.current_rows.append(row)
+            self._append_jsa_row(row)
+        elif "Dynamic" in ra_type:
+            row = {"no": r + 1, "hazard": "", "who": "", "control": "",
+                   "L": 3, "S": 3, "risk": 9, "band": "Medium", "action": "", "by_whom": ""}
+            self.current_rows.append(row)
+            self._append_dynamic_row(row)
+        else:
+            row = {"no": r + 1, "activity": self.cmb_activity.currentText(), "hazards": "", "who": "",
+                   "existing": "", "L": 3, "S": 3, "risk": 9, "band": "Medium",
+                   "additional": "", "rL": 2, "rS": 3, "rrisk": 6, "rband": "Medium"}
+            self.current_rows.append(row)
+            self._append_ra_row(row)
+        self._colorize_risk_columns()
+
+    def _delete_row(self):
+        r = self.table.currentRow()
+        if r < 0:
+            return QMessageBox.information(self, "Select Row", "Select a row to delete.")
+        self.table.removeRow(r)
+        if r < len(self.current_rows):
+            self.current_rows.pop(r)
+
+    def _read_table_rows(self):
+        """Sync table cells into structured list; recompute risk scores."""
+        ra_type = self.cmb_type.currentText()
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        rows = []
+        for r in range(self.table.rowCount()):
+            def cell(c):
+                it = self.table.item(r, c)
+                return it.text().strip() if it else ""
+
+            def num(c, default=1):
+                try:
+                    return max(1, min(5, int(float(cell(c) or default))))
+                except Exception:
+                    return default
+
+            if is_jsa:
+                L, S = num(4, 3), num(5, 3)
+                score = L * S
+                row = {
+                    "step_no": cell(0) or str(r + 1), "job_step": cell(1), "hazards": cell(2),
+                    "controls": cell(3), "L": L, "S": S, "risk": score, "band": ra_band(score),
+                    "responsible": cell(8),
+                }
+                self.table.item(r, 6).setText(str(score)) if self.table.item(r, 6) else self._set_item(r, 6, score)
+                self._set_item(r, 7, ra_band(score))
+            elif "Dynamic" in ra_type:
+                L, S = num(4, 3), num(5, 3)
+                score = L * S
+                row = {
+                    "no": cell(0) or str(r + 1), "hazard": cell(1), "who": cell(2), "control": cell(3),
+                    "L": L, "S": S, "risk": score, "band": ra_band(score),
+                    "action": cell(8), "by_whom": cell(9),
+                }
+                self._set_item(r, 6, score)
+                self._set_item(r, 7, ra_band(score))
+            else:
+                L, S = num(5, 3), num(6, 3)
+                score = L * S
+                rL, rS = num(10, 2), num(11, 3)
+                rscore = rL * rS
+                row = {
+                    "no": cell(0) or str(r + 1), "activity": cell(1), "hazards": cell(2),
+                    "who": cell(3), "existing": cell(4), "L": L, "S": S, "risk": score, "band": ra_band(score),
+                    "additional": cell(9), "rL": rL, "rS": rS, "rrisk": rscore, "rband": ra_band(rscore),
+                }
+                self._set_item(r, 7, score)
+                self._set_item(r, 8, ra_band(score))
+                self._set_item(r, 12, rscore)
+                self._set_item(r, 13, ra_band(rscore))
+            rows.append(row)
+        self.current_rows = rows
+        self._colorize_risk_columns()
+        return rows
+
+    def _colorize_risk_columns(self):
+        ra_type = self.cmb_type.currentText()
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        for r in range(self.table.rowCount()):
+            if is_jsa or "Dynamic" in ra_type:
+                risk_cols = [6, 7]
+            else:
+                risk_cols = [7, 8, 12, 13]
+            for c in risk_cols:
+                it = self.table.item(r, c)
+                if not it:
+                    continue
+                text = it.text().strip()
+                try:
+                    score = int(text.split()[0]) if text[:1].isdigit() else None
+                except Exception:
+                    score = None
+                band = text if text in ("Low", "Medium", "High", "Extreme") else (ra_band(score) if score else "")
+                if score is not None:
+                    it.setBackground(QBrush(QColor(ra_score_color(score))))
+                elif band:
+                    it.setBackground(QBrush(QColor(ra_band_color(band))))
+
+    def _clear_form(self):
+        self._editing_id = None
+        self.txt_title.clear()
+        self.txt_project.clear()
+        self.txt_location.clear()
+        self.txt_department.clear()
+        self.txt_ppe.clear()
+        self.txt_remarks.clear()
+        self.table.setRowCount(0)
+        self.current_rows = []
+        self._on_type_changed(self.cmb_type.currentText())
+
+    def _save(self):
+        rows = self._read_table_rows()
+        if not self.cmb_activity.currentText().strip():
+            return QMessageBox.warning(self, "Required", "Activity is required.")
+        if not rows:
+            return QMessageBox.warning(self, "Required", "Add at least one assessment row (or load from library).")
+        now = _now()
+        number = self._next_number() if not self._editing_id else None
+        payload = (
+            self.cmb_type.currentText(),
+            self.cmb_sector.currentText(),
+            self.cmb_activity.currentText().strip(),
+            self.txt_title.text().strip() or self.cmb_activity.currentText().strip(),
+            self.txt_project.text().strip(),
+            self.txt_location.text().strip(),
+            self.txt_department.text().strip(),
+            self.txt_assessor.text().strip(),
+            self.dt_assess.date().toString("yyyy-MM-dd"),
+            self.dt_review.date().toString("yyyy-MM-dd"),
+            "Active",
+            self.txt_ppe.toPlainText().strip(),
+            self.txt_remarks.toPlainText().strip(),
+            json.dumps(rows, ensure_ascii=False),
+            now,
+        )
+        if self._editing_id:
+            self.db.execute(
+                """UPDATE risk_assessments SET ra_type=?,sector=?,activity=?,title=?,project=?,location=?,
+                   department=?,assessor=?,assessment_date=?,review_date=?,status=?,ppe=?,remarks=?,
+                   rows_json=?,updated_at=? WHERE id=?""",
+                payload + (self._editing_id,)
+            )
+            msg = "Assessment updated."
+        else:
+            self.db.execute(
+                """INSERT INTO risk_assessments(number,ra_type,sector,activity,title,project,location,
+                   department,assessor,assessment_date,review_date,status,ppe,remarks,rows_json,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (number,) + payload[:-1] + (now, now)
+            )
+            msg = f"Assessment saved as {number}."
+            self._editing_id = self.db.fetchone("SELECT id FROM risk_assessments WHERE number=?", (number,))["id"]
+        self.refresh_register()
+        QMessageBox.information(self, "Saved", msg)
+
+    def refresh_register(self, *_):
+        q = self.reg_search.text().strip().lower() if hasattr(self, "reg_search") else ""
+        self.reg_table.setRowCount(0)
+        for r in self.db.fetchall("SELECT * FROM risk_assessments ORDER BY id DESC"):
+            blob = " ".join(_s(r[k]) for k in ("number", "activity", "project", "title", "ra_type")).lower()
+            if q and q not in blob:
+                continue
+            row_i = self.reg_table.rowCount()
+            self.reg_table.insertRow(row_i)
+            vals = [r["id"], r["number"], r["ra_type"], r["sector"], r["activity"],
+                    r["project"], r["assessment_date"], r["assessor"], r["status"]]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(_s(v))
+                if c == 0:
+                    it.setData(Qt.ItemDataRole.UserRole, r["id"])
+                self.reg_table.setItem(row_i, c, it)
+        self.reg_table.resizeColumnsToContents()
+
+    def _selected_reg_id(self):
+        r = self.reg_table.currentRow()
+        if r < 0 or not self.reg_table.item(r, 0):
+            QMessageBox.information(self, "Select", "Select an assessment in the register.")
+            return None
+        return self.reg_table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+
+    def _open_selected(self):
+        rid = self._selected_reg_id()
+        if rid is None:
+            return
+        row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (rid,))
+        if not row:
+            return
+        self.tabs.setCurrentIndex(0)
+        self._editing_id = rid
+        self.cmb_type.setCurrentText(_s(row["ra_type"]))
+        self.cmb_sector.setCurrentText(_s(row["sector"]))
+        self._refresh_activities()
+        self.cmb_activity.setCurrentText(_s(row["activity"]))
+        self.txt_title.setText(_s(row["title"]))
+        self.txt_project.setText(_s(row["project"]))
+        self.txt_location.setText(_s(row["location"]))
+        self.txt_department.setText(_s(row["department"]))
+        self.txt_assessor.setText(_s(row["assessor"]))
+        d = QDate.fromString(_s(row["assessment_date"]), "yyyy-MM-dd")
+        if d.isValid():
+            self.dt_assess.setDate(d)
+        d2 = QDate.fromString(_s(row["review_date"]), "yyyy-MM-dd")
+        if d2.isValid():
+            self.dt_review.setDate(d2)
+        self.txt_ppe.setPlainText(_s(row["ppe"]))
+        self.txt_remarks.setPlainText(_s(row["remarks"]))
+        self._on_type_changed(self.cmb_type.currentText())
+        try:
+            data = json.loads(row["rows_json"] or "[]")
+        except Exception:
+            data = []
+        self.current_rows = data
+        ra_type = self.cmb_type.currentText()
+        is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        for item in data:
+            if is_jsa:
+                self._append_jsa_row(item)
+            elif "Dynamic" in ra_type:
+                self._append_dynamic_row(item)
+            else:
+                self._append_ra_row(item)
+        self._colorize_risk_columns()
+
+    def _delete_selected(self):
+        rid = self._selected_reg_id()
+        if rid is None:
+            return
+        if QMessageBox.question(
+            self, "Delete", "Delete this risk assessment permanently?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.execute("DELETE FROM risk_assessments WHERE id=?", (rid,))
+        if self._editing_id == rid:
+            self._clear_form()
+        self.refresh_register()
+
+    def _export_selected_word(self):
+        rid = self._selected_reg_id()
+        if rid is None:
+            return
+        row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (rid,))
+        if not row:
+            return
+        self._export_word_record(row)
+
+    def _export_word(self):
+        rows = self._read_table_rows()
+        if not rows:
+            return QMessageBox.warning(self, "Export", "Load or enter assessment rows first.")
+        # Prefer saved record if editing
+        if self._editing_id:
+            row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (self._editing_id,))
+            if row:
+                # refresh json from table
+                self.db.execute(
+                    "UPDATE risk_assessments SET rows_json=?,ppe=?,remarks=?,title=?,updated_at=? WHERE id=?",
+                    (json.dumps(rows, ensure_ascii=False), self.txt_ppe.toPlainText().strip(),
+                     self.txt_remarks.toPlainText().strip(), self.txt_title.text().strip(), _now(), self._editing_id)
+                )
+                row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (self._editing_id,))
+                return self._export_word_record(row)
+        # Unsaved: build temporary dict
+        meta = {
+            "number": "(Unsaved draft)",
+            "ra_type": self.cmb_type.currentText(),
+            "sector": self.cmb_sector.currentText(),
+            "activity": self.cmb_activity.currentText(),
+            "title": self.txt_title.text().strip() or self.cmb_activity.currentText(),
+            "project": self.txt_project.text().strip(),
+            "location": self.txt_location.text().strip(),
+            "department": self.txt_department.text().strip(),
+            "assessor": self.txt_assessor.text().strip(),
+            "assessment_date": self.dt_assess.date().toString("yyyy-MM-dd"),
+            "review_date": self.dt_review.date().toString("yyyy-MM-dd"),
+            "ppe": self.txt_ppe.toPlainText().strip(),
+            "remarks": self.txt_remarks.toPlainText().strip(),
+            "rows_json": json.dumps(rows, ensure_ascii=False),
+        }
+        self._export_word_record(meta)
+
+    def _export_word_record(self, row):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Risk Assessment",
+            f"{_s(row['number'] if 'number' in row.keys() else row.get('number', 'RA'))}.docx",
+            "Word Document (*.docx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        try:
+            try:
+                data = json.loads(row["rows_json"] if "rows_json" in row.keys() else row.get("rows_json") or "[]")
+            except Exception:
+                data = []
+            ra_type = _s(row["ra_type"] if "ra_type" in row.keys() else row.get("ra_type"))
+            is_jsa = "JSA" in ra_type or "JHA" in ra_type
+            doc = Document()
+            set_docx_landscape(doc)
+            add_docx_report_header(
+                doc,
+                ra_type.upper() if ra_type else "RISK ASSESSMENT",
+                "RA",
+                _s(row["number"] if "number" in row.keys() else row.get("number", "")),
+            )
+            add_docx_kv_table(doc, [
+                ("Document No.", _s(row["number"] if "number" in row.keys() else "")),
+                ("Assessment Type", ra_type),
+                ("Sector", _s(row["sector"] if "sector" in row.keys() else "")),
+                ("Activity", _s(row["activity"] if "activity" in row.keys() else "")),
+                ("Title", _s(row["title"] if "title" in row.keys() else "")),
+                ("Project", _s(row["project"] if "project" in row.keys() else "")),
+                ("Location", _s(row["location"] if "location" in row.keys() else "")),
+                ("Department", _s(row["department"] if "department" in row.keys() else "")),
+                ("Assessor", _s(row["assessor"] if "assessor" in row.keys() else "")),
+                ("Assessment Date", _s(row["assessment_date"] if "assessment_date" in row.keys() else "")),
+                ("Next Review", _s(row["review_date"] if "review_date" in row.keys() else "")),
+            ])
+            ppe = _s(row["ppe"] if "ppe" in row.keys() else "")
+            if ppe:
+                add_docx_boxed_section(doc, "Required PPE", ppe, 8)
+            remarks = _s(row["remarks"] if "remarks" in row.keys() else "")
+            if remarks:
+                add_docx_boxed_section(doc, "Remarks / Site Notes", remarks, 8)
+
+            doc.add_heading("Risk Assessment Detail", level=2)
+            if is_jsa:
+                headers = ["Step", "Job Step", "Hazards", "Controls / Safe Procedure", "L", "S", "Risk", "Band", "Responsible"]
+                keys = ["step_no", "job_step", "hazards", "controls", "L", "S", "risk", "band", "responsible"]
+            elif "Dynamic" in ra_type:
+                headers = ["No.", "Hazard / Change", "Who Harmed", "Immediate Control", "L", "S", "Risk", "Band", "Action", "By Whom"]
+                keys = ["no", "hazard", "who", "control", "L", "S", "risk", "band", "action", "by_whom"]
+            else:
+                headers = ["No.", "Activity", "Hazards", "Who Might Be Harmed", "Existing Controls",
+                           "L", "S", "Risk", "Band", "Additional Controls", "Res L", "Res S", "Res Risk", "Res Band"]
+                keys = ["no", "activity", "hazards", "who", "existing", "L", "S", "risk", "band",
+                        "additional", "rL", "rS", "rrisk", "rband"]
+
+            t = doc.add_table(rows=1, cols=len(headers))
+            for i, h in enumerate(headers):
+                t.rows[0].cells[i].text = h
+            for item in data:
+                cells = t.add_row().cells
+                for i, k in enumerate(keys):
+                    cells[i].text = xml_safe(item.get(k, ""))
+            style_docx_table(t, header=True, font_size=7)
+
+            doc.add_heading("5×5 Risk Matrix Reference", level=2)
+            mt = doc.add_table(rows=6, cols=6)
+            mt.cell(0, 0).text = "L \\ S"
+            for c, (sv, sn) in enumerate(RA_SEVERITY, 1):
+                mt.cell(0, c).text = f"{sv} {sn}"
+            for r, (lk, ln) in enumerate(RA_LIKELIHOOD, 1):
+                mt.cell(r, 0).text = f"{lk} {ln}"
+                for c, (sv, _) in enumerate(RA_SEVERITY, 1):
+                    sc = lk * sv
+                    mt.cell(r, c).text = f"{sc} {ra_band(sc)}"
+            style_docx_table(mt, header=True, font_size=7)
+
+            add_docx_signatures(doc)
+            add_docx_footer(doc)
+            save_docx_validated(doc, path)
+            QMessageBox.information(self, "Exported", f"Landscape Word report saved:\n{path}")
+        except Exception as exc:
+            logging.exception("RA Word export failed")
+            QMessageBox.critical(self, "Export Failed", str(exc))
 
 
 # ============================================================
