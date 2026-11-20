@@ -7627,6 +7627,41 @@ class MainWindow(QMainWindow):
             )
 
 
+        # ---- Observation Approval tab (restored) ----
+        approval_page = QWidget()
+        approval_layout = QVBoxLayout(approval_page)
+        approval_intro = QLabel(
+            "Submitted observation close-outs are listed here. Select a row and use the action buttons below, "
+            "or double-click a row to open every evidence card with Approve / Reject + remark per file. "
+            "CAPA-linked items are approved once in CAPA Tracking and synchronized automatically."
+        )
+        approval_intro.setWordWrap(True)
+        approval_intro.setStyleSheet("color:#061018;padding:6px;font-weight:800;")
+        approval_layout.addWidget(approval_intro)
+        approval_section_lbl = QLabel(
+            "One row per observation. Action buttons stay visible at the bottom. "
+            "Double-click for per-evidence Approve / Reject with remarks."
+        )
+        approval_section_lbl.setStyleSheet("color:#061018;font-weight:800;")
+        approval_layout.addWidget(approval_section_lbl)
+        evidence_table = QTableWidget()
+        ev_headers = [
+            "ID", "Submission Ref.", "Observation No.", "Observation Detail", "Corrective Action(s)",
+            "CAPA", "Evidence Files", "Submitted By", "Submitted At", "Review Status",
+            "Reviewed By", "Observation Status", "Evidence Progress",
+        ]
+        evidence_table.setColumnCount(len(ev_headers))
+        evidence_table.setHorizontalHeaderLabels(ev_headers)
+        evidence_table.setColumnHidden(0, True)
+        evidence_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        evidence_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        evidence_table.setAlternatingRowColors(True)
+        evidence_table.setWordWrap(True)
+        evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        evidence_table.horizontalHeader().setStretchLastSection(True)
+        evidence_table.setMinimumHeight(180)
+        approval_layout.addWidget(evidence_table, 1)
+
         def _approval_detail_from_table(row_index, *_):
             try:
                 oid = None
@@ -7667,6 +7702,11 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#5f1515;color:#ffffff;}"
         )
         refresh_evidence.setStyleSheet(
+            "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
+            "border:1px solid #0b3a63;border-radius:5px;}"
+            "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+        )
+        open_review_btn.setStyleSheet(
             "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
             "border:1px solid #0b3a63;border-radius:5px;}"
             "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
