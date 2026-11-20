@@ -19930,6 +19930,7 @@ class ChemicalSDSModule(QWidget):
 # RISK ASSESSMENT MODULE  (additive – does not alter other modules)
 # Types: Risk Assessment | JSA | JHA | Dynamic Risk Assessment
 # Library: Construction + Oil & Gas activities with auto-fill
+# Generated assessment is shown on its own tab for space and export
 # ============================================================
 
 RA_TYPES = [
@@ -19989,130 +19990,835 @@ def ra_score_color(score):
     return ra_band_color(ra_band(score))
 
 
+def _ctrl(*items):
+    """Join control measures as numbered lines (5–6+ measures expected)."""
+    return "\n".join(f"{i}. {t}" for i, t in enumerate(items, 1) if t)
+
+
 # Built-in activity library (industry-standard style content for Construction / Oil & Gas)
 # Each activity supports both "Risk Assessment" rows and "JSA/JHA" step breakdown.
+# existing_controls / additional_controls carry 5–6+ control measures each.
 RA_LIBRARY = {
     "Construction": {
         "Working at Height – Scaffold / Edge Work": {
             "who": "Scaffolders, trades working at height, workers below, supervisors, visitors",
-            "hazards": "Fall from scaffold/platform/edge; falling tools or materials; scaffold collapse or instability; contact with overhead power lines",
-            "existing_controls": "Scaffold designed and tagged by competent person; daily pre-use inspection; full body harness with twin lanyard where edge protection is open; tool lanyards; exclusion zone below; minimum clearance from power lines",
+            "hazards": "Fall from scaffold/platform/edge; falling tools or materials; scaffold collapse or instability; contact with overhead power lines; adverse weather",
+            "existing_controls": _ctrl(
+                "Scaffold designed, erected and tagged by a competent person only",
+                "Daily pre-use inspection of boards, ties, guardrails and access",
+                "Full body harness with twin lanyard where edge protection is open or incomplete",
+                "Tool lanyards and material hoists to prevent dropped objects",
+                "Exclusion zone established and maintained below the work area",
+                "Minimum safe clearance from overhead power lines verified before work",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Permit to work for height activities; rescue plan briefed; weather stop-work criteria; toolbox talk before each shift",
+            "additional_controls": _ctrl(
+                "Permit to work for height activities where required by site rules",
+                "Documented rescue plan briefed to the team before starting",
+                "Weather stop-work criteria (wind, rain, lightning) agreed and enforced",
+                "Toolbox talk covering task-specific height hazards each shift",
+                "Competent supervision present during erection, alteration and dismantling",
+                "No lone working at height; radio/phone communication maintained",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Hard hat, safety boots, high-visibility clothing, full body harness, safety glasses, gloves",
             "steps": [
-                ("Plan work and inspect scaffold / edge protection", "Incomplete design, damaged components, unprotected edges", "Confirm scaffold tag in date; inspect boards, ties, guardrails; establish exclusion zone"),
-                ("Access scaffold / work platform", "Fall during access; unstable ladder", "Use designated access only; three points of contact; no climbing on braces"),
-                ("Position materials and tools", "Dropped objects; overload of platform", "Use hoist/lift where practicable; tool lanyards; respect SWL markings"),
-                ("Perform task at height", "Fall from edge; contact with services", "Guardrails/toeboards in place or harness anchored; maintain 3 m clearance from live lines"),
-                ("Dismantle / demobilise", "Collapse during dismantling; falling parts", "Follow sequence in design method; exclusive zone; competent supervision"),
+                ("Plan work and inspect scaffold / edge protection", "Incomplete design, damaged components, unprotected edges",
+                 "Confirm scaffold tag in date; inspect boards, ties, guardrails; establish exclusion zone; check design drawings"),
+                ("Access scaffold / work platform", "Fall during access; unstable ladder",
+                 "Use designated access only; three points of contact; no climbing on braces; secure ladders"),
+                ("Position materials and tools", "Dropped objects; overload of platform",
+                 "Use hoist/lift where practicable; tool lanyards; respect SWL markings; do not store excess materials on platforms"),
+                ("Perform task at height", "Fall from edge; contact with services",
+                 "Guardrails/toeboards in place or harness anchored; maintain safe clearance from live lines; continuous supervision"),
+                ("Dismantle / demobilise", "Collapse during dismantling; falling parts",
+                 "Follow sequence in design method; exclusive zone; competent supervision; lower components in controlled manner"),
             ],
         },
         "Excavation / Trenching": {
             "who": "Excavator operators, ground workers, banksmen, nearby trades, public at fence line",
-            "hazards": "Trench collapse / engulfment; struck by plant; underground services strike; falls into excavation; contaminated ground / atmosphere",
-            "existing_controls": "Service drawings and CAT scan before dig; trench support or batter as per design; edge protection and barriers; banksman for plant; gas testing if deep or contaminated",
+            "hazards": "Trench collapse / engulfment; struck by plant; underground services strike; falls into excavation; contaminated ground / atmosphere; water ingress",
+            "existing_controls": _ctrl(
+                "Service drawings obtained and CAT scan completed before dig starts",
+                "Trench support, shoring or batter installed as per design / competent person instruction",
+                "Edge protection, barriers and warning signs around open excavations",
+                "Banksman / spotter for all plant movements near the excavation",
+                "Gas testing where excavation is deep, confined or contaminated ground is suspected",
+                "Spoil and materials kept a safe distance from the excavation edge",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Daily excavation inspection by competent person; stop-work if water ingress or wall movement; emergency rescue plan",
+            "additional_controls": _ctrl(
+                "Daily excavation inspection by a competent person before entry",
+                "Stop-work authority if water ingress, wall movement or unexplained odours occur",
+                "Emergency rescue plan and equipment available at the work face",
+                "Safe access/egress (ladder within prescribed distance) maintained at all times",
+                "Permit to dig / excavation permit controlled by site HSE",
+                "No worker alone inside unsupported or deep excavations",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Hard hat, safety boots, high-visibility clothing, gloves; gas detector where required",
             "steps": [
-                ("Locate underground services", "Service strike – gas, electric, water", "Obtain drawings; mark services; hand dig within tolerance zones"),
-                ("Set out excavation and barriers", "Public/worker fall into open trench", "Barriers and warning signs before digging starts"),
-                ("Excavate with plant", "Struck by machine; collapse of sides", "Banksman; keep spoil away from edge; install support progressively"),
-                ("Work inside excavation", "Collapse; atmosphere; access failure", "Inspect support; ladder access within 8 m; gas test if required"),
-                ("Backfill and reinstate", "Plant movement; incomplete reinstatement", "Controlled plant movements; compact in layers; remove barriers only when safe"),
+                ("Locate underground services", "Service strike – gas, electric, water",
+                 "Obtain drawings; mark services; hand dig within tolerance zones; trial holes"),
+                ("Set out excavation and barriers", "Public/worker fall into open trench",
+                 "Barriers and warning signs before digging starts; lighting if needed"),
+                ("Excavate with plant", "Struck by machine; collapse of sides",
+                 "Banksman; keep spoil away from edge; install support progressively"),
+                ("Work inside excavation", "Collapse; atmosphere; access failure",
+                 "Inspect support; ladder access; gas test if required; continuous monitoring"),
+                ("Backfill and reinstate", "Plant movement; incomplete reinstatement",
+                 "Controlled plant movements; compact in layers; remove barriers only when safe"),
+            ],
+        },
+        "Concreting / Concrete Pouring": {
+            "who": "Concrete crew, pump operators, vibrator operators, finishers, banksmen, nearby trades",
+            "hazards": "Struck by concrete pump/line; hose whip; chemical burns from wet concrete; slips on wet surfaces; manual handling of rebar/form accessories; collapse of formwork under pour load",
+            "existing_controls": _ctrl(
+                "Method statement and pour sequence agreed before mobilisation",
+                "Formwork and falsework inspected and signed off before pour",
+                "Concrete pump and lines inspected; exclusion zone around delivery and boom",
+                "Trained pump operator and hose handlers only; no unauthorised persons near hose",
+                "Wash-down and eye-wash facilities available for concrete contact",
+                "Safe access routes and housekeeping maintained around pour area",
+            ),
+            "likelihood": 3, "severity": 4,
+            "additional_controls": _ctrl(
+                "Toolbox talk covering hose-whip, chemical burns and formwork failure signs",
+                "Communication protocol between pump operator, pour supervisor and finishers",
+                "Stop pour if formwork shows distress, leakage or excessive deflection",
+                "Limit manual handling; use mechanical aids for materials where practicable",
+                "PPE for concrete work enforced (alkali-resistant gloves, eye protection, boots)",
+                "Night pours require adequate lighting and reduced plant speed",
+            ),
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, alkali-resistant gloves, safety glasses/goggles, long sleeves",
+            "steps": [
+                ("Prepare formwork and access", "Formwork failure; poor access",
+                 "Inspect props, ties, bracing; confirm design loads; clear walkways"),
+                ("Position pump / delivery", "Hose whip; struck by boom",
+                 "Outriggers set; exclusion zone; trained hose crew; radio contact"),
+                ("Place and vibrate concrete", "Chemical burns; slips; over-vibration damage",
+                 "Correct PPE; controlled placement; competent vibrator use"),
+                ("Finish and cure", "Slips; exposure of green concrete",
+                 "Barriers until safe; curing method as specification; housekeeping"),
+                ("Clean equipment and demobilise", "Concrete in eyes/skin; residual pressure in lines",
+                 "Depressurise lines safely; wash facilities; dispose wash water correctly"),
+            ],
+        },
+        "Formwork / Shuttering": {
+            "who": "Carpenters, formwork erectors, crane/slinger teams, supervisors, workers below",
+            "hazards": "Collapse during erection or striking; falling form panels; struck by crane loads; nail/puncture injuries; working at height on incomplete forms; inadequate bracing",
+            "existing_controls": _ctrl(
+                "Formwork designed or selected per manufacturer / temporary works design",
+                "Erection and striking sequence defined in method statement",
+                "Competent temporary works coordinator / supervisor oversight",
+                "Exclusion zone below formwork erection and striking operations",
+                "Lifting of panels by certified gear with tag lines; no free swinging loads",
+                "Daily inspection of props, walers, ties and access platforms",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Do not alter proprietary systems without designer approval",
+                "Strike only after concrete strength confirmed by competent person",
+                "Harness use where edge protection is incomplete during erection",
+                "Toolbox talk on panel handling, nailing and striking sequence",
+                "Secure all loose panels and accessories against wind",
+                "Permit / checklist sign-off before pouring against the formwork",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves, safety glasses; harness where required",
+            "steps": [
+                ("Receive design and materials", "Wrong system; damaged components",
+                 "Check against drawings; quarantine damaged parts"),
+                ("Erect formwork and bracing", "Collapse; falls; dropped panels",
+                 "Follow sequence; exclusion zone; certified lifting; edge protection"),
+                ("Inspect and sign off before pour", "Inadequate capacity",
+                 "Temporary works inspection; record defects and close them"),
+                ("Strike formwork", "Premature strike; falling panels",
+                 "Strength confirmation; controlled striking sequence; exclusion zone"),
+                ("Stack and store materials", "Unstable stacks; sharp edges",
+                 "Designated storage; secure stacks; remove nails/protrusions"),
+            ],
+        },
+        "Steel Fixing / Rebar Works": {
+            "who": "Steel fixers, crane crews, helpers, nearby trades",
+            "hazards": "Manual handling injuries; puncture from rebar ends; falls from rebar cages; struck by suspended cages; cuts; eye injury from tying wire",
+            "existing_controls": _ctrl(
+                "Mechanical lifting for cages and heavy bundles; certified lifting gear",
+                "Rebar end caps or bent ends on protruding bars in traffic routes",
+                "Safe access platforms or harness systems for work on cages at height",
+                "Exclusion zone during cage lifts and placement",
+                "Job rotation and team lifts to reduce musculoskeletal strain",
+                "Eye protection when cutting or tying; gloves suitable for rebar",
+            ),
+            "likelihood": 4, "severity": 3,
+            "additional_controls": _ctrl(
+                "Toolbox talk on cage stability and protruding bar control",
+                "Do not climb on unstable or incomplete cages",
+                "Store rebar on firm level ground with chocks; limited stack height",
+                "Cut rebar with appropriate tools; no makeshift methods",
+                "First-aid provisions for puncture and eye injuries nearby",
+                "Coordinate with formwork and concrete teams on sequence",
+            ),
+            "residual_l": 2, "residual_s": 3,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, cut-resistant gloves, safety glasses",
+            "steps": [
+                ("Receive and store rebar", "Unstable stacks; trip hazards",
+                 "Level storage; chocks; clear walkways; end protection"),
+                ("Assemble cages / fix in situ", "MSD; punctures; falls",
+                 "Team lift or crane; platforms; end caps; correct tying practice"),
+                ("Lift and place cages", "Load swing; collapse of cage",
+                 "Certified lift plan; tag lines; exclusion zone; competent slinger"),
+                ("Final check before concrete", "Loose bars; access still open",
+                 "Inspect cover, spacing, stability; remove access only when safe"),
+            ],
+        },
+        "Structural Steel Erection": {
+            "who": "Ironworkers, crane operators, slingers, connectors, workers below",
+            "hazards": "Fall from steel; load drop; struck by swinging members; instability during erection; weather (wind); crushing at connections",
+            "existing_controls": _ctrl(
+                "Erection engineering / sequence drawings followed",
+                "Certified crane and lifting accessories; appointed person lift plan",
+                "Fall protection (harness, decoils, nets or platforms) as per plan",
+                "Exclusion zone under active erection area",
+                "Temporary bracing installed before releasing crane",
+                "Wind speed limits and stop-work criteria defined",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Competency verification for connectors and crane crew",
+                "Radio communication protocol during lifts",
+                "No work on steel during lightning or high wind beyond limits",
+                "Toolbox talk covering sequence, exclusion and rescue",
+                "Tag lines on all long members; control swing",
+                "Daily inspection of fall-arrest equipment and lifting gear",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, full body harness, gloves, safety glasses",
+            "steps": [
+                ("Review erection plan and inspect gear", "Wrong sequence; defective gear",
+                 "Brief team; check certificates; verify temporary works"),
+                ("Lift and position members", "Swing; drop; struck by load",
+                 "Exclusion zone; tag lines; follow signals; trial lift"),
+                ("Connect and brace", "Falls; crushing; instability",
+                 "Fall protection anchored; temporary bracing before release"),
+                ("Torque / complete connections", "Falls; dropped tools",
+                 "Tool lanyards; platforms where practicable; residual bracing checks"),
             ],
         },
         "Lifting Operations – Crane / Mobile Crane": {
             "who": "Crane operator, slingers/signallers, riggers, workers in lift radius, public",
             "hazards": "Load drop; crane overturn; struck by swinging load; contact with overhead lines; inadequate ground bearing",
-            "existing_controls": "Appointed person lift plan; certified crane and lifting accessories; exclusion zone; tag lines; overhead line proximity assessment",
+            "existing_controls": _ctrl(
+                "Appointed person lift plan for the operation",
+                "Certified crane and lifting accessories within inspection period",
+                "Exclusion zone and barriers around lift radius",
+                "Tag lines to control load swing",
+                "Overhead line proximity assessment and spotter where relevant",
+                "Outriggers fully extended on suitable ground / mats",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Trial lift where needed; wind speed limits; daily checklist; radio communication protocol",
+            "additional_controls": _ctrl(
+                "Trial lift where centre of gravity is uncertain",
+                "Wind speed limits enforced; anemometer where required",
+                "Daily pre-use checklist completed by operator",
+                "Radio or agreed hand-signal protocol; one banksman only",
+                "No personnel under suspended load at any time",
+                "Lift plan briefed to all involved before starting",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Hard hat, safety boots, high-visibility clothing, gloves",
             "steps": [
-                ("Review lift plan and inspect gear", "Wrong capacity; defective sling/shackle", "Verify SWL, certificates, colour code; check soft ground pads"),
-                ("Establish exclusion zone", "Personnel under load path", "Barriers/spotters; no one under suspended load"),
-                ("Attach load and take initial strain", "Unstable load; unexpected movement", "Correct hitch; trial lift a few cm; check balance"),
-                ("Lift, slew and place load", "Swing; contact structures/lines", "Follow signals; tag lines; observe clearance envelope"),
-                ("Detach and demobilise", "Load shift on landing; residual energy", "Confirm load stable before releasing; store gear correctly"),
+                ("Review lift plan and inspect gear", "Wrong capacity; defective sling/shackle",
+                 "Verify SWL, certificates, colour code; check soft ground pads"),
+                ("Establish exclusion zone", "Personnel under load path",
+                 "Barriers/spotters; no one under suspended load"),
+                ("Attach load and take initial strain", "Unstable load; unexpected movement",
+                 "Correct hitch; trial lift a few cm; check balance"),
+                ("Lift, slew and place load", "Swing; contact structures/lines",
+                 "Follow signals; tag lines; observe clearance envelope"),
+                ("Detach and demobilise", "Load shift on landing; residual energy",
+                 "Confirm load stable before releasing; store gear correctly"),
             ],
         },
         "Hot Work – Welding / Cutting": {
             "who": "Welders, fire watch, adjacent trades, confined space attendants",
-            "hazards": "Fire/explosion; burns; fume inhalation; eye damage (arc); residual heat ignition",
-            "existing_controls": "Hot work permit; gas test in hazardous areas; fire watch during and after; extinguishers; screens; fume extraction",
+            "hazards": "Fire/explosion; burns; fume inhalation; eye damage (arc); residual heat ignition; electric shock",
+            "existing_controls": _ctrl(
+                "Hot work permit issued before starting",
+                "Gas test in hazardous or enclosed areas as required",
+                "Fire watch during work and for defined period after",
+                "Suitable extinguishers at the work point",
+                "Welding screens to protect others from arc flash",
+                "Local exhaust ventilation or forced ventilation for fumes",
+            ),
             "likelihood": 3, "severity": 4,
-            "additional_controls": "Remove combustibles 15 m or cover; isolate systems; post-work fire watch minimum 30–60 min",
+            "additional_controls": _ctrl(
+                "Remove or protect combustibles within 15 m",
+                "Isolate energy systems that could feed a fire",
+                "Post-work fire watch minimum 30–60 minutes (or as permit)",
+                "Inspect leads, earth and equipment before use",
+                "No hot work on containers until certified gas-free",
+                "Competency and PPE verified for the process used",
+            ),
             "residual_l": 2, "residual_s": 4,
             "ppe": "Welding helmet, gloves, FR clothing, safety boots, respirator as required",
             "steps": [
-                ("Obtain permit and prepare area", "Combustibles; flammable atmosphere", "Permit issued; gas test; clear or protect combustibles"),
-                ("Set up equipment and screens", "Electric shock; UV exposure to others", "Inspect leads; earth correctly; erect screens"),
-                ("Perform welding / cutting", "Fire; burns; fumes", "Fire watch present; extraction on; correct PPE"),
-                ("Complete work and cool down", "Delayed fire from hot slag", "Fire watch continues; remove cylinders to safe area"),
+                ("Obtain permit and prepare area", "Combustibles; flammable atmosphere",
+                 "Permit issued; gas test; clear or protect combustibles"),
+                ("Set up equipment and screens", "Electric shock; UV exposure to others",
+                 "Inspect leads; earth correctly; erect screens"),
+                ("Perform welding / cutting", "Fire; burns; fumes",
+                 "Fire watch present; extraction on; correct PPE"),
+                ("Complete work and cool down", "Delayed fire from hot slag",
+                 "Fire watch continues; remove cylinders to safe area; cancel permit"),
             ],
         },
         "Confined Space Entry": {
             "who": "Entrants, attendant, rescue team, supervisors",
             "hazards": "Oxygen deficiency / toxic / flammable atmosphere; engulfment; difficult rescue; heat stress",
-            "existing_controls": "Confined space permit; atmospheric testing and continuous monitoring; forced ventilation; standby person; rescue plan and equipment",
+            "existing_controls": _ctrl(
+                "Confined space entry permit issued by authorised person",
+                "Atmospheric testing before entry and continuous monitoring",
+                "Forced ventilation where required by risk assessment",
+                "Dedicated standby person at the entrance at all times",
+                "Rescue plan and suitable rescue equipment ready",
+                "Isolation (LOTO) of energies and product lines feeding the space",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "No lone entry; communication checks; time limits; emergency drill familiarity",
+            "additional_controls": _ctrl(
+                "No lone entry; maximum entry duration defined",
+                "Communication checks at agreed intervals",
+                "Emergency drill familiarity for the rescue team",
+                "Stop entry if monitor alarms or conditions change",
+                "Entrants trained and medically fit as required",
+                "Cancel permit and account for all persons on completion",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "As per permit – may include SCBA/escape set, harness, detector, communication",
             "steps": [
-                ("Isolate and prepare space", "Energy release; residual product", "LOTO; drain/purge; verify isolations"),
-                ("Test atmosphere", "Undetected hazardous atmosphere", "Test top/middle/bottom; record readings; continuous monitor"),
-                ("Enter and perform task", "Atmosphere change; injury inside", "Attendant maintains count; entrant on lifeline if required"),
-                ("Exit and close permit", "Incomplete isolation restoration", "Account for all persons; cancel permit; restore systems under control"),
+                ("Isolate and prepare space", "Energy release; residual product",
+                 "LOTO; drain/purge; verify isolations"),
+                ("Test atmosphere", "Undetected hazardous atmosphere",
+                 "Test top/middle/bottom; record readings; continuous monitor"),
+                ("Enter and perform task", "Atmosphere change; injury inside",
+                 "Attendant maintains count; entrant on lifeline if required"),
+                ("Exit and close permit", "Incomplete isolation restoration",
+                 "Account for all persons; cancel permit; restore systems under control"),
+            ],
+        },
+        "Scaffolding Erection & Dismantling": {
+            "who": "Scaffolders, crane/hoist operators, supervisors, persons below",
+            "hazards": "Fall from height; scaffold collapse; falling components; manual handling; contact with overhead services",
+            "existing_controls": _ctrl(
+                "Only competent scaffolders erect, alter or dismantle",
+                "Scaffold design / TG20 or equivalent compliance where applicable",
+                "Harness and suitable anchorage during erection/dismantling",
+                "Exclusion zone and spotting below the work",
+                "Materials hoisted safely; no throwing of components",
+                "Handover certificate / tag before use by others",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Follow manufacturer or design dismantling sequence",
+                "Do not overload incomplete platforms with materials",
+                "Weather limits (wind) enforced",
+                "Toolbox talk on sequence and rescue",
+                "Inspect tubes, fittings and boards before use",
+                "Public/worker protection screens where adjacent to roads or occupied areas",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, full body harness, gloves, safety glasses",
+            "steps": [
+                ("Plan and inspect materials", "Damaged tubes; wrong design",
+                 "Check design; quarantine defective gear"),
+                ("Erect progressively with edge protection", "Falls; collapse",
+                 "Harness; ties as design; progressive guardrails"),
+                ("Handover and tag", "Unauthorised use of incomplete scaffold",
+                 "Inspection; tag; brief users"),
+                ("Dismantle in reverse sequence", "Collapse; falling parts",
+                 "Exclusion zone; controlled lowering; competent supervision"),
+            ],
+        },
+        "Working at Height – MEWP / Scissor Lift": {
+            "who": "MEWP operators, occupants, persons below, supervisors",
+            "hazards": "Overturn; crush against structure; fall from basket; contact with overhead lines; ground collapse under outriggers",
+            "existing_controls": _ctrl(
+                "Operator trained and authorised for the specific MEWP type",
+                "Pre-use inspection and function checks completed",
+                "Harness attached to designated anchor in boom-type MEWPs",
+                "Ground conditions assessed; outriggers/pads used as required",
+                "Exclusion zone below elevated work",
+                "Overhead obstruction and power-line survey before positioning",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Do not exceed SWL or use MEWP as a crane",
+                "Wind limits per manufacturer observed",
+                "Spotter when operating near structures or traffic",
+                "Emergency lowering procedure known to team",
+                "No climbing on guardrails or exiting at height unless planned",
+                "Isolate and tag defective machines immediately",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, harness (boom type), gloves",
+            "steps": [
+                ("Inspect MEWP and site ground", "Defects; soft ground",
+                 "Checklist; pads; check overhead clearances"),
+                ("Position and elevate", "Overturn; crush",
+                 "Spotter; slow movements; harness clipped"),
+                ("Perform task from platform", "Falls; dropped tools",
+                 "Feet on floor; tool lanyards; do not overreach"),
+                ("Lower and demobilise", "Crush on descent; residual energy",
+                 "Clear zone below; stow correctly; report defects"),
+            ],
+        },
+        "Roof Work": {
+            "who": "Roofers, supervisors, persons below, material hoist operators",
+            "hazards": "Falls through fragile surfaces; falls from roof edge; weather; manual handling of sheets; falling materials",
+            "existing_controls": _ctrl(
+                "Roof work permit / method statement before access",
+                "Edge protection, scaffolding or harness systems as hierarchy requires",
+                "Fragile surface survey and designated walkways/crawling boards",
+                "Exclusion zone below roof works",
+                "Materials secured against wind; controlled hoisting",
+                "Weather monitoring and stop criteria",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Rescue plan for suspended workers",
+                "No work on icy or excessively wet roofs without extra controls",
+                "Toolbox talk on fragile materials and edge protection",
+                "Competent supervision for unfamiliar roof types",
+                "Short-duration work still requires fall protection",
+                "Secure all tools; no loose items near edges",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, harness where required, gloves, safety glasses",
+            "steps": [
+                ("Survey roof and plan access", "Fragile areas unknown",
+                 "Identify fragile zones; plan walkways and edge protection"),
+                ("Install protection systems", "Falls during setup",
+                 "Scaffold/MEWP/harness as planned; exclusion below"),
+                ("Install / repair roof materials", "Falls; wind lift; cuts",
+                 "Secure sheets; correct PPE; follow sequence"),
+                ("Clear materials and remove access", "Falling debris; incomplete edges",
+                 "Housekeeping; remove protection only when edges safe"),
+            ],
+        },
+        "Brickwork / Blockwork / Masonry": {
+            "who": "Bricklayers, labourers, scaffold users, material handlers",
+            "hazards": "Manual handling; falls from scaffold; cuts; eye injury from mortar/chips; dermatitis; struck by falling bricks",
+            "existing_controls": _ctrl(
+                "Scaffold or safe working platform for elevated work",
+                "Mechanical aids for block packs where practicable",
+                "Eye protection when cutting blocks or chasing",
+                "Gloves suitable for handling masonry and mortar",
+                "Good housekeeping on platforms; limited material storage",
+                "Dust control when cutting (wet methods / extraction)",
+            ),
+            "likelihood": 3, "severity": 3,
+            "additional_controls": _ctrl(
+                "Job rotation for repetitive lifting",
+                "Silica exposure controls for cutting operations",
+                "Toolbox talk on platform loading limits",
+                "First aid for eye and skin exposure to mortar",
+                "Secure incomplete walls against wind if required",
+                "Coordinate deliveries to avoid platform overload",
+            ),
+            "residual_l": 2, "residual_s": 3,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves, safety glasses; RPE when cutting",
+            "steps": [
+                ("Set out and prepare materials", "MSD; trip hazards",
+                 "Clear area; mechanical handling; stack safely"),
+                ("Build from safe platform", "Falls; overload",
+                 "Scaffold tagged; respect SWL; edge protection"),
+                ("Cut blocks / chase", "Dust; eye injury",
+                 "Wet cut or extraction; eye/RPE protection"),
+                ("Clean down and cure", "Slips; residual debris",
+                 "Housekeeping; protect fresh work as needed"),
             ],
         },
         "Manual Handling / Material Movement": {
             "who": "Labourers, trades, delivery crews",
             "hazards": "Musculoskeletal injury; crush from dropped load; slips while carrying",
-            "existing_controls": "Mechanical aids preferred; team lift for heavy items; clear routes; training in kinetic lifting",
+            "existing_controls": _ctrl(
+                "Mechanical aids preferred (trolleys, forklifts, hoists)",
+                "Team lift for heavy or awkward items with agreed signals",
+                "Clear routes free of debris and trip hazards",
+                "Training in kinetic lifting techniques",
+                "Assess weight and centre of gravity before lifting",
+                "Gloves with suitable grip for the material",
+            ),
             "likelihood": 4, "severity": 3,
-            "additional_controls": "Break loads; rest breaks; assess weight before lift; gloves with grip",
+            "additional_controls": _ctrl(
+                "Break loads into smaller units where practicable",
+                "Scheduled rest breaks for repetitive handling",
+                "Two-person rule for items above defined weight",
+                "No lifting above shoulder height without aids",
+                "Report and investigate handling injuries promptly",
+                "Design storage to minimise double handling",
+            ),
             "residual_l": 2, "residual_s": 3,
             "ppe": "Safety boots, gloves, hard hat as area requires",
             "steps": [
-                ("Assess load and route", "Overweight; obstructed path", "Check weight/shape; clear path; use trolley if possible"),
-                ("Lift and carry", "Back strain; drop", "Bend knees, keep load close; team lift signals"),
-                ("Place load", "Crush fingers; unstable stack", "Set down controlled; stack within height limits"),
+                ("Assess load and route", "Overweight; obstructed path",
+                 "Check weight/shape; clear path; use trolley if possible"),
+                ("Lift and carry", "Back strain; drop",
+                 "Bend knees, keep load close; team lift signals"),
+                ("Place load", "Crush fingers; unstable stack",
+                 "Set down controlled; stack within height limits"),
             ],
         },
         "Electrical Work – Temporary Power / Isolation": {
             "who": "Electricians, users of temporary supplies, other trades",
-            "hazards": "Electric shock; arc flash; fire from overloaded circuits",
-            "existing_controls": "Competent persons only; LOTO; RCD protection; inspected temporary distribution; insulated tools",
+            "hazards": "Electric shock; arc flash; fire from overloaded circuits; contact with live temporary boards",
+            "existing_controls": _ctrl(
+                "Only competent electricians install and modify temporary supplies",
+                "LOTO procedures for isolation before work on circuits",
+                "RCD protection on temporary distribution",
+                "Inspected and tagged temporary boards and leads",
+                "Insulated tools and proving-dead instruments used",
+                "Weather protection of outdoor boards and connections",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Prove dead before work; barriers on live panels; weather protection of boards",
+            "additional_controls": _ctrl(
+                "Prove dead before contact; test instrument before and after",
+                "Barriers and signage on live panels under test",
+                "No daisy-chaining of extension leads",
+                "Daily visual checks of leads in traffic routes",
+                "Emergency response awareness for electric shock",
+                "Coordinated isolation with other trades affected",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Insulating gloves where required, safety glasses, FR clothing as task demands",
             "steps": [
-                ("Plan isolation", "Wrong circuit; residual energy", "Identify circuit; notify affected parties"),
-                ("Isolate and lock out", "Unexpected re-energisation", "Apply locks/tags; stored energy released"),
-                ("Prove dead and work", "Contact with live parts", "Test instrument proved; work within safe zone"),
-                ("Restore and test", "Incorrect reconnection", "Remove LOTO only by isolator; functional test"),
+                ("Plan isolation", "Wrong circuit; residual energy",
+                 "Identify circuit; notify affected parties"),
+                ("Isolate and lock out", "Unexpected re-energisation",
+                 "Apply locks/tags; stored energy released"),
+                ("Prove dead and work", "Contact with live parts",
+                 "Test instrument proved; work within safe zone"),
+                ("Restore and test", "Incorrect reconnection",
+                 "Remove LOTO only by isolator; functional test"),
             ],
         },
         "Demolition / Structural Alteration": {
             "who": "Demolition crew, plant operators, adjacent occupants, public",
-            "hazards": "Uncontrolled collapse; falling debris; asbestos/lead exposure; service strikes",
-            "existing_controls": "Structural survey; method statement; exclusion zones; soft strip before structural take-down; asbestos survey",
+            "hazards": "Uncontrolled collapse; falling debris; asbestos/lead exposure; service strikes; dust and noise",
+            "existing_controls": _ctrl(
+                "Structural survey and engineered method statement",
+                "Exclusion zones and hoarding as required",
+                "Soft strip before structural take-down",
+                "Asbestos / hazardous material survey and licensed removal if needed",
+                "Service isolation confirmed before cutting",
+                "Dust suppression and noise controls",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Temporary works design; continuous supervision; dust suppression; air monitoring if required",
+            "additional_controls": _ctrl(
+                "Temporary works design for partial demolition",
+                "Continuous competent supervision",
+                "Air monitoring where hazardous dust is possible",
+                "Public protection and traffic management if roadside",
+                "Emergency plan for unexpected collapse or service strike",
+                "Waste segregation and licensed disposal routes",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Hard hat, safety boots, high-visibility, RPE for dust, eye protection",
             "steps": [
-                ("Survey and soft strip", "Hidden services; ACM", "Confirm surveys; licensed removal if ACM present"),
-                ("Establish exclusion and plant positions", "Public exposure; plant instability", "Hoarding/barriers; outrigger pads"),
-                ("Controlled demolition sequence", "Premature collapse", "Follow engineered sequence; remote methods where practicable"),
-                ("Clear debris and make safe", "Sharp materials; residual instability", "Sort waste streams; temporary support until stable"),
+                ("Survey and soft strip", "Hidden services; ACM",
+                 "Confirm surveys; licensed removal if ACM present"),
+                ("Establish exclusion and plant positions", "Public exposure; plant instability",
+                 "Hoarding/barriers; outrigger pads"),
+                ("Controlled demolition sequence", "Premature collapse",
+                 "Follow engineered sequence; remote methods where practicable"),
+                ("Clear debris and make safe", "Sharp materials; residual instability",
+                 "Sort waste streams; temporary support until stable"),
+            ],
+        },
+        "Piling / Foundation Works": {
+            "who": "Piling crew, crane/rig operators, banksmen, nearby trades, public at boundary",
+            "hazards": "Struck by plant; noise and vibration; flying debris; service strikes; unstable ground; lifting of cages/casings",
+            "existing_controls": _ctrl(
+                "Service location and permit to dig before boring",
+                "Exclusion zone around rig and under suspended loads",
+                "Competent operator and appointed lift plan for cages",
+                "Hearing protection zones defined",
+                "Stability assessment of rig on working platform",
+                "Daily plant inspection and maintenance",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Vibration monitoring near sensitive structures if required",
+                "Banksman for all rig movements",
+                "Stop work in high wind beyond manufacturer limits",
+                "Toolbox talk on flying spoil and service strikes",
+                "Emergency response for service strike (gas/electric)",
+                "Controlled access to spoil and bentonite areas",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, hearing protection, gloves, safety glasses",
+            "steps": [
+                ("Locate services and prepare platform", "Service strike; rig overturn",
+                 "CAT scan; engineered platform; barriers"),
+                ("Position rig and bore", "Struck by plant; noise",
+                 "Banksman; exclusion; hearing protection"),
+                ("Place reinforcement / concrete", "Lifting incidents; wet concrete hazards",
+                 "Lift plan; tag lines; concrete PPE"),
+                ("Demobilise plant", "Plant movement incidents",
+                 "Controlled travel routes; banksman"),
+            ],
+        },
+        "Grinding / Cutting with Abrasive Wheels": {
+            "who": "Operatives using angle grinders / cut-off saws, nearby workers",
+            "hazards": "Wheel burst; eye and face injury; cuts; fire from sparks; noise; hand-arm vibration; dust (including silica)",
+            "existing_controls": _ctrl(
+                "Only trained persons use abrasive wheels; correct wheel for machine and material",
+                "Guards fitted and adjusted; side handle used",
+                "Eye/face protection mandatory; hearing protection as required",
+                "Fire watch / spark control near combustibles or in hot-work areas",
+                "Dust extraction or wet methods for silica-containing materials",
+                "Pre-use check of wheel, flanges and machine condition",
+            ),
+            "likelihood": 4, "severity": 4,
+            "additional_controls": _ctrl(
+                "HAV exposure time limited; job rotation",
+                "No grinding on containers unless certified safe",
+                "Secure workpiece; two-handed operation",
+                "Spark direction away from people and openings",
+                "Damaged wheels discarded; correct storage of wheels",
+                "RPE for dusty operations as risk assessment requires",
+            ),
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Hard hat (as area), safety boots, face shield/goggles, gloves, hearing protection, RPE as required",
+            "steps": [
+                ("Select and inspect wheel/machine", "Wrong wheel; cracks",
+                 "Match RPM; ring test where applicable; fit guard"),
+                ("Secure work and set exclusion", "Workpiece movement; bystanders",
+                 "Clamp; screens; warn others"),
+                ("Cut / grind", "Burst; sparks; dust; HAV",
+                 "Two hands; correct stance; extraction; time limits"),
+                ("Stop and store", "Hot material; damaged disc",
+                 "Allow cool-down; remove damaged wheels from service"),
+            ],
+        },
+        "Mobile Plant / Vehicle Movement on Site": {
+            "who": "Plant operators, banksmen, pedestrians, delivery drivers",
+            "hazards": "Struck by vehicle/plant; overturn; collision; restricted visibility; reversing incidents",
+            "existing_controls": _ctrl(
+                "One-way systems and segregated pedestrian routes where practicable",
+                "Trained operators only; plant inductions",
+                "Banksman for reversing and tight manoeuvres",
+                "High-visibility clothing for all on foot",
+                "Speed limits and mirrors/cameras maintained",
+                "Daily pre-use plant checks",
+            ),
+            "likelihood": 4, "severity": 5,
+            "additional_controls": _ctrl(
+                "Exclusion of non-essential pedestrians from plant zones",
+                "Lighting for night or low-visibility movements",
+                "No phones while operating plant",
+                "Seat belts worn where fitted",
+                "Report near-miss vehicle incidents for learning",
+                "Delivery booking to reduce congestion",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing",
+            "steps": [
+                ("Plan route and brief banksman", "Unknown obstacles; no banksman",
+                 "Walk route if needed; agree signals"),
+                ("Move plant", "Struck pedestrian; overturn",
+                 "Speed limits; banksman; seat belt; mirrors"),
+                ("Park and isolate", "Unintended movement",
+                 "Park on firm ground; apply brake; remove key if required"),
+            ],
+        },
+        "Painting / Surface Coating": {
+            "who": "Painters, helpers, nearby trades in enclosed areas",
+            "hazards": "Solvent vapour inhalation; fire/explosion from flammable coatings; skin exposure; falls from access equipment; slips",
+            "existing_controls": _ctrl(
+                "COSHH assessment and SDS available for products used",
+                "Ventilation appropriate to product and space",
+                "No hot work or ignition sources in spray areas",
+                "Correct RPE and gloves per SDS",
+                "Safe access (scaffold/MEWP) for elevated painting",
+                "Spill kits and waste segregation for residues",
+            ),
+            "likelihood": 3, "severity": 3,
+            "additional_controls": _ctrl(
+                "Explosion-proof equipment where solvent concentrations possible",
+                "Job rotation and exposure time limits for solvents",
+                "Skin care and washing facilities",
+                "Fire extinguisher suitable for solvent fires nearby",
+                "Toolbox talk on product-specific hazards",
+                "Store flammables in approved cabinets away from work face",
+            ),
+            "residual_l": 2, "residual_s": 3,
+            "ppe": "Overalls, gloves, RPE as SDS requires, eye protection, safety boots; harness if at height",
+            "steps": [
+                ("Review SDS and prepare area", "Unknown product hazards",
+                 "COSHH controls; ventilate; remove ignition sources"),
+                ("Apply coating", "Inhalation; fire; falls",
+                 "Correct RPE; safe access; no smoking/hot work"),
+                ("Clean tools and dispose waste", "Solvent exposure; fire",
+                 "Approved thinners use; sealed waste containers"),
+            ],
+        },
+        "Housekeeping / Material Storage": {
+            "who": "All site workers, stores personnel, delivery crews",
+            "hazards": "Slips, trips and falls; falling materials from unstable stacks; fire load; obstructed emergency routes; manual handling",
+            "existing_controls": _ctrl(
+                "Designated storage areas with stacking rules",
+                "Daily housekeeping expectations in work areas",
+                "Emergency routes and exits kept clear",
+                "Flammable and incompatible materials segregated",
+                "Waste removed at regular intervals",
+                "Lighting maintained in storage and access ways",
+            ),
+            "likelihood": 4, "severity": 3,
+            "additional_controls": _ctrl(
+                "Supervisory checks of housekeeping standards",
+                "Maximum stack heights posted and enforced",
+                "Spill response for oils and chemicals",
+                "No storage against electrical panels or fire equipment",
+                "Pest and weather protection for sensitive materials",
+                "Induction briefing on storage and waste rules",
+            ),
+            "residual_l": 2, "residual_s": 3,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves as task requires",
+            "steps": [
+                ("Receive and place materials", "Unstable stacks; blocked routes",
+                 "Use designated areas; respect height limits"),
+                ("Maintain work area", "Trips; sharp waste",
+                 "Clear as you go; segregate waste"),
+                ("End-of-shift check", "Fire load; blocked exits",
+                 "Remove waste; restore access routes"),
+            ],
+        },
+        "Night Work / Low Visibility Operations": {
+            "who": "All night-shift workers, plant operators, supervisors",
+            "hazards": "Reduced visibility leading to struck-by and slips; fatigue; emergency response delays; isolation of workers",
+            "existing_controls": _ctrl(
+                "Task lighting to a defined standard on work faces and routes",
+                "High-visibility clothing mandatory",
+                "Fatigue management – shift limits and rest breaks",
+                "Supervisory presence appropriate to the work",
+                "Emergency procedures briefed for night conditions",
+                "Plant movements restricted or banksman-controlled",
+            ),
+            "likelihood": 3, "severity": 4,
+            "additional_controls": _ctrl(
+                "Avoid highest-risk tasks at night where practicable",
+                "Buddy system for isolated work",
+                "Check lighting before shift starts; spare lamps available",
+                "Reduced speed limits for plant after dark",
+                "Clear communication of muster points in dark conditions",
+                "Monitor weather that further reduces visibility",
+            ),
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Hard hat, safety boots, high-visibility clothing (Class as required), task-specific PPE",
+            "steps": [
+                ("Pre-shift lighting and briefing", "Dark zones; unclear plan",
+                 "Inspect lights; toolbox talk; confirm emergency points"),
+                ("Execute tasks", "Struck-by; fatigue errors",
+                 "Banksman; breaks; stop if lighting fails"),
+                ("Close shift", "Workers left in dark areas",
+                 "Account for personnel; secure plant and openings"),
+            ],
+        },
+        "Work in Extreme Heat": {
+            "who": "Outdoor workers, plant operators, confined-space entrants in hot conditions",
+            "hazards": "Heat stress / heat stroke; dehydration; reduced concentration leading to errors; burns from hot surfaces",
+            "existing_controls": _ctrl(
+                "Hydration points and scheduled drinking breaks",
+                "Work/rest cycles adjusted for temperature and humidity",
+                "Shade or cooled rest areas",
+                "Buddy observation for symptoms of heat illness",
+                "Acclimatisation consideration for new or returning workers",
+                "Avoid peak heat periods for heavy work where practicable",
+            ),
+            "likelihood": 4, "severity": 4,
+            "additional_controls": _ctrl(
+                "Stop-work authority for heat stress symptoms",
+                "Light-coloured, breathable clothing compatible with other PPE",
+                "Electrolyte replacement as medical advice / site policy",
+                "Training to recognise heat illness in self and others",
+                "First-aid response plan for heat emergencies",
+                "Monitor WBGT or equivalent where used by site rules",
+            ),
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Task PPE selected to balance protection and heat burden; sun protection as needed",
+            "steps": [
+                ("Plan work for cooler periods", "Unnecessary peak-heat exposure",
+                 "Schedule heavy tasks early/late; provide shade"),
+                ("Monitor workers during task", "Unnoticed heat illness",
+                 "Buddy checks; enforced breaks; hydration"),
+                ("Respond to symptoms", "Delayed first aid",
+                 "Stop work; cool casualty; emergency services if needed"),
+            ],
+        },
+        "Drainage / Pipe Laying": {
+            "who": "Pipe layers, excavator operators, banksmen, testers",
+            "hazards": "Excavation collapse; manual handling of pipes; struck by plant; service strikes; confined trench entry",
+            "existing_controls": _ctrl(
+                "Excavation controls as for trenching (support, barriers, inspection)",
+                "Mechanical handling of pipes where practicable",
+                "Banksman for plant near open trenches",
+                "Service location before excavation",
+                "Trench access by ladder; no jumping into excavations",
+                "Pipe stacks chocked and limited in height",
+            ),
+            "likelihood": 3, "severity": 4,
+            "additional_controls": _ctrl(
+                "Team lift or vacuum/mechanical lifters for heavy pipe",
+                "Stop work if trench condition deteriorates",
+                "Pressure testing exclusion zones",
+                "Toolbox talk on trench and lifting hazards",
+                "Gloves and pinch-point awareness when jointing",
+                "Backfill promptly when testing complete",
+            ),
+            "residual_l": 2, "residual_s": 4,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves, safety glasses",
+            "steps": [
+                ("Excavate and support trench", "Collapse; service strike",
+                 "Support; CAT scan; barriers"),
+                ("Place and joint pipes", "MSD; pinch; trench entry hazards",
+                 "Mechanical lift; safe access; inspect support"),
+                ("Test and backfill", "Pressure injury; plant movement",
+                 "Exclusion during test; controlled backfill"),
+            ],
+        },
+        "Falsework / Temporary Works Support": {
+            "who": "Falsework erectors, supervisors, concrete crews, inspectors",
+            "hazards": "Collapse under load; incorrect assembly; falls during erection; premature striking",
+            "existing_controls": _ctrl(
+                "Temporary works design by competent designer",
+                "Erection only by trained persons to the drawing",
+                "Inspection and permit to load before use",
+                "No unauthorised alteration of falsework",
+                "Edge protection during erection at height",
+                "Defined striking procedure after strength gain",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Temporary works coordinator appointed",
+                "Check foundations/ground bearing for props",
+                "Toolbox talk on assembly critical points",
+                "Stop pour if movement or noise indicates distress",
+                "Exclusion under incomplete falsework",
+                "Records of inspections retained",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility clothing, gloves, harness where required",
+            "steps": [
+                ("Review design and materials", "Wrong components",
+                 "Match drawing; reject damaged gear"),
+                ("Erect and brace", "Collapse; falls",
+                 "Follow sequence; edge protection; inspection"),
+                ("Permit to load / pour", "Premature loading",
+                 "Sign-off by competent person"),
+                ("Strike after approval", "Premature strike",
+                 "Strength confirmation; reverse sequence"),
             ],
         },
     },
@@ -20120,86 +20826,286 @@ RA_LIBRARY = {
         "Hot Work in Process Area": {
             "who": "Welders, fire watch, process operators, adjacent units",
             "hazards": "Fire/explosion from residual hydrocarbons; gas release; burns",
-            "existing_controls": "Hot work permit; continuous gas monitoring (LEL); depressurise/isolate/purge; fire watch; extinguishers/deluge awareness",
+            "existing_controls": _ctrl(
+                "Hot work permit with gas testing requirements",
+                "Continuous LEL monitoring in the work area",
+                "Depressurise, isolate, purge and prove gas-free as required",
+                "Dedicated fire watch with extinguishers",
+                "SIMOPS review with operations",
+                "FR clothing and personal gas detectors",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "SIMOPS review; wind direction awareness; stop if LEL rises",
+            "additional_controls": _ctrl(
+                "Stop work if LEL rises above agreed limit",
+                "Wind direction awareness for residual vapour",
+                "No hot work during plant upsets without re-approval",
+                "Post-work fire watch duration met",
+                "Communication with control room maintained",
+                "Rescue and muster awareness for the area",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "FR clothing, hard hat, safety glasses, gloves, gas detector",
             "steps": [
-                ("Isolate and gas-free system", "Residual hydrocarbon", "Blind/LOTO; purge; prove gas-free"),
-                ("Issue hot work permit", "Incomplete controls", "Authorised issuer; gas readings recorded"),
-                ("Execute hot work", "Ignition of release", "Continuous LEL monitor; fire watch"),
-                ("Cool down and close permit", "Smouldering fire", "Fire watch duration met; reinstatement controlled"),
+                ("Isolate and gas-free system", "Residual hydrocarbon",
+                 "Blind/LOTO; purge; prove gas-free"),
+                ("Issue hot work permit", "Incomplete controls",
+                 "Authorised issuer; gas readings recorded"),
+                ("Execute hot work", "Ignition of release",
+                 "Continuous LEL monitor; fire watch"),
+                ("Cool down and close permit", "Smouldering fire",
+                 "Fire watch duration met; reinstatement controlled"),
             ],
         },
         "H2S / Toxic Gas Area Work": {
             "who": "Field operators, maintenance crews, visitors in area",
             "hazards": "H2S exposure – rapid incapacitation; flammability",
-            "existing_controls": "Continuous H2S monitors with alarm; escape sets; wind socks; muster points; buddy system",
+            "existing_controls": _ctrl(
+                "Continuous H2S monitors with alarm",
+                "Escape sets available and inspected",
+                "Wind socks and known muster points",
+                "Buddy system in classified areas",
+                "Pre-job briefing on H2S zones and alarms",
+                "Access control to high-H2S areas",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Pre-job briefing on H2S zones; SCBA for certain tasks; rescue plan",
+            "additional_controls": _ctrl(
+                "SCBA for tasks defined by risk assessment",
+                "Rescue plan specific to the area",
+                "Bump-test detectors before entry",
+                "Stop work and muster on alarm",
+                "Visitor escort rules enforced",
+                "Medical fitness awareness for respirator use",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Personal H2S detector, escape respirator, FR clothing, hard hat",
             "steps": [
-                ("Check monitors and wind", "Undetected H2S", "Bump-test detectors; note wind sock"),
-                ("Enter area / perform task", "Sudden release", "Buddy; know muster route; stop-work authority"),
-                ("Exit on alarm", "Delayed evacuation", "Immediate muster; account for personnel"),
+                ("Check monitors and wind", "Undetected H2S",
+                 "Bump-test detectors; note wind sock"),
+                ("Enter area / perform task", "Sudden release",
+                 "Buddy; know muster route; stop-work authority"),
+                ("Exit on alarm", "Delayed evacuation",
+                 "Immediate muster; account for personnel"),
             ],
         },
         "Well Servicing / Tripping Pipe": {
             "who": "Drill crew, derrickman, floorhands, toolpusher",
             "hazards": "Struck by pipe/tongs; pinch points; dropped objects from derrick; slips on oily floor",
-            "existing_controls": "Competent crew; PPE; designated hand placement; stabilise elevators; housekeeping",
+            "existing_controls": _ctrl(
+                "Competent crew with defined roles",
+                "PPE including FR clothing and gloves",
+                "Designated hand placement and exclusion during tong operation",
+                "Housekeeping of the rig floor",
+                "Dropped-object prevention from derrick",
+                "Communication with driller at all times",
+            ),
             "likelihood": 4, "severity": 4,
-            "additional_controls": "Pre-tour JSA; exclude non-essential personnel from floor; communication with driller",
+            "additional_controls": _ctrl(
+                "Pre-tour JSA for the specific operation",
+                "Exclude non-essential personnel from floor",
+                "Inspect elevators, tongs and slips before use",
+                "Look-up policy for derrick work",
+                "Stop work for uncontrolled pipe movement",
+                "First-aid readiness for crush and impact injuries",
+            ),
             "residual_l": 2, "residual_s": 4,
             "ppe": "Hard hat, safety glasses, steel-toe boots, gloves, FR clothing",
             "steps": [
-                ("Prepare floor and equipment", "Slips; defective elevators", "Clean floor; inspect elevators/tongs"),
-                ("Make up / break out connections", "Pinch points; chain strike", "Hands on handles only; controlled spinning chain"),
-                ("Trip pipe in/out of hole", "Swinging stands; dropped objects", "Derrickman tails pipe; look up policy"),
+                ("Prepare floor and equipment", "Slips; defective elevators",
+                 "Clean floor; inspect elevators/tongs"),
+                ("Make up / break out connections", "Pinch points; chain strike",
+                 "Hands on handles only; controlled spinning chain"),
+                ("Trip pipe in/out of hole", "Swinging stands; dropped objects",
+                 "Derrickman tails pipe; look-up policy"),
             ],
         },
         "Line Breaking / Process Opening": {
             "who": "Mechanical fitters, operators, fire watch if hot work follows",
             "hazards": "Release of pressure/product; chemical exposure; fire",
-            "existing_controls": "Line break permit; depressurise/drain/purge; PPE for product; splash protection; spill control",
+            "existing_controls": _ctrl(
+                "Line break / energy isolation permit",
+                "Depressurise, drain and purge to safe state",
+                "PPE matched to product SDS",
+                "Splash protection and face shield as required",
+                "Spill control materials ready",
+                "Standby person for higher-risk breaks",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Crack flange away from body; standby person; emergency shower access",
+            "additional_controls": _ctrl(
+                "Crack first flange away from body and others",
+                "Emergency shower / eyewash accessible",
+                "Verify zero energy with gauges and bleeds",
+                "Toolbox talk on product-specific hazards",
+                "Stop if unexpected pressure or product appears",
+                "Controlled reinstatement and leak check",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Chemical-resistant gloves/apron as SDS requires, face shield, FR clothing",
             "steps": [
-                ("Verify isolation and energy zero", "Pressure residual", "Gauge reads zero; bleed points open"),
-                ("Break first flange carefully", "Spray of product", "Stand aside; contain drips"),
-                ("Complete opening and clean", "Exposure during cleaning", "Use approved method; dispose residues correctly"),
+                ("Verify isolation and energy zero", "Pressure residual",
+                 "Gauge reads zero; bleed points open"),
+                ("Break first flange carefully", "Spray of product",
+                 "Stand aside; contain drips"),
+                ("Complete opening and clean", "Exposure during cleaning",
+                 "Use approved method; dispose residues correctly"),
             ],
         },
         "Pressure Testing": {
             "who": "Test crew, operators, exclusion zone boundary watchers",
             "hazards": "Stored energy rupture; projectile failure; high-pressure injection",
-            "existing_controls": "Written test procedure; calibrated gauges; exclusion zone; gradual pressurisation; certified blinds/equipment",
+            "existing_controls": _ctrl(
+                "Written test procedure with defined pressures and hold points",
+                "Calibrated gauges and certified blinds/equipment",
+                "Exclusion zone during pressurisation",
+                "Gradual pressurisation with hold points",
+                "No personnel in line of fire",
+                "Communication before pressure-up and depressurisation",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "No personnel in line of fire; communication before pressure up",
+            "additional_controls": _ctrl(
+                "Independent verification of test pack boundaries",
+                "Hydrotest preferred over pneumatic where practicable",
+                "Emergency depressurisation route known",
+                "Toolbox talk on stored-energy hazards",
+                "Stop test on any unexplained pressure drop or noise",
+                "Controlled venting away from personnel",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "Hard hat, safety glasses, safety boots, FR clothing",
             "steps": [
-                ("Verify test pack and blinds", "Wrong rating", "Check design pressure vs test pressure"),
-                ("Pressurise in stages", "Sudden failure", "Hold points; inspect for leaks from safe distance"),
-                ("Depressurise and normalise", "Trapped pressure", "Vent safely; remove blinds under procedure"),
+                ("Verify test pack and blinds", "Wrong rating",
+                 "Check design pressure vs test pressure"),
+                ("Pressurise in stages", "Sudden failure",
+                 "Hold points; inspect for leaks from safe distance"),
+                ("Depressurise and normalise", "Trapped pressure",
+                 "Vent safely; remove blinds under procedure"),
             ],
         },
         "Simultaneous Operations (SIMOPS)": {
             "who": "All crews in shared area – construction, operations, contractors",
             "hazards": "Conflicting activities; ignition sources near hydrocarbons; vehicle/pedestrian interface",
-            "existing_controls": "SIMOPS matrix and permit coordination; daily coordination meeting; shared exclusion zones",
+            "existing_controls": _ctrl(
+                "SIMOPS matrix and permit coordination",
+                "Daily coordination meeting",
+                "Shared exclusion zones and plot plans",
+                "Named SIMOPS coordinator where required",
+                "Clear radio / communication protocols",
+                "Stop-work authority for conflicts",
+            ),
             "likelihood": 3, "severity": 4,
-            "additional_controls": "Named SIMOPS coordinator; stop-work if conflict arises",
+            "additional_controls": _ctrl(
+                "Stagger critical high-risk steps",
+                "Update shared board when conditions change",
+                "Hourly check-ins during peak SIMOPS",
+                "Toolbox talk covering interface risks",
+                "Limit non-essential concurrent work",
+                "Escalate unresolved conflicts to operations leadership",
+            ),
             "residual_l": 2, "residual_s": 4,
             "ppe": "As per area and task permits",
             "steps": [
-                ("Identify overlapping work", "Unknown interfaces", "Review permits and plot plans"),
-                ("Agree controls and timing", "Concurrent high-risk tasks", "Stagger critical steps; shared radio channel"),
-                ("Execute with continuous liaison", "Change not communicated", "Hourly check-ins; update board"),
+                ("Identify overlapping work", "Unknown interfaces",
+                 "Review permits and plot plans"),
+                ("Agree controls and timing", "Concurrent high-risk tasks",
+                 "Stagger critical steps; shared radio channel"),
+                ("Execute with continuous liaison", "Change not communicated",
+                 "Hourly check-ins; update board"),
+            ],
+        },
+        "Process Isolation / LOTO": {
+            "who": "Operators, maintenance technicians, permit issuers",
+            "hazards": "Unexpected energy release; incorrect isolation; residual product; confusion of isolation points",
+            "existing_controls": _ctrl(
+                "Written isolation procedure and permit",
+                "LOTO devices applied by authorised persons",
+                "Isolation register / certificate maintained",
+                "Try-out / verification of zero energy",
+                "Unique locks and tags identifying the owner",
+                "Shift handover of active isolations",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Independent verification for high-risk isolations",
+                "P&ID walkdown before applying isolations",
+                "No removal of another person's lock",
+                "Toolbox talk for complex multi-point isolations",
+                "Restore only under controlled reinstatement procedure",
+                "Audit sample of isolations periodically",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Task and area PPE including FR clothing and detectors as required",
+            "steps": [
+                ("Identify energy sources on P&ID", "Missed energy source",
+                 "Walkdown; mark points; brief team"),
+                ("Apply isolation and LOTO", "Incorrect valve/breaker",
+                 "Follow procedure; unique locks; register"),
+                ("Verify zero energy", "Residual pressure/product",
+                 "Bleed; gauge; try-out"),
+                ("Work and reinstate", "Premature re-energisation",
+                 "Only isolator removes locks; controlled restart"),
+            ],
+        },
+        "Tank / Vessel Entry": {
+            "who": "Entrants, attendants, rescue team, operations",
+            "hazards": "Hazardous atmosphere; engulfment; residual chemicals; difficult rescue; heat stress",
+            "existing_controls": _ctrl(
+                "Confined space / vessel entry permit",
+                "Cleaning, gas-freeing and atmospheric testing",
+                "Continuous monitoring and ventilation as required",
+                "Standby person and rescue plan specific to the vessel",
+                "Isolation of product and energy sources",
+                "Entrant training and fit-for-work checks",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "No entry on alarm or changing conditions",
+                "Time limits and rest cycles in hot vessels",
+                "Communication method tested before entry",
+                "Rescue equipment staged and rescue team briefed",
+                "SDS controls for residual product",
+                "Cancel permit and account for all persons on exit",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "As per permit – may include SCBA, chemical protective clothing, harness, detector",
+            "steps": [
+                ("Isolate, clean and gas-free", "Residual product/atmosphere",
+                 "LOTO; clean; test atmosphere"),
+                ("Issue entry permit", "Incomplete controls",
+                 "Authorised issuer; rescue plan confirmed"),
+                ("Enter and work", "Atmosphere change; injury inside",
+                 "Attendant; continuous monitor; communication checks"),
+                ("Exit and close", "Person left inside; open isolations",
+                 "Headcount; cancel permit; controlled reinstatement"),
+            ],
+        },
+        "Flare / Hydrocarbon Drain Handling": {
+            "who": "Operators, maintenance, contractors near drain/flare systems",
+            "hazards": "Flammable release; fire/explosion; H2S; burns; environmental spill",
+            "existing_controls": _ctrl(
+                "Procedures for controlled draining to designated systems",
+                "Gas testing and hot-work controls in the area",
+                "FR clothing and personal detectors",
+                "Spill containment for liquid hydrocarbons",
+                "No uncontrolled venting to atmosphere",
+                "Operations approval for non-routine drains",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Weather and wind considered for vapour dispersion",
+                "Fire watch when ignition risk is elevated",
+                "Emergency isolation points known to the crew",
+                "Toolbox talk on specific system hazards",
+                "Stop work if unexpected release occurs",
+                "Report and clean any spill immediately per plan",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "FR clothing, hard hat, safety glasses, gloves, gas detector",
+            "steps": [
+                ("Plan drain route and approvals", "Wrong routing; unauthorised vent",
+                 "Follow procedure; operations approval"),
+                ("Execute controlled drain", "Release; fire; exposure",
+                 "PPE; monitoring; containment"),
+                ("Close and verify", "Residual leak",
+                 "Confirm isolation; inspect for leaks; report anomalies"),
             ],
         },
     },
@@ -20207,16 +21113,98 @@ RA_LIBRARY = {
         "Brownfield Construction in Live Plant": {
             "who": "Construction contractors, operations, permit issuers",
             "hazards": "Ignition in classified area; process upset from construction; dropped objects onto live equipment",
-            "existing_controls": "PTW system; area classification awareness; drop zones; SIMOPS; gas testing",
+            "existing_controls": _ctrl(
+                "PTW system integrated with operations",
+                "Area classification awareness and spark control",
+                "Dropped-object prevention and protection of live equipment",
+                "SIMOPS coordination with operations representative",
+                "Gas testing as permit conditions require",
+                "FR clothing in process areas",
+            ),
             "likelihood": 3, "severity": 5,
-            "additional_controls": "Spark control; night-work limits; operations representative on site",
+            "additional_controls": _ctrl(
+                "Night-work limits in live areas as operations require",
+                "Named operations contact for the shift",
+                "Stop-work if process conditions change",
+                "Toolbox talk on plant-specific hazards",
+                "Crash decks / covers over sensitive equipment",
+                "Joint inspection before hand-back of work area",
+            ),
             "residual_l": 2, "residual_s": 5,
             "ppe": "FR clothing in process areas, hard hat, safety glasses, detectors as required",
             "steps": [
-                ("Obtain area permits", "Work without authorisation", "Valid PTW and certificates before mobilise"),
-                ("Establish protection of live equipment", "Impact damage", "Crash decks/covers; exclusion"),
-                ("Perform construction task", "Ignition / interference", "Follow permit conditions; continuous monitoring"),
-                ("Hand back and close permits", "Open isolations left", "Joint inspection with operations"),
+                ("Obtain area permits", "Work without authorisation",
+                 "Valid PTW and certificates before mobilise"),
+                ("Establish protection of live equipment", "Impact damage",
+                 "Crash decks/covers; exclusion"),
+                ("Perform construction task", "Ignition / interference",
+                 "Follow permit conditions; continuous monitoring"),
+                ("Hand back and close permits", "Open isolations left",
+                 "Joint inspection with operations"),
+            ],
+        },
+        "Excavation in Process Plant": {
+            "who": "Excavation crew, operations, cable/pipe locators",
+            "hazards": "Strike on live underground hydrocarbons or power; trench collapse; ignition",
+            "existing_controls": _ctrl(
+                "Permit to dig with operations approval",
+                "Drawings plus positive location (CAT, trial holes)",
+                "Hand dig within tolerance of known services",
+                "Gas testing in and around excavation",
+                "Excavation support and barriers",
+                "Spark control and hot-work rules if in classified area",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Standby from operations for critical digs",
+                "Emergency isolation knowledge for nearby lines",
+                "Stop dig on unexpected pipe/cable or odour",
+                "Continuous banksman for plant",
+                "Toolbox talk on underground drawings limits",
+                "Backfill and protect exposed services immediately",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility, FR clothing as area requires, gas detector",
+            "steps": [
+                ("Permit and locate services", "Unknown live services",
+                 "PTW; drawings; CAT; mark out"),
+                ("Excavate with controls", "Strike; collapse; gas",
+                 "Hand dig near services; support; gas test"),
+                ("Expose, protect and backfill", "Damage to services",
+                 "Protect exposed lines; operations verification"),
+            ],
+        },
+        "Lifting Over Live Equipment": {
+            "who": "Crane crew, operations, workers in the area",
+            "hazards": "Load drop onto live plant; swing into process equipment; ignition if hydrocarbon release follows impact",
+            "existing_controls": _ctrl(
+                "Lift plan approved with operations input",
+                "Certified crane and gear; exclusion zone",
+                "Tag lines and controlled lift path avoiding critical equipment where possible",
+                "Protection (matting/covers) on vulnerable equipment",
+                "Gas detection and hot-work style controls if classified",
+                "Stop-work authority for operations",
+            ),
+            "likelihood": 3, "severity": 5,
+            "additional_controls": _ctrl(
+                "Trial lift; limit concurrent SIMOPS under the path",
+                "Weather/wind limits stricter than open field",
+                "Radio protocol with control room",
+                "Emergency response brief for plant damage scenario",
+                "No night lifts over critical plant unless specifically approved",
+                "Post-lift inspection of the travel path area",
+            ),
+            "residual_l": 2, "residual_s": 5,
+            "ppe": "Hard hat, safety boots, high-visibility, FR clothing as required",
+            "steps": [
+                ("Approve lift plan with operations", "Path over critical plant",
+                 "Agree path, protection and stop criteria"),
+                ("Set exclusion and protection", "Personnel and equipment exposure",
+                 "Barriers; covers; brief crews"),
+                ("Execute lift", "Drop; swing",
+                 "Tag lines; single banksman; continuous communication"),
+                ("Inspect and close", "Unnoticed damage",
+                 "Walk path; report; cancel permits"),
             ],
         },
     },
@@ -20224,7 +21212,14 @@ RA_LIBRARY = {
 
 
 class RiskAssessmentModule(QWidget):
-    """Risk Assessment / JSA / JHA / Dynamic RA module – additive only."""
+    """Risk Assessment / JSA / JHA / Dynamic RA module – additive only.
+
+    Tab layout:
+      1. Setup & Library – choose type/sector/activity and load library
+      2. Generated Assessment – full table, controls, save & export (space to review)
+      3. Risk Matrix (5×5)
+      4. Assessment Register
+    """
 
     def __init__(self, parent_window, db):
         super().__init__(parent_window)
@@ -20287,10 +21282,10 @@ class RiskAssessmentModule(QWidget):
         head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:7px;")
         root.addWidget(head)
         note = QLabel(
-            "Select the assessment type, sector and activity. Library content for Construction and Oil & Gas "
-            "auto-fills hazards, who might be harmed, controls and (for JSA/JHA) job steps. "
-            "Review every field for site conditions before saving or exporting. "
-            "Risk scores use Likelihood × Severity (1–5). Colours follow the matrix on the Risk Matrix tab."
+            "Tab 1: select assessment type, sector and activity, then Load from Library. "
+            "Tab 2 shows the generated risk assessment with full control measures, space to edit, "
+            "Save and Export. Risk scores use Likelihood × Severity (1–5). "
+            "Colours follow the matrix on the Risk Matrix tab. Review every field for site conditions."
         )
         note.setWordWrap(True)
         note.setStyleSheet("padding:8px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:4px;color:#17365D;")
@@ -20299,12 +21294,14 @@ class RiskAssessmentModule(QWidget):
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
         self._build_create_tab()
+        self._build_detail_tab()
         self._build_matrix_tab()
         self._build_register_tab()
 
     def _build_create_tab(self):
+        """Setup only – library load switches to Generated Assessment tab."""
         w = QWidget()
-        self.tabs.addTab(w, "1. Create / Edit Assessment")
+        self.tabs.addTab(w, "1. Setup & Library")
         lay = QVBoxLayout(w)
 
         form = QGridLayout()
@@ -20314,7 +21311,7 @@ class RiskAssessmentModule(QWidget):
         self.cmb_sector.addItems(RA_SECTORS)
         self.cmb_activity = QComboBox()
         self.cmb_activity.setEditable(True)
-        self.cmb_activity.setMinimumWidth(280)
+        self.cmb_activity.setMinimumWidth(320)
         self.txt_title = QLineEdit()
         self.txt_project = QLineEdit()
         self.txt_location = QLineEdit()
@@ -20327,9 +21324,9 @@ class RiskAssessmentModule(QWidget):
         self.dt_review.setCalendarPopup(True)
         self.dt_review.setDisplayFormat("yyyy-MM-dd")
         self.txt_ppe = QTextEdit()
-        self.txt_ppe.setFixedHeight(52)
+        self.txt_ppe.setFixedHeight(72)
         self.txt_remarks = QTextEdit()
-        self.txt_remarks.setFixedHeight(52)
+        self.txt_remarks.setFixedHeight(72)
 
         r = 0
         form.addWidget(QLabel("Assessment Type *"), r, 0)
@@ -20366,33 +21363,42 @@ class RiskAssessmentModule(QWidget):
         lay.addLayout(form)
 
         btn_row = QHBoxLayout()
-        b_load = QPushButton("Load Library → Auto-Fill Form")
-        b_load.setStyleSheet("background:#2E7D32;font-weight:bold;")
+        b_load = QPushButton("Load Library → Generate Assessment")
+        b_load.setStyleSheet(
+            "background:#2E7D32;color:white;font-weight:bold;padding:10px 16px;font-size:13px;"
+        )
         b_load.clicked.connect(self._load_from_library)
-        b_add = QPushButton("Add Blank Row")
-        b_add.clicked.connect(self._add_blank_row)
-        b_del = QPushButton("Delete Selected Row")
-        b_del.clicked.connect(self._delete_row)
-        b_save = QPushButton("Save Assessment")
-        b_save.clicked.connect(self._save)
-        b_export = QPushButton("Export to Word (Landscape)")
-        b_export.clicked.connect(self._export_word)
         b_clear = QPushButton("Clear Form")
         b_clear.clicked.connect(self._clear_form)
-        for b in (b_load, b_add, b_del, b_save, b_export, b_clear):
-            btn_row.addWidget(b)
+        b_goto = QPushButton("Open Generated Assessment Tab")
+        b_goto.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
+        btn_row.addWidget(b_load)
+        btn_row.addWidget(b_goto)
+        btn_row.addWidget(b_clear)
+        btn_row.addStretch(1)
         lay.addLayout(btn_row)
 
-        self.table = QTableWidget(0, 0)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        lay.addWidget(self.table, 1)
+        hint = QLabel(
+            "After you click “Load Library → Generate Assessment”, the full risk assessment "
+            "(hazards, who might be harmed, 5–6+ control measures, residual risk, and JSA steps when selected) "
+            "opens on tab 2 with space to review, edit, save and export."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("padding:10px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
+        lay.addWidget(hint)
 
-        self.lbl_format = QLabel("")
-        self.lbl_format.setStyleSheet("color:#17365D;font-weight:600;padding:4px;")
-        lay.addWidget(self.lbl_format)
+        lib_info = QLabel()
+        n_con = len(RA_LIBRARY.get("Construction", {}))
+        n_og = len(RA_LIBRARY.get("Oil & Gas", {}))
+        n_if = len(RA_LIBRARY.get("Construction – Oil & Gas Interface", {}))
+        lib_info.setText(
+            f"Library size — Construction: {n_con} activities  |  Oil & Gas: {n_og}  |  "
+            f"Construction–Oil & Gas Interface: {n_if}. Each activity includes multiple control measures."
+        )
+        lib_info.setStyleSheet("color:#17365D;padding:6px;")
+        lib_info.setWordWrap(True)
+        lay.addWidget(lib_info)
+        lay.addStretch(1)
 
         self.cmb_type.currentTextChanged.connect(self._on_type_changed)
         self.cmb_sector.currentTextChanged.connect(self._refresh_activities)
@@ -20400,9 +21406,62 @@ class RiskAssessmentModule(QWidget):
         self._on_type_changed(self.cmb_type.currentText())
         self._editing_id = None
 
+    def _build_detail_tab(self):
+        """Dedicated tab for the generated assessment table, edits, save and export."""
+        w = QWidget()
+        self.tabs.addTab(w, "2. Generated Assessment")
+        lay = QVBoxLayout(w)
+
+        self.lbl_detail_header = QLabel("No assessment loaded yet. Use tab 1 to select an activity and Load Library.")
+        self.lbl_detail_header.setWordWrap(True)
+        self.lbl_detail_header.setStyleSheet(
+            "font-weight:700;color:#17365D;padding:8px;background:#E8F1FB;"
+            "border:1px solid #B7C9D6;border-radius:4px;"
+        )
+        lay.addWidget(self.lbl_detail_header)
+
+        self.lbl_format = QLabel("")
+        self.lbl_format.setStyleSheet("color:#17365D;font-weight:600;padding:4px;")
+        lay.addWidget(self.lbl_format)
+
+        btn_row = QHBoxLayout()
+        b_add = QPushButton("Add Blank Row")
+        b_add.clicked.connect(self._add_blank_row)
+        b_del = QPushButton("Delete Selected Row")
+        b_del.clicked.connect(self._delete_row)
+        b_recalc = QPushButton("Recalculate Risk Scores")
+        b_recalc.clicked.connect(lambda: self._read_table_rows())
+        b_save = QPushButton("Save Assessment")
+        b_save.setStyleSheet("background:#17365D;color:white;font-weight:bold;padding:8px 12px;")
+        b_save.clicked.connect(self._save)
+        b_export = QPushButton("Export to Word (Landscape)")
+        b_export.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:8px 12px;")
+        b_export.clicked.connect(self._export_word)
+        for b in (b_add, b_del, b_recalc, b_save, b_export):
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+
+        self.table = QTableWidget(0, 0)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setWordWrap(True)
+        lay.addWidget(self.table, 1)
+
+        foot = QLabel(
+            "Edit Likelihood (L) and Severity (S) cells as needed, then Recalculate or Save. "
+            "Control measures from the library appear in the Existing / Additional / Controls columns — expand row height to read them fully."
+        )
+        foot.setWordWrap(True)
+        foot.setStyleSheet("color:#445;padding:4px;")
+        lay.addWidget(foot)
+
     def _build_matrix_tab(self):
         w = QWidget()
-        self.tabs.addTab(w, "2. Risk Matrix (5×5)")
+        self.tabs.addTab(w, "3. Risk Matrix (5×5)")
         lay = QVBoxLayout(w)
         intro = QLabel(
             "Risk Score = Likelihood × Severity. "
@@ -20437,7 +21496,6 @@ class RiskAssessmentModule(QWidget):
         self.matrix.setHorizontalHeaderLabels(headers_s)
         for i, h in enumerate(headers_l):
             self.matrix.setVerticalHeaderItem(i, QTableWidgetItem(h if i else "L \\ S"))
-        # Axis labels
         self.matrix.setItem(0, 0, QTableWidgetItem("L ↓  S →"))
         for c, (sv, _) in enumerate(RA_SEVERITY, 1):
             self.matrix.setItem(0, c, QTableWidgetItem(str(sv)))
@@ -20477,7 +21535,7 @@ class RiskAssessmentModule(QWidget):
 
     def _build_register_tab(self):
         w = QWidget()
-        self.tabs.addTab(w, "3. Assessment Register")
+        self.tabs.addTab(w, "4. Assessment Register")
         lay = QVBoxLayout(w)
         bar = QHBoxLayout()
         self.reg_search = QLineEdit()
@@ -20553,6 +21611,15 @@ class RiskAssessmentModule(QWidget):
         activity = self.cmb_activity.currentText().strip()
         return RA_LIBRARY.get(sector, {}).get(activity)
 
+    def _update_detail_header(self):
+        title = self.txt_title.text().strip() or self.cmb_activity.currentText().strip() or "(Untitled)"
+        self.lbl_detail_header.setText(
+            f"{self.cmb_type.currentText()}  ·  {self.cmb_sector.currentText()}  ·  "
+            f"{self.cmb_activity.currentText().strip() or '—'}  ·  {title}\n"
+            f"Project: {self.txt_project.text().strip() or '—'}  |  Location: {self.txt_location.text().strip() or '—'}  |  "
+            f"Assessor: {self.txt_assessor.text().strip() or '—'}  |  Date: {self.dt_assess.date().toString('yyyy-MM-dd')}"
+        )
+
     def _load_from_library(self):
         entry = self._library_entry()
         activity = self.cmb_activity.currentText().strip()
@@ -20562,15 +21629,20 @@ class RiskAssessmentModule(QWidget):
         if not entry:
             QMessageBox.information(
                 self, "No Library Match",
-                "No library template for this activity. You can still enter rows manually or pick a listed activity."
+                "No library template for this activity. You can still enter rows manually on the Generated Assessment tab "
+                "or pick a listed activity."
             )
             self.txt_title.setText(activity)
+            self._on_type_changed(self.cmb_type.currentText())
+            self._update_detail_header()
+            self.tabs.setCurrentIndex(1)
             return
 
         self.txt_title.setText(f"{self.cmb_type.currentText()} – {activity}")
         self.txt_ppe.setPlainText(entry.get("ppe", ""))
         ra_type = self.cmb_type.currentText()
         is_jsa = "JSA" in ra_type or "JHA" in ra_type
+        self._on_type_changed(ra_type)
         self.table.setRowCount(0)
         self.current_rows = []
 
@@ -20578,7 +21650,6 @@ class RiskAssessmentModule(QWidget):
             for i, (step, haz, ctrl) in enumerate(entry.get("steps") or [], 1):
                 L = entry.get("likelihood", 3)
                 S = entry.get("severity", 4)
-                # Slight variation per step residual thinking: use base scores
                 score = L * S
                 row = {
                     "step_no": str(i),
@@ -20594,11 +21665,15 @@ class RiskAssessmentModule(QWidget):
             L = entry.get("likelihood", 3)
             S = entry.get("severity", 4)
             score = L * S
+            # Combine existing + additional controls for dynamic immediate control text
+            combined = entry.get("existing_controls", "")
+            if entry.get("additional_controls"):
+                combined = (combined + "\n" + entry.get("additional_controls", "")).strip()
             row = {
                 "no": "1",
                 "hazard": entry.get("hazards", ""),
                 "who": entry.get("who", ""),
-                "control": entry.get("existing_controls", ""),
+                "control": combined or entry.get("existing_controls", ""),
                 "L": L, "S": S, "risk": score, "band": ra_band(score),
                 "action": "Proceed with controls" if score <= 9 else "Additional controls / escalate",
                 "by_whom": self.txt_assessor.text().strip() or "Supervisor",
@@ -20626,9 +21701,15 @@ class RiskAssessmentModule(QWidget):
             self._append_ra_row(row)
 
         self._colorize_risk_columns()
+        self._update_detail_header()
+        # Give control-measure rows more height so numbered measures are readable
+        for r in range(self.table.rowCount()):
+            self.table.setRowHeight(r, max(90, self.table.rowHeight(r)))
+        self.tabs.setCurrentIndex(1)
         QMessageBox.information(
-            self, "Library Loaded",
-            f"Template for “{activity}” loaded. Review and adjust Likelihood/Severity and site-specific details before saving."
+            self, "Assessment Generated",
+            f"Library template for “{activity}” has been loaded on the Generated Assessment tab.\n\n"
+            "Review control measures, adjust Likelihood/Severity for site conditions, then Save or Export."
         )
 
     def _set_item(self, r, c, text, editable=True):
@@ -20728,7 +21809,10 @@ class RiskAssessmentModule(QWidget):
                     "controls": cell(3), "L": L, "S": S, "risk": score, "band": ra_band(score),
                     "responsible": cell(8),
                 }
-                self.table.item(r, 6).setText(str(score)) if self.table.item(r, 6) else self._set_item(r, 6, score)
+                if self.table.item(r, 6):
+                    self.table.item(r, 6).setText(str(score))
+                else:
+                    self._set_item(r, 6, score)
                 self._set_item(r, 7, ra_band(score))
             elif "Dynamic" in ra_type:
                 L, S = num(4, 3), num(5, 3)
@@ -20793,6 +21877,9 @@ class RiskAssessmentModule(QWidget):
         self.table.setRowCount(0)
         self.current_rows = []
         self._on_type_changed(self.cmb_type.currentText())
+        self.lbl_detail_header.setText(
+            "No assessment loaded yet. Use tab 1 to select an activity and Load Library."
+        )
 
     def _save(self):
         rows = self._read_table_rows()
@@ -20837,6 +21924,7 @@ class RiskAssessmentModule(QWidget):
             msg = f"Assessment saved as {number}."
             self._editing_id = self.db.fetchone("SELECT id FROM risk_assessments WHERE number=?", (number,))["id"]
         self.refresh_register()
+        self._update_detail_header()
         QMessageBox.information(self, "Saved", msg)
 
     def refresh_register(self, *_):
@@ -20871,7 +21959,6 @@ class RiskAssessmentModule(QWidget):
         row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (rid,))
         if not row:
             return
-        self.tabs.setCurrentIndex(0)
         self._editing_id = rid
         self.cmb_type.setCurrentText(_s(row["ra_type"]))
         self.cmb_sector.setCurrentText(_s(row["sector"]))
@@ -20906,6 +21993,10 @@ class RiskAssessmentModule(QWidget):
             else:
                 self._append_ra_row(item)
         self._colorize_risk_columns()
+        for r in range(self.table.rowCount()):
+            self.table.setRowHeight(r, max(90, self.table.rowHeight(r)))
+        self._update_detail_header()
+        self.tabs.setCurrentIndex(1)
 
     def _delete_selected(self):
         rid = self._selected_reg_id()
@@ -20935,11 +22026,9 @@ class RiskAssessmentModule(QWidget):
         rows = self._read_table_rows()
         if not rows:
             return QMessageBox.warning(self, "Export", "Load or enter assessment rows first.")
-        # Prefer saved record if editing
         if self._editing_id:
             row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (self._editing_id,))
             if row:
-                # refresh json from table
                 self.db.execute(
                     "UPDATE risk_assessments SET rows_json=?,ppe=?,remarks=?,title=?,updated_at=? WHERE id=?",
                     (json.dumps(rows, ensure_ascii=False), self.txt_ppe.toPlainText().strip(),
@@ -20947,7 +22036,6 @@ class RiskAssessmentModule(QWidget):
                 )
                 row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (self._editing_id,))
                 return self._export_word_record(row)
-        # Unsaved: build temporary dict
         meta = {
             "number": "(Unsaved draft)",
             "ra_type": self.cmb_type.currentText(),
@@ -21052,7 +22140,6 @@ class RiskAssessmentModule(QWidget):
         except Exception as exc:
             logging.exception("RA Word export failed")
             QMessageBox.critical(self, "Export Failed", str(exc))
-
 
 # ============================================================
 # APPLICATION START
