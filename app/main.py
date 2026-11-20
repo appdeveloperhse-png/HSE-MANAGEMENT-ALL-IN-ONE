@@ -36482,6 +36482,13 @@ class RiskAssessmentModule(QWidget):
         form.addWidget(QLabel("Assessment Type *"), r, 0); form.addWidget(self.cmb_type, r, 1)
         form.addWidget(QLabel("Sector / Industry *"), r, 2); form.addWidget(self.cmb_sector, r, 3); r += 1
         form.addWidget(QLabel("Activity *"), r, 0); form.addWidget(self.cmb_activity, r, 1, 1, 3); r += 1
+        self.lbl_other_activity = QLabel("Custom activity name *")
+        self.txt_other_activity = QLineEdit()
+        self.txt_other_activity.setPlaceholderText("Type the new activity name here when Other is selected…")
+        self.lbl_other_activity.setVisible(False)
+        self.txt_other_activity.setVisible(False)
+        form.addWidget(self.lbl_other_activity, r, 0)
+        form.addWidget(self.txt_other_activity, r, 1, 1, 3); r += 1
         form.addWidget(QLabel("Title"), r, 0); form.addWidget(self.txt_title, r, 1, 1, 3); r += 1
         form.addWidget(QLabel("Project"), r, 0); form.addWidget(self.txt_project, r, 1)
         form.addWidget(QLabel("Location"), r, 2); form.addWidget(self.txt_location, r, 3); r += 1
@@ -36518,8 +36525,10 @@ class RiskAssessmentModule(QWidget):
 
         self.cmb_type.currentTextChanged.connect(self._on_type_changed)
         self.cmb_sector.currentTextChanged.connect(self._refresh_activities)
+        self.cmb_activity.currentTextChanged.connect(self._toggle_other_activity)
         self._refresh_activities()
         self._on_type_changed(self.cmb_type.currentText())
+        self._toggle_other_activity()
 
     def _build_detail_tab(self):
         w = QWidget()
@@ -36669,6 +36678,8 @@ class RiskAssessmentModule(QWidget):
     def _refresh_activities(self, *_):
         sector = self.cmb_sector.currentText()
         acts = list(RA_LIBRARY.get(sector, {}).keys())
+        if "Other" not in acts:
+            acts = acts + ["Other"]
         current = self.cmb_activity.currentText()
         self.cmb_activity.blockSignals(True)
         self.cmb_activity.clear()
@@ -36678,8 +36689,21 @@ class RiskAssessmentModule(QWidget):
             if ix >= 0:
                 self.cmb_activity.setCurrentIndex(ix)
             else:
-                self.cmb_activity.setEditText(current)
+                # keep custom typed text if user was editing
+                if current and current not in acts:
+                    self.cmb_activity.setEditText(current)
         self.cmb_activity.blockSignals(False)
+        self._toggle_other_activity()
+
+
+    def _toggle_other_activity(self, *_):
+        is_other = self.cmb_activity.currentText().strip().lower() == "other"
+        if hasattr(self, "lbl_other_activity"):
+            self.lbl_other_activity.setVisible(is_other)
+        if hasattr(self, "txt_other_activity"):
+            self.txt_other_activity.setVisible(is_other)
+            if is_other:
+                self.txt_other_activity.setFocus()
 
     def _on_type_changed(self, ra_type):
         is_jsa = "JSA" in ra_type or "JHA" in ra_type
@@ -36721,118 +36745,226 @@ class RiskAssessmentModule(QWidget):
             f"Assessor: {self.txt_assessor.text().strip() or '—'}  |  Date: {self.dt_assess.date().toString('yyyy-MM-dd')}"
         )
 
+    def _controls_text(self, value, fallback=""):
+        """Turn control measures into readable numbered text (handles str / list / tuple)."""
+        if value is None or value == "":
+            value = fallback
+        if value is None:
+            return ""
+        if isinstance(value, (list, tuple)):
+            parts = [str(x).strip() for x in value if str(x).strip()]
+            if not parts:
+                return self._controls_text(fallback, "")
+            # already numbered?
+            if parts and parts[0][:1].isdigit():
+                return "\n".join(parts)
+            return "\n".join(f"{i}. {p}" for i, p in enumerate(parts, 1))
+        return str(value).strip()
+
+    def _normalize_task(self, t, entry, activity):
+        """Accept task as dict or legacy tuple (activity, hazards, existing, additional, L, S, rL, rS)."""
+        if isinstance(t, dict):
+            return {
+                "activity": t.get("activity") or activity,
+                "hazards": t.get("hazards") or entry.get("hazards", ""),
+                "who": t.get("who") or entry.get("who", ""),
+                "existing": self._controls_text(t.get("existing"), entry.get("existing_controls", "")),
+                "additional": self._controls_text(t.get("additional"), entry.get("additional_controls", "")),
+                "L": int(t.get("L", entry.get("likelihood", 3)) or 3),
+                "S": int(t.get("S", entry.get("severity", 5)) or 5),
+                "rL": int(t.get("rL", entry.get("residual_l", 2)) or 2),
+                "rS": int(t.get("rS", entry.get("residual_s", entry.get("severity", 5))) or 3),
+            }
+        # tuple / list from library generator
+        seq = list(t) if isinstance(t, (list, tuple)) else []
+        while len(seq) < 8:
+            seq.append(None)
+        task_name, haz, existing, additional, L, S, rL, rS = seq[:8]
+        return {
+            "activity": task_name or activity,
+            "hazards": haz or entry.get("hazards", ""),
+            "who": entry.get("who", ""),
+            "existing": self._controls_text(existing, entry.get("existing_controls", "")),
+            "additional": self._controls_text(additional, entry.get("additional_controls", "")),
+            "L": int(L if L not in (None, "") else entry.get("likelihood", 3)),
+            "S": int(S if S not in (None, "") else entry.get("severity", 5)),
+            "rL": int(rL if rL not in (None, "") else entry.get("residual_l", 2)),
+            "rS": int(rS if rS not in (None, "") else entry.get("residual_s", 3)),
+        }
+
     def _load_from_library(self):
-        entry = self._library_entry()
         activity = self.cmb_activity.currentText().strip()
-        if not activity:
-            QMessageBox.warning(self, "Activity Required", "Select or enter an activity.")
-            return
-        if not entry:
-            QMessageBox.information(
-                self, "No Library Match",
-                "No library template for this activity. Add rows manually on the Generated Assessment tab."
-            )
-            self.txt_title.setText(activity)
-            self._on_type_changed(self.cmb_type.currentText())
-            self._update_detail_header()
-            self.tabs.setCurrentIndex(1)
-            return
+        custom = ""
+        if hasattr(self, "txt_other_activity"):
+            custom = self.txt_other_activity.text().strip()
+        if activity.lower() == "other":
+            if not custom:
+                QMessageBox.warning(
+                    self, "Custom Activity Required",
+                    "You selected Other. Enter the new activity name in the text box, then load again."
+                )
+                if hasattr(self, "txt_other_activity"):
+                    self.txt_other_activity.setFocus()
+                return
+            activity = custom
+            # Build a blank multi-row template so user can complete the assessment
+            entry = {
+                "who": "Workers involved in the activity, supervisors, nearby trades",
+                "hazards": "To be defined for site conditions",
+                "existing_controls": "1. Competent persons only\n2. Method statement briefed\n3. Required PPE worn\n4. Supervision in place\n5. Emergency arrangements known\n6. Stop-work authority",
+                "additional_controls": "1. Toolbox talk before start\n2. Inspect tools/equipment\n3. Maintain housekeeping\n4. Coordinate with adjacent work\n5. Report changing conditions\n6. Review controls if conditions change",
+                "likelihood": 3, "severity": 4, "residual_l": 2, "residual_s": 3,
+                "ppe": "Hard hat, safety boots, high-visibility clothing, task-specific PPE",
+                "tasks": [
+                    (f"{activity} – preparation", "To be defined", None, None, 3, 4, 2, 3),
+                    (f"{activity} – main task", "To be defined", None, None, 3, 4, 2, 3),
+                    (f"{activity} – plant / tools", "To be defined", None, None, 3, 4, 2, 3),
+                    (f"{activity} – interface with others", "To be defined", None, None, 3, 3, 2, 3),
+                    (f"{activity} – completion / demobilise", "To be defined", None, None, 2, 3, 2, 2),
+                ],
+                "steps": [
+                    ("Plan and prepare work area", "Unclear hazards; inadequate setup", "Brief team; inspect area; confirm PPE and permits"),
+                    ("Mobilise tools / materials / plant", "Manual handling; struck by; defective equipment", "Pre-use checks; mechanical aids; exclusion as needed"),
+                    ("Perform main activity", "Task-specific hazards", "Follow method statement; supervision; stop-work if unsafe"),
+                    ("Monitor conditions and interfaces", "Changing conditions; SIMOPS conflict", "Continuous observation; communicate changes; reassess"),
+                    ("Make area safe and housekeep", "Slips; leftover hazards", "Clear waste; secure materials; restore barriers"),
+                    ("Close out and hand over", "Open permits; incomplete brief", "Cancel permits; brief following trades; record issues"),
+                    ("Review residual risk", "Controls not effective", "Confirm residual risk acceptable; update assessment if needed"),
+                ],
+            }
+        else:
+            entry = self._library_entry()
+            if not activity:
+                QMessageBox.warning(self, "Activity Required", "Select or enter an activity.")
+                return
+            if not entry:
+                QMessageBox.information(
+                    self, "No Library Match",
+                    "No library template for this activity.\n\n"
+                    "Select \"Other\" and enter a custom activity name, or add rows manually on the Generated Assessment tab."
+                )
+                self.txt_title.setText(activity)
+                self._on_type_changed(self.cmb_type.currentText())
+                self._update_detail_header()
+                self.tabs.setCurrentIndex(1)
+                return
 
         self.txt_title.setText(f"{self.cmb_type.currentText()} – {activity}")
         self.txt_ppe.setPlainText(entry.get("ppe", ""))
+        # Keep combo text as Other but use custom name in title/rows
         ra_type = self.cmb_type.currentText()
         is_jsa = "JSA" in ra_type or "JHA" in ra_type
         self._on_type_changed(ra_type)
         self._risk_update_blocked = True
+        loaded = 0
         try:
             self.table.setRowCount(0)
             self.current_rows = []
             if is_jsa:
                 steps = entry.get("steps") or []
                 for i, step_tuple in enumerate(steps, 1):
-                    if len(step_tuple) >= 3:
-                        step, haz, ctrl = step_tuple[0], step_tuple[1], step_tuple[2]
-                    else:
-                        continue
-                    L = entry.get("likelihood", 3)
-                    S = entry.get("severity", 4)
-                    score = L * S
-                    row = {
-                        "step_no": str(i), "job_step": step, "hazards": haz, "controls": ctrl,
-                        "L": L, "S": S, "risk": score, "band": ra_band(score),
-                        "responsible": self.txt_assessor.text().strip() or "Supervisor",
-                    }
-                    self.current_rows.append(row)
-                    self._append_jsa_row(row)
+                    try:
+                        if isinstance(step_tuple, dict):
+                            step = step_tuple.get("job_step") or step_tuple.get("step") or ""
+                            haz = step_tuple.get("hazards") or ""
+                            ctrl = step_tuple.get("controls") or step_tuple.get("control") or ""
+                        else:
+                            step_tuple = list(step_tuple)
+                            step = step_tuple[0] if len(step_tuple) > 0 else ""
+                            haz = step_tuple[1] if len(step_tuple) > 1 else ""
+                            ctrl = step_tuple[2] if len(step_tuple) > 2 else ""
+                        L = int(entry.get("likelihood", 3) or 3)
+                        S = int(entry.get("severity", 4) or 4)
+                        score = L * S
+                        row = {
+                            "step_no": str(i), "job_step": step, "hazards": haz, "controls": ctrl,
+                            "L": L, "S": S, "risk": score, "band": ra_band(score),
+                            "responsible": self.txt_assessor.text().strip() or "Supervisor",
+                        }
+                        self.current_rows.append(row)
+                        self._append_jsa_row(row)
+                        loaded += 1
+                    except Exception:
+                        logging.exception("JSA step load failed")
             elif "Dynamic" in ra_type:
-                L = entry.get("likelihood", 3)
-                S = entry.get("severity", 4)
-                score = L * S
-                combined = entry.get("existing_controls", "")
+                L0 = int(entry.get("likelihood", 3) or 3)
+                S0 = int(entry.get("severity", 4) or 4)
+                combined = entry.get("existing_controls", "") or ""
                 if entry.get("additional_controls"):
                     combined = (combined + "\n" + entry["additional_controls"]).strip()
-                # Multiple dynamic rows from tasks if present
                 tasks = entry.get("tasks") or []
                 if tasks:
-                    for i, t in enumerate(tasks, 1):
-                        tL = int(t.get("L", L)); tS = int(t.get("S", S)); sc = tL * tS
+                    for i, raw in enumerate(tasks, 1):
+                        t = self._normalize_task(raw, entry, activity)
+                        tL, tS = t["L"], t["S"]
+                        sc = tL * tS
                         row = {
-                            "no": str(i), "hazard": t.get("hazards") or entry.get("hazards", ""),
-                            "who": t.get("who") or entry.get("who", ""),
-                            "control": t.get("existing") or combined,
+                            "no": str(i), "hazard": t["hazards"], "who": t["who"],
+                            "control": t["existing"] or combined,
                             "L": tL, "S": tS, "risk": sc, "band": ra_band(sc),
                             "action": "Proceed with controls" if sc <= 9 else "Additional controls / escalate",
                             "by_whom": self.txt_assessor.text().strip() or "Supervisor",
                         }
                         self.current_rows.append(row)
                         self._append_dynamic_row(row)
+                        loaded += 1
                 else:
+                    score = L0 * S0
                     row = {
                         "no": "1", "hazard": entry.get("hazards", ""), "who": entry.get("who", ""),
-                        "control": combined, "L": L, "S": S, "risk": score, "band": ra_band(score),
+                        "control": combined, "L": L0, "S": S0, "risk": score, "band": ra_band(score),
                         "action": "Proceed with controls" if score <= 9 else "Additional controls / escalate",
                         "by_whom": self.txt_assessor.text().strip() or "Supervisor",
                     }
                     self.current_rows.append(row)
                     self._append_dynamic_row(row)
+                    loaded += 1
             else:
                 tasks = entry.get("tasks") or []
                 if not tasks:
-                    # Fallback single row built from entry
-                    L = entry.get("likelihood", 3); S = entry.get("severity", 5)
-                    rL = entry.get("residual_l", 2); rS = entry.get("residual_s", S)
+                    L = int(entry.get("likelihood", 3) or 3)
+                    S = int(entry.get("severity", 5) or 5)
+                    rL = int(entry.get("residual_l", 2) or 2)
+                    rS = int(entry.get("residual_s", S) or S)
                     tasks = [{
                         "activity": activity, "hazards": entry.get("hazards", ""), "who": entry.get("who", ""),
                         "existing": entry.get("existing_controls", ""), "additional": entry.get("additional_controls", ""),
                         "L": L, "S": S, "rL": rL, "rS": rS,
                     }]
-                for i, t in enumerate(tasks, 1):
-                    L = int(t.get("L", entry.get("likelihood", 3)))
-                    S = int(t.get("S", entry.get("severity", 5)))
-                    rL = int(t.get("rL", entry.get("residual_l", 2)))
-                    rS = int(t.get("rS", entry.get("residual_s", S)))
-                    score = L * S
-                    rscore = rL * rS
+                for i, raw in enumerate(tasks, 1):
+                    t = self._normalize_task(raw, entry, activity)
+                    L, S, rL, rS = t["L"], t["S"], t["rL"], t["rS"]
+                    score, rscore = L * S, rL * rS
                     row = {
                         "no": str(i),
-                        "activity": t.get("activity") or activity,
-                        "hazards": t.get("hazards") or entry.get("hazards", ""),
-                        "who": t.get("who") or entry.get("who", ""),
-                        "existing": t.get("existing") or entry.get("existing_controls", ""),
+                        "activity": t["activity"],
+                        "hazards": t["hazards"],
+                        "who": t["who"],
+                        "existing": t["existing"],
                         "L": L, "S": S, "risk": score, "band": ra_band(score),
-                        "additional": t.get("additional") or entry.get("additional_controls", ""),
+                        "additional": t["additional"],
                         "rL": rL, "rS": rS, "rrisk": rscore, "rband": ra_band(rscore),
                     }
                     self.current_rows.append(row)
                     self._append_ra_row(row)
+                    loaded += 1
+        except Exception as exc:
+            logging.exception("Load library failed")
+            QMessageBox.critical(self, "Load Failed", f"Could not generate assessment:\n{exc}")
+            self._risk_update_blocked = False
+            return
         finally:
             self._risk_update_blocked = False
+
+        if loaded == 0:
+            QMessageBox.warning(self, "Nothing Loaded", "No rows were generated. Try another activity or add rows manually.")
+            self.tabs.setCurrentIndex(1)
+            return
 
         self._colorize_risk_columns()
         self._update_detail_header()
         for r in range(self.table.rowCount()):
             self.table.setRowHeight(r, max(110, self.table.rowHeight(r)))
-        # Wider key columns for readability
         if self.table.columnCount() >= 5:
             self.table.setColumnWidth(1, 180)
             self.table.setColumnWidth(2, 200)
@@ -36842,8 +36974,8 @@ class RiskAssessmentModule(QWidget):
         self.tabs.setCurrentIndex(1)
         QMessageBox.information(
             self, "Assessment Generated",
-            f"Loaded “{activity}” with {self.table.rowCount()} row(s) on the Generated Assessment tab.\n\n"
-            "Edit L or S to auto-update risk ratings. Review controls for site conditions, then Save or Export."
+            f"Loaded “{activity}” with {loaded} row(s) on the Generated Assessment tab.\n\n"
+            "Edit L or S to auto-update risk ratings. Review controls, then Save or Export."
         )
 
     def _on_table_item_changed(self, item):
