@@ -21293,6 +21293,16 @@ class RiskAssessmentModule(QWidget):
 
         self.tabs = QTabWidget()
         root.addWidget(self.tabs, 1)
+        # Create shared detail widgets early so Setup signals never touch missing attributes.
+        self.lbl_format = QLabel("")
+        self.lbl_format.setStyleSheet("color:#17365D;font-weight:600;padding:4px;")
+        self.table = QTableWidget(0, 0)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setWordWrap(True)
         self._build_create_tab()
         self._build_detail_tab()
         self._build_matrix_tab()
@@ -21420,8 +21430,6 @@ class RiskAssessmentModule(QWidget):
         )
         lay.addWidget(self.lbl_detail_header)
 
-        self.lbl_format = QLabel("")
-        self.lbl_format.setStyleSheet("color:#17365D;font-weight:600;padding:4px;")
         lay.addWidget(self.lbl_format)
 
         btn_row = QHBoxLayout()
@@ -21442,13 +21450,6 @@ class RiskAssessmentModule(QWidget):
         btn_row.addStretch(1)
         lay.addLayout(btn_row)
 
-        self.table = QTableWidget(0, 0)
-        self.table.setAlternatingRowColors(True)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.table.setWordWrap(True)
         lay.addWidget(self.table, 1)
 
         foot = QLabel(
@@ -21585,22 +21586,26 @@ class RiskAssessmentModule(QWidget):
         if is_jsa:
             cols = ["Step No.", "Job Step", "Hazards", "Control Measures / Safe Procedure",
                     "L", "S", "Risk", "Band", "Responsible"]
-            self.lbl_format.setText(
+            fmt = (
                 "Format: Job Safety / Hazard Analysis — activity is broken into sequential steps with hazards and controls."
             )
         elif "Dynamic" in ra_type:
             cols = ["No.", "Hazard / Change Observed", "Who Might Be Harmed", "Immediate Control",
                     "L", "S", "Risk", "Band", "Action / Stop Work?", "By Whom"]
-            self.lbl_format.setText(
+            fmt = (
                 "Format: Dynamic Risk Assessment — point-of-work assessment for changing conditions; use Stop Work if Extreme."
             )
         else:
             cols = ["No.", "Activity / Task", "Hazards", "Who Might Be Harmed", "Existing Controls",
                     "L", "S", "Risk", "Band", "Additional Controls", "Residual L", "Residual S",
                     "Residual Risk", "Residual Band"]
-            self.lbl_format.setText(
+            fmt = (
                 "Format: Formal Risk Assessment — activity-level hazards, people at risk, existing and additional controls, residual risk."
             )
+        if hasattr(self, "lbl_format"):
+            self.lbl_format.setText(fmt)
+        if not hasattr(self, "table"):
+            return
         self.table.setColumnCount(len(cols))
         self.table.setHorizontalHeaderLabels(cols)
         self.table.setRowCount(0)
