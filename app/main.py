@@ -7619,6 +7619,24 @@ class MainWindow(QMainWindow):
         open_preview_label.setStyleSheet("color:#061018;font-weight:700;padding:4px;")
         close_layout.addWidget(open_preview_label)
 
+        # Action buttons for Open Observations tab (must exist before .clicked.connect)
+        open_actions = QHBoxLayout()
+        open_edit = QPushButton("Edit Observation")
+        open_delete = QPushButton("Delete Observation")
+        upload_closeout = QPushButton("Open Close-out Evidence")
+        submit_closeout = QPushButton("Submit Close-out for Review")
+        refresh_open = QPushButton("Refresh Open List")
+        for _b in (open_edit, open_delete, upload_closeout, submit_closeout, refresh_open):
+            _b.setMinimumHeight(34)
+            _b.setStyleSheet(
+                "QPushButton{background:#0f4c81;color:#ffffff;font-weight:800;padding:5px 10px;"
+                "border:1px solid #0b3a63;border-radius:5px;}"
+                "QPushButton:hover{background:#0b3a63;color:#ffffff;}"
+            )
+            open_actions.addWidget(_b)
+        open_actions.addStretch(1)
+        close_layout.addLayout(open_actions)
+
         def _preview_open_observation_evidence():
             """Evidence preview is shown inside the observation dialog, not on the main tab."""
             open_preview_label.setText(
@@ -8682,10 +8700,17 @@ class MainWindow(QMainWindow):
             refresh_closeout_open()
             refresh_closeout_evidence()
 
-        upload_closeout.clicked.connect(lambda: open_observation_action_evidence()); submit_closeout.clicked.connect(submit_attached_closeout_evidence); refresh_open.clicked.connect(refresh_both_closeout_sections)
-        refresh_evidence.clicked.connect(refresh_both_closeout_sections); approve_btn.clicked.connect(lambda:review_closeout(True)); reject_btn.clicked.connect(lambda:review_closeout(False))
-        open_review_btn.clicked.connect(lambda: _approval_detail_from_table(evidence_table.currentRow()) if evidence_table.currentRow() >= 0 else QMessageBox.information(self, "Select Row", "Select an observation submission first, then open evidence review."))
-        refresh_evidence.clicked.connect(lambda: (refresh_closeout_evidence(), refresh_closeout_open()))
+        upload_closeout.clicked.connect(lambda: open_observation_action_evidence())
+        submit_closeout.clicked.connect(submit_attached_closeout_evidence)
+        refresh_open.clicked.connect(refresh_both_closeout_sections)
+        refresh_evidence.clicked.connect(refresh_both_closeout_sections)
+        approve_btn.clicked.connect(lambda: review_closeout(True))
+        reject_btn.clicked.connect(lambda: review_closeout(False))
+        open_review_btn.clicked.connect(
+            lambda: _approval_detail_from_table(evidence_table.currentRow())
+            if evidence_table.currentRow() >= 0
+            else QMessageBox.information(self, "Select Row", "Select an observation submission first, then open evidence review.")
+        )
 
         def upload_closeout_from_observation_register():
             ids = selected_observation_ids(require_one=True)
@@ -8963,8 +8988,19 @@ class MainWindow(QMainWindow):
             except Exception:
                 logging.exception("Tab-change refresh_closeout_evidence failed")
         tabs.currentChanged.connect(_on_observation_tab_changed)
-        layout.addWidget(tabs,1)
-        load(); refresh_closeout_open(); refresh_closeout_evidence()
+        layout.addWidget(tabs, 1)
+        try:
+            load()
+        except Exception:
+            logging.exception("Initial observation register load failed")
+        try:
+            refresh_closeout_open()
+        except Exception:
+            logging.exception("Initial open close-out list refresh failed")
+        try:
+            refresh_closeout_evidence()
+        except Exception:
+            logging.exception("Initial observation approval list refresh failed")
 
     def observation_form(self, refresh, record_id=None):
         existing = db.fetchone("SELECT * FROM observations WHERE id=?", (record_id,)) if record_id else None
