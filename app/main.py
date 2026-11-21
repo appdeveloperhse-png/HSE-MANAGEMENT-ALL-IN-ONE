@@ -36404,6 +36404,21 @@ class RiskAssessmentModule(QWidget):
         CREATE INDEX IF NOT EXISTS idx_ra_number ON risk_assessments(number);
         CREATE INDEX IF NOT EXISTS idx_ra_type ON risk_assessments(ra_type);
         """)
+        # Additive migration: existing assessment records and columns are preserved.
+        existing = {r[1] for r in self.db.conn.execute("PRAGMA table_info(risk_assessments)").fetchall()}
+        additions = {
+            "hse_reviewer": "TEXT DEFAULT ''",
+            "hse_reviewed_at": "TEXT DEFAULT ''",
+            "management_approver": "TEXT DEFAULT ''",
+            "management_approved_at": "TEXT DEFAULT ''",
+            "workflow_note": "TEXT DEFAULT ''",
+            "parent_id": "INTEGER",
+            "revision": "INTEGER DEFAULT 0",
+            "submitted_at": "TEXT DEFAULT ''",
+        }
+        for col, definition in additions.items():
+            if col not in existing:
+                self.db.conn.execute(f"ALTER TABLE risk_assessments ADD COLUMN {col} {definition}")
         self.db.conn.commit()
 
     def _actor(self):
@@ -36411,17 +36426,16 @@ class RiskAssessmentModule(QWidget):
 
     def _next_number(self):
         year = datetime.now().year
-        row = self.db.fetchone(
-            "SELECT number FROM risk_assessments WHERE number LIKE ? ORDER BY id DESC LIMIT 1",
+        rows = self.db.fetchall(
+            "SELECT number FROM risk_assessments WHERE number LIKE ?",
             (f"HSE-RA-{year}-%",)
         )
-        n = 1
-        if row:
-            try:
-                n = int(str(row["number"]).split("-")[-1]) + 1
-            except Exception:
-                n = 1
-        return f"HSE-RA-{year}-{n:05d}"
+        highest = 0
+        for row in rows:
+            match = re.search(r"-(\d{5})(?:-R\d+)?$", str(row["number"] or ""))
+            if match:
+                highest = max(highest, int(match.group(1)))
+        return f"HSE-RA-{year}-{highest + 1:05d}"
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -36513,7 +36527,9 @@ class RiskAssessmentModule(QWidget):
         b_goto.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
         b_clear = QPushButton("Clear Form")
         b_clear.clicked.connect(self._clear_form)
-        btn_row.addWidget(b_load); btn_row.addWidget(b_goto); btn_row.addWidget(b_clear); btn_row.addStretch(1)
+        b_quick_dynamic = QPushButton("Quick Dynamic RA")
+        b_quick_dynamic.clicked.connect(self._quick_dynamic_ra)
+        btn_row.addWidget(b_load); btn_row.addWidget(b_quick_dynamic); btn_row.addWidget(b_goto); btn_row.addWidget(b_clear); btn_row.addStretch(1)
         lay.addLayout(btn_row)
 
         n_con = len(RA_LIBRARY.get("Construction", {}))
@@ -36541,65 +36557,144 @@ class RiskAssessmentModule(QWidget):
         w = QWidget()
         self.tabs.addTab(w, "2. Generated Assessment")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(18, 18, 18, 18)
+        lay.setContentsMargins(10, 10, 10, 10)
         self.lbl_detail_header = QLabel("No assessment loaded yet. Select library activities and generate an assessment.")
         self.lbl_detail_header.setWordWrap(True)
-        self.lbl_detail_header.setStyleSheet("font-weight:700;color:#17365D;padding:14px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
+        self.lbl_detail_header.setStyleSheet("font-weight:700;color:#17365D;padding:10px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
         lay.addWidget(self.lbl_detail_header)
-        info = QLabel("Generated assessments open in a dedicated editor window. Add or remove task rows, review the live risk ratings and colours, then Save & Exit.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color:#445;padding:12px;background:#F7F9FC;border:1px solid #D9E1EA;border-radius:6px;")
-        lay.addWidget(info)
-        b_open = QPushButton("Open Generated Assessment")
-        b_open.setMinimumHeight(42)
-        b_open.setStyleSheet("background:#17365D;color:white;font-weight:bold;padding:10px 18px;border-radius:5px;")
-        b_open.clicked.connect(self._show_assessment_dialog)
-        lay.addWidget(b_open, 0, Qt.AlignmentFlag.AlignLeft)
-        lay.addStretch(1)
-
-        # Persistent editor dialog owns the same table used by the calculation/save logic.
-        self.assessment_dialog = QDialog(self)
-        self.assessment_dialog.setWindowTitle("Generated Risk Assessment")
-        self.assessment_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.assessment_dialog.resize(1280, 780)
-        self.assessment_dialog.setMinimumSize(900, 600)
-        dlg_lay = QVBoxLayout(self.assessment_dialog)
-        dlg_lay.setContentsMargins(16, 14, 16, 14)
-        dlg_lay.setSpacing(10)
-        self.dialog_header = QLabel("Generated Risk Assessment")
-        self.dialog_header.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:10px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
-        self.dialog_header.setWordWrap(True)
-        dlg_lay.addWidget(self.dialog_header)
-        dlg_lay.addWidget(self.lbl_format)
+        self.workflow_label = QLabel("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
+        self.workflow_label.setStyleSheet("font-weight:600;color:#34495e;padding:5px;")
+        lay.addWidget(self.workflow_label)
         actions = QHBoxLayout()
-        b_add = QPushButton("+ Add Additional Row"); b_add.clicked.connect(self._add_blank_row)
-        b_del = QPushButton("Delete Selected Row"); b_del.clicked.connect(self._delete_row)
-        b_recalc = QPushButton("Recalculate Risk Scores"); b_recalc.clicked.connect(self._read_table_rows)
-        b_export = QPushButton("Export to Word"); b_export.clicked.connect(self._export_word)
-        for b in (b_add, b_del, b_recalc, b_export):
-            b.setMinimumHeight(34)
-            actions.addWidget(b)
+        self.view_mode = QComboBox()
+        self.view_mode.addItems(["Main Assessment View", "Residual Risk View", "All Columns"])
+        self.view_mode.currentIndexChanged.connect(self._apply_table_view)
+        actions.addWidget(QLabel("Table view:")); actions.addWidget(self.view_mode)
+        for text, slot in [("+ Add Row", self._add_blank_row), ("Delete Row", self._delete_row),
+                           ("Recalculate", self._read_table_rows), ("Export Word", self._export_word), ("Create Observation from Risk", self._create_observation_from_risk),
+                           ("Full Screen Editor", self._open_fullscreen_editor)]:
+            b = QPushButton(text); b.clicked.connect(slot); actions.addWidget(b)
         actions.addStretch(1)
-        dlg_lay.addLayout(actions)
-        self.table.setParent(self.assessment_dialog)
-        self.table.setMinimumHeight(360)
-        dlg_lay.addWidget(self.table, 1)
-        foot = QLabel("Change Likelihood (L) or Severity (S) to automatically recalculate the risk score, rating and colour. Formal Risk Assessments also recalculate residual risk.")
-        foot.setWordWrap(True)
-        foot.setStyleSheet("color:#445;padding:8px;background:#F7F9FC;border-radius:4px;")
-        dlg_lay.addWidget(foot)
+        lay.addLayout(actions)
+        self.detail_table_host = QWidget()
+        host_layout = QVBoxLayout(self.detail_table_host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        self.table.setParent(self.detail_table_host)
+        self.table.setMinimumHeight(300)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        host_layout.addWidget(self.table)
+        lay.addWidget(self.detail_table_host, 1)
+
         bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        b_save_exit = QPushButton("Submit / Save & Exit")
-        b_save_exit.setMinimumHeight(42)
-        b_save_exit.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:10px 22px;border-radius:5px;")
-        b_save_exit.clicked.connect(self._save_and_exit_dialog)
-        b_cancel = QPushButton("Cancel")
-        b_cancel.setMinimumHeight(42)
-        b_cancel.setStyleSheet("padding:10px 22px;")
-        b_cancel.clicked.connect(self._cancel_assessment_dialog)
-        bottom.addWidget(b_save_exit); bottom.addWidget(b_cancel)
-        dlg_lay.addLayout(bottom)
+        self.btn_save_draft = QPushButton("Save Draft")
+        self.btn_save_draft.clicked.connect(self._save_draft)
+        self.btn_submit_review = QPushButton("Submit for HSE Review")
+        self.btn_submit_review.clicked.connect(self._submit_for_review)
+        self.btn_hse_review = QPushButton("HSE Review & Forward")
+        self.btn_hse_review.clicked.connect(self._hse_review_forward)
+        self.btn_return_review = QPushButton("Return for Correction")
+        self.btn_return_review.clicked.connect(self._return_for_correction)
+        self.btn_management_approve = QPushButton("Management Approve")
+        self.btn_management_approve.clicked.connect(self._management_approve)
+        self.btn_revise = QPushButton("Revise Approved Version")
+        self.btn_revise.clicked.connect(self._revise_version)
+        self.btn_save_exit = QPushButton("Save & Exit")
+        self.btn_save_exit.clicked.connect(self._save_and_exit_dialog)
+        self.btn_cancel_edit = QPushButton("Back to Setup")
+        self.btn_cancel_edit.clicked.connect(self._cancel_assessment_dialog)
+        for b in (self.btn_save_draft, self.btn_submit_review, self.btn_hse_review,
+                  self.btn_return_review, self.btn_management_approve, self.btn_revise,
+                  self.btn_save_exit, self.btn_cancel_edit):
+            b.setMinimumHeight(34); bottom.addWidget(b)
+        lay.addLayout(bottom)
+
+        # Compact, clickable 5x5 matrix. Clicking a score applies L/S to the selected row.
+        self.inline_matrix = QTableWidget(6, 6)
+        self.inline_matrix.setMaximumHeight(220)
+        self.inline_matrix.setMinimumWidth(390)
+        self.inline_matrix.horizontalHeader().setVisible(False)
+        self.inline_matrix.verticalHeader().setVisible(False)
+        self.inline_matrix.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.inline_matrix.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.inline_matrix.setStyleSheet("QTableWidget{font-size:10px;gridline-color:#aab;} ")
+        for c, (sv, sn) in enumerate(RA_SEVERITY, 1):
+            it=QTableWidgetItem(f"{sv} {sn}"); it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it.setBackground(QBrush(QColor("#17365D"))); it.setForeground(QBrush(QColor("white")))
+            self.inline_matrix.setItem(0,c,it)
+        corner=QTableWidgetItem("L/S"); corner.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        corner.setBackground(QBrush(QColor("#17365D"))); corner.setForeground(QBrush(QColor("white")))
+        self.inline_matrix.setItem(0,0,corner)
+        for rr,(lv,ln) in enumerate(RA_LIKELIHOOD,1):
+            it=QTableWidgetItem(f"{lv} {ln}"); it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it.setBackground(QBrush(QColor("#17365D"))); it.setForeground(QBrush(QColor("white")))
+            self.inline_matrix.setItem(rr,0,it)
+            for cc,(sv,_) in enumerate(RA_SEVERITY,1):
+                score=lv*sv; cell=QTableWidgetItem(f"{score}\n{ra_band(score)}")
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                cell.setBackground(QBrush(QColor(ra_band_color(ra_band(score)))))
+                self.inline_matrix.setItem(rr,cc,cell)
+        for c in range(6): self.inline_matrix.setColumnWidth(c, 64)
+        for rr in range(6): self.inline_matrix.setRowHeight(rr, 28)
+        self.inline_matrix.cellClicked.connect(self._apply_matrix_selection)
+        matrix_row=QHBoxLayout()
+        matrix_row.addWidget(QLabel("Select a table row, then click a matrix cell to apply Likelihood and Severity:"))
+        matrix_row.addWidget(self.inline_matrix)
+        lay.addLayout(matrix_row)
+
+        # Optional full-screen editor reuses the same table; it is returned to Tab 2 on close.
+        self.assessment_dialog = QDialog(self)
+        self.assessment_dialog.setWindowTitle("Risk Assessment – Full Screen Editor")
+        self.assessment_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.assessment_dialog.resize(1500, 900)
+        self.assessment_dialog.setMinimumSize(900, 600)
+        self.fullscreen_layout = QVBoxLayout(self.assessment_dialog)
+        self.fullscreen_layout.addWidget(QLabel("Full Screen Risk Assessment Editor"))
+        self.fullscreen_buttons = QHBoxLayout()
+        b_close=QPushButton("Return to Assessment Tab"); b_close.clicked.connect(self.assessment_dialog.accept)
+        self.fullscreen_buttons.addStretch(1); self.fullscreen_buttons.addWidget(b_close)
+        self.fullscreen_layout.addLayout(self.fullscreen_buttons)
+
+    def _open_fullscreen_editor(self):
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "No Assessment", "Generate or open an assessment first.")
+            return
+        self.table.setParent(self.assessment_dialog)
+        self.fullscreen_layout.insertWidget(1, self.table, 1)
+        self.assessment_dialog.showMaximized()
+        self.assessment_dialog.exec()
+        self.table.setParent(self.detail_table_host)
+        self.detail_table_host.layout().addWidget(self.table)
+        self._apply_table_view()
+
+    def _apply_table_view(self, *_):
+        if not hasattr(self, "view_mode") or self.table.columnCount() == 0:
+            return
+        mode=self.view_mode.currentIndex()
+        ra_type=self.cmb_type.currentText()
+        if "JSA" in ra_type or "JHA" in ra_type or "Dynamic" in ra_type:
+            for c in range(self.table.columnCount()): self.table.setColumnHidden(c, False)
+            return
+        main_cols={0,1,2,3,4,5,6,7,8,9}
+        residual_cols={0,1,3,10,11,12,13}
+        for c in range(self.table.columnCount()):
+            self.table.setColumnHidden(c, mode==0 and c not in main_cols or mode==1 and c not in residual_cols)
+
+    def _apply_matrix_selection(self, row, col):
+        if row < 1 or col < 1:
+            return
+        selected=self.table.currentRow()
+        if selected < 0:
+            QMessageBox.information(self, "Select Row", "Select an assessment row first.")
+            return
+        is_special="JSA" in self.cmb_type.currentText() or "JHA" in self.cmb_type.currentText() or "Dynamic" in self.cmb_type.currentText()
+        lcol,scol=(4,5) if is_special else (5,6)
+        self._risk_update_blocked=True
+        try:
+            self._set_item(selected,lcol,row); self._set_item(selected,scol,col)
+        finally:
+            self._risk_update_blocked=False
+        self._on_table_item_changed(self.table.item(selected,lcol))
+        self._read_table_rows()
 
     def _build_matrix_tab(self):
         w = QWidget()
@@ -36687,27 +36782,53 @@ class RiskAssessmentModule(QWidget):
         w = QWidget()
         self.tabs.addTab(w, "4. Assessment Register")
         lay = QVBoxLayout(w)
+        stats=QHBoxLayout(); self.reg_stats=QLabel("Total: 0  |  Draft: 0  |  Approved/Active: 0  |  Overdue: 0")
+        self.reg_stats.setStyleSheet("font-weight:700;color:#17365D;padding:7px;background:#E8F1FB;border-radius:4px;")
+        stats.addWidget(self.reg_stats); stats.addStretch(1); lay.addLayout(stats)
         bar = QHBoxLayout()
         self.reg_search = QLineEdit(); self.reg_search.setPlaceholderText("Search number, activity, project…")
         self.reg_search.textChanged.connect(self.refresh_register)
-        b_open = QPushButton("Open Selected"); b_open.clicked.connect(self._open_selected)
-        b_del = QPushButton("Delete Selected"); b_del.clicked.connect(self._delete_selected)
-        b_exp = QPushButton("Export Selected to Word"); b_exp.clicked.connect(self._export_selected_word)
-        b_ref = QPushButton("Refresh"); b_ref.clicked.connect(self.refresh_register)
-        bar.addWidget(self.reg_search, 1)
-        for b in (b_open, b_del, b_exp, b_ref):
-            bar.addWidget(b)
+        self.reg_type_filter=QComboBox(); self.reg_type_filter.addItem("All Types"); self.reg_type_filter.addItems(RA_TYPES)
+        self.reg_status_filter=QComboBox(); self.reg_status_filter.addItems(["All Statuses","Draft","Under Review","Pending Management Approval","Returned","Active","Superseded"])
+        self.reg_risk_filter=QComboBox(); self.reg_risk_filter.addItems(["All Risk Levels","Low","Medium","High","Extreme"])
+        self.reg_from_date=QDateEdit(QDate(2000,1,1)); self.reg_from_date.setCalendarPopup(True); self.reg_from_date.setDisplayFormat("yyyy-MM-dd")
+        self.reg_to_date=QDateEdit(QDate.currentDate().addYears(20)); self.reg_to_date.setCalendarPopup(True); self.reg_to_date.setDisplayFormat("yyyy-MM-dd")
+        self.reg_type_filter.currentIndexChanged.connect(self.refresh_register)
+        self.reg_status_filter.currentIndexChanged.connect(self.refresh_register)
+        self.reg_risk_filter.currentIndexChanged.connect(self.refresh_register)
+        self.reg_from_date.dateChanged.connect(self.refresh_register); self.reg_to_date.dateChanged.connect(self.refresh_register)
+        bar.addWidget(self.reg_search,2); bar.addWidget(self.reg_type_filter); bar.addWidget(self.reg_status_filter); bar.addWidget(self.reg_risk_filter)
+        bar.addWidget(QLabel("From")); bar.addWidget(self.reg_from_date); bar.addWidget(QLabel("To")); bar.addWidget(self.reg_to_date)
+        for text,slot in [("Open",self._open_selected),("Revise",self._revise_version),("Delete",self._delete_selected),("Export Word",self._export_selected_word),("Refresh",self.refresh_register)]:
+            b=QPushButton(text); b.clicked.connect(slot); bar.addWidget(b)
         lay.addLayout(bar)
-        self.reg_table = QTableWidget(0, 9)
-        self.reg_table.setHorizontalHeaderLabels(
-            ["ID", "Number", "Type", "Sector", "Activity", "Project", "Date", "Assessor", "Status"]
-        )
+        self.reg_table = QTableWidget(0, 10)
+        self.reg_table.setHorizontalHeaderLabels(["ID", "Number", "Type", "Sector", "Activity", "Project", "Date", "Assessor", "Status", "Revision"])
         self.reg_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.reg_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.reg_table.setAlternatingRowColors(True)
         self.reg_table.horizontalHeader().setStretchLastSection(True)
         self.reg_table.doubleClicked.connect(lambda *_: self._open_selected())
         lay.addWidget(self.reg_table, 1)
+
+    def _quick_dynamic_ra(self):
+        self.cmb_type.setCurrentText("Dynamic Risk Assessment")
+        self.txt_title.setText("Dynamic / Point-of-Work Risk Assessment")
+        if not self.cmb_activity.currentText().strip(): self.cmb_activity.setEditText("Dynamic site activity")
+        self._risk_update_blocked=True
+        try:
+            self.table.setRowCount(0)
+            presets=[
+                ("Change in work conditions", "Workers and nearby personnel", "Stop and reassess; brief the team before restart"),
+                ("New or previously unidentified hazard", "Work team and other persons", "Isolate the area and apply suitable controls"),
+                ("Weather / environmental change", "Work team and nearby personnel", "Monitor conditions; suspend work if unsafe"),
+                ("SIMOPS / interface with other activities", "All affected work groups", "Coordinate permits, sequence tasks and establish exclusion zones"),
+                ("Equipment, personnel or scope change", "Operators and work team", "Verify competence, equipment condition and revised method")]
+            for i,(hazard,who,control) in enumerate(presets,1):
+                self._append_dynamic_row({"no":i,"hazard":hazard,"who":who,"control":control,"L":3,"S":3,"risk":9,"band":"Medium","action":"Review controls and communicate change","by_whom":self._actor()})
+        finally: self._risk_update_blocked=False
+        self.current_rows=[]; self._read_table_rows(); self._colorize_risk_columns()
+        self.tabs.setCurrentIndex(1); self._apply_table_view(); self._update_detail_header()
 
     def _refresh_library_multi(self, *_):
         if not hasattr(self, "library_multi"):
@@ -36723,36 +36844,20 @@ class RiskAssessmentModule(QWidget):
         if self.table.rowCount() == 0:
             QMessageBox.information(self, "No Assessment", "Generate or open an assessment before opening the editor.")
             return
-        self._dialog_cancel_snapshot = {
-            "rows": [[self.table.item(r, c).text() if self.table.item(r, c) else ""
-                      for c in range(self.table.columnCount())] for r in range(self.table.rowCount())],
-            "current_rows": json.loads(json.dumps(self.current_rows, ensure_ascii=False)),
-        }
-        self.dialog_header.setText(self.lbl_detail_header.text())
-        self.assessment_dialog.exec()
+        self.tabs.setCurrentIndex(1)
+        self._apply_table_view()
 
     def _cancel_assessment_dialog(self):
-        snap = getattr(self, "_dialog_cancel_snapshot", None)
-        if snap:
-            self._risk_update_blocked = True
-            try:
-                self.table.setRowCount(0)
-                for values in snap["rows"]:
-                    r = self.table.rowCount(); self.table.insertRow(r)
-                    for c, value in enumerate(values):
-                        self._set_item(r, c, value)
-                self.current_rows = snap["current_rows"]
-            finally:
-                self._risk_update_blocked = False
-            self._colorize_risk_columns()
-        self.assessment_dialog.reject()
+        # Cancel returns to the register/setup without discarding the in-memory draft.
+        self.tabs.setCurrentIndex(1)
 
     def _save_and_exit_dialog(self):
         if not self.table.rowCount() or not self.cmb_activity.currentText().strip():
             QMessageBox.warning(self, "Cannot Save", "Add at least one assessment row and provide an activity.")
             return
-        self._save()
-        self.assessment_dialog.accept()
+        if not self._save_draft():
+            return
+        self.tabs.setCurrentIndex(3)
 
     def _refresh_activities(self, *_):
         sector = self.cmb_sector.currentText()
@@ -37118,6 +37223,8 @@ class RiskAssessmentModule(QWidget):
         else:
             trigger = c in (5, 6, 10, 11)  # L, S, residual L, residual S
         if not trigger:
+            if "Dynamic" in ra_type and c == 8:
+                self._colorize_risk_columns()
             return
 
         def num(col, default=1):
@@ -37204,7 +37311,9 @@ class RiskAssessmentModule(QWidget):
             row.get("by_whom", ""),
         ]
         for c, v in enumerate(vals):
-            self._set_item(r, c, v)
+            item=self._set_item(r, c, v)
+            if c == 8 and "Dynamic" in self.cmb_type.currentText():
+                item.setToolTip("Enter STOP WORK: followed by the reason to flag this row red. A reason is mandatory.")
 
     def _add_blank_row(self):
         ra_type = self.cmb_type.currentText()
@@ -37263,9 +37372,13 @@ class RiskAssessmentModule(QWidget):
                 elif "Dynamic" in ra_type:
                     L, S = num(4, 3), num(5, 3)
                     score = L * S
+                    action_text=cell(8)
+                    if action_text.strip().upper().startswith("STOP WORK") and (":" not in action_text or not action_text.split(":",1)[1].strip()):
+                        QMessageBox.warning(self,"Stop Work Reason Required",f"Row {r+1}: enter STOP WORK: followed by the reason.")
+                        return []
                     row = {"no": cell(0) or str(r + 1), "hazard": cell(1), "who": cell(2), "control": cell(3),
                            "L": L, "S": S, "risk": score, "band": ra_band(score),
-                           "action": cell(8), "by_whom": cell(9)}
+                           "action": action_text, "by_whom": cell(9)}
                     self._set_item(r, 6, score); self._set_item(r, 7, ra_band(score))
                 else:
                     L, S = num(5, 3), num(6, 3)
@@ -37287,6 +37400,17 @@ class RiskAssessmentModule(QWidget):
         ra_type = self.cmb_type.currentText()
         is_jsa = "JSA" in ra_type or "JHA" in ra_type
         for r in range(self.table.rowCount()):
+            if "Dynamic" in ra_type:
+                action_item=self.table.item(r,8)
+                action_text=action_item.text().strip().upper() if action_item else ""
+                stop_flag=action_text.startswith("STOP WORK")
+                for c in range(self.table.columnCount()):
+                    cell=self.table.item(r,c)
+                    if cell and stop_flag:
+                        cell.setBackground(QBrush(QColor("#F4CCCC")))
+                        cell.setForeground(QBrush(QColor("#7A0000")))
+                    elif cell and c in (6,7):
+                        cell.setForeground(QBrush(QColor("#000000")))
             risk_cols = [6, 7] if (is_jsa or "Dynamic" in ra_type) else [7, 8, 12, 13]
             for c in risk_cols:
                 it = self.table.item(r, c)
@@ -37302,6 +37426,14 @@ class RiskAssessmentModule(QWidget):
                     it.setBackground(QBrush(QColor(ra_score_color(score))))
                 elif band:
                     it.setBackground(QBrush(QColor(ra_band_color(band))))
+            if "Dynamic" in ra_type:
+                action_item=self.table.item(r,8)
+                if action_item and action_item.text().strip().upper().startswith("STOP WORK"):
+                    for c in range(self.table.columnCount()):
+                        cell=self.table.item(r,c)
+                        if cell:
+                            cell.setBackground(QBrush(QColor("#F4CCCC")))
+                            cell.setForeground(QBrush(QColor("#7A0000")))
 
     def _clear_form(self):
         self._editing_id = None
@@ -37315,13 +37447,21 @@ class RiskAssessmentModule(QWidget):
         self.current_rows = []
         self._on_type_changed(self.cmb_type.currentText())
         self.lbl_detail_header.setText("No assessment loaded yet. Use tab 1 → Load Library.")
+        self._update_workflow_ui()
 
-    def _save(self):
+    def _save(self, silent=False, status_override=None):
+        if self._editing_id:
+            existing=self.db.fetchone("SELECT status FROM risk_assessments WHERE id=?",(self._editing_id,))
+            if existing and existing["status"] not in ("Draft","Returned"):
+                QMessageBox.warning(self,"Workflow Locked","Only Draft or Returned assessments can be edited. Complete the review workflow or create a new revision from an Active version.")
+                return False
         rows = self._read_table_rows()
         if not self.cmb_activity.currentText().strip():
-            return QMessageBox.warning(self, "Required", "Activity is required.")
+            QMessageBox.warning(self, "Required", "Activity is required.")
+            return False
         if not rows:
-            return QMessageBox.warning(self, "Required", "Add at least one assessment row (or load from library).")
+            QMessageBox.warning(self, "Required", "Add at least one assessment row (or load from library).")
+            return False
         now = _now()
         number = self._next_number() if not self._editing_id else None
         payload = (
@@ -37331,7 +37471,7 @@ class RiskAssessmentModule(QWidget):
             self.txt_project.text().strip(), self.txt_location.text().strip(),
             self.txt_department.text().strip(), self.txt_assessor.text().strip(),
             self.dt_assess.date().toString("yyyy-MM-dd"), self.dt_review.date().toString("yyyy-MM-dd"),
-            "Active", self.txt_ppe.toPlainText().strip(), self.txt_remarks.toPlainText().strip(),
+            (status_override or "Draft"), self.txt_ppe.toPlainText().strip(), self.txt_remarks.toPlainText().strip(),
             json.dumps(rows, ensure_ascii=False), now,
         )
         if self._editing_id:
@@ -37353,24 +37493,199 @@ class RiskAssessmentModule(QWidget):
             self._editing_id = self.db.fetchone("SELECT id FROM risk_assessments WHERE number=?", (number,))["id"]
         self.refresh_register()
         self._update_detail_header()
-        QMessageBox.information(self, "Saved", msg)
+        self._update_workflow_ui()
+        if not silent:
+            QMessageBox.information(self, "Saved", msg)
+        return True
+
+    def _save_draft(self):
+        if not self.table.rowCount() or not self.cmb_activity.currentText().strip():
+            QMessageBox.warning(self, "Cannot Save", "Provide an activity and at least one assessment row.")
+            return False
+        saved=self._save(silent=True, status_override="Draft")
+        self._update_workflow_ui()
+        return bool(saved)
+
+    def _workflow_actor(self, title, prompt):
+        value, ok = QInputDialog.getText(self, title, prompt, text=self._actor())
+        return value.strip() if ok else ""
+
+    def _submit_for_review(self):
+        if self._editing_id:
+            current=self.db.fetchone("SELECT status FROM risk_assessments WHERE id=?",(self._editing_id,))
+            if current and current["status"] not in ("Draft","Returned"):
+                return QMessageBox.warning(self,"Submit","Only Draft or Returned assessments can be submitted.")
+        actor=self._workflow_actor("Submit for HSE Review", "Submitted by:")
+        if not actor: return
+        if not self._save(silent=True, status_override="Under Review"):
+            return
+        self.db.execute("UPDATE risk_assessments SET status='Under Review',submitted_at=?,workflow_note=? WHERE id=?",
+                        (_now(), f"Submitted by {actor}", self._editing_id))
+        self.refresh_register(); self._update_workflow_ui()
+        QMessageBox.information(self,"Submitted","Assessment submitted to the HSE Reviewer.")
+
+    def _hse_review_forward(self):
+        if not self._editing_id:
+            return QMessageBox.warning(self,"HSE Review","Save the assessment before review.")
+        row=self.db.fetchone("SELECT status FROM risk_assessments WHERE id=?",(self._editing_id,))
+        if not row or row["status"]!="Under Review":
+            return QMessageBox.warning(self,"HSE Review","Only assessments with status Under Review can be forwarded.")
+        reviewer=self._workflow_actor("HSE Reviewer", "HSE Reviewer name:")
+        if not reviewer: return
+        self.db.execute("UPDATE risk_assessments SET status='Pending Management Approval',hse_reviewer=?,hse_reviewed_at=?,workflow_note=? WHERE id=?",
+                        (reviewer,_now(),f"HSE reviewed and forwarded by {reviewer}",self._editing_id))
+        self.refresh_register(); self._update_workflow_ui()
+        QMessageBox.information(self,"Forwarded","HSE review completed. Sent to Management Approver.")
+
+    def _management_approve(self):
+        if not self._editing_id:
+            return QMessageBox.warning(self,"Management Approval","Save the assessment first.")
+        row=self.db.fetchone("SELECT status FROM risk_assessments WHERE id=?",(self._editing_id,))
+        if not row or row["status"]!="Pending Management Approval":
+            return QMessageBox.warning(self,"Management Approval","HSE review must be completed before management approval.")
+        approver=self._workflow_actor("Management Approver", "Management Approver name:")
+        if not approver: return
+        self.db.execute("UPDATE risk_assessments SET status='Active',management_approver=?,management_approved_at=?,workflow_note=? WHERE id=?",
+                        (approver,_now(),f"Approved by {approver}",self._editing_id))
+        self.refresh_register(); self._update_workflow_ui()
+        QMessageBox.information(self,"Approved","Assessment is now Active.")
+
+    def _return_for_correction(self):
+        if not self._editing_id: return
+        row=self.db.fetchone("SELECT status FROM risk_assessments WHERE id=?",(self._editing_id,))
+        if not row or row["status"] not in ("Under Review","Pending Management Approval"):
+            return QMessageBox.warning(self,"Return for Correction","Only assessments under review can be returned.")
+        reviewer=self._workflow_actor("Return for Correction", "Returned by reviewer/approver:")
+        if not reviewer: return
+        note,ok=QInputDialog.getText(self,"Correction Required","Reason / required correction:")
+        if not ok or not note.strip():
+            return QMessageBox.warning(self,"Reason Required","Enter the reason for returning this assessment.")
+        self.db.execute("UPDATE risk_assessments SET status='Returned',workflow_note=? WHERE id=?",
+                        (f"Returned by {reviewer}: {note.strip()}",self._editing_id))
+        self.refresh_register(); self._update_workflow_ui()
+
+    def _revise_version(self):
+        if not self._editing_id: return
+        old=self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?",(self._editing_id,))
+        if not old or old["status"]!="Active":
+            return QMessageBox.warning(self,"Revision","Only an Active approved assessment can be revised.")
+        if QMessageBox.question(self,"Create Revision","Create a new Draft revision and mark this version Superseded?",
+            QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)!=QMessageBox.StandardButton.Yes:
+            return
+        root_id=old["parent_id"] or old["id"]
+        rev=int(old["revision"] or 0)+1
+        base=old["number"].split("-R")[0]
+        number=f"{base}-R{rev}"
+        while self.db.fetchone("SELECT id FROM risk_assessments WHERE number=?",(number,)):
+            rev+=1; number=f"{base}-R{rev}"
+        self.db.execute("UPDATE risk_assessments SET status='Superseded' WHERE id=?",(self._editing_id,))
+        self.db.execute("""INSERT INTO risk_assessments(number,ra_type,sector,activity,title,project,location,department,assessor,
+            assessment_date,review_date,status,ppe,remarks,rows_json,created_at,updated_at,parent_id,revision)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (number,old["ra_type"],old["sector"],old["activity"],old["title"],old["project"],old["location"],
+             old["department"],self._actor(),old["assessment_date"],old["review_date"],"Draft",old["ppe"],old["remarks"],
+             old["rows_json"],_now(),_now(),root_id,rev))
+        new_id=self.db.fetchone("SELECT id FROM risk_assessments WHERE number=?",(number,))["id"]
+        self.refresh_register()
+        self._open_record_by_id(new_id)
+        QMessageBox.information(self,"Revision Created",f"New revision {number} created as Draft. Previous version retained as Superseded.")
+
+    def _update_workflow_ui(self):
+        if not hasattr(self,"workflow_label"): return
+        if not self._editing_id:
+            status="Draft"
+        else:
+            row=self.db.fetchone("SELECT status,hse_reviewer,management_approver,revision,number FROM risk_assessments WHERE id=?",(self._editing_id,))
+            if not row: status="Draft"
+            else:
+                status=row["status"]
+                self.workflow_label.setText(f"{row['number']}  |  Revision {row['revision'] or 0}  |  Status: {status}  |  HSE Reviewer: {row['hse_reviewer'] or '—'}  |  Management: {row['management_approver'] or '—'}")
+        if not self._editing_id: self.workflow_label.setText("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
+        active=status=="Active"
+        self.btn_hse_review.setEnabled(status=="Under Review")
+        self.btn_management_approve.setEnabled(status=="Pending Management Approval")
+        self.btn_return_review.setEnabled(status in ("Under Review","Pending Management Approval"))
+        self.btn_revise.setEnabled(active)
+        self.btn_submit_review.setEnabled(status in ("Draft","Returned"))
+        self.btn_save_draft.setEnabled(status in ("Draft","Returned"))
+        editable=status in ("Draft","Returned") or not self._editing_id
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers if editable else QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setEnabled(True)
+
+    def _create_observation_from_risk(self):
+        rows=self._read_table_rows()
+        if not rows:
+            return QMessageBox.warning(self,"Create Observation","Load an assessment with at least one risk row first.")
+        location=self.txt_location.text().strip()
+        if not location:
+            location,ok=QInputDialog.getText(self,"Observation Location","Enter the observation location:")
+            if not ok or not location.strip(): return
+        selected=self.table.currentRow()
+        item=rows[selected] if 0 <= selected < len(rows) else rows[0]
+        hazard=item.get("hazards") or item.get("hazard") or item.get("job_step") or item.get("activity") or "Hazard identified in risk assessment"
+        controls=item.get("additional") or item.get("control") or item.get("controls") or item.get("existing") or "Review and implement the controls specified in the linked risk assessment."
+        obs_text=f"Risk-based observation from {_s(self._editing_id and self.db.fetchone('SELECT number FROM risk_assessments WHERE id=?',(self._editing_id,))['number'] or 'unsaved assessment')}. Activity: {self.cmb_activity.currentText().strip()}. Hazard: {hazard}."
+        action,ok=QInputDialog.getText(self,"Corrective Action","Enter the corrective action:",text=str(controls))
+        if not ok or not action.strip(): return
+        try:
+            number=next_number("HSE-OBS","observations")
+            today=datetime.now().strftime("%Y-%m-%d")
+            self.db.execute("""INSERT INTO observations(number,obs_date,obs_time,project,location,area,observer,obs_type,category,
+                subcategory,observation,corrective_action,corrective_actions_json,priority,target_date,status,capa_required,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (number,today,datetime.now().strftime("%H:%M"),self.txt_project.text().strip(),location,
+                 self.txt_department.text().strip(),self._actor(),"Unsafe Condition","Risk Assessment",
+                 self.cmb_activity.currentText().strip(),obs_text,action.strip(),json.dumps([{"action":action.strip()}],ensure_ascii=False),
+                 "Medium",today,"Open",0,datetime.now().isoformat()))
+            QMessageBox.information(self,"Observation Created",f"Observation {number} created and linked by reference to the risk assessment context.")
+        except Exception as exc:
+            logging.exception("Create observation from risk assessment failed")
+            QMessageBox.critical(self,"Observation Error",str(exc))
+
+    def _open_record_by_id(self, rid):
+        for r in range(self.reg_table.rowCount()):
+            item=self.reg_table.item(r,0)
+            if item and item.data(Qt.ItemDataRole.UserRole)==rid:
+                self.reg_table.selectRow(r); break
+        self._load_record_into_editor(rid)
 
     def refresh_register(self, *_):
         q = self.reg_search.text().strip().lower() if hasattr(self, "reg_search") else ""
+        type_filter=self.reg_type_filter.currentText() if hasattr(self,"reg_type_filter") else "All Types"
+        status_filter=self.reg_status_filter.currentText() if hasattr(self,"reg_status_filter") else "All Statuses"
+        risk_filter=self.reg_risk_filter.currentText() if hasattr(self,"reg_risk_filter") else "All Risk Levels"
         self.reg_table.setRowCount(0)
-        for r in self.db.fetchall("SELECT * FROM risk_assessments ORDER BY id DESC"):
+        all_rows=self.db.fetchall("SELECT * FROM risk_assessments ORDER BY id DESC")
+        counts={"total":len(all_rows),"draft":0,"active":0,"overdue":0}
+        today=date.today().isoformat()
+        for r in all_rows:
+            status=_s(r["status"])
+            counts["draft"] += status in ("Draft","Returned")
+            counts["active"] += status=="Active"
+            counts["overdue"] += bool(_s(r["review_date"]) and _s(r["review_date"])<today and status=="Active")
             blob = " ".join(_s(r[k]) for k in ("number", "activity", "project", "title", "ra_type")).lower()
-            if q and q not in blob:
-                continue
-            row_i = self.reg_table.rowCount()
-            self.reg_table.insertRow(row_i)
-            vals = [r["id"], r["number"], r["ra_type"], r["sector"], r["activity"],
-                    r["project"], r["assessment_date"], r["assessor"], r["status"]]
+            if q and q not in blob: continue
+            if type_filter!="All Types" and _s(r["ra_type"])!=type_filter: continue
+            if status_filter!="All Statuses" and status!=status_filter: continue
+            assessment_date=_s(r["assessment_date"])
+            if assessment_date and hasattr(self,"reg_from_date"):
+                if assessment_date < self.reg_from_date.date().toString("yyyy-MM-dd") or assessment_date > self.reg_to_date.date().toString("yyyy-MM-dd"):
+                    continue
+            try:
+                data=json.loads(r["rows_json"] or "[]")
+                highest=max([int(x.get("risk",0) or 0) for x in data] + [int(x.get("rrisk",0) or 0) for x in data] + [0])
+                level=ra_band(highest) if highest else ""
+            except Exception: level=""
+            if risk_filter!="All Risk Levels" and level!=risk_filter: continue
+            row_i = self.reg_table.rowCount(); self.reg_table.insertRow(row_i)
+            vals = [r["id"], r["number"], r["ra_type"], r["sector"], r["activity"], r["project"],
+                    r["assessment_date"], r["assessor"], status, r["revision"] or 0]
             for c, v in enumerate(vals):
                 it = QTableWidgetItem(_s(v))
-                if c == 0:
-                    it.setData(Qt.ItemDataRole.UserRole, r["id"])
+                if c == 0: it.setData(Qt.ItemDataRole.UserRole, r["id"])
                 self.reg_table.setItem(row_i, c, it)
+        if hasattr(self,"reg_stats"):
+            self.reg_stats.setText(f"Total: {counts['total']}  |  Draft/Returned: {counts['draft']}  |  Active: {counts['active']}  |  Overdue for review: {counts['overdue']}")
         self.reg_table.resizeColumnsToContents()
 
     def _selected_reg_id(self):
@@ -37384,6 +37699,9 @@ class RiskAssessmentModule(QWidget):
         rid = self._selected_reg_id()
         if rid is None:
             return
+        self._open_record_by_id(rid)
+
+    def _load_record_into_editor(self, rid):
         row = self.db.fetchone("SELECT * FROM risk_assessments WHERE id=?", (rid,))
         if not row:
             return
@@ -37429,7 +37747,8 @@ class RiskAssessmentModule(QWidget):
             self.table.setRowHeight(r, max(110, self.table.rowHeight(r)))
         self._update_detail_header()
         self.tabs.setCurrentIndex(1)
-        self._show_assessment_dialog()
+        self._apply_table_view()
+        self._update_workflow_ui()
 
     def _delete_selected(self):
         rid = self._selected_reg_id()
