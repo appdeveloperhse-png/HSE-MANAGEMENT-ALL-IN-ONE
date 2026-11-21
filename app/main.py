@@ -36477,11 +36477,28 @@ class RiskAssessmentModule(QWidget):
     def _build_create_tab(self):
         w = QWidget()
         self.tabs.addTab(w, "1. Setup & Library")
-        lay = QVBoxLayout(w)
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(8)
+
         form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+
         self.cmb_type = QComboBox(); self.cmb_type.addItems(RA_TYPES)
         self.cmb_sector = QComboBox(); self.cmb_sector.addItems(RA_SECTORS)
-        self.cmb_activity = QComboBox(); self.cmb_activity.setEditable(True); self.cmb_activity.setMinimumWidth(340)
+        self.cmb_activity = QComboBox(); self.cmb_activity.setEditable(True)
+        self.cmb_activity.setMinimumWidth(280)
         self.txt_title = QLineEdit()
         self.txt_project = QLineEdit()
         self.txt_location = QLineEdit()
@@ -36489,24 +36506,28 @@ class RiskAssessmentModule(QWidget):
         self.txt_assessor = QLineEdit(self._actor())
         self.dt_assess = QDateEdit(QDate.currentDate()); self.dt_assess.setCalendarPopup(True); self.dt_assess.setDisplayFormat("yyyy-MM-dd")
         self.dt_review = QDateEdit(QDate.currentDate().addMonths(12)); self.dt_review.setCalendarPopup(True); self.dt_review.setDisplayFormat("yyyy-MM-dd")
-        self.txt_ppe = QTextEdit(); self.txt_ppe.setMinimumHeight(70)
-        self.txt_remarks = QTextEdit(); self.txt_remarks.setMinimumHeight(70)
+        self.txt_ppe = QTextEdit(); self.txt_ppe.setFixedHeight(64)
+        self.txt_remarks = QTextEdit(); self.txt_remarks.setFixedHeight(64)
 
         r = 0
         form.addWidget(QLabel("Assessment Type *"), r, 0); form.addWidget(self.cmb_type, r, 1)
         form.addWidget(QLabel("Sector / Industry *"), r, 2); form.addWidget(self.cmb_sector, r, 3); r += 1
         form.addWidget(QLabel("Activity *"), r, 0); form.addWidget(self.cmb_activity, r, 1, 1, 3); r += 1
-        form.addWidget(QLabel("Select multiple library activities (optional)"), r, 0, 1, 4); r += 1
-        self.library_multi = QComboBox()
-        self.library_multi.setMinimumWidth(420)
-        self.library_multi.setToolTip("Open the dropdown and tick one or more activities to combine them into one assessment. Leave all unticked to use the Activity field above.")
-        self.library_multi.setEditable(True)
-        self.library_multi.lineEdit().setReadOnly(True)
-        self.library_multi.lineEdit().setPlaceholderText("Click to select one or more activities…")
-        self._library_multi_model = QStandardItemModel(self.library_multi)
-        self.library_multi.setModel(self._library_multi_model)
-        self.library_multi.setMaxVisibleItems(16)
-        form.addWidget(self.library_multi, r, 0, 1, 4); r += 1
+
+        form.addWidget(QLabel("Multiple activities (optional)"), r, 0)
+        multi_row = QHBoxLayout()
+        self.library_multi_btn = QPushButton("Select activities…")
+        self.library_multi_btn.setMinimumHeight(32)
+        self.library_multi_btn.setToolTip("Open checklist to tick one or more library activities")
+        self.library_multi_btn.clicked.connect(self._open_library_multi_dialog)
+        self.lbl_library_multi = QLabel("None selected — single Activity field will be used")
+        self.lbl_library_multi.setStyleSheet("color:#17365D;padding:4px;")
+        self.lbl_library_multi.setWordWrap(True)
+        multi_row.addWidget(self.library_multi_btn)
+        multi_row.addWidget(self.lbl_library_multi, 1)
+        form.addLayout(multi_row, r, 1, 1, 3); r += 1
+        self._library_multi_checked = set()
+
         self.lbl_other_activity = QLabel("Custom activity name *")
         self.txt_other_activity = QLineEdit()
         self.txt_other_activity.setPlaceholderText("Type the new activity name here when Other is selected…")
@@ -36514,6 +36535,7 @@ class RiskAssessmentModule(QWidget):
         self.txt_other_activity.setVisible(False)
         form.addWidget(self.lbl_other_activity, r, 0)
         form.addWidget(self.txt_other_activity, r, 1, 1, 3); r += 1
+
         form.addWidget(QLabel("Title"), r, 0); form.addWidget(self.txt_title, r, 1, 1, 3); r += 1
         form.addWidget(QLabel("Project"), r, 0); form.addWidget(self.txt_project, r, 1)
         form.addWidget(QLabel("Location"), r, 2); form.addWidget(self.txt_location, r, 3); r += 1
@@ -36526,16 +36548,25 @@ class RiskAssessmentModule(QWidget):
         lay.addLayout(form)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         b_load = QPushButton("Load Library → Generate Assessment")
-        b_load.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:12px 18px;font-size:13px;")
+        b_load.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:10px 16px;font-size:13px;")
+        b_load.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         b_load.clicked.connect(self._load_from_library)
         b_goto = QPushButton("Open Generated Assessment Tab")
+        b_goto.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         b_goto.clicked.connect(lambda: self.tabs.setCurrentIndex(1))
         b_clear = QPushButton("Clear Form")
+        b_clear.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         b_clear.clicked.connect(self._clear_form)
         b_quick_dynamic = QPushButton("Quick Dynamic RA")
+        b_quick_dynamic.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         b_quick_dynamic.clicked.connect(self._quick_dynamic_ra)
-        btn_row.addWidget(b_load); btn_row.addWidget(b_quick_dynamic); btn_row.addWidget(b_goto); btn_row.addWidget(b_clear); btn_row.addStretch(1)
+        for b in (b_load, b_quick_dynamic, b_goto, b_clear):
+            b.setMinimumHeight(34)
+            b.setMaximumHeight(40)
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
         lay.addLayout(btn_row)
 
         n_con = len(RA_LIBRARY.get("Construction", {}))
@@ -36546,9 +36577,12 @@ class RiskAssessmentModule(QWidget):
             "Each Risk Assessment loads at least 5 task rows; JSA/JHA load extended job steps with controls."
         )
         info.setWordWrap(True)
-        info.setStyleSheet("padding:10px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
+        info.setStyleSheet("padding:8px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;color:#5B4B16;")
         lay.addWidget(info)
         lay.addStretch(1)
+
+        scroll.setWidget(host)
+        outer.addWidget(scroll, 1)
 
         self.cmb_type.currentTextChanged.connect(self._on_type_changed)
         self.cmb_sector.currentTextChanged.connect(self._refresh_activities)
@@ -36572,24 +36606,33 @@ class RiskAssessmentModule(QWidget):
         self.workflow_label = QLabel("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
         self.workflow_label.setStyleSheet("font-weight:600;color:#34495e;padding:4px;")
         lay.addWidget(self.workflow_label)
-        actions = QHBoxLayout()
+
+        actions_wrap = QWidget()
+        actions = QHBoxLayout(actions_wrap)
+        actions.setContentsMargins(0, 0, 0, 0)
+        actions.setSpacing(6)
         self.view_mode = QComboBox()
         self.view_mode.addItems(["Main Assessment View", "Residual Risk View", "All Columns"])
         self.view_mode.currentIndexChanged.connect(self._apply_table_view)
         actions.addWidget(QLabel("Table view:")); actions.addWidget(self.view_mode)
         for text_btn, slot in [("+ Add Row", self._add_blank_row), ("Delete Row", self._delete_row),
-                           ("Recalculate", self._read_table_rows), ("Export Word", self._export_word), ("Create Observation from Risk", self._create_observation_from_risk),
+                           ("Recalculate", self._read_table_rows), ("Export Word", self._export_word),
+                           ("Create Observation from Risk", self._create_observation_from_risk),
                            ("Full Screen Editor", self._open_fullscreen_editor)]:
-            b = QPushButton(text_btn); b.clicked.connect(slot); actions.addWidget(b)
+            b = QPushButton(text_btn)
+            b.setMinimumHeight(32)
+            b.setMaximumHeight(36)
+            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            b.clicked.connect(slot)
+            actions.addWidget(b)
         actions.addStretch(1)
-        lay.addLayout(actions)
+        lay.addWidget(actions_wrap)
 
-        # Generated assessment table gets maximum available space (inline matrix removed from this tab).
         self.detail_table_host = QWidget()
         host_layout = QVBoxLayout(self.detail_table_host)
         host_layout.setContentsMargins(0, 0, 0, 0)
         self.table.setParent(self.detail_table_host)
-        self.table.setMinimumHeight(520)
+        self.table.setMinimumHeight(480)
         self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
@@ -36604,12 +36647,15 @@ class RiskAssessmentModule(QWidget):
             pass
         self.table.doubleClicked.connect(self._on_generated_table_double_clicked)
         host_layout.addWidget(self.table)
-        tip = QLabel("Tip: Double-click any cell to edit. Right-click or use the double-click menu to Delete row / Highlight / Clear highlight.")
+        tip = QLabel("Tip: Double-click a cell to edit. Menu also offers Delete row / Highlight / Clear highlight.")
         tip.setStyleSheet("color:#5B6B7A;padding:2px 4px;")
         host_layout.addWidget(tip)
         lay.addWidget(self.detail_table_host, 1)
 
-        bottom = QHBoxLayout()
+        bottom_wrap = QWidget()
+        bottom = QHBoxLayout(bottom_wrap)
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(6)
         self.btn_save_draft = QPushButton("Save Draft")
         self.btn_save_draft.clicked.connect(self._save_draft)
         self.btn_submit_review = QPushButton("Submit for HSE Review")
@@ -36629,56 +36675,89 @@ class RiskAssessmentModule(QWidget):
         for b in (self.btn_save_draft, self.btn_submit_review, self.btn_hse_review,
                   self.btn_return_review, self.btn_management_approve, self.btn_revise,
                   self.btn_save_exit, self.btn_cancel_edit):
-            b.setMinimumHeight(34); bottom.addWidget(b)
-        lay.addLayout(bottom)
+            b.setMinimumHeight(32)
+            b.setMaximumHeight(36)
+            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            bottom.addWidget(b)
+        lay.addWidget(bottom_wrap)
 
-        # Full-screen editor reuses the same table; returned to Tab 2 on close.
+        # Full-screen editor
         self.assessment_dialog = QDialog(self)
         self.assessment_dialog.setWindowTitle("Risk Assessment – Full Screen Editor")
         self.assessment_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.assessment_dialog.resize(1500, 900)
-        self.assessment_dialog.setMinimumSize(900, 600)
+        self.assessment_dialog.resize(1200, 800)
+        self.assessment_dialog.setMinimumSize(800, 500)
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geo = screen.availableGeometry()
+                self.assessment_dialog.setMaximumSize(geo.width(), geo.height())
+        except Exception:
+            pass
         self.fullscreen_layout = QVBoxLayout(self.assessment_dialog)
-        fs_head = QLabel("Full Screen Risk Assessment Editor — edit rows below, then Save or Save & Exit")
-        fs_head.setStyleSheet("font-weight:700;color:#17365D;padding:6px;")
+        self.fullscreen_layout.setContentsMargins(8, 8, 8, 8)
+        fs_head = QLabel("Full Screen Risk Assessment Editor")
+        fs_head.setStyleSheet("font-weight:700;color:#17365D;padding:4px;")
         self.fullscreen_layout.addWidget(fs_head)
+
         self.fullscreen_buttons = QHBoxLayout()
+        self.fullscreen_buttons.setSpacing(6)
         self.btn_fs_edit = QPushButton("Edit")
-        self.btn_fs_edit.setToolTip("Ensure the table is editable")
         self.btn_fs_edit.clicked.connect(self._fullscreen_enable_edit)
+        self.btn_fs_add = QPushButton("+ Add Row")
+        self.btn_fs_add.clicked.connect(self._add_blank_row)
+        self.btn_fs_del = QPushButton("Delete Row")
+        self.btn_fs_del.clicked.connect(self._delete_row)
+        self.btn_fs_zoom_in = QPushButton("Zoom In")
+        self.btn_fs_zoom_in.clicked.connect(lambda: self._fullscreen_zoom(1))
+        self.btn_fs_zoom_out = QPushButton("Zoom Out")
+        self.btn_fs_zoom_out.clicked.connect(lambda: self._fullscreen_zoom(-1))
         self.btn_fs_save = QPushButton("Save")
-        self.btn_fs_save.setStyleSheet("background:#1F4E79;color:white;font-weight:bold;padding:8px 14px;")
+        self.btn_fs_save.setStyleSheet("background:#1F4E79;color:white;font-weight:bold;padding:6px 12px;")
         self.btn_fs_save.clicked.connect(self._fullscreen_save)
         self.btn_fs_save_exit = QPushButton("Save & Exit")
-        self.btn_fs_save_exit.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:8px 14px;")
+        self.btn_fs_save_exit.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:6px 12px;")
         self.btn_fs_save_exit.clicked.connect(self._fullscreen_save_and_exit)
         self.btn_fs_return = QPushButton("Return to Assessment Tab")
         self.btn_fs_return.clicked.connect(self.assessment_dialog.accept)
-        for b in (self.btn_fs_edit, self.btn_fs_save, self.btn_fs_save_exit):
-            b.setMinimumHeight(36)
+        for b in (self.btn_fs_edit, self.btn_fs_add, self.btn_fs_del, self.btn_fs_zoom_out, self.btn_fs_zoom_in,
+                  self.btn_fs_save, self.btn_fs_save_exit, self.btn_fs_return):
+            b.setMinimumHeight(32)
+            b.setMaximumHeight(36)
+            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             self.fullscreen_buttons.addWidget(b)
         self.fullscreen_buttons.addStretch(1)
-        self.btn_fs_return.setMinimumHeight(36)
-        self.fullscreen_buttons.addWidget(self.btn_fs_return)
         self.fullscreen_layout.addLayout(self.fullscreen_buttons)
+        self._fs_zoom_level = 0
 
     def _open_fullscreen_editor(self):
         if self.table.rowCount() == 0:
             QMessageBox.information(self, "No Assessment", "Generate or open an assessment first.")
             return
         self.table.setParent(self.assessment_dialog)
-        # Keep header label (0) and button row (last); insert table in the middle with stretch.
-        self.fullscreen_layout.insertWidget(1, self.table, 1)
-        self._fullscreen_enable_edit()
-        self.assessment_dialog.showMaximized()
+        # Insert table after header + button row
+        self.fullscreen_layout.insertWidget(2, self.table, 1)
+        self._fs_zoom_level = 0
+        self._apply_fullscreen_zoom()
+        self._fullscreen_enable_edit(silent=True)
+        try:
+            screen = QApplication.primaryScreen()
+            if screen:
+                geo = screen.availableGeometry()
+                self.assessment_dialog.setGeometry(geo.adjusted(20, 20, -20, -20))
+        except Exception:
+            self.assessment_dialog.showMaximized()
+        else:
+            self.assessment_dialog.show()
         self.assessment_dialog.exec()
         self.table.setParent(self.detail_table_host)
-        # Restore table into the detail host (above the tip label if present)
         host_lay = self.detail_table_host.layout()
         host_lay.insertWidget(0, self.table, 1)
+        self._fs_zoom_level = 0
+        self._apply_fullscreen_zoom()
         self._apply_table_view()
 
-    def _fullscreen_enable_edit(self):
+    def _fullscreen_enable_edit(self, silent=False):
         self.table.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked
             | QAbstractItemView.EditTrigger.SelectedClicked
@@ -36688,33 +36767,47 @@ class RiskAssessmentModule(QWidget):
         self.table.setFocus()
         if self.table.currentRow() < 0 and self.table.rowCount() > 0:
             self.table.selectRow(0)
-            self.table.setCurrentCell(0, 1)
-        QMessageBox.information(self.assessment_dialog if self.assessment_dialog.isVisible() else self,
-                                "Edit Mode", "Table is editable. Double-click a cell or start typing to change values.")
+            self.table.setCurrentCell(0, min(1, max(0, self.table.columnCount() - 1)))
+        if not silent:
+            parent = self.assessment_dialog if self.assessment_dialog.isVisible() else self
+            QMessageBox.information(parent, "Edit Mode", "Table is editable. Double-click a cell or start typing to change values.")
+
+    def _fullscreen_zoom(self, direction):
+        self._fs_zoom_level = max(-3, min(5, getattr(self, "_fs_zoom_level", 0) + direction))
+        self._apply_fullscreen_zoom()
+
+    def _apply_fullscreen_zoom(self):
+        base = 10
+        size = base + int(getattr(self, "_fs_zoom_level", 0)) * 2
+        font = self.table.font()
+        font.setPointSize(size)
+        self.table.setFont(font)
+        header_font = self.table.horizontalHeader().font()
+        header_font.setPointSize(size)
+        self.table.horizontalHeader().setFont(header_font)
+        for r in range(self.table.rowCount()):
+            self.table.setRowHeight(r, max(36, 28 + size * 4))
 
     def _fullscreen_save(self):
         if self._save_draft():
-            QMessageBox.information(self.assessment_dialog if self.assessment_dialog.isVisible() else self,
-                                    "Saved", "Assessment saved as Draft.")
+            parent = self.assessment_dialog if self.assessment_dialog.isVisible() else self
+            QMessageBox.information(parent, "Saved", "Assessment saved as Draft.")
 
     def _fullscreen_save_and_exit(self):
         if self._save_draft():
             self.assessment_dialog.accept()
 
     def _on_generated_table_double_clicked(self, index):
-        """Double-click: edit cell, or open quick actions (delete / highlight)."""
+        """Double-click: edit cell, with optional row actions."""
         if not index.isValid():
             return
         row = index.row()
-        col = index.column()
-        # Always allow direct edit on double-click
         self.table.edit(index)
         menu = QMenu(self)
         act_edit = menu.addAction("Edit cell")
         act_delete = menu.addAction("Delete this row")
         act_highlight = menu.addAction("Highlight row")
         act_clear = menu.addAction("Clear highlight")
-        # Show menu slightly delayed so edit starts; user can also use right-click style actions
         chosen = menu.exec(self.table.viewport().mapToGlobal(self.table.visualRect(index).center()))
         if chosen == act_edit:
             self.table.edit(index)
@@ -36770,40 +36863,19 @@ class RiskAssessmentModule(QWidget):
         w = QWidget()
         self.tabs.addTab(w, "3. Risk Matrix (5×5)")
         outer = QVBoxLayout(w)
-        intro = QLabel(
-            "Risk Score = Likelihood × Severity.  Low 1–4 · Medium 5–9 · High 10–15 · Extreme 16–25. "
-            "Changing L or S on the Generated Assessment tab updates scores using this matrix."
-        )
-        intro.setWordWrap(True)
-        intro.setStyleSheet("padding:8px;background:#FFF8E7;border:1px solid #E6D18A;border-radius:4px;")
-        outer.addWidget(intro)
+        outer.setContentsMargins(12, 12, 12, 12)
 
-        scales = QHBoxLayout()
-        lik = QLabel(
-            "<b>Likelihood</b><br>1 Rare<br>2 Unlikely<br>3 Possible<br>4 Likely<br>5 Almost Certain"
-        )
-        sev = QLabel(
-            "<b>Severity</b><br>1 Insignificant<br>2 Minor<br>3 Moderate<br>4 Major<br>5 Catastrophic"
-        )
-        for lab in (lik, sev):
-            lab.setWordWrap(True)
-            lab.setStyleSheet("padding:8px;background:white;border:1px solid #CCD3DA;border-radius:4px;")
-            scales.addWidget(lab)
-        outer.addLayout(scales)
-
-        # Centered matrix — fully visible, clear cells
+        # Centered matrix only — scores and band names are inside each cell (no external legends).
         center = QHBoxLayout()
         center.addStretch(1)
         self.matrix = QTableWidget(6, 6)
-        self.matrix.setMinimumSize(720, 420)
-        self.matrix.setMaximumSize(900, 520)
+        self.matrix.setFixedSize(540, 360)
         self.matrix.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.matrix.horizontalHeader().setVisible(False)
         self.matrix.verticalHeader().setVisible(False)
         self.matrix.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.matrix.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.matrix.setStyleSheet("QTableWidget{gridline-color:#99A;font-size:13px;background:#FFFFFF;}")
-        # Header corner
+        self.matrix.setStyleSheet("QTableWidget{gridline-color:#99A;font-size:12px;background:#FFFFFF;}")
         corner = QTableWidgetItem("L \\ S")
         corner.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         corner.setBackground(QBrush(QColor("#17365D")))
@@ -36832,21 +36904,13 @@ class RiskAssessmentModule(QWidget):
                 f = cell.font(); f.setBold(True); cell.setFont(f)
                 self.matrix.setItem(r, c, cell)
         for i in range(6):
-            self.matrix.setColumnWidth(i, 118)
-            self.matrix.setRowHeight(i, 64)
+            self.matrix.setColumnWidth(i, 88)
+            self.matrix.setRowHeight(i, 58)
         center.addWidget(self.matrix, 0, Qt.AlignmentFlag.AlignCenter)
         center.addStretch(1)
         outer.addStretch(1)
         outer.addLayout(center)
         outer.addStretch(1)
-
-        legend = QLabel(
-            "Action guidance: Low – monitor routine controls · Medium – ensure controls supervised · "
-            "High – management approval before work · Extreme – do not proceed until risk is reduced."
-        )
-        legend.setWordWrap(True)
-        legend.setStyleSheet("padding:8px;font-weight:600;color:#17365D;")
-        outer.addWidget(legend, 0, Qt.AlignmentFlag.AlignBottom)
 
     def _build_register_tab(self):
         w = QWidget()
@@ -36901,51 +36965,78 @@ class RiskAssessmentModule(QWidget):
         self.tabs.setCurrentIndex(1); self._apply_table_view(); self._update_detail_header()
 
     def _refresh_library_multi(self, *_):
-        if not hasattr(self, "library_multi"):
-            return
-        model = getattr(self, "_library_multi_model", None)
-        if model is None:
-            model = QStandardItemModel(self.library_multi)
-            self._library_multi_model = model
-            self.library_multi.setModel(model)
-        model.clear()
-        for activity_name in RA_LIBRARY.get(self.cmb_sector.currentText(), {}).keys():
-            item = QStandardItem(activity_name)
-            item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            item.setData(Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-            model.appendRow(item)
-        try:
-            model.itemChanged.disconnect(self._update_library_multi_text)
-        except Exception:
-            pass
-        model.itemChanged.connect(self._update_library_multi_text)
-        self._update_library_multi_text()
+        # Keep checked set filtered to current sector activities
+        acts = set(RA_LIBRARY.get(self.cmb_sector.currentText(), {}).keys())
+        current = getattr(self, "_library_multi_checked", set()) or set()
+        self._library_multi_checked = {a for a in current if a in acts}
+        self._update_library_multi_label()
 
-    def _update_library_multi_text(self, *_):
-        if not hasattr(self, "library_multi"):
-            return
-        selected = self._selected_library_activities()
-        le = self.library_multi.lineEdit()
-        if le is None:
+    def _update_library_multi_label(self):
+        selected = sorted(getattr(self, "_library_multi_checked", set()) or set())
+        if not hasattr(self, "lbl_library_multi"):
             return
         if not selected:
-            le.setText("")
-            le.setPlaceholderText("Click to select one or more activities…")
+            self.lbl_library_multi.setText("None selected — single Activity field will be used")
         elif len(selected) == 1:
-            le.setText(selected[0])
+            self.lbl_library_multi.setText(selected[0])
         else:
-            le.setText(f"{len(selected)} activities selected")
+            self.lbl_library_multi.setText(f"{len(selected)} selected: " + ", ".join(selected[:4]) + ("…" if len(selected) > 4 else ""))
 
     def _selected_library_activities(self):
-        model = getattr(self, "_library_multi_model", None)
-        if model is None:
-            return []
-        out = []
-        for i in range(model.rowCount()):
-            item = model.item(i)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                out.append(item.text())
-        return out
+        return sorted(getattr(self, "_library_multi_checked", set()) or set())
+
+    def _open_library_multi_dialog(self):
+        sector = self.cmb_sector.currentText()
+        activities = list(RA_LIBRARY.get(sector, {}).keys())
+        if not activities:
+            QMessageBox.information(self, "Library", "No library activities for this sector.")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Select activities — {sector}")
+        dlg.resize(480, 520)
+        fit_dialog_to_desktop(dlg, 0.5, 0.75)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel("Tick one or more activities to combine into one assessment:"))
+        search = QLineEdit()
+        search.setPlaceholderText("Filter activities…")
+        v.addWidget(search)
+        lst = QListWidget()
+        lst.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        checked = getattr(self, "_library_multi_checked", set()) or set()
+        for name in activities:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+            item.setCheckState(Qt.CheckState.Checked if name in checked else Qt.CheckState.Unchecked)
+            lst.addItem(item)
+        v.addWidget(lst, 1)
+
+        def apply_filter(text):
+            t = (text or "").strip().casefold()
+            for i in range(lst.count()):
+                it = lst.item(i)
+                it.setHidden(bool(t) and t not in it.text().casefold())
+        search.textChanged.connect(apply_filter)
+
+        row = QHBoxLayout()
+        b_all = QPushButton("Select All")
+        b_none = QPushButton("Clear All")
+        b_ok = QPushButton("OK")
+        b_cancel = QPushButton("Cancel")
+        b_all.clicked.connect(lambda: [lst.item(i).setCheckState(Qt.CheckState.Checked) for i in range(lst.count()) if not lst.item(i).isHidden()])
+        b_none.clicked.connect(lambda: [lst.item(i).setCheckState(Qt.CheckState.Unchecked) for i in range(lst.count())])
+        row.addWidget(b_all); row.addWidget(b_none); row.addStretch(1); row.addWidget(b_ok); row.addWidget(b_cancel)
+        v.addLayout(row)
+        b_ok.clicked.connect(dlg.accept)
+        b_cancel.clicked.connect(dlg.reject)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = set()
+        for i in range(lst.count()):
+            it = lst.item(i)
+            if it.checkState() == Qt.CheckState.Checked:
+                selected.add(it.text())
+        self._library_multi_checked = selected
+        self._update_library_multi_label()
 
     def _show_assessment_dialog(self):
         if self.table.rowCount() == 0:
