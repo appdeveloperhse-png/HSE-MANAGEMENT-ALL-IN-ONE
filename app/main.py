@@ -36599,63 +36599,19 @@ class RiskAssessmentModule(QWidget):
         lay = QVBoxLayout(w)
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
+
         self.lbl_detail_header = QLabel("No assessment loaded yet. Select library activities and generate an assessment.")
         self.lbl_detail_header.setWordWrap(True)
         self.lbl_detail_header.setStyleSheet("font-weight:700;color:#17365D;padding:8px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
         lay.addWidget(self.lbl_detail_header)
+
         self.workflow_label = QLabel("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
         self.workflow_label.setStyleSheet("font-weight:600;color:#34495e;padding:4px;")
         lay.addWidget(self.workflow_label)
 
-        actions_wrap = QWidget()
-        actions = QHBoxLayout(actions_wrap)
-        actions.setContentsMargins(0, 0, 0, 0)
-        actions.setSpacing(6)
-        self.view_mode = QComboBox()
-        self.view_mode.addItems(["Main Assessment View", "Residual Risk View", "All Columns"])
-        self.view_mode.currentIndexChanged.connect(self._apply_table_view)
-        actions.addWidget(QLabel("Table view:")); actions.addWidget(self.view_mode)
-        for text_btn, slot in [("+ Add Row", self._add_blank_row), ("Delete Row", self._delete_row),
-                           ("Recalculate", self._read_table_rows), ("Export Word", self._export_word),
-                           ("Create Observation from Risk", self._create_observation_from_risk),
-                           ("Full Screen Editor", self._open_fullscreen_editor)]:
-            b = QPushButton(text_btn)
-            b.setMinimumHeight(32)
-            b.setMaximumHeight(36)
-            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            b.clicked.connect(slot)
-            actions.addWidget(b)
-        actions.addStretch(1)
-        lay.addWidget(actions_wrap)
-
-        self.detail_table_host = QWidget()
-        host_layout = QVBoxLayout(self.detail_table_host)
-        host_layout.setContentsMargins(0, 0, 0, 0)
-        self.table.setParent(self.detail_table_host)
-        self.table.setMinimumHeight(480)
-        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.SelectedClicked
-            | QAbstractItemView.EditTrigger.EditKeyPressed
-        )
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        try:
-            self.table.doubleClicked.disconnect()
-        except Exception:
-            pass
-        self.table.doubleClicked.connect(self._on_generated_table_double_clicked)
-        host_layout.addWidget(self.table)
-        tip = QLabel("Tip: Double-click a cell to edit. Menu also offers Delete row / Highlight / Clear highlight.")
-        tip.setStyleSheet("color:#5B6B7A;padding:2px 4px;")
-        host_layout.addWidget(tip)
-        lay.addWidget(self.detail_table_host, 1)
-
-        bottom_wrap = QWidget()
-        bottom = QHBoxLayout(bottom_wrap)
-        bottom.setContentsMargins(0, 0, 0, 0)
-        bottom.setSpacing(6)
+        # Workflow / action buttons (always visible and clickable)
+        flow = QHBoxLayout()
+        flow.setSpacing(6)
         self.btn_save_draft = QPushButton("Save Draft")
         self.btn_save_draft.clicked.connect(self._save_draft)
         self.btn_submit_review = QPushButton("Submit for HSE Review")
@@ -36668,42 +36624,62 @@ class RiskAssessmentModule(QWidget):
         self.btn_management_approve.clicked.connect(self._management_approve)
         self.btn_revise = QPushButton("Revise Approved Version")
         self.btn_revise.clicked.connect(self._revise_version)
-        self.btn_save_exit = QPushButton("Save & Exit")
-        self.btn_save_exit.clicked.connect(self._save_and_exit_dialog)
+        self.btn_export_word = QPushButton("Export Word")
+        self.btn_export_word.clicked.connect(self._export_word)
+        self.btn_fullscreen = QPushButton("Full Screen Editor")
+        self.btn_fullscreen.setStyleSheet("background:#1F4E79;color:white;font-weight:bold;padding:6px 14px;")
+        self.btn_fullscreen.clicked.connect(self._open_fullscreen_editor)
         self.btn_cancel_edit = QPushButton("Back to Setup")
         self.btn_cancel_edit.clicked.connect(self._cancel_assessment_dialog)
         for b in (self.btn_save_draft, self.btn_submit_review, self.btn_hse_review,
                   self.btn_return_review, self.btn_management_approve, self.btn_revise,
-                  self.btn_save_exit, self.btn_cancel_edit):
-            b.setMinimumHeight(32)
-            b.setMaximumHeight(36)
+                  self.btn_export_word, self.btn_fullscreen, self.btn_cancel_edit):
+            b.setMinimumHeight(34)
+            b.setMaximumHeight(38)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-            bottom.addWidget(b)
-        lay.addWidget(bottom_wrap)
+            flow.addWidget(b)
+        flow.addStretch(1)
+        lay.addLayout(flow)
 
-        # Full-screen editor
+        note = QLabel("This tab shows the generated assessment (view). Use Full Screen Editor to add/edit/delete rows. Workflow buttons: Save Draft → Submit → HSE Review → Management Approve.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#5B6B7A;padding:2px 4px;")
+        lay.addWidget(note)
+
+        # Read-only preview table — maximum space
+        self.detail_table_host = QWidget()
+        host_layout = QVBoxLayout(self.detail_table_host)
+        host_layout.setContentsMargins(0, 0, 0, 0)
+        self.table.setParent(self.detail_table_host)
+        self.table.setMinimumHeight(420)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+        host_layout.addWidget(self.table)
+        lay.addWidget(self.detail_table_host, 1)
+
+        # Compatibility aliases used by older helpers
+        self.btn_save_exit = self.btn_cancel_edit
+        self.view_mode = None
+
+        # Full-screen editor dialog
         self.assessment_dialog = QDialog(self)
         self.assessment_dialog.setWindowTitle("Risk Assessment – Full Screen Editor")
         self.assessment_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.assessment_dialog.resize(1200, 800)
-        self.assessment_dialog.setMinimumSize(800, 500)
-        try:
-            screen = QApplication.primaryScreen()
-            if screen:
-                geo = screen.availableGeometry()
-                self.assessment_dialog.setMaximumSize(geo.width(), geo.height())
-        except Exception:
-            pass
+        self.assessment_dialog.setSizeGripEnabled(True)
         self.fullscreen_layout = QVBoxLayout(self.assessment_dialog)
         self.fullscreen_layout.setContentsMargins(8, 8, 8, 8)
-        fs_head = QLabel("Full Screen Risk Assessment Editor")
+        fs_head = QLabel("Full Screen Editor — edit rows here. Ctrl + Mouse Wheel to zoom.")
         fs_head.setStyleSheet("font-weight:700;color:#17365D;padding:4px;")
         self.fullscreen_layout.addWidget(fs_head)
 
         self.fullscreen_buttons = QHBoxLayout()
         self.fullscreen_buttons.setSpacing(6)
         self.btn_fs_edit = QPushButton("Edit")
-        self.btn_fs_edit.clicked.connect(self._fullscreen_enable_edit)
+        self.btn_fs_edit.clicked.connect(lambda: self._fullscreen_enable_edit(False))
         self.btn_fs_add = QPushButton("+ Add Row")
         self.btn_fs_add.clicked.connect(self._add_blank_row)
         self.btn_fs_del = QPushButton("Delete Row")
@@ -36718,44 +36694,78 @@ class RiskAssessmentModule(QWidget):
         self.btn_fs_save_exit = QPushButton("Save & Exit")
         self.btn_fs_save_exit.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:6px 12px;")
         self.btn_fs_save_exit.clicked.connect(self._fullscreen_save_and_exit)
-        self.btn_fs_return = QPushButton("Return to Assessment Tab")
+        self.btn_fs_return = QPushButton("Return")
         self.btn_fs_return.clicked.connect(self.assessment_dialog.accept)
         for b in (self.btn_fs_edit, self.btn_fs_add, self.btn_fs_del, self.btn_fs_zoom_out, self.btn_fs_zoom_in,
                   self.btn_fs_save, self.btn_fs_save_exit, self.btn_fs_return):
             b.setMinimumHeight(32)
             b.setMaximumHeight(36)
-            b.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             self.fullscreen_buttons.addWidget(b)
         self.fullscreen_buttons.addStretch(1)
         self.fullscreen_layout.addLayout(self.fullscreen_buttons)
         self._fs_zoom_level = 0
+        self._fs_table_filter_installed = False
+
+    def _fit_dialog_to_screen(self, dialog, width_ratio=0.92, height_ratio=0.88):
+        try:
+            screen = QApplication.primaryScreen()
+            if not screen:
+                dialog.resize(1100, 700)
+                return
+            area = screen.availableGeometry()
+            w = max(800, min(int(area.width() * width_ratio), area.width() - 40))
+            h = max(500, min(int(area.height() * height_ratio), area.height() - 40))
+            dialog.setMaximumSize(area.width() - 20, area.height() - 20)
+            dialog.resize(w, h)
+            dialog.move(area.left() + (area.width() - w) // 2, area.top() + (area.height() - h) // 2)
+        except Exception:
+            dialog.resize(1100, 700)
 
     def _open_fullscreen_editor(self):
         if self.table.rowCount() == 0:
             QMessageBox.information(self, "No Assessment", "Generate or open an assessment first.")
             return
         self.table.setParent(self.assessment_dialog)
-        # Insert table after header + button row
         self.fullscreen_layout.insertWidget(2, self.table, 1)
+        self.table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.SelectedClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+            | QAbstractItemView.EditTrigger.AnyKeyPressed
+        )
         self._fs_zoom_level = 0
         self._apply_fullscreen_zoom()
-        self._fullscreen_enable_edit(silent=True)
-        try:
-            screen = QApplication.primaryScreen()
-            if screen:
-                geo = screen.availableGeometry()
-                self.assessment_dialog.setGeometry(geo.adjusted(20, 20, -20, -20))
-        except Exception:
-            self.assessment_dialog.showMaximized()
-        else:
-            self.assessment_dialog.show()
+        if not self._fs_table_filter_installed:
+            self.table.viewport().installEventFilter(self)
+            self._fs_table_filter_installed = True
+        self._fit_dialog_to_screen(self.assessment_dialog, 0.94, 0.90)
         self.assessment_dialog.exec()
+        # Return table to preview host (read-only)
         self.table.setParent(self.detail_table_host)
-        host_lay = self.detail_table_host.layout()
-        host_lay.insertWidget(0, self.table, 1)
+        self.detail_table_host.layout().addWidget(self.table)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._fs_zoom_level = 0
         self._apply_fullscreen_zoom()
-        self._apply_table_view()
+        self._colorize_risk_columns()
+        self._update_workflow_ui()
+
+    def eventFilter(self, obj, event):
+        # Ctrl + mouse wheel zoom while table is in full-screen editor
+        try:
+            if (self.assessment_dialog.isVisible()
+                    and obj is self.table.viewport()
+                    and event.type() == event.Type.Wheel
+                    and (event.modifiers() & Qt.KeyboardModifier.ControlModifier)):
+                delta = event.angleDelta().y()
+                if delta > 0:
+                    self._fullscreen_zoom(1)
+                elif delta < 0:
+                    self._fullscreen_zoom(-1)
+                return True
+        except Exception:
+            pass
+        return super().eventFilter(obj, event)
 
     def _fullscreen_enable_edit(self, silent=False):
         self.table.setEditTriggers(
@@ -36770,10 +36780,10 @@ class RiskAssessmentModule(QWidget):
             self.table.setCurrentCell(0, min(1, max(0, self.table.columnCount() - 1)))
         if not silent:
             parent = self.assessment_dialog if self.assessment_dialog.isVisible() else self
-            QMessageBox.information(parent, "Edit Mode", "Table is editable. Double-click a cell or start typing to change values.")
+            QMessageBox.information(parent, "Edit Mode", "Table is editable. Double-click a cell or start typing.")
 
     def _fullscreen_zoom(self, direction):
-        self._fs_zoom_level = max(-3, min(5, getattr(self, "_fs_zoom_level", 0) + direction))
+        self._fs_zoom_level = max(-3, min(6, int(getattr(self, "_fs_zoom_level", 0)) + int(direction)))
         self._apply_fullscreen_zoom()
 
     def _apply_fullscreen_zoom(self):
@@ -36782,11 +36792,12 @@ class RiskAssessmentModule(QWidget):
         font = self.table.font()
         font.setPointSize(size)
         self.table.setFont(font)
-        header_font = self.table.horizontalHeader().font()
-        header_font.setPointSize(size)
-        self.table.horizontalHeader().setFont(header_font)
+        hf = self.table.horizontalHeader().font()
+        hf.setPointSize(size)
+        self.table.horizontalHeader().setFont(hf)
+        row_h = max(32, 26 + int(getattr(self, "_fs_zoom_level", 0)) * 6)
         for r in range(self.table.rowCount()):
-            self.table.setRowHeight(r, max(36, 28 + size * 4))
+            self.table.setRowHeight(r, row_h)
 
     def _fullscreen_save(self):
         if self._save_draft():
@@ -36797,50 +36808,12 @@ class RiskAssessmentModule(QWidget):
         if self._save_draft():
             self.assessment_dialog.accept()
 
-    def _on_generated_table_double_clicked(self, index):
-        """Double-click: edit cell, with optional row actions."""
-        if not index.isValid():
-            return
-        row = index.row()
-        self.table.edit(index)
-        menu = QMenu(self)
-        act_edit = menu.addAction("Edit cell")
-        act_delete = menu.addAction("Delete this row")
-        act_highlight = menu.addAction("Highlight row")
-        act_clear = menu.addAction("Clear highlight")
-        chosen = menu.exec(self.table.viewport().mapToGlobal(self.table.visualRect(index).center()))
-        if chosen == act_edit:
-            self.table.edit(index)
-        elif chosen == act_delete:
-            self.table.selectRow(row)
-            self._delete_row()
-        elif chosen == act_highlight:
-            for c in range(self.table.columnCount()):
-                item = self.table.item(row, c)
-                if item is None:
-                    item = QTableWidgetItem("")
-                    self.table.setItem(row, c, item)
-                item.setBackground(QBrush(QColor("#FFF3B0")))
-                item.setData(Qt.ItemDataRole.UserRole + 5, "highlighted")
-        elif chosen == act_clear:
-            for c in range(self.table.columnCount()):
-                item = self.table.item(row, c)
-                if item is not None:
-                    item.setData(Qt.ItemDataRole.UserRole + 5, None)
-            self._colorize_risk_columns()
-
     def _apply_table_view(self, *_):
-        if not hasattr(self, "view_mode") or self.table.columnCount() == 0:
+        # Residual view removed — show all columns for the current assessment type.
+        if self.table.columnCount() == 0:
             return
-        mode=self.view_mode.currentIndex()
-        ra_type=self.cmb_type.currentText()
-        if "JSA" in ra_type or "JHA" in ra_type or "Dynamic" in ra_type:
-            for c in range(self.table.columnCount()): self.table.setColumnHidden(c, False)
-            return
-        main_cols={0,1,2,3,4,5,6,7,8,9}
-        residual_cols={0,1,3,10,11,12,13}
         for c in range(self.table.columnCount()):
-            self.table.setColumnHidden(c, mode==0 and c not in main_cols or mode==1 and c not in residual_cols)
+            self.table.setColumnHidden(c, False)
 
     def _apply_matrix_selection(self, row, col):
         if row < 1 or col < 1:
@@ -37099,9 +37072,8 @@ class RiskAssessmentModule(QWidget):
             fmt = "Format: Dynamic RA — point-of-work assessment. Extreme risk → consider Stop Work."
         else:
             cols = ["No.", "Activity / Task", "Hazards", "Who Might Be Harmed", "Existing Controls",
-                    "L", "S", "Risk", "Band", "Additional Controls", "Residual L", "Residual S",
-                    "Residual Risk", "Residual Band"]
-            fmt = "Format: Formal Risk Assessment — multiple task rows with existing & additional controls and residual risk."
+                    "L", "S", "Risk", "Band", "Additional Controls"]
+            fmt = "Format: Formal Risk Assessment — task rows with existing & additional controls (no residual columns)."
         if hasattr(self, "lbl_format"):
             self.lbl_format.setText(fmt)
         if not hasattr(self, "table"):
@@ -37408,17 +37380,16 @@ class RiskAssessmentModule(QWidget):
             self._show_assessment_dialog()
 
     def _on_table_item_changed(self, item):
-        """Auto-recalculate risk when L or S (or residual L/S) changes."""
+        """Auto-recalculate risk when L or S changes."""
         if self._risk_update_blocked or item is None:
             return
         ra_type = self.cmb_type.currentText()
         is_jsa = "JSA" in ra_type or "JHA" in ra_type
         r, c = item.row(), item.column()
-        # Columns that trigger recalc
         if is_jsa or "Dynamic" in ra_type:
             trigger = c in (4, 5)  # L, S
         else:
-            trigger = c in (5, 6, 10, 11)  # L, S, residual L, residual S
+            trigger = c in (5, 6)  # L, S (residual columns removed)
         if not trigger:
             if "Dynamic" in ra_type and c == 8:
                 self._colorize_risk_columns()
@@ -37451,16 +37422,15 @@ class RiskAssessmentModule(QWidget):
                         it.setBackground(QBrush(QColor(ra_score_color(score) if col == 6 else ra_band_color(band))))
             else:
                 L, S = num(5, 3), num(6, 3)
-                rL, rS = num(10, 2), num(11, 3)
-                score, rscore = L * S, rL * rS
-                band, rband = ra_band(score), ra_band(rscore)
-                mapping = {7: str(score), 8: band, 12: str(rscore), 13: rband}
+                score = L * S
+                band = ra_band(score)
+                mapping = {7: str(score), 8: band}
                 for col, val in mapping.items():
                     if self.table.item(r, col):
                         self.table.item(r, col).setText(val)
                     else:
                         self.table.setItem(r, col, QTableWidgetItem(val))
-                for col, sc, bd in ((7, score, None), (8, None, band), (12, rscore, None), (13, None, rband)):
+                for col, sc, bd in ((7, score, None), (8, None, band)):
                     it = self.table.item(r, col)
                     if it:
                         it.setBackground(QBrush(QColor(ra_score_color(sc) if sc is not None else ra_band_color(bd))))
@@ -37481,8 +37451,7 @@ class RiskAssessmentModule(QWidget):
             row.get("no", r + 1), row.get("activity", ""), row.get("hazards", ""),
             row.get("who", ""), row.get("existing", ""),
             row.get("L", 3), row.get("S", 3), row.get("risk", 9), row.get("band", ""),
-            row.get("additional", ""), row.get("rL", 2), row.get("rS", 3),
-            row.get("rrisk", 6), row.get("rband", ""),
+            row.get("additional", ""),
         ]
         for c, v in enumerate(vals):
             self._set_item(r, c, v)
@@ -37529,7 +37498,7 @@ class RiskAssessmentModule(QWidget):
             else:
                 row = {"no": r + 1, "activity": self.cmb_activity.currentText(), "hazards": "", "who": "",
                        "existing": "", "L": 3, "S": 3, "risk": 9, "band": "Medium",
-                       "additional": "", "rL": 2, "rS": 3, "rrisk": 6, "rband": "Medium"}
+                       "additional": ""}
                 self.current_rows.append(row); self._append_ra_row(row)
         finally:
             self._risk_update_blocked = False
@@ -37579,13 +37548,11 @@ class RiskAssessmentModule(QWidget):
                     self._set_item(r, 6, score); self._set_item(r, 7, ra_band(score))
                 else:
                     L, S = num(5, 3), num(6, 3)
-                    rL, rS = num(10, 2), num(11, 3)
-                    score, rscore = L * S, rL * rS
+                    score = L * S
                     row = {"no": cell(0) or str(r + 1), "activity": cell(1), "hazards": cell(2),
                            "who": cell(3), "existing": cell(4), "L": L, "S": S, "risk": score, "band": ra_band(score),
-                           "additional": cell(9), "rL": rL, "rS": rS, "rrisk": rscore, "rband": ra_band(rscore)}
+                           "additional": cell(9)}
                     self._set_item(r, 7, score); self._set_item(r, 8, ra_band(score))
-                    self._set_item(r, 12, rscore); self._set_item(r, 13, ra_band(rscore))
                 rows.append(row)
         finally:
             self._risk_update_blocked = False
@@ -37608,7 +37575,7 @@ class RiskAssessmentModule(QWidget):
                         cell.setForeground(QBrush(QColor("#7A0000")))
                     elif cell and c in (6,7):
                         cell.setForeground(QBrush(QColor("#000000")))
-            risk_cols = [6, 7] if (is_jsa or "Dynamic" in ra_type) else [7, 8, 12, 13]
+            risk_cols = [6, 7] if (is_jsa or "Dynamic" in ra_type) else [7, 8]
             for c in risk_cols:
                 it = self.table.item(r, c)
                 if not it:
@@ -37788,25 +37755,33 @@ class RiskAssessmentModule(QWidget):
         QMessageBox.information(self,"Revision Created",f"New revision {number} created as Draft. Previous version retained as Superseded.")
 
     def _update_workflow_ui(self):
-        if not hasattr(self,"workflow_label"): return
+        if not hasattr(self, "workflow_label"):
+            return
         if not self._editing_id:
-            status="Draft"
+            status = "Draft"
+            self.workflow_label.setText("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
         else:
-            row=self.db.fetchone("SELECT status,hse_reviewer,management_approver,revision,number FROM risk_assessments WHERE id=?",(self._editing_id,))
-            if not row: status="Draft"
+            row = self.db.fetchone(
+                "SELECT status,hse_reviewer,management_approver,revision,number FROM risk_assessments WHERE id=?",
+                (self._editing_id,),
+            )
+            if not row:
+                status = "Draft"
             else:
-                status=row["status"]
-                self.workflow_label.setText(f"{row['number']}  |  Revision {row['revision'] or 0}  |  Status: {status}  |  HSE Reviewer: {row['hse_reviewer'] or '—'}  |  Management: {row['management_approver'] or '—'}")
-        if not self._editing_id: self.workflow_label.setText("Status: Draft  →  HSE Reviewer  →  Management Approver  →  Active")
-        active=status=="Active"
-        self.btn_hse_review.setEnabled(status=="Under Review")
-        self.btn_management_approve.setEnabled(status=="Pending Management Approval")
-        self.btn_return_review.setEnabled(status in ("Under Review","Pending Management Approval"))
-        self.btn_revise.setEnabled(active)
-        self.btn_submit_review.setEnabled(status in ("Draft","Returned"))
-        self.btn_save_draft.setEnabled(status in ("Draft","Returned"))
-        editable=status in ("Draft","Returned") or not self._editing_id
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers if editable else QAbstractItemView.EditTrigger.NoEditTriggers)
+                status = row["status"] or "Draft"
+                self.workflow_label.setText(
+                    f"{row['number']}  |  Revision {row['revision'] or 0}  |  Status: {status}  |  "
+                    f"HSE Reviewer: {row['hse_reviewer'] or '—'}  |  Management: {row['management_approver'] or '—'}"
+                )
+        # Keep all workflow buttons enabled so clicks always respond; handlers validate state.
+        for bname in ("btn_save_draft", "btn_submit_review", "btn_hse_review", "btn_return_review",
+                      "btn_management_approve", "btn_revise", "btn_export_word", "btn_fullscreen", "btn_cancel_edit"):
+            btn = getattr(self, bname, None)
+            if btn is not None:
+                btn.setEnabled(True)
+        # Preview table stays non-editable; editing is done in Full Screen Editor.
+        if not (hasattr(self, "assessment_dialog") and self.assessment_dialog.isVisible()):
+            self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setEnabled(True)
 
     def _create_observation_from_risk(self):
@@ -38052,9 +38027,9 @@ class RiskAssessmentModule(QWidget):
                 keys = ["no", "hazard", "who", "control", "L", "S", "risk", "band", "action", "by_whom"]
             else:
                 headers = ["No.", "Activity", "Hazards", "Who Might Be Harmed", "Existing Controls",
-                           "L", "S", "Risk", "Band", "Additional Controls", "Res L", "Res S", "Res Risk", "Res Band"]
+                           "L", "S", "Risk", "Band", "Additional Controls"]
                 keys = ["no", "activity", "hazards", "who", "existing", "L", "S", "risk", "band",
-                        "additional", "rL", "rS", "rrisk", "rband"]
+                        "additional"]
             t = doc.add_table(rows=1, cols=len(headers))
             for i, h in enumerate(headers):
                 t.rows[0].cells[i].text = h
