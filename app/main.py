@@ -36482,6 +36482,11 @@ class RiskAssessmentModule(QWidget):
         form.addWidget(QLabel("Assessment Type *"), r, 0); form.addWidget(self.cmb_type, r, 1)
         form.addWidget(QLabel("Sector / Industry *"), r, 2); form.addWidget(self.cmb_sector, r, 3); r += 1
         form.addWidget(QLabel("Activity *"), r, 0); form.addWidget(self.cmb_activity, r, 1, 1, 3); r += 1
+        form.addWidget(QLabel("Select multiple library activities (optional)"), r, 0, 1, 4); r += 1
+        self.library_multi = QListWidget()
+        self.library_multi.setMaximumHeight(118)
+        self.library_multi.setToolTip("Tick one or more activities to combine them into one assessment. Leave all unticked to use the Activity field above.")
+        form.addWidget(self.library_multi, r, 0, 1, 4); r += 1
         self.lbl_other_activity = QLabel("Custom activity name *")
         self.txt_other_activity = QLineEdit()
         self.txt_other_activity.setPlaceholderText("Type the new activity name here when Other is selected…")
@@ -36525,7 +36530,9 @@ class RiskAssessmentModule(QWidget):
 
         self.cmb_type.currentTextChanged.connect(self._on_type_changed)
         self.cmb_sector.currentTextChanged.connect(self._refresh_activities)
+        self.cmb_sector.currentTextChanged.connect(self._refresh_library_multi)
         self.cmb_activity.currentTextChanged.connect(self._toggle_other_activity)
+        self._refresh_library_multi()
         self._refresh_activities()
         self._on_type_changed(self.cmb_type.currentText())
         self._toggle_other_activity()
@@ -36534,41 +36541,65 @@ class RiskAssessmentModule(QWidget):
         w = QWidget()
         self.tabs.addTab(w, "2. Generated Assessment")
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(6, 6, 6, 6)
-
-        self.lbl_detail_header = QLabel("No assessment loaded yet. Use tab 1 → Load Library.")
+        lay.setContentsMargins(18, 18, 18, 18)
+        self.lbl_detail_header = QLabel("No assessment loaded yet. Select library activities and generate an assessment.")
         self.lbl_detail_header.setWordWrap(True)
-        self.lbl_detail_header.setStyleSheet(
-            "font-weight:700;color:#17365D;padding:10px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:4px;"
-        )
+        self.lbl_detail_header.setStyleSheet("font-weight:700;color:#17365D;padding:14px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
         lay.addWidget(self.lbl_detail_header)
-        lay.addWidget(self.lbl_format)
+        info = QLabel("Generated assessments open in a dedicated editor window. Add or remove task rows, review the live risk ratings and colours, then Save & Exit.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color:#445;padding:12px;background:#F7F9FC;border:1px solid #D9E1EA;border-radius:6px;")
+        lay.addWidget(info)
+        b_open = QPushButton("Open Generated Assessment")
+        b_open.setMinimumHeight(42)
+        b_open.setStyleSheet("background:#17365D;color:white;font-weight:bold;padding:10px 18px;border-radius:5px;")
+        b_open.clicked.connect(self._show_assessment_dialog)
+        lay.addWidget(b_open, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addStretch(1)
 
-        btn_row = QHBoxLayout()
-        b_add = QPushButton("Add Blank Row"); b_add.clicked.connect(self._add_blank_row)
+        # Persistent editor dialog owns the same table used by the calculation/save logic.
+        self.assessment_dialog = QDialog(self)
+        self.assessment_dialog.setWindowTitle("Generated Risk Assessment")
+        self.assessment_dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.assessment_dialog.resize(1280, 780)
+        self.assessment_dialog.setMinimumSize(900, 600)
+        dlg_lay = QVBoxLayout(self.assessment_dialog)
+        dlg_lay.setContentsMargins(16, 14, 16, 14)
+        dlg_lay.setSpacing(10)
+        self.dialog_header = QLabel("Generated Risk Assessment")
+        self.dialog_header.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:10px;background:#E8F1FB;border:1px solid #B7C9D6;border-radius:6px;")
+        self.dialog_header.setWordWrap(True)
+        dlg_lay.addWidget(self.dialog_header)
+        dlg_lay.addWidget(self.lbl_format)
+        actions = QHBoxLayout()
+        b_add = QPushButton("+ Add Additional Row"); b_add.clicked.connect(self._add_blank_row)
         b_del = QPushButton("Delete Selected Row"); b_del.clicked.connect(self._delete_row)
-        b_recalc = QPushButton("Recalculate Risk Scores"); b_recalc.clicked.connect(lambda: self._read_table_rows())
-        b_save = QPushButton("Save Assessment")
-        b_save.setStyleSheet("background:#17365D;color:white;font-weight:bold;padding:10px 14px;")
-        b_save.clicked.connect(self._save)
-        b_export = QPushButton("Export to Word (Landscape)")
-        b_export.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:10px 14px;")
-        b_export.clicked.connect(self._export_word)
-        for b in (b_add, b_del, b_recalc, b_save, b_export):
-            btn_row.addWidget(b)
-        btn_row.addStretch(1)
-        lay.addLayout(btn_row)
-
-        # Large readable table area
-        lay.addWidget(self.table, 1)
-
-        foot = QLabel(
-            "Edit Likelihood (L) or Severity (S) — Risk score and Band update automatically from the 5×5 matrix. "
-            "Double-click cells to edit. Expand column widths as needed. Control measures are numbered for clarity."
-        )
+        b_recalc = QPushButton("Recalculate Risk Scores"); b_recalc.clicked.connect(self._read_table_rows)
+        b_export = QPushButton("Export to Word"); b_export.clicked.connect(self._export_word)
+        for b in (b_add, b_del, b_recalc, b_export):
+            b.setMinimumHeight(34)
+            actions.addWidget(b)
+        actions.addStretch(1)
+        dlg_lay.addLayout(actions)
+        self.table.setParent(self.assessment_dialog)
+        self.table.setMinimumHeight(360)
+        dlg_lay.addWidget(self.table, 1)
+        foot = QLabel("Change Likelihood (L) or Severity (S) to automatically recalculate the risk score, rating and colour. Formal Risk Assessments also recalculate residual risk.")
         foot.setWordWrap(True)
-        foot.setStyleSheet("color:#445;padding:6px;background:#F7F9FC;border-radius:3px;")
-        lay.addWidget(foot)
+        foot.setStyleSheet("color:#445;padding:8px;background:#F7F9FC;border-radius:4px;")
+        dlg_lay.addWidget(foot)
+        bottom = QHBoxLayout()
+        bottom.addStretch(1)
+        b_save_exit = QPushButton("Submit / Save & Exit")
+        b_save_exit.setMinimumHeight(42)
+        b_save_exit.setStyleSheet("background:#2E7D32;color:white;font-weight:bold;padding:10px 22px;border-radius:5px;")
+        b_save_exit.clicked.connect(self._save_and_exit_dialog)
+        b_cancel = QPushButton("Cancel")
+        b_cancel.setMinimumHeight(42)
+        b_cancel.setStyleSheet("padding:10px 22px;")
+        b_cancel.clicked.connect(self._cancel_assessment_dialog)
+        bottom.addWidget(b_save_exit); bottom.addWidget(b_cancel)
+        dlg_lay.addLayout(bottom)
 
     def _build_matrix_tab(self):
         w = QWidget()
@@ -36599,7 +36630,9 @@ class RiskAssessmentModule(QWidget):
         center = QHBoxLayout()
         center.addStretch(1)
         self.matrix = QTableWidget(6, 6)
-        self.matrix.setFixedSize(640, 360)
+        self.matrix.setMinimumSize(600, 340)
+        self.matrix.setMaximumSize(760, 420)
+        self.matrix.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.matrix.horizontalHeader().setVisible(False)
         self.matrix.verticalHeader().setVisible(False)
         self.matrix.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -36638,7 +36671,9 @@ class RiskAssessmentModule(QWidget):
             self.matrix.setRowHeight(i, 56)
         center.addWidget(self.matrix)
         center.addStretch(1)
+        outer.addStretch(1)
         outer.addLayout(center)
+        outer.addStretch(1)
 
         legend = QLabel(
             "Action guidance: Low – monitor routine controls · Medium – ensure controls supervised · "
@@ -36646,8 +36681,7 @@ class RiskAssessmentModule(QWidget):
         )
         legend.setWordWrap(True)
         legend.setStyleSheet("padding:8px;font-weight:600;color:#17365D;")
-        outer.addWidget(legend)
-        outer.addStretch(1)
+        outer.addWidget(legend, 0, Qt.AlignmentFlag.AlignBottom)
 
     def _build_register_tab(self):
         w = QWidget()
@@ -36674,6 +36708,51 @@ class RiskAssessmentModule(QWidget):
         self.reg_table.horizontalHeader().setStretchLastSection(True)
         self.reg_table.doubleClicked.connect(lambda *_: self._open_selected())
         lay.addWidget(self.reg_table, 1)
+
+    def _refresh_library_multi(self, *_):
+        if not hasattr(self, "library_multi"):
+            return
+        self.library_multi.clear()
+        for activity_name in RA_LIBRARY.get(self.cmb_sector.currentText(), {}).keys():
+            item = QListWidgetItem(activity_name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self.library_multi.addItem(item)
+
+    def _show_assessment_dialog(self):
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "No Assessment", "Generate or open an assessment before opening the editor.")
+            return
+        self._dialog_cancel_snapshot = {
+            "rows": [[self.table.item(r, c).text() if self.table.item(r, c) else ""
+                      for c in range(self.table.columnCount())] for r in range(self.table.rowCount())],
+            "current_rows": json.loads(json.dumps(self.current_rows, ensure_ascii=False)),
+        }
+        self.dialog_header.setText(self.lbl_detail_header.text())
+        self.assessment_dialog.exec()
+
+    def _cancel_assessment_dialog(self):
+        snap = getattr(self, "_dialog_cancel_snapshot", None)
+        if snap:
+            self._risk_update_blocked = True
+            try:
+                self.table.setRowCount(0)
+                for values in snap["rows"]:
+                    r = self.table.rowCount(); self.table.insertRow(r)
+                    for c, value in enumerate(values):
+                        self._set_item(r, c, value)
+                self.current_rows = snap["current_rows"]
+            finally:
+                self._risk_update_blocked = False
+            self._colorize_risk_columns()
+        self.assessment_dialog.reject()
+
+    def _save_and_exit_dialog(self):
+        if not self.table.rowCount() or not self.cmb_activity.currentText().strip():
+            QMessageBox.warning(self, "Cannot Save", "Add at least one assessment row and provide an activity.")
+            return
+        self._save()
+        self.assessment_dialog.accept()
 
     def _refresh_activities(self, *_):
         sector = self.cmb_sector.currentText()
@@ -36793,6 +36872,57 @@ class RiskAssessmentModule(QWidget):
         }
 
     def _load_from_library(self):
+        selected = [self.library_multi.item(i).text() for i in range(self.library_multi.count())
+                    if self.library_multi.item(i).checkState() == Qt.CheckState.Checked]
+        if len(selected) <= 1:
+            if selected:
+                self.cmb_activity.setCurrentText(selected[0])
+            self._load_single_from_library()
+            return
+
+        # Generate each selected library entry using the existing generator, then combine all rows.
+        original_activity = self.cmb_activity.currentText()
+        original_title = self.txt_title.text()
+        combined_rows = []
+        combined_labels = []
+        headers = None
+        self._multi_generation = True
+        try:
+            for activity_name in selected:
+                self.cmb_activity.setCurrentText(activity_name)
+                self._load_single_from_library()
+                if self.table.rowCount() == 0:
+                    continue
+                if headers is None:
+                    headers = [self.table.horizontalHeaderItem(c).text() if self.table.horizontalHeaderItem(c) else ""
+                               for c in range(self.table.columnCount())]
+                for r in range(self.table.rowCount()):
+                    combined_rows.append([self.table.item(r, c).text() if self.table.item(r, c) else ""
+                                          for c in range(self.table.columnCount())])
+                combined_labels.append(activity_name)
+            if not combined_rows:
+                self.cmb_activity.setCurrentText(original_activity)
+                return
+            self._risk_update_blocked = True
+            self.table.setRowCount(0)
+            for values in combined_rows:
+                r = self.table.rowCount(); self.table.insertRow(r)
+                for c, value in enumerate(values):
+                    self._set_item(r, c, str(r + 1) if c == 0 else value)
+            self._risk_update_blocked = False
+            self.cmb_activity.setCurrentText("Combined Library Assessment")
+            self.txt_title.setText("Combined Risk Assessment – " + ", ".join(combined_labels))
+            self.current_rows = []
+            self._read_table_rows()
+            self._colorize_risk_columns()
+            self._update_detail_header()
+            self.lbl_detail_header.setText(self.lbl_detail_header.text().replace("Combined Library Assessment", ", ".join(combined_labels)))
+            self.tabs.setCurrentIndex(1)
+            self._show_assessment_dialog()
+        finally:
+            self._multi_generation = False
+
+    def _load_single_from_library(self):
         activity = self.cmb_activity.currentText().strip()
         custom = ""
         if hasattr(self, "txt_other_activity"):
@@ -36972,11 +37102,8 @@ class RiskAssessmentModule(QWidget):
             if self.table.columnCount() >= 10:
                 self.table.setColumnWidth(9, 260)
         self.tabs.setCurrentIndex(1)
-        QMessageBox.information(
-            self, "Assessment Generated",
-            f"Loaded “{activity}” with {loaded} row(s) on the Generated Assessment tab.\n\n"
-            "Edit L or S to auto-update risk ratings. Review controls, then Save or Export."
-        )
+        if not getattr(self, "_multi_generation", False):
+            self._show_assessment_dialog()
 
     def _on_table_item_changed(self, item):
         """Auto-recalculate risk when L or S (or residual L/S) changes."""
@@ -37302,6 +37429,7 @@ class RiskAssessmentModule(QWidget):
             self.table.setRowHeight(r, max(110, self.table.rowHeight(r)))
         self._update_detail_header()
         self.tabs.setCurrentIndex(1)
+        self._show_assessment_dialog()
 
     def _delete_selected(self):
         rid = self._selected_reg_id()
