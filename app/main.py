@@ -6,6 +6,7 @@ import sqlite3
 import zipfile
 import logging
 import json
+import uuid
 import re
 import html
 import calendar
@@ -15721,6 +15722,121 @@ class MainWindow(QMainWindow):
                 "Check your internet connection and Supabase settings."
             )
 
+    def test_supabase_cloud_data(self, project_url_edit, publishable_key_edit):
+        """Insert, retrieve, verify, and remove one isolated Supabase test row.
+
+        This test never reads, uploads, updates, or deletes actual HSE register
+        records. It only operates on the unique UUID generated below.
+        """
+        project_url = project_url_edit.text().strip().rstrip("/")
+        publishable_key = publishable_key_edit.text().strip()
+        if not project_url or not publishable_key:
+            QMessageBox.warning(self, "Cloud Data Test", "Enter both the Supabase Project URL and Publishable key first.")
+            return
+        if not (project_url.startswith("https://") and project_url.endswith(".supabase.co")):
+            QMessageBox.warning(self, "Cloud Data Test", "The Project URL should look like https://your-project-ref.supabase.co")
+            return
+        if not publishable_key.startswith("sb_publishable_") and not publishable_key.startswith("eyJ"):
+            QMessageBox.warning(self, "Cloud Data Test", "Use the Supabase Publishable key. Do not use a secret or service_role key.")
+            return
+
+        db.set_setting("supabase_project_url", project_url)
+        db.set_setting("supabase_publishable_key", publishable_key)
+        test_id = str(uuid.uuid4())
+        test_payload = {
+            "test": True,
+            "message": "HSE application cloud upload and retrieval test",
+            "test_id": test_id,
+        }
+        headers_base = {"apikey": publishable_key, "Accept": "application/json"}
+        inserted = False
+        verified = False
+        cleanup_ok = False
+        try:
+            signup_request = urllib.request.Request(
+                project_url + "/auth/v1/signup",
+                data=json.dumps({"data": {"app": APP_NAME}}).encode("utf-8"),
+                headers={**headers_base, "Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(signup_request, timeout=25) as response:
+                auth_result = json.loads(response.read().decode("utf-8") or "{}")
+            access_token = auth_result.get("access_token")
+            if not access_token:
+                raise RuntimeError("Supabase did not return an anonymous access token. Check that Anonymous Sign-ins are enabled.")
+
+            api_headers = {
+                **headers_base,
+                "Authorization": "Bearer " + access_token,
+                "Content-Type": "application/json",
+            }
+            row = {
+                "id": test_id,
+                "module": "__connection_test__",
+                "record_number": "APP-CLOUD-TEST",
+                "payload": test_payload,
+                "source_device": "HSE-APP-TEST",
+            }
+            insert_request = urllib.request.Request(
+                project_url + "/rest/v1/hse_cloud_records",
+                data=json.dumps(row).encode("utf-8"),
+                headers={**api_headers, "Prefer": "return=representation"},
+                method="POST",
+            )
+            with urllib.request.urlopen(insert_request, timeout=25) as response:
+                inserted_rows = json.loads(response.read().decode("utf-8") or "[]")
+            inserted = bool(inserted_rows and inserted_rows[0].get("id") == test_id)
+            if not inserted:
+                raise RuntimeError("Supabase did not confirm the inserted test record.")
+
+            retrieve_url = project_url + "/rest/v1/hse_cloud_records?select=id,module,record_number,payload&id=eq." + test_id
+            retrieve_request = urllib.request.Request(retrieve_url, headers=api_headers, method="GET")
+            with urllib.request.urlopen(retrieve_request, timeout=25) as response:
+                retrieved_rows = json.loads(response.read().decode("utf-8") or "[]")
+            if retrieved_rows:
+                retrieved = retrieved_rows[0]
+                verified = (
+                    retrieved.get("id") == test_id
+                    and retrieved.get("module") == "__connection_test__"
+                    and retrieved.get("record_number") == "APP-CLOUD-TEST"
+                    and retrieved.get("payload") == test_payload
+                )
+            if not verified:
+                raise RuntimeError("The test row was inserted, but the retrieved data did not match the original test data.")
+
+            # Remove only this test's own unique UUID. Never issue a broad delete.
+            delete_request = urllib.request.Request(
+                project_url + "/rest/v1/hse_cloud_records?id=eq." + test_id,
+                headers={**api_headers, "Prefer": "return=minimal"},
+                method="DELETE",
+            )
+            with urllib.request.urlopen(delete_request, timeout=25) as response:
+                response.read()
+            cleanup_ok = True
+            QMessageBox.information(
+                self, "Cloud Data Test Successful",
+                "Your HSE application successfully uploaded and retrieved a test record from Supabase.\n\n"
+                "✓ Anonymous authentication successful\n"
+                "✓ Test record upload successful\n"
+                "✓ Test record retrieval successful\n"
+                "✓ Retrieved data verified\n"
+                "✓ Temporary application test record cleaned up\n\n"
+                "Your manually created CLOUD_TEST / TEST-001 row was not changed.\n"
+                "No actual HSE register records or attachments were uploaded."
+            )
+        except urllib.error.HTTPError as exc:
+            try:
+                details = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                details = str(exc)
+            logging.exception("Supabase cloud data test returned HTTP error")
+            extra = "\n\nThe application test row may remain in the table. If upload succeeded, look for module __connection_test__ and record APP-CLOUD-TEST."
+            QMessageBox.critical(self, "Cloud Data Test Failed", f"Supabase returned HTTP {exc.code}.\n\n{details[:1200]}{extra}\n\nCheck the table INSERT, SELECT, and DELETE policies.")
+        except Exception as exc:
+            logging.exception("Supabase cloud data test failed")
+            extra = "\n\nIf the upload occurred before the error, a temporary row may remain with module __connection_test__."
+            QMessageBox.critical(self, "Cloud Data Test Failed", f"Unable to complete the cloud data test.\n\n{exc}{extra}\n\nCheck your internet connection and Supabase table policies.")
+
     def settings_page(self):
         w,layout=self.page("Settings")
         form=QFormLayout()
@@ -15792,6 +15908,13 @@ class MainWindow(QMainWindow):
             lambda: self.test_supabase_connection(cloud_url, cloud_key)
         )
         cloud_form.addRow(cloud_test)
+        cloud_data_test = QPushButton("Run Cloud Data Upload & Retrieval Test")
+        cloud_data_test.setToolTip("Uploads one uniquely identified temporary test row, reads it back, verifies it, and removes only that test row.")
+        cloud_data_test.clicked.connect(
+            lambda: self.test_supabase_cloud_data(cloud_url, cloud_key)
+        )
+        cloud_form.addRow(cloud_data_test)
+        cloud_form.addRow(QLabel("The cloud data test uses a temporary test row only. It does not synchronise real HSE records or attachments."))
         layout.addWidget(cloud_group)
 
         save=QPushButton("Save Settings")
