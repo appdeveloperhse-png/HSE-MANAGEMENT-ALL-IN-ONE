@@ -8,12 +8,14 @@ import logging
 import json
 import uuid
 import re
+import hashlib
+import mimetypes
 import html
 import calendar
 import io
 import urllib.request
 import urllib.error
-from urllib.parse import unquote
+from urllib.parse import unquote, quote
 from copy import copy
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -4610,7 +4612,8 @@ class MainWindow(QMainWindow):
             "Risk Assessment",
             "Reports",
             "Master Data",
-            "Settings"
+            "Settings",
+            "Cloud Sync"
         ]
 
         self.nav.addItems(modules)
@@ -4690,6 +4693,8 @@ class MainWindow(QMainWindow):
                 self.master_data()
             elif row == 12:
                 self.settings_page()
+            elif row == 13:
+                self.cloud_sync_page()
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -15926,6 +15931,509 @@ class MainWindow(QMainWindow):
         restore=QPushButton("Restore Application Backup"); layout.addWidget(restore); restore.clicked.connect(self.restore)
         about=QPushButton("About"); layout.addWidget(about)
         about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System"))
+
+    def _supabase_config(self):
+        project_url = safe(db.setting("supabase_project_url", "")).strip().rstrip("/")
+        publishable_key = safe(db.setting("supabase_publishable_key", "")).strip()
+        if not project_url or not publishable_key:
+            raise RuntimeError("Open Cloud Sync and save your Supabase Project URL and Publishable Key first.")
+        if not (project_url.startswith("https://") and project_url.endswith(".supabase.co")):
+            raise RuntimeError("The saved Supabase Project URL is not valid.")
+        return project_url, publishable_key
+
+    def _supabase_auth_token(self, force_refresh=False):
+        """Reuse the local anonymous Supabase session; refresh it when needed."""
+        project_url, publishable_key = self._supabase_config()
+        current_token = safe(db.setting("supabase_access_token", ""))
+        refresh_token = safe(db.setting("supabase_refresh_token", ""))
+        if current_token and not force_refresh:
+            return current_token
+
+        def auth_post(endpoint, payload):
+            req = urllib.request.Request(
+                project_url + endpoint,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"apikey": publishable_key, "Content-Type": "application/json", "Accept": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+
+        if refresh_token:
+            try:
+                result = auth_post("/auth/v1/token?grant_type=refresh_token", {"refresh_token": refresh_token})
+                if result.get("access_token"):
+                    db.set_setting("supabase_access_token", result["access_token"])
+                    if result.get("refresh_token"):
+                        db.set_setting("supabase_refresh_token", result["refresh_token"])
+                    return result["access_token"]
+            except Exception:
+                logging.exception("Supabase anonymous session refresh failed; creating a new anonymous session")
+
+        result = auth_post("/auth/v1/signup", {"data": {"app": APP_NAME}})
+        access_token = result.get("access_token")
+        if not access_token:
+            raise RuntimeError("Supabase did not return an anonymous access token. Confirm Anonymous Sign-ins are enabled.")
+        db.set_setting("supabase_access_token", access_token)
+        db.set_setting("supabase_refresh_token", result.get("refresh_token", ""))
+        return access_token
+
+    def _supabase_request(self, method, path, body=None, headers=None, retry_auth=True):
+        """Call Supabase REST/Storage using the saved anonymous session."""
+        project_url, publishable_key = self._supabase_config()
+        token = self._supabase_auth_token()
+        request_headers = {
+            "apikey": publishable_key,
+            "Authorization": "Bearer " + token,
+            "Accept": "application/json",
+        }
+        if headers:
+            request_headers.update(headers)
+        data = body
+        if isinstance(body, (dict, list)):
+            data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+            request_headers.setdefault("Content-Type", "application/json")
+        req = urllib.request.Request(project_url + path, data=data, headers=request_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as response:
+                raw = response.read()
+                if not raw:
+                    return None
+                content_type = response.headers.get("Content-Type", "")
+                if "application/json" in content_type:
+                    return json.loads(raw.decode("utf-8"))
+                return raw
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 and retry_auth:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
+                self._supabase_auth_token(force_refresh=True)
+                return self._supabase_request(method, path, body, headers, retry_auth=False)
+            details = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else str(exc)
+            raise RuntimeError(f"Supabase returned HTTP {exc.code}: {details[:1000]}") from exc
+
+    def _observation_cloud_id(self, record_number):
+        company = safe(db.setting("company_name", "")).strip().casefold()
+        project = safe(db.setting("project_name", "")).strip().casefold()
+        identity = "hse-observation-v1|" + company + "|" + project + "|" + safe(record_number).strip().casefold()
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
+
+    def _cloud_upload_file(self, local_path, cloud_id):
+        source = resolve_attachment_path(local_path)
+        if not source or not source.is_file():
+            raise FileNotFoundError(f"An observation attachment could not be found: {safe(local_path)}")
+        content = source.read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        clean_name = re.sub(r"[^A-Za-z0-9._-]+", "_", source.name).strip("._") or "attachment"
+        storage_path = f"observations/{cloud_id}/{digest[:16]}_{clean_name}"
+        mime_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+        self._supabase_request(
+            "POST",
+            "/storage/v1/object/hse-attachments/" + quote(storage_path, safe="/"),
+            body=content,
+            headers={"Content-Type": mime_type, "x-upsert": "true"},
+        )
+        return {
+            "storage_path": storage_path,
+            "file_name": source.name,
+            "sha256": digest,
+            "attachment_type": "Evidence",
+            "content_type": mime_type,
+        }
+
+    def _cloud_download_file(self, attachment, cloud_id):
+        storage_path = safe(attachment.get("storage_path"))
+        if not storage_path or not storage_path.startswith(f"observations/{cloud_id}/"):
+            raise ValueError("Cloud attachment path is invalid for this observation.")
+        digest = safe(attachment.get("sha256"))[:16] or "file"
+        original_name = Path(safe(attachment.get("file_name")) or "attachment").name
+        clean_name = re.sub(r"[^A-Za-z0-9._-]+", "_", original_name).strip("._") or "attachment"
+        target_dir = ATTACH_DIR / "cloud_observations" / cloud_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        destination = target_dir / f"{digest}_{clean_name}"
+        if not destination.exists():
+            raw = self._supabase_request(
+                "GET",
+                "/storage/v1/object/authenticated/hse-attachments/" + quote(storage_path, safe="/"),
+                headers={"Accept": "application/octet-stream"},
+            )
+            if not isinstance(raw, (bytes, bytearray)):
+                raise RuntimeError(f"Supabase did not return the attachment file: {original_name}")
+            temporary = destination.with_suffix(destination.suffix + ".download")
+            temporary.write_bytes(raw)
+            temporary.replace(destination)
+        return str(destination)
+
+    def _observation_payload_for_cloud(self, observation_id, cloud_id):
+        row = db.fetchone("SELECT * FROM observations WHERE id=?", (observation_id,))
+        if not row:
+            raise RuntimeError("The selected local observation no longer exists.")
+        if int(row["capa_required"] or 0):
+            raise RuntimeError(
+                "This observation is linked to CAPA. To protect its existing CAPA approval and corrective-action workflow, "
+                "CAPA-linked observations are excluded from this first Observation-only cloud pilot."
+            )
+        record = {key: row[key] for key in row.keys() if key != "id"}
+        closeout_rows = db.fetchall("SELECT * FROM observation_closeout_evidence WHERE observation_id=? ORDER BY id", (observation_id,))
+        timestamp_candidates = [safe(row["updated_at"]), safe(row["created_at"])]
+        for closeout_row in closeout_rows:
+            timestamp_candidates.extend([safe(closeout_row["submitted_at"]), safe(closeout_row["reviewed_at"])])
+        timestamp_candidates = [value for value in timestamp_candidates if value]
+        local_updated = max(timestamp_candidates, key=self._cloud_time_value) if timestamp_candidates else datetime.now().isoformat(timespec="seconds")
+        record["updated_at"] = local_updated
+
+        attachments = []
+        for item in db.fetchall("SELECT * FROM observation_attachments WHERE observation_id=? ORDER BY id", (observation_id,)):
+            meta = self._cloud_upload_file(item["file_path"], cloud_id)
+            meta.update({"kind": "observation", "attachment_type": safe(item["attachment_type"]) or "Evidence"})
+            attachments.append(meta)
+
+        closeout = []
+        for item in closeout_rows:
+            meta = self._cloud_upload_file(item["file_path"], cloud_id)
+            meta.update({
+                "kind": "closeout",
+                "batch_id": safe(item["batch_id"]),
+                "submitted_by": safe(item["submitted_by"]),
+                "submitted_at": safe(item["submitted_at"]),
+                "review_status": safe(item["review_status"]),
+                "reviewed_by": safe(item["reviewed_by"]),
+                "reviewed_at": safe(item["reviewed_at"]),
+                "review_comments": safe(item["review_comments"]),
+            })
+            closeout.append(meta)
+
+        return {
+            "schema_version": 1,
+            "record": record,
+            "local_updated_at": local_updated,
+            "attachments": attachments,
+            "closeout_evidence": closeout,
+        }
+
+    @staticmethod
+    def _cloud_time_value(value):
+        raw = safe(value).strip()
+        if not raw:
+            return 0.0
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+
+    def refresh_local_observation_cloud_list(self):
+        table = getattr(self, "_cloud_local_observation_table", None)
+        if table is None:
+            return
+        rows = db.fetchall("SELECT id,number,obs_date,location,observation,status,capa_required,updated_at,created_at FROM observations ORDER BY id DESC")
+        table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            values = [row["id"], safe(row["number"]), safe(row["obs_date"]), safe(row["location"]), safe(row["observation"]), safe(row["status"]), "Yes" if int(row["capa_required"] or 0) else "No", safe(row["updated_at"]) or safe(row["created_at"])]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(safe(value))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, int(row["id"]))
+                table.setItem(r, c, item)
+        table.setColumnHidden(0, True)
+
+    def refresh_cloud_observation_list(self):
+        table = getattr(self, "_cloud_remote_observation_table", None)
+        if table is None:
+            return
+        try:
+            rows = self._supabase_request(
+                "GET",
+                "/rest/v1/hse_cloud_records?select=id,record_number,payload,updated_at&module=eq.OBSERVATION&order=updated_at.desc&limit=1000",
+            ) or []
+            table.setRowCount(len(rows))
+            for r, cloud_row in enumerate(rows):
+                payload = cloud_row.get("payload") or {}
+                record = payload.get("record") or {}
+                values = [cloud_row.get("id", ""), cloud_row.get("record_number", ""), record.get("obs_date", ""), record.get("location", ""), record.get("observation", ""), record.get("status", ""), payload.get("local_updated_at", "")]
+                for c, value in enumerate(values):
+                    item = QTableWidgetItem(safe(value))
+                    if c == 0:
+                        item.setData(Qt.ItemDataRole.UserRole, safe(cloud_row.get("id")))
+                    table.setItem(r, c, item)
+            table.setColumnHidden(0, True)
+            QMessageBox.information(self, "Cloud Observations", f"Retrieved {len(rows)} Observation record(s) from Supabase.")
+        except Exception as exc:
+            logging.exception("Unable to refresh cloud observations")
+            QMessageBox.critical(self, "Cloud Observations", f"Unable to retrieve cloud observations.\n\n{exc}")
+
+    def upload_selected_observation_to_cloud(self):
+        table = getattr(self, "_cloud_local_observation_table", None)
+        if table is None or table.currentRow() < 0 or not table.item(table.currentRow(), 0):
+            QMessageBox.information(self, "Upload Observation", "Select one local observation first.")
+            return
+        observation_id = table.item(table.currentRow(), 0).data(Qt.ItemDataRole.UserRole)
+        row = db.fetchone("SELECT * FROM observations WHERE id=?", (observation_id,))
+        if not row:
+            QMessageBox.warning(self, "Upload Observation", "The selected observation could not be found locally.")
+            return
+        if int(row["capa_required"] or 0):
+            QMessageBox.warning(
+                self, "CAPA-linked Observation Not Included",
+                "This observation is linked to CAPA. The first cloud pilot synchronises only observations that do not require CAPA, "
+                "so that CAPA records, approval history and linked actions are not changed or separated."
+            )
+            return
+        number = safe(row["number"]).strip()
+        if not number:
+            QMessageBox.warning(self, "Upload Observation", "The selected observation has no observation number.")
+            return
+        if QMessageBox.question(
+            self, "Confirm Observation Upload",
+            f"Upload Observation {number} and its Observation Register attachments to Supabase?\n\n"
+            "This does not delete the local record. No other HSE module will be uploaded.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            cloud_id = self._observation_cloud_id(number)
+            remote = self._supabase_request(
+                "GET", "/rest/v1/hse_cloud_records?select=id,payload&id=eq." + cloud_id
+            ) or []
+            local_time = safe(row["updated_at"]) or safe(row["created_at"]) or datetime.now().isoformat(timespec="seconds")
+            if remote:
+                remote_time = safe((remote[0].get("payload") or {}).get("local_updated_at"))
+                if self._cloud_time_value(remote_time) > self._cloud_time_value(local_time):
+                    raise RuntimeError(
+                        "The cloud copy is newer than this computer's local observation. Upload was stopped to prevent overwriting newer cloud information. "
+                        "Refresh Cloud Observations and download the newer copy first."
+                    )
+            payload = self._observation_payload_for_cloud(observation_id, cloud_id)
+            cloud_row = {
+                "id": cloud_id,
+                "module": "OBSERVATION",
+                "record_number": number,
+                "payload": payload,
+                "source_device": "HSE Desktop App",
+                "updated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "+00:00",
+            }
+            self._supabase_request(
+                "POST", "/rest/v1/hse_cloud_records?on_conflict=id", cloud_row,
+                headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+            )
+            QMessageBox.information(
+                self, "Observation Uploaded",
+                f"Observation {number} was uploaded successfully.\n\n"
+                f"Observation attachments uploaded: {len(payload['attachments'])}\n"
+                f"Close-out evidence files uploaded: {len(payload['closeout_evidence'])}\n\n"
+                "Your local observation and attachments were kept unchanged."
+            )
+            self.refresh_cloud_observation_list()
+        except Exception as exc:
+            logging.exception("Observation cloud upload failed")
+            QMessageBox.critical(self, "Observation Upload Failed", f"The observation was not confirmed as uploaded.\n\n{exc}")
+
+    def download_selected_observation_from_cloud(self):
+        table = getattr(self, "_cloud_remote_observation_table", None)
+        if table is None or table.currentRow() < 0 or not table.item(table.currentRow(), 0):
+            QMessageBox.information(self, "Download Observation", "Select one cloud observation first. Click Refresh Cloud Observations if the list is empty.")
+            return
+        cloud_id = safe(table.item(table.currentRow(), 0).data(Qt.ItemDataRole.UserRole))
+        try:
+            cloud_rows = self._supabase_request(
+                "GET", "/rest/v1/hse_cloud_records?select=id,record_number,payload&id=eq." + cloud_id
+            ) or []
+            if not cloud_rows:
+                raise RuntimeError("The selected cloud observation no longer exists.")
+            cloud_row = cloud_rows[0]
+            payload = cloud_row.get("payload") or {}
+            record = payload.get("record") or {}
+            number = safe(cloud_row.get("record_number") or record.get("number")).strip()
+            if not number:
+                raise RuntimeError("The cloud observation does not contain an observation number.")
+            if int(record.get("capa_required") or 0):
+                raise RuntimeError("This cloud observation is CAPA-linked and is excluded from the first Observation-only pilot to protect CAPA links and approval history.")
+            local = db.fetchone("SELECT * FROM observations WHERE number=?", (number,))
+            cloud_time = safe(payload.get("local_updated_at"))
+            if local and int(local["capa_required"] or 0):
+                raise RuntimeError("A local observation with this number is linked to CAPA. Download was stopped to protect the local CAPA workflow.")
+            if local:
+                local_time = safe(local["updated_at"]) or safe(local["created_at"])
+                if self._cloud_time_value(local_time) > self._cloud_time_value(cloud_time):
+                    raise RuntimeError("The local observation is newer than the cloud copy. Download was stopped to prevent overwriting newer local information.")
+
+            if QMessageBox.question(
+                self, "Confirm Observation Download",
+                f"Download Observation {number} and its attachments to this computer?\n\n"
+                "Existing local attachments will be preserved. No other HSE module will be downloaded.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) != QMessageBox.StandardButton.Yes:
+                return
+
+            columns = {r["name"] for r in db.fetchall("PRAGMA table_info(observations)")}
+            values = {k: v for k, v in record.items() if k in columns and k != "id"}
+            values["number"] = number
+            if "updated_at" in columns and not safe(values.get("updated_at")):
+                values["updated_at"] = cloud_time
+            if local:
+                update_cols = [k for k in values if k != "id"]
+                assignments = ",".join(f'"{k}"=?' for k in update_cols)
+                db.execute(
+                    f'UPDATE observations SET {assignments} WHERE id=?',
+                    tuple(values[k] for k in update_cols) + (local["id"],),
+                )
+                observation_id = int(local["id"])
+            else:
+                insert_cols = list(values.keys())
+                quoted_cols = ",".join(f'"{k}"' for k in insert_cols)
+                placeholders = ",".join("?" for _ in insert_cols)
+                cur = db.execute(
+                    f'INSERT INTO observations ({quoted_cols}) VALUES ({placeholders})',
+                    tuple(values[k] for k in insert_cols),
+                )
+                observation_id = int(cur.lastrowid)
+
+            imported_attachments = 0
+            imported_closeout = 0
+            for attachment in payload.get("attachments", []) or []:
+                if attachment.get("kind") != "observation":
+                    continue
+                local_path = self._cloud_download_file(attachment, cloud_id)
+                exists = db.fetchone(
+                    "SELECT id FROM observation_attachments WHERE observation_id=? AND file_path=?",
+                    (observation_id, local_path),
+                )
+                if not exists:
+                    db.execute(
+                        "INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)",
+                        (observation_id, local_path, safe(attachment.get("attachment_type")) or "Evidence"),
+                    )
+                    imported_attachments += 1
+
+            for attachment in payload.get("closeout_evidence", []) or []:
+                if attachment.get("kind") != "closeout":
+                    continue
+                local_path = self._cloud_download_file(attachment, cloud_id)
+                batch_id = safe(attachment.get("batch_id")) or ("CLOUD-" + cloud_id[:12])
+                exists = db.fetchone(
+                    "SELECT id FROM observation_closeout_evidence WHERE observation_id=? AND file_path=? AND batch_id=?",
+                    (observation_id, local_path, batch_id),
+                )
+                if not exists:
+                    db.execute(
+                        """INSERT INTO observation_closeout_evidence
+                           (batch_id,observation_id,file_path,submitted_by,submitted_at,review_status,reviewed_by,reviewed_at,review_comments)
+                           VALUES(?,?,?,?,?,?,?,?,?)""",
+                        (batch_id, observation_id, local_path, safe(attachment.get("submitted_by")),
+                         safe(attachment.get("submitted_at")), safe(attachment.get("review_status")) or "Pending Review",
+                         safe(attachment.get("reviewed_by")), safe(attachment.get("reviewed_at")), safe(attachment.get("review_comments"))),
+                    )
+                    imported_closeout += 1
+
+            QMessageBox.information(
+                self, "Observation Downloaded",
+                f"Observation {number} is now available in this computer's local Observation Register.\n\n"
+                f"New observation attachments downloaded: {imported_attachments}\n"
+                f"New close-out evidence files downloaded: {imported_closeout}\n\n"
+                "Existing local attachments were preserved. Please open the Observation Register and review the record."
+            )
+            self.refresh_local_observation_cloud_list()
+        except Exception as exc:
+            logging.exception("Observation cloud download failed")
+            QMessageBox.critical(self, "Observation Download Failed", f"The cloud observation could not be fully downloaded.\n\n{exc}\n\nIf the record was inserted before an attachment error, refresh the local list and retry the download; already downloaded files will be retained.")
+
+    def cloud_sync_page(self):
+        """Dedicated cloud page; the first pilot synchronises selected non-CAPA observations only."""
+        w, layout = self.page("Cloud Sync & Supabase Connection")
+
+        intro = QLabel(
+            "Connect this HSE application to Supabase. Cloud transfer is manual: select one Observation to upload or download. "
+            "Local records are never deleted by cloud sync. Other HSE modules are not included."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("font-size: 13px; color: #334E68; padding: 6px 8px;")
+        layout.addWidget(intro)
+
+        cloud_group = QGroupBox("Supabase Cloud Connection")
+        cloud_form = QFormLayout(cloud_group)
+        cloud_url = QLineEdit(db.setting("supabase_project_url", ""))
+        cloud_url.setPlaceholderText("https://your-project-ref.supabase.co")
+        cloud_key = QLineEdit(db.setting("supabase_publishable_key", ""))
+        cloud_key.setPlaceholderText("sb_publishable_...")
+        cloud_key.setEchoMode(QLineEdit.EchoMode.Password)
+        cloud_form.addRow("Project URL", cloud_url)
+        cloud_form.addRow("Publishable Key", cloud_key)
+        note = QLabel(
+            "Use only your Supabase Project URL and Publishable key. Never enter a secret/service_role key. "
+            "The connection tests below do not change real HSE records."
+        )
+        note.setWordWrap(True)
+        cloud_form.addRow(note)
+        save_test = QPushButton("1. Save & Test Supabase Connection")
+        save_test.setMinimumHeight(40)
+        save_test.clicked.connect(lambda: self.test_supabase_connection(cloud_url, cloud_key))
+        cloud_form.addRow(save_test)
+        data_test = QPushButton("2. Run Cloud Data Upload & Retrieval Test")
+        data_test.setMinimumHeight(40)
+        data_test.clicked.connect(lambda: self.test_supabase_cloud_data(cloud_url, cloud_key))
+        cloud_form.addRow(data_test)
+        layout.addWidget(cloud_group)
+
+        scope_note = QLabel(
+            "FIRST PILOT SCOPE: Observation Register records with CAPA Required = No, including their direct observation attachments "
+            "and Observation close-out evidence files. CAPA-linked observations are deliberately excluded until the linked CAPA register "
+            "is included in a separately tested phase. This prevents broken CAPA links or approval history."
+        )
+        scope_note.setWordWrap(True)
+        scope_note.setStyleSheet("background:#FFF7E6; color:#694D00; padding:9px; border:1px solid #E7C979; border-radius:5px;")
+        layout.addWidget(scope_note)
+
+        local_group = QGroupBox("A. Local Observation Register — select one record to upload")
+        local_layout = QVBoxLayout(local_group)
+        self._cloud_local_observation_table = QTableWidget(0, 8)
+        self._cloud_local_observation_table.setHorizontalHeaderLabels(["ID", "Observation No.", "Date", "Location", "Observation", "Status", "CAPA Required", "Last Updated"])
+        self._cloud_local_observation_table.setColumnHidden(0, True)
+        self._cloud_local_observation_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cloud_local_observation_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._cloud_local_observation_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cloud_local_observation_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._cloud_local_observation_table.horizontalHeader().setStretchLastSection(True)
+        self._cloud_local_observation_table.setMinimumHeight(170)
+        local_layout.addWidget(self._cloud_local_observation_table)
+        local_buttons = QHBoxLayout()
+        local_refresh = QPushButton("Refresh Local Observations")
+        upload_button = QPushButton("Upload Selected Observation + Attachments")
+        upload_button.setMinimumHeight(38)
+        local_buttons.addWidget(local_refresh)
+        local_buttons.addWidget(upload_button)
+        local_layout.addLayout(local_buttons)
+        layout.addWidget(local_group, 1)
+
+        remote_group = QGroupBox("B. Supabase Cloud Observations — select one record to download")
+        remote_layout = QVBoxLayout(remote_group)
+        self._cloud_remote_observation_table = QTableWidget(0, 7)
+        self._cloud_remote_observation_table.setHorizontalHeaderLabels(["Cloud ID", "Observation No.", "Date", "Location", "Observation", "Status", "Last Updated"])
+        self._cloud_remote_observation_table.setColumnHidden(0, True)
+        self._cloud_remote_observation_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cloud_remote_observation_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._cloud_remote_observation_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cloud_remote_observation_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._cloud_remote_observation_table.horizontalHeader().setStretchLastSection(True)
+        self._cloud_remote_observation_table.setMinimumHeight(170)
+        remote_layout.addWidget(self._cloud_remote_observation_table)
+        remote_buttons = QHBoxLayout()
+        remote_refresh = QPushButton("Refresh Cloud Observations")
+        download_button = QPushButton("Download Selected Observation + Attachments")
+        download_button.setMinimumHeight(38)
+        remote_buttons.addWidget(remote_refresh)
+        remote_buttons.addWidget(download_button)
+        remote_layout.addLayout(remote_buttons)
+        layout.addWidget(remote_group, 1)
+
+        local_refresh.clicked.connect(self.refresh_local_observation_cloud_list)
+        upload_button.clicked.connect(self.upload_selected_observation_to_cloud)
+        remote_refresh.clicked.connect(self.refresh_cloud_observation_list)
+        download_button.clicked.connect(self.download_selected_observation_from_cloud)
+        self.refresh_local_observation_cloud_list()
+        layout.addStretch(0)
 
     def save_settings(self, company, project, location, observer, footer, prefix=None, logo_path=None):
         # Persist all report branding settings in the application database.
