@@ -16147,21 +16147,91 @@ class MainWindow(QMainWindow):
                 "GET",
                 "/rest/v1/hse_cloud_records?select=id,record_number,payload,updated_at&module=eq.OBSERVATION&order=updated_at.desc&limit=1000",
             ) or []
+            self._cloud_observation_payloads = {}
             table.setRowCount(len(rows))
             for r, cloud_row in enumerate(rows):
                 payload = cloud_row.get("payload") or {}
                 record = payload.get("record") or {}
-                values = [cloud_row.get("id", ""), cloud_row.get("record_number", ""), record.get("obs_date", ""), record.get("location", ""), record.get("observation", ""), record.get("status", ""), payload.get("local_updated_at", "")]
+                cloud_id = safe(cloud_row.get("id"))
+                self._cloud_observation_payloads[cloud_id] = cloud_row
+                attachment_count = len(payload.get("attachments") or [])
+                closeout_count = len(payload.get("closeout_evidence") or [])
+                values = [cloud_id, cloud_row.get("record_number", ""), record.get("obs_date", ""), record.get("location", ""), record.get("observation", ""), record.get("status", ""), f"{attachment_count} / {closeout_count}", payload.get("local_updated_at", "")]
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(safe(value))
                     if c == 0:
-                        item.setData(Qt.ItemDataRole.UserRole, safe(cloud_row.get("id")))
+                        item.setData(Qt.ItemDataRole.UserRole, cloud_id)
                     table.setItem(r, c, item)
             table.setColumnHidden(0, True)
+            if rows:
+                table.selectRow(0)
+                self.show_selected_cloud_observation_details(0, 0, -1, -1)
+            else:
+                details = getattr(self, "_cloud_remote_detail_table", None)
+                if details is not None:
+                    details.setRowCount(0)
             QMessageBox.information(self, "Cloud Observations", f"Retrieved {len(rows)} Observation record(s) from Supabase.")
         except Exception as exc:
             logging.exception("Unable to refresh cloud observations")
             QMessageBox.critical(self, "Cloud Observations", f"Unable to retrieve cloud observations.\n\n{exc}")
+
+    def show_selected_cloud_observation_details(self, current_row, current_column=0, previous_row=-1, previous_column=-1):
+        """Show a readable field/value view of the selected cloud observation without changing cloud data."""
+        details = getattr(self, "_cloud_remote_detail_table", None)
+        table = getattr(self, "_cloud_remote_observation_table", None)
+        if details is None or table is None or current_row < 0:
+            return
+        try:
+            id_item = table.item(current_row, 0)
+            cloud_id = safe(id_item.data(Qt.ItemDataRole.UserRole)) if id_item else ""
+            cloud_row = getattr(self, "_cloud_observation_payloads", {}).get(cloud_id, {})
+            payload = cloud_row.get("payload") or {}
+            record = payload.get("record") or {}
+            field_labels = [
+                ("Observation Number", "number"), ("Date", "obs_date"), ("Time", "obs_time"),
+                ("Project", "project"), ("Company", "company"), ("Location", "location"),
+                ("Area", "area"), ("Responsible Person", "responsible"), ("Designation", "designation"),
+                ("Employee ID", "employee_id"), ("Observer", "observer"),
+                ("Observer Designation", "observer_designation"), ("Observer ID", "observer_id"),
+                ("Observer Company", "observer_company"), ("Observation Type", "obs_type"),
+                ("Category", "category"), ("Subcategory", "subcategory"),
+                ("Observation Description", "observation"), ("Immediate Action", "immediate_action"),
+                ("Corrective Action", "corrective_action"), ("Preventive Action", "preventive_action"),
+                ("Priority / Risk Level", "priority"), ("Target Completion Date", "target_date"),
+                ("Status", "status"), ("CAPA Required", "capa_required"),
+                ("Close-out Date", "closeout_date"), ("Closed By", "closed_by"),
+                ("Verified By", "verified_by"), ("Verification Date", "verification_date"),
+                ("Close-out Comments", "closeout_comments"), ("Verification", "verification"),
+                ("Created At", "created_at"), ("Last Updated", "updated_at"),
+            ]
+            rows = []
+            for label, key in field_labels:
+                value = record.get(key, "")
+                if value not in (None, ""):
+                    rows.append((label, safe(value)))
+            direct_files = payload.get("attachments") or []
+            closeout_files = payload.get("closeout_evidence") or []
+            direct_names = [safe(a.get("file_name")) for a in direct_files if safe(a.get("file_name"))]
+            closeout_names = [safe(a.get("file_name")) for a in closeout_files if safe(a.get("file_name"))]
+            rows.append((f"Observation Attachments ({len(direct_files)})", "\n".join(direct_names) if direct_names else "None"))
+            rows.append((f"Close-out Evidence ({len(closeout_files)})", "\n".join(closeout_names) if closeout_names else "None"))
+            for index, attachment in enumerate(closeout_files, 1):
+                review = safe(attachment.get("review_status")) or "Not specified"
+                reviewer = safe(attachment.get("reviewed_by"))
+                comments = safe(attachment.get("review_comments"))
+                extra = f"Review: {review}"
+                if reviewer:
+                    extra += f" | Reviewed by: {reviewer}"
+                if comments:
+                    extra += f" | Comments: {comments}"
+                rows.append((f"Close-out Evidence {index} Review", extra))
+            details.setRowCount(len(rows))
+            for r, (label, value) in enumerate(rows):
+                details.setItem(r, 0, QTableWidgetItem(label))
+                details.setItem(r, 1, QTableWidgetItem(value))
+            details.resizeRowsToContents()
+        except Exception:
+            logging.exception("Unable to display selected cloud observation details")
 
     def upload_selected_observation_to_cloud(self):
         table = getattr(self, "_cloud_local_observation_table", None)
@@ -16409,8 +16479,8 @@ class MainWindow(QMainWindow):
 
         remote_group = QGroupBox("B. Supabase Cloud Observations — select one record to download")
         remote_layout = QVBoxLayout(remote_group)
-        self._cloud_remote_observation_table = QTableWidget(0, 7)
-        self._cloud_remote_observation_table.setHorizontalHeaderLabels(["Cloud ID", "Observation No.", "Date", "Location", "Observation", "Status", "Last Updated"])
+        self._cloud_remote_observation_table = QTableWidget(0, 8)
+        self._cloud_remote_observation_table.setHorizontalHeaderLabels(["Cloud ID", "Observation No.", "Date", "Location", "Observation", "Status", "Files (Obs. / Close-out)", "Last Updated"])
         self._cloud_remote_observation_table.setColumnHidden(0, True)
         self._cloud_remote_observation_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._cloud_remote_observation_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -16419,6 +16489,22 @@ class MainWindow(QMainWindow):
         self._cloud_remote_observation_table.horizontalHeader().setStretchLastSection(True)
         self._cloud_remote_observation_table.setMinimumHeight(170)
         remote_layout.addWidget(self._cloud_remote_observation_table)
+        detail_group = QGroupBox("C. Selected Cloud Observation — complete readable details")
+        detail_layout = QVBoxLayout(detail_group)
+        detail_hint = QLabel("Select an observation in the cloud list above to view its saved fields and attachment names below. The JSON payload remains unchanged in Supabase.")
+        detail_hint.setWordWrap(True)
+        detail_layout.addWidget(detail_hint)
+        self._cloud_remote_detail_table = QTableWidget(0, 2)
+        self._cloud_remote_detail_table.setHorizontalHeaderLabels(["Field", "Saved Cloud Value"])
+        self._cloud_remote_detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._cloud_remote_detail_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._cloud_remote_detail_table.verticalHeader().setVisible(False)
+        self._cloud_remote_detail_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self._cloud_remote_detail_table.horizontalHeader().setStretchLastSection(True)
+        self._cloud_remote_detail_table.setMinimumHeight(220)
+        detail_layout.addWidget(self._cloud_remote_detail_table)
+        remote_layout.addWidget(detail_group)
+        self._cloud_remote_observation_table.currentCellChanged.connect(self.show_selected_cloud_observation_details)
         remote_buttons = QHBoxLayout()
         remote_refresh = QPushButton("Refresh Cloud Observations")
         download_button = QPushButton("Download Selected Observation + Attachments")
