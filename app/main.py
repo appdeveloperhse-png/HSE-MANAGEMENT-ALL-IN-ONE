@@ -10,6 +10,8 @@ import re
 import html
 import calendar
 import io
+import urllib.request
+import urllib.error
 from urllib.parse import unquote
 from copy import copy
 from datetime import datetime, date, timedelta
@@ -50,7 +52,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.22"
+APP_VERSION = "1.4.23"
 
 
 def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
@@ -15625,6 +15627,100 @@ class MainWindow(QMainWindow):
         tabs.addTab(cat_page, "Observation Categories")
 
 
+    def test_supabase_connection(self, project_url_edit, publishable_key_edit):
+        """Test Supabase anonymous authentication and access to the HSE cloud table.
+
+        This is a connection test only. It does not upload, download, or modify
+        any HSE register data.
+        """
+        project_url = project_url_edit.text().strip().rstrip("/")
+        publishable_key = publishable_key_edit.text().strip()
+
+        if not project_url or not publishable_key:
+            QMessageBox.warning(
+                self, "Cloud Connection",
+                "Enter both the Supabase Project URL and Publishable key first."
+            )
+            return
+        if not (project_url.startswith("https://") and project_url.endswith(".supabase.co")):
+            QMessageBox.warning(
+                self, "Cloud Connection",
+                "The Project URL should look like https://your-project-ref.supabase.co"
+            )
+            return
+        if not publishable_key.startswith("sb_publishable_") and not publishable_key.startswith("eyJ"):
+            QMessageBox.warning(
+                self, "Cloud Connection",
+                "Use the Supabase Publishable key (sb_publishable_...). Do not use a secret or service_role key."
+            )
+            return
+
+        # Save the public client configuration locally. The publishable key is
+        # intended for client applications; access is controlled by Supabase RLS.
+        db.set_setting("supabase_project_url", project_url)
+        db.set_setting("supabase_publishable_key", publishable_key)
+
+        try:
+            signup_url = project_url + "/auth/v1/signup"
+            signup_payload = json.dumps({"data": {"app": APP_NAME}}).encode("utf-8")
+            signup_request = urllib.request.Request(
+                signup_url,
+                data=signup_payload,
+                headers={
+                    "apikey": publishable_key,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(signup_request, timeout=25) as response:
+                auth_result = json.loads(response.read().decode("utf-8") or "{}")
+
+            access_token = auth_result.get("access_token")
+            if not access_token:
+                raise RuntimeError(
+                    "Supabase did not return an anonymous access token. Check that Anonymous Sign-ins are enabled."
+                )
+
+            table_url = project_url + "/rest/v1/hse_cloud_records?select=id&limit=1"
+            table_request = urllib.request.Request(
+                table_url,
+                headers={
+                    "apikey": publishable_key,
+                    "Authorization": "Bearer " + access_token,
+                    "Accept": "application/json",
+                },
+                method="GET",
+            )
+            with urllib.request.urlopen(table_request, timeout=25) as response:
+                response.read()
+
+            QMessageBox.information(
+                self, "Supabase Connection Successful",
+                "Your HSE application successfully connected to Supabase.\n\n"
+                "✓ Anonymous authentication successful\n"
+                "✓ hse_cloud_records table is reachable\n\n"
+                "This test did not upload or change any HSE records."
+            )
+        except urllib.error.HTTPError as exc:
+            try:
+                details = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                details = str(exc)
+            logging.exception("Supabase connection test returned HTTP error")
+            QMessageBox.critical(
+                self, "Supabase Connection Failed",
+                f"Supabase returned HTTP {exc.code}.\n\n{details[:1200]}\n\n"
+                "Check the Project URL, Publishable key, Anonymous Sign-ins, and table policies."
+            )
+        except Exception as exc:
+            logging.exception("Supabase connection test failed")
+            QMessageBox.critical(
+                self, "Supabase Connection Failed",
+                f"Unable to connect to Supabase.\n\n{exc}\n\n"
+                "Check your internet connection and Supabase settings."
+            )
+
     def settings_page(self):
         w,layout=self.page("Settings")
         form=QFormLayout()
@@ -15673,6 +15769,30 @@ class MainWindow(QMainWindow):
         if existing_logo and Path(existing_logo).exists():
             pix=QPixmap(existing_logo)
             logo_preview.setPixmap(pix.scaled(180,80,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+
+        # Supabase cloud connection setup is additive; local SQLite storage remains active.
+        cloud_group = QGroupBox("Cloud Connection (Supabase)")
+        cloud_form = QFormLayout(cloud_group)
+        cloud_url = QLineEdit(db.setting("supabase_project_url", ""))
+        cloud_url.setPlaceholderText("https://your-project-ref.supabase.co")
+        cloud_key = QLineEdit(db.setting("supabase_publishable_key", ""))
+        cloud_key.setPlaceholderText("sb_publishable_...")
+        cloud_key.setEchoMode(QLineEdit.EchoMode.Password)
+        cloud_form.addRow("Project URL", cloud_url)
+        cloud_form.addRow("Publishable Key", cloud_key)
+        cloud_note = QLabel(
+            "Connection test only: this does not synchronise register data yet. "
+            "Your existing local database remains unchanged. Never enter a secret/service_role key."
+        )
+        cloud_note.setWordWrap(True)
+        cloud_note.setStyleSheet("color: #52606D; padding: 4px;")
+        cloud_form.addRow(cloud_note)
+        cloud_test = QPushButton("Save & Test Supabase Connection")
+        cloud_test.clicked.connect(
+            lambda: self.test_supabase_connection(cloud_url, cloud_key)
+        )
+        cloud_form.addRow(cloud_test)
+        layout.addWidget(cloud_group)
 
         save=QPushButton("Save Settings")
         save.setMinimumHeight(44)
