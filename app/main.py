@@ -213,6 +213,28 @@ class Database:
                 ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS incident_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT UNIQUE,
+            notification_date TEXT DEFAULT '',
+            incident_time TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            company TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            activity TEXT DEFAULT '',
+            incident_type TEXT DEFAULT '',
+            injury_type TEXT DEFAULT '',
+            reported_by TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            immediate_action TEXT DEFAULT '',
+            investigation_required TEXT DEFAULT 'No',
+            incident_id INTEGER DEFAULT NULL,
+            status TEXT DEFAULT 'Reported',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+
         CREATE TABLE IF NOT EXISTS audit_attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             audit_id INTEGER NOT NULL,
@@ -523,6 +545,8 @@ class Database:
         incident_attachment_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(incident_attachments)").fetchall()]
         if "remark" not in incident_attachment_cols:
             self.conn.execute("ALTER TABLE incident_attachments ADD COLUMN remark TEXT DEFAULT ''")
+        if "noi_id" not in incident_cols:
+            self.conn.execute("ALTER TABLE incidents ADD COLUMN noi_id INTEGER DEFAULT NULL")
 
         # Audit module extensions are additive and isolated from all other modules.
         audit_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audits)").fetchall()}
@@ -9372,6 +9396,7 @@ class MainWindow(QMainWindow):
             ("Export PDF", lambda: self.export_pdf("incidents")),
             ("Export Word", lambda: self.export_docx("incidents")),
             ("Professional Report", None),
+            ("Notification of Incident (NOI)", None),
         ]
         btns={}
         for text,fn in buttons:
@@ -9455,12 +9480,94 @@ class MainWindow(QMainWindow):
             lambda: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load)
         )
         btns["Professional Report"].clicked.connect(professional)
+
+        def notification_register():
+            dlg=QDialog(self); dlg.setWindowTitle("Notification of Incident (NOI) Register"); dlg.resize(1120,720)
+            lay=QVBoxLayout(dlg)
+            intro=QLabel("Record the initial incident notification. If investigation is required, create or open the linked investigation from this register.")
+            intro.setWordWrap(True); lay.addWidget(intro)
+            reg=QTableWidget(); reg.setColumnCount(10); reg.setHorizontalHeaderLabels(["NOI No.","Date","Time","Location","Type","Injury Type","Reported By","Investigation Required","Linked Investigation","Status"]); reg.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); reg.horizontalHeader().setStretchLastSection(True); reg.setSelectionBehavior(QAbstractItemView.SelectRows); lay.addWidget(reg,1)
+            bar=QHBoxLayout(); bnew=QPushButton("+ New NOI"); bedit=QPushButton("Edit Selected"); bdel=QPushButton("Delete Selected"); bcreate=QPushButton("Create / Open Investigation"); bclose=QPushButton("Close")
+            for b in (bnew,bedit,bdel,bcreate,bclose): bar.addWidget(b)
+            lay.addLayout(bar)
+            def selected_noi_id():
+                rr=reg.currentRow()
+                if rr<0 or not reg.item(rr,0): return None
+                return int(reg.item(rr,0).data(Qt.ItemDataRole.UserRole))
+            def reload_noi():
+                rows=db.fetchall("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id ORDER BY n.id DESC")
+                reg.setRowCount(len(rows))
+                for r,n in enumerate(rows):
+                    values=[n["number"],n["notification_date"],n["incident_time"],n["location"],n["incident_type"],n["injury_type"],n["reported_by"],n["investigation_required"],n["investigation_number"] or "Not Linked",n["status"]]
+                    for c,v in enumerate(values): reg.setItem(r,c,QTableWidgetItem(safe(v)))
+                    reg.item(r,0).setData(Qt.ItemDataRole.UserRole,n["id"])
+            def noi_form(noi_id=None):
+                old=db.fetchone("SELECT * FROM incident_notifications WHERE id=?",(noi_id,)) if noi_id else None
+                f=QDialog(dlg); f.setWindowTitle("Edit Notification of Incident" if old else "New Notification of Incident"); f.resize(850,680)
+                ff=QFormLayout(f); fields={}
+                def le(key,label,val=""):
+                    x=QLineEdit(safe(val)); fields[key]=x; ff.addRow(label,x); return x
+                le("notification_date","Notification Date",old["notification_date"] if old else today())
+                le("incident_time","Time of Incident",old["incident_time"] if old else "")
+                le("location","Location / Area",old["location"] if old else "")
+                le("project","Project",old["project"] if old else db.setting("project_name", ""))
+                le("company","Company / Contractor",old["company"] if old else db.setting("company_name", ""))
+                le("department","Department",old["department"] if old else "")
+                le("activity","Activity / Task",old["activity"] if old else "")
+                typ=QComboBox(); typ.addItems(INCIDENT_TYPES); typ.setCurrentText(safe(old["incident_type"]) if old else INCIDENT_TYPES[0]); ff.addRow("Incident Type",typ)
+                injury=QComboBox(); injury.addItems(["Not Applicable","First Aid","Medical Treatment","Lost Time Injury","Restricted Work","Fatality","Near Miss","Property Damage","Environmental","Other"]); injury.setCurrentText(safe(old["injury_type"]) if old else "Not Applicable"); ff.addRow("Type of Injury / Outcome",injury)
+                le("reported_by","Reported By",old["reported_by"] if old else "")
+                desc=QTextEdit(); desc.setMinimumHeight(100); desc.setPlainText(safe(old["description"]) if old else ""); ff.addRow("Initial Incident Details / What Happened",desc)
+                immediate=QTextEdit(); immediate.setMinimumHeight(65); immediate.setPlainText(safe(old["immediate_action"]) if old else ""); ff.addRow("Immediate Action Taken",immediate)
+                req=QComboBox(); req.addItems(["No","Yes"]); req.setCurrentText(safe(old["investigation_required"]) if old else "No"); ff.addRow("Investigation Required?",req)
+                note=QLabel("If Yes, save the NOI and use Create / Open Investigation in the NOI Register to link it to the investigation form."); note.setWordWrap(True); ff.addRow("",note)
+                buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(buttons)
+                def save_noi():
+                    if not fields["notification_date"].text().strip() or not fields["location"].text().strip() or not desc.toPlainText().strip():
+                        QMessageBox.warning(f,"Required Information","Notification Date, Location, and initial incident details are required."); return
+                    vals=(fields["notification_date"].text().strip(),fields["incident_time"].text().strip(),fields["location"].text().strip(),fields["project"].text().strip(),fields["company"].text().strip(),fields["department"].text().strip(),fields["activity"].text().strip(),typ.currentText(),injury.currentText(),fields["reported_by"].text().strip(),desc.toPlainText().strip(),immediate.toPlainText().strip(),req.currentText(),"Reported",datetime.now().isoformat())
+                    if old:
+                        db.execute("UPDATE incident_notifications SET notification_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,description=?,immediate_action=?,investigation_required=?,status=?,updated_at=? WHERE id=?",vals+(noi_id,))
+                        saved_id=noi_id
+                    else:
+                        noi_no=next_number("HSE-NOI","incident_notifications")
+                        stamp=datetime.now().isoformat()
+                        db.execute("INSERT INTO incident_notifications(number,notification_date,incident_time,location,project,company,department,activity,incident_type,injury_type,reported_by,description,immediate_action,investigation_required,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(noi_no,)+vals[:-1]+(stamp,stamp))
+                        saved_id=db.fetchone("SELECT id FROM incident_notifications WHERE number=?",(noi_no,))["id"]
+                    f.accept(); reload_noi()
+                    if req.currentText()=="Yes":
+                        QMessageBox.information(dlg,"Investigation Required","NOI saved. Use Create / Open Investigation to link and continue the investigation form.")
+                buttons.accepted.connect(save_noi); buttons.rejected.connect(f.reject); f.exec()
+            def create_investigation():
+                noi_id=selected_noi_id()
+                if noi_id is None: QMessageBox.information(dlg,"Select NOI","Select a notification first."); return
+                noi=db.fetchone("SELECT * FROM incident_notifications WHERE id=?",(noi_id,))
+                if not noi: return
+                if safe(noi["investigation_required"])!="Yes": QMessageBox.information(dlg,"Investigation Not Required","This NOI is marked Investigation Required = No."); return
+                linked=db.fetchone("SELECT id FROM incidents WHERE noi_id=?",(noi_id,))
+                if linked: self.incident_form(load,linked["id"],noi_id)
+                else: self.incident_form(load,None,noi_id)
+                reload_noi()
+            bnew.clicked.connect(lambda:noi_form())
+            bedit.clicked.connect(lambda:noi_form(selected_noi_id()) if selected_noi_id() is not None else QMessageBox.information(dlg,"Select NOI","Select a notification to edit."))
+            def delete_noi():
+                nid=selected_noi_id()
+                if nid is None: QMessageBox.information(dlg,"Select NOI","Select a notification to delete."); return
+                n=db.fetchone("SELECT incident_id FROM incident_notifications WHERE id=?",(nid,))
+                if n and n["incident_id"]: QMessageBox.warning(dlg,"Linked NOI","This NOI is linked to an investigation. Delete or unlink the investigation first."); return
+                if QMessageBox.question(dlg,"Delete NOI","Delete the selected Notification of Incident?")==QMessageBox.StandardButton.Yes:
+                    db.execute("DELETE FROM incident_notifications WHERE id=?",(nid,)); reload_noi()
+            bdel.clicked.connect(delete_noi); bcreate.clicked.connect(create_investigation); bclose.clicked.connect(dlg.accept)
+            reload_noi(); dlg.exec()
+        btns["Notification of Incident (NOI)"].clicked.connect(notification_register)
         load()
 
 
-    def incident_form(self, refresh, incident_id=None):
+    def incident_form(self, refresh, incident_id=None, noi_id=None):
         existing = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,)) if incident_id else None
         if incident_id and not existing: return
+        noi_record = db.fetchone("SELECT * FROM incident_notifications WHERE id=?", (noi_id,)) if noi_id else None
+        linked_noi_id = (existing["noi_id"] if existing and "noi_id" in existing.keys() else noi_id)
         dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1200,850); dialog.setMinimumSize(1100,750)
         outer=QVBoxLayout(dialog); title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
@@ -9469,12 +9576,19 @@ class MainWindow(QMainWindow):
         add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else "")
         add_edit("permit_number","Permit Number",existing["permit_number"] if existing and "permit_number" in existing.keys() else "")
         for name in ["incident_time","location","project","company","department","activity"]:
-            default_value = existing[name] if existing else (db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
+            if existing:
+                default_value=existing[name]
+            elif noi_record:
+                default_value=safe(noi_record[name]) if name in noi_record.keys() else ""
+            else:
+                default_value=(db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
             add_edit(name,value=default_value)
         for name in ["supervisor","witnesses"]: add_edit(name,value=existing[name] if existing else "")
         incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); form.addRow("Type of Incident:",incident_type)
-        description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else ""); form.addRow("Incident Description:",description)
-        immediate=QTextEdit(); immediate.setMinimumHeight(70); immediate.setPlainText(safe(existing["immediate_action"]) if existing else ""); form.addRow("Immediate Action:",immediate)
+        if existing: incident_type.setCurrentText(safe(existing["incident_type"]))
+        elif noi_record: incident_type.setCurrentText(safe(noi_record["incident_type"]))
+        description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else (safe(noi_record["description"]) if noi_record else "")); form.addRow("Incident Description:",description)
+        immediate=QTextEdit(); immediate.setMinimumHeight(70); immediate.setPlainText(safe(existing["immediate_action"]) if existing else (safe(noi_record["immediate_action"]) if noi_record else "")); form.addRow("Immediate Action:",immediate)
         # People involved
         people_box=QGroupBox("People Involved"); people_layout=QVBoxLayout(people_box); people_rows=[]
         def add_person(data=None):
@@ -10002,12 +10116,16 @@ class MainWindow(QMainWindow):
                 people=[{"name":n.text().strip(),"role":role.currentText(),"designation":d.text().strip(),"id":i.text().strip()} for _,n,role,d,i in people_rows if n.text().strip()]
                 equipment=[{"name":n.text().strip(),"id":i.text().strip(),"specification":sp.text().strip()} for _,n,i,sp in equipment_rows if n.text().strip()]
                 primary_corrective="\n".join(f"{i}. {x['action']}" for i,x in enumerate(actions,1))
-                params=(today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),"", "", equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),"", "", "", "", edits["organization"].text(), "", edits["report_reference"].text(),mode,datetime.now().isoformat())
+                incident_date_value=(safe(existing["incident_date"]) if existing else (safe(noi_record["notification_date"]) if noi_record else today()))
+                params=(incident_date_value,edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),"", "", equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),"", "", "", "", edits["organization"].text(), "", edits["report_reference"].text(),mode,datetime.now().isoformat())
                 if existing:
                     db.execute("""UPDATE incidents SET incident_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,person_involved=?,employee_id=?,designation=?,supervisor=?,witnesses=?,description=?,immediate_action=?,consequences=?,potential_consequences=?,equipment=?,investigation_method=?,why1=?,why2=?,why3=?,why4=?,why5=?,direct_cause=?,contributing_factors=?,root_cause=?,corrective_action=?,preventive_action=?,investigation_details=?,people_details=?,equipment_details=?,environmental_category=?,environmental_quantity=?,property_name=?,property_damage_cost=?,organization=?,procedure_reference=?,report_reference=?,status=?,created_at=? WHERE id=?""",params+(incident_id,))
                 else:
                     db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
                 rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
+                if linked_noi_id:
+                    db.execute("UPDATE incidents SET noi_id=? WHERE id=?",(linked_noi_id,rid))
+                    db.execute("UPDATE incident_notifications SET incident_id=?,status='Investigation Linked',updated_at=? WHERE id=?",(rid,datetime.now().isoformat(),linked_noi_id))
                 db.execute("UPDATE incidents SET incident_title=?, permit_number=? WHERE id=?",
                            (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), rid))
                 # Save Fishbone cause attachments and replace temporary source paths with
