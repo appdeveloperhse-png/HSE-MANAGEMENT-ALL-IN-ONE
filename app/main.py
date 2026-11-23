@@ -9542,8 +9542,12 @@ class MainWindow(QMainWindow):
                 n=db.fetchone("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id WHERE n.id=?",(noi_id,))
                 if not n: detail.clear(); return
                 pairs=[("NOI Reference",n["number"]),("Notification Date",n["notification_date"]),("Incident Time",n["incident_time"]),("Location / Area",n["location"]),("Project",n["project"]),("Company / Contractor",n["company"]),("Department",n["department"]),("Activity / Task",n["activity"]),("Incident Type",n["incident_type"]),("Injury / Outcome",n["injury_type"]),("Reported By",n["reported_by"]),("Investigation Required",n["investigation_required"]),("Linked Investigation",n["investigation_number"] or "Not linked"),("Reviewed By",n["reviewed_by"]),("Approved By",n["approved_by"]),("Status",n["status"]),("Initial Incident Details",n["description"]),("Immediate Action Taken",n["immediate_action"])]
-                html="<div style='font-family:Arial;color:#22374b'>"+"".join(f"<p><b>{html.escape(str(k))}</b><br>{html.escape(safe(v) or '—').replace(chr(10),'<br>')}</p>" for k,v in pairs)+"</div>"
-                detail.setHtml(html); selected_label.setText(f"Selected notification: {safe(n['number'])}")
+                # Keep the imported html module available for escaping. Previously the
+                # local variable named `html` shadowed the module, causing an
+                # UnboundLocalError during initial NOI register preview and making
+                # the NOI register button appear not to work.
+                html_content="<div style='font-family:Arial;color:#22374b'>"+"".join(f"<p><b>{html.escape(str(k))}</b><br>{html.escape(safe(v) or '—').replace(chr(10),'<br>')}</p>" for k,v in pairs)+"</div>"
+                detail.setHtml(html_content); selected_label.setText(f"Selected notification: {safe(n['number'])}")
             def reload_noi():
                 rows=db.fetchall("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id ORDER BY n.id DESC")
                 reg.setSortingEnabled(False); reg.setRowCount(len(rows))
