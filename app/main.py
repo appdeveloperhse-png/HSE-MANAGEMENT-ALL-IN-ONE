@@ -9482,29 +9482,84 @@ class MainWindow(QMainWindow):
         btns["Professional Report"].clicked.connect(professional)
 
         def notification_register():
-            dlg=QDialog(self); dlg.setWindowTitle("Notification of Incident (NOI) Register"); dlg.resize(1120,720)
-            lay=QVBoxLayout(dlg)
-            intro=QLabel("Record the initial incident notification. If investigation is required, create or open the linked investigation from this register.")
-            intro.setWordWrap(True); lay.addWidget(intro)
-            reg=QTableWidget(); reg.setColumnCount(10); reg.setHorizontalHeaderLabels(["NOI No.","Date","Time","Location","Type","Injury Type","Reported By","Investigation Required","Linked Investigation","Status"]); reg.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); reg.horizontalHeader().setStretchLastSection(True); reg.setSelectionBehavior(QAbstractItemView.SelectRows); lay.addWidget(reg,1)
-            bar=QHBoxLayout(); bnew=QPushButton("+ New NOI"); bedit=QPushButton("Edit Selected"); bdel=QPushButton("Delete Selected"); bcreate=QPushButton("Create / Open Investigation"); bclose=QPushButton("Close")
-            for b in (bnew,bedit,bdel,bcreate,bclose): bar.addWidget(b)
+            # NOI register is intentionally redesigned only within Incident Investigation.
+            # Additive database migration for NOI report review/approval fields.
+            try:
+                noi_columns={r["name"] for r in db.fetchall("PRAGMA table_info(incident_notifications)")}
+                if "reviewed_by" not in noi_columns:
+                    db.execute("ALTER TABLE incident_notifications ADD COLUMN reviewed_by TEXT DEFAULT ''")
+                if "approved_by" not in noi_columns:
+                    db.execute("ALTER TABLE incident_notifications ADD COLUMN approved_by TEXT DEFAULT ''")
+            except Exception:
+                logging.exception("NOI additive migration failed")
+                QMessageBox.critical(self,"NOI Register","Unable to prepare NOI review/approval fields.")
+                return
+            dlg=QDialog(self); dlg.setWindowTitle("Notification of Incident (NOI) — Register"); dlg.resize(1450,850)
+            dlg.setMinimumSize(1050,680)
+            lay=QVBoxLayout(dlg); lay.setContentsMargins(16,14,16,14); lay.setSpacing(10)
+            header=QFrame(); header.setObjectName("noiHeader"); hl=QHBoxLayout(header); hl.setContentsMargins(14,12,14,12)
+            logo=QLabel(); logo.setFixedSize(86,64); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lp=report_logo_path()
+            if lp and Path(lp).exists(): logo.setPixmap(QPixmap(str(lp)).scaled(82,60,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+            hl.addWidget(logo)
+            htext=QVBoxLayout(); title=QLabel("NOTIFICATION OF INCIDENT"); title.setStyleSheet("font-size:20px;font-weight:700;color:#163A59;")
+            subtitle=QLabel("Initial incident notification • review • investigation handover"); subtitle.setStyleSheet("color:#617486;font-size:12px;")
+            htext.addWidget(title); htext.addWidget(subtitle); hl.addLayout(htext,1)
+            comp=QLabel(safe(company_name())); comp.setStyleSheet("font-size:15px;font-weight:600;color:#163A59;"); comp.setAlignment(Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter); hl.addWidget(comp)
+            header.setStyleSheet("QFrame#noiHeader{background:#F2F6FA;border:1px solid #D7E1EA;border-radius:10px;}")
+            lay.addWidget(header)
+            intro=QLabel("Select an NOI to preview its details. Double-click a register row to open the preview. Export the selected notification as a formal Word report."); intro.setWordWrap(True); intro.setStyleSheet("color:#526577;padding:2px 4px;"); lay.addWidget(intro)
+            splitter=QSplitter(Qt.Orientation.Horizontal); splitter.setChildrenCollapsible(False)
+            left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,4,0); ll.setSpacing(8)
+            filterbar=QHBoxLayout(); search=QLineEdit(); search.setPlaceholderText("Search NOI number, location, reported by, type..."); filterbar.addWidget(search,1)
+            ll.addLayout(filterbar)
+            reg=QTableWidget(); reg.setColumnCount(10); reg.setHorizontalHeaderLabels(["NOI No.","Date","Time","Location","Incident Type","Injury / Outcome","Reported By","Investigation","Linked Investigation","Status"])
+            reg.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); reg.horizontalHeader().setStretchLastSection(True); reg.setSelectionBehavior(QAbstractItemView.SelectRows); reg.setSelectionMode(QAbstractItemView.SingleSelection); reg.setAlternatingRowColors(True); reg.setSortingEnabled(True); reg.setEditTriggers(QAbstractItemView.NoEditTriggers); ll.addWidget(reg,1)
+            splitter.addWidget(left)
+            right=QFrame(); right.setObjectName("noiPreview"); right.setMinimumWidth(330); right.setMaximumWidth(500); rl=QVBoxLayout(right); rl.setContentsMargins(14,14,14,14); rl.setSpacing(8)
+            preview_title=QLabel("NOI DETAIL PREVIEW"); preview_title.setStyleSheet("font-size:15px;font-weight:700;color:#163A59;"); rl.addWidget(preview_title)
+            detail=QTextEdit(); detail.setReadOnly(True); detail.setMinimumHeight(320); detail.setStyleSheet("QTextEdit{background:#FFFFFF;border:1px solid #D9E3EC;border-radius:8px;padding:10px;font-size:12px;}"); rl.addWidget(detail,1)
+            selected_label=QLabel("Select a row to view notification details."); selected_label.setWordWrap(True); selected_label.setStyleSheet("color:#738397;"); rl.addWidget(selected_label)
+            right.setStyleSheet("QFrame#noiPreview{background:#F7F9FC;border:1px solid #D9E3EC;border-radius:10px;}")
+            splitter.addWidget(right); splitter.setStretchFactor(0,4); splitter.setStretchFactor(1,2); splitter.setSizes([880,430]); lay.addWidget(splitter,1)
+            bar=QHBoxLayout(); bnew=QPushButton("＋ New NOI"); bedit=QPushButton("Edit"); bdel=QPushButton("Delete"); bcreate=QPushButton("Create / Open Investigation"); bexport=QPushButton("Export Selected NOI"); bclose=QPushButton("Close")
+            for b in (bnew,bedit,bdel,bcreate,bexport,bclose): b.setMinimumHeight(36); bar.addWidget(b)
+            bcreate.setStyleSheet("QPushButton{background:#1F5B86;color:white;font-weight:600;border-radius:5px;padding:6px 10px;}")
+            bexport.setStyleSheet("QPushButton{background:#176B52;color:white;font-weight:600;border-radius:5px;padding:6px 10px;}")
             lay.addLayout(bar)
             def selected_noi_id():
                 rr=reg.currentRow()
                 if rr<0 or not reg.item(rr,0): return None
                 return int(reg.item(rr,0).data(Qt.ItemDataRole.UserRole))
+            def show_details(noi_id):
+                n=db.fetchone("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id WHERE n.id=?",(noi_id,))
+                if not n: detail.clear(); return
+                pairs=[("NOI Reference",n["number"]),("Notification Date",n["notification_date"]),("Incident Time",n["incident_time"]),("Location / Area",n["location"]),("Project",n["project"]),("Company / Contractor",n["company"]),("Department",n["department"]),("Activity / Task",n["activity"]),("Incident Type",n["incident_type"]),("Injury / Outcome",n["injury_type"]),("Reported By",n["reported_by"]),("Investigation Required",n["investigation_required"]),("Linked Investigation",n["investigation_number"] or "Not linked"),("Reviewed By",n["reviewed_by"]),("Approved By",n["approved_by"]),("Status",n["status"]),("Initial Incident Details",n["description"]),("Immediate Action Taken",n["immediate_action"])]
+                html="<div style='font-family:Arial;color:#22374b'>"+"".join(f"<p><b>{html.escape(str(k))}</b><br>{html.escape(safe(v) or '—').replace(chr(10),'<br>')}</p>" for k,v in pairs)+"</div>"
+                detail.setHtml(html); selected_label.setText(f"Selected notification: {safe(n['number'])}")
             def reload_noi():
                 rows=db.fetchall("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id ORDER BY n.id DESC")
-                reg.setRowCount(len(rows))
+                reg.setSortingEnabled(False); reg.setRowCount(len(rows))
                 for r,n in enumerate(rows):
                     values=[n["number"],n["notification_date"],n["incident_time"],n["location"],n["incident_type"],n["injury_type"],n["reported_by"],n["investigation_required"],n["investigation_number"] or "Not Linked",n["status"]]
                     for c,v in enumerate(values): reg.setItem(r,c,QTableWidgetItem(safe(v)))
                     reg.item(r,0).setData(Qt.ItemDataRole.UserRole,n["id"])
+                reg.setSortingEnabled(True)
+                if rows: reg.selectRow(0); show_details(rows[0]["id"])
+                else: detail.clear(); selected_label.setText("No notifications recorded yet.")
+            def filter_rows(text):
+                q=text.strip().lower()
+                for r in range(reg.rowCount()):
+                    visible=not q or any(q in (reg.item(r,c).text().lower() if reg.item(r,c) else "") for c in range(reg.columnCount()))
+                    reg.setRowHidden(r,not visible)
+            search.textChanged.connect(filter_rows)
+            reg.itemSelectionChanged.connect(lambda: show_details(selected_noi_id()) if selected_noi_id() is not None else detail.clear())
+            reg.cellDoubleClicked.connect(lambda row,col: show_details(selected_noi_id()) if selected_noi_id() is not None else None)
             def noi_form(noi_id=None):
                 old=db.fetchone("SELECT * FROM incident_notifications WHERE id=?",(noi_id,)) if noi_id else None
-                f=QDialog(dlg); f.setWindowTitle("Edit Notification of Incident" if old else "New Notification of Incident"); f.resize(850,680)
-                ff=QFormLayout(f); fields={}
+                f=QDialog(dlg); f.setWindowTitle("Edit Notification of Incident" if old else "New Notification of Incident"); f.resize(900,760); f.setMinimumSize(720,600)
+                outer=QVBoxLayout(f); formwrap=QScrollArea(); formwrap.setWidgetResizable(True); fw=QWidget(); ff=QFormLayout(fw); ff.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); formwrap.setWidget(fw); outer.addWidget(formwrap,1)
+                fields={}
                 def le(key,label,val=""):
                     x=QLineEdit(safe(val)); fields[key]=x; ff.addRow(label,x); return x
                 le("notification_date","Notification Date",old["notification_date"] if old else today())
@@ -9517,26 +9572,25 @@ class MainWindow(QMainWindow):
                 typ=QComboBox(); typ.addItems(INCIDENT_TYPES); typ.setCurrentText(safe(old["incident_type"]) if old else INCIDENT_TYPES[0]); ff.addRow("Incident Type",typ)
                 injury=QComboBox(); injury.addItems(["Not Applicable","First Aid","Medical Treatment","Lost Time Injury","Restricted Work","Fatality","Near Miss","Property Damage","Environmental","Other"]); injury.setCurrentText(safe(old["injury_type"]) if old else "Not Applicable"); ff.addRow("Type of Injury / Outcome",injury)
                 le("reported_by","Reported By",old["reported_by"] if old else "")
-                desc=QTextEdit(); desc.setMinimumHeight(100); desc.setPlainText(safe(old["description"]) if old else ""); ff.addRow("Initial Incident Details / What Happened",desc)
-                immediate=QTextEdit(); immediate.setMinimumHeight(65); immediate.setPlainText(safe(old["immediate_action"]) if old else ""); ff.addRow("Immediate Action Taken",immediate)
-                req=QComboBox(); req.addItems(["No","Yes"]); req.setCurrentText(safe(old["investigation_required"]) if old else "No"); ff.addRow("Investigation Required?",req)
-                note=QLabel("If Yes, save the NOI and use Create / Open Investigation in the NOI Register to link it to the investigation form."); note.setWordWrap(True); ff.addRow("",note)
-                buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); ff.addRow(buttons)
+                desc=QTextEdit(); desc.setMinimumHeight(120); desc.setPlainText(safe(old["description"] if old else "")); ff.addRow("Initial Incident Details / What Happened",desc)
+                immediate=QTextEdit(); immediate.setMinimumHeight(80); immediate.setPlainText(safe(old["immediate_action"] if old else "")); ff.addRow("Immediate Action Taken",immediate)
+                req=QComboBox(); req.addItems(["No","Yes"]); req.setCurrentText(safe(old["investigation_required"] if old else "No")); ff.addRow("Investigation Required?",req)
+                le("reviewed_by","Reviewed By",old["reviewed_by"] if old and "reviewed_by" in old.keys() else "")
+                le("approved_by","Approved By",old["approved_by"] if old and "approved_by" in old.keys() else "")
+                note=QLabel("If investigation is required, save the NOI and use Create / Open Investigation in the register to transfer the initial information."); note.setWordWrap(True); ff.addRow("Workflow",note)
+                buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); outer.addWidget(buttons)
                 def save_noi():
                     if not fields["notification_date"].text().strip() or not fields["location"].text().strip() or not desc.toPlainText().strip():
                         QMessageBox.warning(f,"Required Information","Notification Date, Location, and initial incident details are required."); return
-                    vals=(fields["notification_date"].text().strip(),fields["incident_time"].text().strip(),fields["location"].text().strip(),fields["project"].text().strip(),fields["company"].text().strip(),fields["department"].text().strip(),fields["activity"].text().strip(),typ.currentText(),injury.currentText(),fields["reported_by"].text().strip(),desc.toPlainText().strip(),immediate.toPlainText().strip(),req.currentText(),"Reported",datetime.now().isoformat())
+                    vals=(fields["notification_date"].text().strip(),fields["incident_time"].text().strip(),fields["location"].text().strip(),fields["project"].text().strip(),fields["company"].text().strip(),fields["department"].text().strip(),fields["activity"].text().strip(),typ.currentText(),injury.currentText(),fields["reported_by"].text().strip(),desc.toPlainText().strip(),immediate.toPlainText().strip(),req.currentText(),fields["reviewed_by"].text().strip(),fields["approved_by"].text().strip(),"Reported",datetime.now().isoformat())
                     if old:
-                        db.execute("UPDATE incident_notifications SET notification_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,description=?,immediate_action=?,investigation_required=?,status=?,updated_at=? WHERE id=?",vals+(noi_id,))
-                        saved_id=noi_id
+                        db.execute("UPDATE incident_notifications SET notification_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,description=?,immediate_action=?,investigation_required=?,reviewed_by=?,approved_by=?,status=?,updated_at=? WHERE id=?",vals+(noi_id,)); saved_id=noi_id
                     else:
-                        noi_no=next_number("HSE-NOI","incident_notifications")
-                        stamp=datetime.now().isoformat()
-                        db.execute("INSERT INTO incident_notifications(number,notification_date,incident_time,location,project,company,department,activity,incident_type,injury_type,reported_by,description,immediate_action,investigation_required,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(noi_no,)+vals[:-1]+(stamp,stamp))
+                        noi_no=next_number("HSE-NOI","incident_notifications"); stamp=datetime.now().isoformat()
+                        db.execute("INSERT INTO incident_notifications(number,notification_date,incident_time,location,project,company,department,activity,incident_type,injury_type,reported_by,description,immediate_action,investigation_required,reviewed_by,approved_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(noi_no,)+vals[:-1]+(stamp,stamp))
                         saved_id=db.fetchone("SELECT id FROM incident_notifications WHERE number=?",(noi_no,))["id"]
-                    f.accept(); reload_noi()
-                    if req.currentText()=="Yes":
-                        QMessageBox.information(dlg,"Investigation Required","NOI saved. Use Create / Open Investigation to link and continue the investigation form.")
+                    f.accept(); reload_noi();
+                    if req.currentText()=="Yes": QMessageBox.information(dlg,"Investigation Required","NOI saved. Use Create / Open Investigation to link and continue the investigation form.")
                 buttons.accepted.connect(save_noi); buttons.rejected.connect(f.reject); f.exec()
             def create_investigation():
                 noi_id=selected_noi_id()
@@ -9548,18 +9602,60 @@ class MainWindow(QMainWindow):
                 if linked: self.incident_form(load,linked["id"],noi_id)
                 else: self.incident_form(load,None,noi_id)
                 reload_noi()
-            bnew.clicked.connect(lambda:noi_form())
-            bedit.clicked.connect(lambda:noi_form(selected_noi_id()) if selected_noi_id() is not None else QMessageBox.information(dlg,"Select NOI","Select a notification to edit."))
             def delete_noi():
                 nid=selected_noi_id()
                 if nid is None: QMessageBox.information(dlg,"Select NOI","Select a notification to delete."); return
                 n=db.fetchone("SELECT incident_id FROM incident_notifications WHERE id=?",(nid,))
                 if n and n["incident_id"]: QMessageBox.warning(dlg,"Linked NOI","This NOI is linked to an investigation. Delete or unlink the investigation first."); return
-                if QMessageBox.question(dlg,"Delete NOI","Delete the selected Notification of Incident?")==QMessageBox.StandardButton.Yes:
-                    db.execute("DELETE FROM incident_notifications WHERE id=?",(nid,)); reload_noi()
-            bdel.clicked.connect(delete_noi); bcreate.clicked.connect(create_investigation); bclose.clicked.connect(dlg.accept)
+                if QMessageBox.question(dlg,"Delete NOI","Delete the selected Notification of Incident?")==QMessageBox.StandardButton.Yes: db.execute("DELETE FROM incident_notifications WHERE id=?",(nid,)); reload_noi()
+            def export_noi():
+                nid=selected_noi_id()
+                if nid is None: QMessageBox.information(dlg,"Select NOI","Select a notification to export."); return
+                n=db.fetchone("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id WHERE n.id=?",(nid,))
+                if not n: return
+                default=f"{safe(n['number'])}_Notification_of_Incident.docx"
+                path,_=QFileDialog.getSaveFileName(dlg,"Export NOI Professional Report",default,"Word Document (*.docx)")
+                if not path: return
+                if not path.lower().endswith(".docx"): path+=".docx"
+                try:
+                    doc=Document(); sec=doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55); sec.left_margin=Inches(.65); sec.right_margin=Inches(.65)
+                    # Company/logo banner and formal document identity
+                    table=doc.add_table(rows=1,cols=2); table.alignment=WD_TABLE_ALIGNMENT.CENTER; table.autofit=False; table.columns[0].width=Inches(1.35); table.columns[1].width=Inches(5.9)
+                    cell=table.cell(0,0); lp=report_logo_path()
+                    if lp and Path(lp).exists():
+                        try: cell.paragraphs[0].add_run().add_picture(str(lp),width=Inches(1.15))
+                        except Exception: pass
+                    cell=table.cell(0,1); p=cell.paragraphs[0]; p.alignment=WD_ALIGN_PARAGRAPH.CENTER; rr=p.add_run(safe(company_name()).upper()); rr.bold=True; rr.font.size=Pt(15)
+                    p=cell.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("NOTIFICATION OF INCIDENT (NOI)"); r.bold=True; r.font.size=Pt(16)
+                    p=cell.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run(f"Document No.: {safe(n['number'])}"); r.bold=True; r.font.size=Pt(11)
+                    doc.add_paragraph()
+                    def section_heading(label):
+                        p=doc.add_paragraph(); r=p.add_run(label); r.bold=True; r.font.size=Pt(11); r.font.color.rgb=__import__("docx").shared.RGBColor(31,78,121)
+                    def add_table(pairs):
+                        t=doc.add_table(rows=0,cols=2); t.style="Table Grid"; t.alignment=WD_TABLE_ALIGNMENT.CENTER
+                        for label,value in pairs:
+                            cells=t.add_row().cells; cells[0].text=str(label); cells[1].text=safe(value) or "—"
+                            cells[0].width=Inches(2.0); cells[1].width=Inches(5.25)
+                            for run in cells[0].paragraphs[0].runs: run.bold=True
+                            for c in cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                        return t
+                    section_heading("1. INCIDENT NOTIFICATION DETAILS")
+                    add_table([("NOI Number",n["number"]),("Notification Date",n["notification_date"]),("Incident Time",n["incident_time"]),("Location / Area",n["location"]),("Project",n["project"]),("Company / Contractor",n["company"]),("Department",n["department"]),("Activity / Task",n["activity"]),("Incident Type",n["incident_type"]),("Injury / Outcome",n["injury_type"]),("Reported By",n["reported_by"]),("Investigation Required",n["investigation_required"]),("Linked Investigation",n["investigation_number"] or "Not linked")])
+                    section_heading("2. INITIAL INCIDENT DESCRIPTION")
+                    doc.add_paragraph(safe(n["description"]) or "Not provided")
+                    section_heading("3. IMMEDIATE ACTION TAKEN")
+                    doc.add_paragraph(safe(n["immediate_action"]) or "Not provided")
+                    section_heading("4. REVIEW AND APPROVAL")
+                    add_table([("Reviewed By",n["reviewed_by"]),("Approved By",n["approved_by"]),("Report Generated",datetime.now().strftime("%d %b %Y %H:%M"))])
+                    doc.save(path)
+                    if not Path(path).exists() or Path(path).stat().st_size<500: raise ValueError("NOI report did not generate correctly.")
+                    self.show_export_success(path)
+                except Exception as e: logging.exception("NOI Word export failed"); QMessageBox.critical(dlg,"Export Failed",str(e))
+            bnew.clicked.connect(lambda:noi_form()); bedit.clicked.connect(lambda:noi_form(selected_noi_id()) if selected_noi_id() is not None else QMessageBox.information(dlg,"Select NOI","Select a notification to edit."))
+            bdel.clicked.connect(delete_noi); bcreate.clicked.connect(create_investigation); bexport.clicked.connect(export_noi); bclose.clicked.connect(dlg.accept)
             reload_noi(); dlg.exec()
         btns["Notification of Incident (NOI)"].clicked.connect(notification_register)
+
         load()
 
 
