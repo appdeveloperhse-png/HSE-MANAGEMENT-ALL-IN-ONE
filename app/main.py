@@ -9522,15 +9522,22 @@ class MainWindow(QMainWindow):
             selected_label=QLabel("Select a row to view notification details."); selected_label.setWordWrap(True); selected_label.setStyleSheet("color:#738397;"); rl.addWidget(selected_label)
             right.setStyleSheet("QFrame#noiPreview{background:#F7F9FC;border:1px solid #D9E3EC;border-radius:10px;}")
             splitter.addWidget(right); splitter.setStretchFactor(0,4); splitter.setStretchFactor(1,2); splitter.setSizes([880,430]); lay.addWidget(splitter,1)
-            bar=QHBoxLayout(); bnew=QPushButton("＋ New NOI"); bedit=QPushButton("Edit"); bdel=QPushButton("Delete"); bcreate=QPushButton("Create / Open Investigation"); bexport=QPushButton("Export Selected NOI"); bclose=QPushButton("Close")
-            for b in (bnew,bedit,bdel,bcreate,bexport,bclose): b.setMinimumHeight(36); bar.addWidget(b)
+            bar=QGridLayout(); bar.setHorizontalSpacing(8); bar.setVerticalSpacing(7)
+            bnew=QPushButton("＋ New NOI"); bedit=QPushButton("Edit"); bdel=QPushButton("Delete"); bcreate=QPushButton("Create / Open Investigation"); bexport=QPushButton("Export Selected NOI"); bclose=QPushButton("Close")
+            for idx,b in enumerate((bnew,bedit,bdel,bcreate,bexport,bclose)):
+                b.setMinimumHeight(38); b.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Fixed); bar.addWidget(b,idx//3,idx%3)
             bcreate.setStyleSheet("QPushButton{background:#1F5B86;color:white;font-weight:600;border-radius:5px;padding:6px 10px;}")
             bexport.setStyleSheet("QPushButton{background:#176B52;color:white;font-weight:600;border-radius:5px;padding:6px 10px;}")
             lay.addLayout(bar)
+            fit_dialog_to_desktop(dlg,0.96,0.92)
             def selected_noi_id():
-                rr=reg.currentRow()
-                if rr<0 or not reg.item(rr,0): return None
-                return int(reg.item(rr,0).data(Qt.ItemDataRole.UserRole))
+                selected=reg.selectionModel().selectedRows() if reg.selectionModel() else []
+                if not selected: return None
+                rr=selected[0].row()
+                if reg.isRowHidden(rr) or not reg.item(rr,0): return None
+                value=reg.item(rr,0).data(Qt.ItemDataRole.UserRole)
+                try: return int(value)
+                except (TypeError,ValueError): return None
             def show_details(noi_id):
                 n=db.fetchone("SELECT n.*,i.number AS investigation_number FROM incident_notifications n LEFT JOIN incidents i ON i.id=n.incident_id WHERE n.id=?",(noi_id,))
                 if not n: detail.clear(); return
@@ -9545,8 +9552,18 @@ class MainWindow(QMainWindow):
                     for c,v in enumerate(values): reg.setItem(r,c,QTableWidgetItem(safe(v)))
                     reg.item(r,0).setData(Qt.ItemDataRole.UserRole,n["id"])
                 reg.setSortingEnabled(True)
-                if rows: reg.selectRow(0); show_details(rows[0]["id"])
-                else: detail.clear(); selected_label.setText("No notifications recorded yet.")
+                if rows:
+                    # Restore selection by stable database ID after sorting; avoid selecting a different record.
+                    target_id=rows[0]["id"]
+                    target_row=-1
+                    for rr in range(reg.rowCount()):
+                        item=reg.item(rr,0)
+                        if item and item.data(Qt.ItemDataRole.UserRole)==target_id:
+                            target_row=rr; break
+                    if target_row>=0:
+                        reg.selectRow(target_row); show_details(target_id)
+                else:
+                    detail.clear(); selected_label.setText("No notifications recorded yet.")
             def filter_rows(text):
                 q=text.strip().lower()
                 for r in range(reg.rowCount()):
@@ -9557,28 +9574,42 @@ class MainWindow(QMainWindow):
             reg.cellDoubleClicked.connect(lambda row,col: show_details(selected_noi_id()) if selected_noi_id() is not None else None)
             def noi_form(noi_id=None):
                 old=db.fetchone("SELECT * FROM incident_notifications WHERE id=?",(noi_id,)) if noi_id else None
-                f=QDialog(dlg); f.setWindowTitle("Edit Notification of Incident" if old else "New Notification of Incident"); f.resize(900,760); f.setMinimumSize(720,600)
-                outer=QVBoxLayout(f); formwrap=QScrollArea(); formwrap.setWidgetResizable(True); fw=QWidget(); ff=QFormLayout(fw); ff.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); formwrap.setWidget(fw); outer.addWidget(formwrap,1)
-                fields={}
-                def le(key,label,val=""):
-                    x=QLineEdit(safe(val)); fields[key]=x; ff.addRow(label,x); return x
-                le("notification_date","Notification Date",old["notification_date"] if old else today())
-                le("incident_time","Time of Incident",old["incident_time"] if old else "")
-                le("location","Location / Area",old["location"] if old else "")
-                le("project","Project",old["project"] if old else db.setting("project_name", ""))
-                le("company","Company / Contractor",old["company"] if old else db.setting("company_name", ""))
-                le("department","Department",old["department"] if old else "")
-                le("activity","Activity / Task",old["activity"] if old else "")
-                typ=QComboBox(); typ.addItems(INCIDENT_TYPES); typ.setCurrentText(safe(old["incident_type"]) if old else INCIDENT_TYPES[0]); ff.addRow("Incident Type",typ)
-                injury=QComboBox(); injury.addItems(["Not Applicable","First Aid","Medical Treatment","Lost Time Injury","Restricted Work","Fatality","Near Miss","Property Damage","Environmental","Other"]); injury.setCurrentText(safe(old["injury_type"]) if old else "Not Applicable"); ff.addRow("Type of Injury / Outcome",injury)
-                le("reported_by","Reported By",old["reported_by"] if old else "")
-                desc=QTextEdit(); desc.setMinimumHeight(120); desc.setPlainText(safe(old["description"] if old else "")); ff.addRow("Initial Incident Details / What Happened",desc)
-                immediate=QTextEdit(); immediate.setMinimumHeight(80); immediate.setPlainText(safe(old["immediate_action"] if old else "")); ff.addRow("Immediate Action Taken",immediate)
-                req=QComboBox(); req.addItems(["No","Yes"]); req.setCurrentText(safe(old["investigation_required"] if old else "No")); ff.addRow("Investigation Required?",req)
-                le("reviewed_by","Reviewed By",old["reviewed_by"] if old and "reviewed_by" in old.keys() else "")
-                le("approved_by","Approved By",old["approved_by"] if old and "approved_by" in old.keys() else "")
-                note=QLabel("If investigation is required, save the NOI and use Create / Open Investigation in the register to transfer the initial information."); note.setWordWrap(True); ff.addRow("Workflow",note)
-                buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); outer.addWidget(buttons)
+                f=QDialog(dlg); f.setWindowTitle("Edit Notification of Incident" if old else "New Notification of Incident")
+                f.setWindowFlags(f.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
+                f.resize(980,760); f.setMinimumSize(720,560); fit_dialog_to_desktop(f,0.94,0.90)
+                outer=QVBoxLayout(f); outer.setContentsMargins(14,12,14,12); outer.setSpacing(10)
+                formwrap=QScrollArea(); formwrap.setWidgetResizable(True); formwrap.setFrameShape(QFrame.Shape.NoFrame)
+                fw=QWidget(); grid=QGridLayout(fw); grid.setContentsMargins(4,4,4,8); grid.setHorizontalSpacing(16); grid.setVerticalSpacing(9)
+                grid.setColumnStretch(1,1); grid.setColumnStretch(3,1)
+                fields={}; row=0
+                def le(key,label,val="",col=0):
+                    x=QLineEdit(safe(val)); x.setMinimumHeight(34); fields[key]=x
+                    lab=QLabel(label); lab.setStyleSheet("font-weight:600;color:#31465B;")
+                    grid.addWidget(lab,row,col); grid.addWidget(x,row,col+1); return x
+                le("notification_date","Notification Date",old["notification_date"] if old else today(),0)
+                le("incident_time","Time of Incident",old["incident_time"] if old else "",2); row+=1
+                le("location","Location / Area",old["location"] if old else "",0)
+                le("project","Project",old["project"] if old else db.setting("project_name", ""),2); row+=1
+                le("company","Company / Contractor",old["company"] if old else db.setting("company_name", ""),0)
+                le("department","Department",old["department"] if old else "",2); row+=1
+                le("activity","Activity / Task",old["activity"] if old else "",0)
+                typ=QComboBox(); typ.addItems(INCIDENT_TYPES); typ.setMinimumHeight(34); typ.setCurrentText(safe(old["incident_type"]) if old else INCIDENT_TYPES[0]); grid.addWidget(QLabel("Incident Type"),row,2); grid.addWidget(typ,row,3); row+=1
+                injury=QComboBox(); injury.addItems(["Not Applicable","First Aid","Medical Treatment","Lost Time Injury","Restricted Work","Fatality","Near Miss","Property Damage","Environmental","Other"]); injury.setMinimumHeight(34); injury.setCurrentText(safe(old["injury_type"]) if old else "Not Applicable")
+                grid.addWidget(QLabel("Type of Injury / Outcome"),row,0); grid.addWidget(injury,row,1)
+                le("reported_by","Reported By",old["reported_by"] if old else "",2); row+=1
+                desc=QTextEdit(); desc.setMinimumHeight(118); desc.setPlaceholderText("Describe what happened, people involved, and initial facts..."); desc.setPlainText(safe(old["description"] if old else ""))
+                grid.addWidget(QLabel("Initial Incident Details / What Happened"),row,0,1,4); row+=1; grid.addWidget(desc,row,0,1,4); row+=1
+                immediate=QTextEdit(); immediate.setMinimumHeight(80); immediate.setPlaceholderText("Record immediate actions, first aid, area isolation, notifications, etc."); immediate.setPlainText(safe(old["immediate_action"] if old else ""))
+                grid.addWidget(QLabel("Immediate Action Taken"),row,0,1,4); row+=1; grid.addWidget(immediate,row,0,1,4); row+=1
+                req=QComboBox(); req.addItems(["No","Yes"]); req.setMinimumHeight(34); req.setCurrentText(safe(old["investigation_required"] if old else "No"))
+                grid.addWidget(QLabel("Investigation Required?"),row,0); grid.addWidget(req,row,1)
+                le("reviewed_by","Reviewed By",old["reviewed_by"] if old and "reviewed_by" in old.keys() else "",2); row+=1
+                le("approved_by","Approved By",old["approved_by"] if old and "approved_by" in old.keys() else "",0)
+                hint=QLabel("Save the notification first. If Investigation Required is Yes, select it in the register and use Create / Open Investigation to carry the initial information into the investigation form."); hint.setWordWrap(True); hint.setStyleSheet("color:#52677A;background:#F1F6FA;padding:8px;border-radius:5px;")
+                grid.addWidget(hint,row,0,1,4)
+                formwrap.setWidget(fw); outer.addWidget(formwrap,1)
+                buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); buttons.setMinimumHeight(42); outer.addWidget(buttons)
+                f.setStyleSheet("QDialog{background:#F8FAFC;} QLineEdit,QTextEdit,QComboBox{background:white;border:1px solid #C9D5E0;border-radius:5px;padding:6px;} QLabel{color:#34495E;} QDialogButtonBox QPushButton{min-width:110px;padding:8px 16px;}")
                 def save_noi():
                     if not fields["notification_date"].text().strip() or not fields["location"].text().strip() or not desc.toPlainText().strip():
                         QMessageBox.warning(f,"Required Information","Notification Date, Location, and initial incident details are required."); return
@@ -9590,7 +9621,7 @@ class MainWindow(QMainWindow):
                         db.execute("INSERT INTO incident_notifications(number,notification_date,incident_time,location,project,company,department,activity,incident_type,injury_type,reported_by,description,immediate_action,investigation_required,reviewed_by,approved_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(noi_no,)+vals[:-1]+(stamp,stamp))
                         saved_id=db.fetchone("SELECT id FROM incident_notifications WHERE number=?",(noi_no,))["id"]
                     f.accept(); reload_noi();
-                    if req.currentText()=="Yes": QMessageBox.information(dlg,"Investigation Required","NOI saved. Use Create / Open Investigation to link and continue the investigation form.")
+                    if req.currentText()=="Yes": QMessageBox.information(dlg,"Investigation Required","NOI saved. Select it in the register and use Create / Open Investigation to link and continue.")
                 buttons.accepted.connect(save_noi); buttons.rejected.connect(f.reject); f.exec()
             def create_investigation():
                 noi_id=selected_noi_id()
@@ -9619,25 +9650,35 @@ class MainWindow(QMainWindow):
                 if not path.lower().endswith(".docx"): path+=".docx"
                 try:
                     doc=Document(); sec=doc.sections[0]; sec.top_margin=Inches(.55); sec.bottom_margin=Inches(.55); sec.left_margin=Inches(.65); sec.right_margin=Inches(.65)
-                    # Company/logo banner and formal document identity
-                    table=doc.add_table(rows=1,cols=2); table.alignment=WD_TABLE_ALIGNMENT.CENTER; table.autofit=False; table.columns[0].width=Inches(1.35); table.columns[1].width=Inches(5.9)
-                    cell=table.cell(0,0); lp=report_logo_path()
+                    # Formal centered document heading in a bordered header table.
+                    head=doc.add_table(rows=1,cols=3); head.alignment=WD_TABLE_ALIGNMENT.CENTER; head.autofit=False
+                    head.columns[0].width=Inches(1.0); head.columns[1].width=Inches(5.5); head.columns[2].width=Inches(.4)
+                    logo_cell=head.cell(0,0); logo_cell.width=Inches(1.0); lp=report_logo_path()
                     if lp and Path(lp).exists():
-                        try: cell.paragraphs[0].add_run().add_picture(str(lp),width=Inches(1.15))
+                        try: logo_cell.paragraphs[0].add_run().add_picture(str(lp),width=Inches(.85))
                         except Exception: pass
-                    cell=table.cell(0,1); p=cell.paragraphs[0]; p.alignment=WD_ALIGN_PARAGRAPH.CENTER; rr=p.add_run(safe(company_name()).upper()); rr.bold=True; rr.font.size=Pt(15)
-                    p=cell.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("NOTIFICATION OF INCIDENT (NOI)"); r.bold=True; r.font.size=Pt(16)
-                    p=cell.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run(f"Document No.: {safe(n['number'])}"); r.bold=True; r.font.size=Pt(11)
+                    center=head.cell(0,1); center.width=Inches(5.5); center.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    p=center.paragraphs[0]; p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run(safe(company_name()).upper()); r.bold=True; r.font.size=Pt(14)
+                    p=center.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("NOTIFICATION OF INCIDENT (NOI)"); r.bold=True; r.font.size=Pt(16); r.font.color.rgb=__import__("docx").shared.RGBColor(31,78,121)
+                    p=center.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("INCIDENT NOTIFICATION REPORT"); r.bold=True; r.font.size=Pt(10)
+                    p=center.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run(f"Document No.: {safe(n['number'])}"); r.bold=True; r.font.size=Pt(11)
+                    # header table borders and light blue fill on the central heading cell
+                    for cell in head.rows[0].cells:
+                        tcPr=cell._tc.get_or_add_tcPr(); borders=OxmlElement("w:tcBorders")
+                        for edge in ("top","left","bottom","right"):
+                            el=OxmlElement(f"w:{edge}"); el.set(qn("w:val"),"single"); el.set(qn("w:sz"),"8"); el.set(qn("w:color"),"B7C9D8"); borders.append(el)
+                        tcPr.append(borders)
+                    sh=OxmlElement("w:shd"); sh.set(qn("w:fill"),"EEF4F8"); center._tc.get_or_add_tcPr().append(sh)
                     doc.add_paragraph()
                     def section_heading(label):
-                        p=doc.add_paragraph(); r=p.add_run(label); r.bold=True; r.font.size=Pt(11); r.font.color.rgb=__import__("docx").shared.RGBColor(31,78,121)
+                        p=doc.add_paragraph(); p.paragraph_format.space_before=Pt(8); p.paragraph_format.space_after=Pt(4); r=p.add_run(label); r.bold=True; r.font.size=Pt(11); r.font.color.rgb=__import__("docx").shared.RGBColor(31,78,121)
                     def add_table(pairs):
-                        t=doc.add_table(rows=0,cols=2); t.style="Table Grid"; t.alignment=WD_TABLE_ALIGNMENT.CENTER
+                        t=doc.add_table(rows=0,cols=2); t.style="Table Grid"; t.alignment=WD_TABLE_ALIGNMENT.CENTER; t.autofit=False
                         for label,value in pairs:
                             cells=t.add_row().cells; cells[0].text=str(label); cells[1].text=safe(value) or "—"
-                            cells[0].width=Inches(2.0); cells[1].width=Inches(5.25)
+                            cells[0].width=Inches(2.0); cells[1].width=Inches(5.25); cells[0].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER; cells[1].vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
                             for run in cells[0].paragraphs[0].runs: run.bold=True
-                            for c in cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                            shade=OxmlElement("w:shd"); shade.set(qn("w:fill"),"EAF1F7"); cells[0]._tc.get_or_add_tcPr().append(shade)
                         return t
                     section_heading("1. INCIDENT NOTIFICATION DETAILS")
                     add_table([("NOI Number",n["number"]),("Notification Date",n["notification_date"]),("Incident Time",n["incident_time"]),("Location / Area",n["location"]),("Project",n["project"]),("Company / Contractor",n["company"]),("Department",n["department"]),("Activity / Task",n["activity"]),("Incident Type",n["incident_type"]),("Injury / Outcome",n["injury_type"]),("Reported By",n["reported_by"]),("Investigation Required",n["investigation_required"]),("Linked Investigation",n["investigation_number"] or "Not linked")])
