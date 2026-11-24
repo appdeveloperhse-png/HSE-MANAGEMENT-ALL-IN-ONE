@@ -548,6 +548,15 @@ class Database:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT ''
         )""")
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS noi_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            noi_id INTEGER NOT NULL,
+            file_path TEXT,
+            attachment_type TEXT DEFAULT 'Evidence',
+            remark TEXT DEFAULT '',
+            FOREIGN KEY(noi_id) REFERENCES noi_register(id) ON DELETE CASCADE
+        )""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_noi_attachments_noi ON noi_attachments(noi_id)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_noi_register_date ON noi_register(incident_date)")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_noi_register_link ON noi_register(linked_incident_id)")
         if "noi_id" not in incident_cols:
@@ -1139,6 +1148,7 @@ def attachment_export_map(table_name):
         "incidents": "incident_attachments",
         "audits": "audit_attachments",
         "capa": "capa_attachments",
+        "noi_register": "noi_attachments",
     }.get(table_name)
 
 
@@ -1977,7 +1987,8 @@ def attachment_rows(table_name, record_id):
         "observation_attachments": "observation_id",
         "incident_attachments": "incident_id",
         "audit_attachments": "audit_id",
-        "capa_attachments": "capa_id"
+        "capa_attachments": "capa_id",
+        "noi_attachments": "noi_id"
     }
     if table_name not in allowed:
         return []
@@ -1992,7 +2003,8 @@ def copy_attachments(paths, record_number, table_name, record_id, attachment_typ
         "observation_attachments": "observation_id",
         "incident_attachments": "incident_id",
         "audit_attachments": "audit_id",
-        "capa_attachments": "capa_id"
+        "capa_attachments": "capa_id",
+        "noi_attachments": "noi_id"
     }[table_name]
     saved = []
     for path in paths or []:
@@ -2432,6 +2444,92 @@ OBSERVATION_EXPORT_FIELDS = [
 ]
 
 
+def add_noi_docx_attachments(document, rows):
+    """Append NOI evidence to the Word report, embedding supported file content."""
+    document.add_heading("Supporting Attachments / Evidence", 2)
+    if not rows:
+        document.add_paragraph("No attachments recorded.")
+        return
+    for index, row in enumerate(rows, 1):
+        raw_path = safe(row["file_path"])
+        path = resolve_attachment_path(raw_path)
+        filename = Path(raw_path.replace("\\", "/")).name or f"Attachment {index}"
+        kind = safe(row["attachment_type"]) or "Evidence"
+        remark = safe(row["remark"]) if "remark" in row.keys() else ""
+        p = document.add_paragraph()
+        run = p.add_run(f"{index}. {filename}  |  Type: {kind}")
+        run.bold = True
+        if remark:
+            document.add_paragraph(f"Remark: {remark}")
+        if not path:
+            document.add_paragraph("Original file could not be located at export time.")
+            continue
+        suffix = path.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}:
+            try:
+                document.add_picture(str(path), width=Inches(5.8))
+            except Exception as exc:
+                document.add_paragraph(f"Image could not be embedded: {exc}")
+        elif suffix == ".pdf":
+            try:
+                import fitz
+                pdf = fitz.open(str(path))
+                for page_no, page in enumerate(pdf, 1):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.35, 1.35), alpha=False)
+                    stream = io.BytesIO(pix.tobytes("png"))
+                    document.add_paragraph(f"{filename} — Page {page_no}")
+                    document.add_picture(stream, width=Inches(6.0))
+                pdf.close()
+            except Exception:
+                document.add_paragraph("PDF is recorded in the NOI attachment register; PDF page embedding was unavailable on this computer.")
+        elif suffix in {".txt", ".csv", ".log"}:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                document.add_paragraph(content[:30000] if content else "(No readable text content.)")
+                if len(content) > 30000:
+                    document.add_paragraph("Text appendix truncated after 30,000 characters.")
+            except Exception:
+                document.add_paragraph("Text content could not be read during export.")
+        elif suffix == ".docx":
+            try:
+                attached_doc = Document(str(path))
+                for paragraph in attached_doc.paragraphs:
+                    if paragraph.text.strip():
+                        document.add_paragraph(paragraph.text[:5000])
+                for source_table in attached_doc.tables:
+                    target = document.add_table(rows=0, cols=max(1, len(source_table.columns)))
+                    target.alignment = WD_TABLE_ALIGNMENT.CENTER
+                    for source_row in source_table.rows:
+                        cells = target.add_row().cells
+                        for cell_index, source_cell in enumerate(source_row.cells[:len(cells)]):
+                            cells[cell_index].text = xml_safe(source_cell.text)
+                    style_docx_table(target, header=False, font_size=7)
+            except Exception:
+                document.add_paragraph("Attached Word document could not be read during export; original remains in the NOI attachment register.")
+        elif suffix in {".xlsx", ".xlsm"}:
+            try:
+                from openpyxl import load_workbook
+                workbook = load_workbook(str(path), read_only=True, data_only=True)
+                for sheet in workbook.worksheets:
+                    document.add_heading(f"{filename} — {sheet.title}", 3)
+                    source_rows = list(sheet.iter_rows(values_only=True))[:100]
+                    if source_rows:
+                        max_cols = min(max((len(r) for r in source_rows), default=1), 12)
+                        target = document.add_table(rows=0, cols=max(1, max_cols))
+                        for source_row in source_rows:
+                            cells = target.add_row().cells
+                            for cell_index, value in enumerate(source_row[:max_cols]):
+                                cells[cell_index].text = xml_safe(value)
+                        style_docx_table(target, header=False, font_size=6)
+                    if sheet.max_row > 100:
+                        document.add_paragraph("Only the first 100 rows are reproduced in this report appendix.")
+                workbook.close()
+            except Exception:
+                document.add_paragraph("Attached spreadsheet could not be read during export; original remains in the NOI attachment register.")
+        else:
+            document.add_paragraph("Original file is retained in the NOI attachment register. File name and type are recorded above.")
+
+
 def generate_noi_docx(noi_id, path):
     """Create a formal Notification of Incident report from the separate NOI register."""
     row = db.fetchone("SELECT * FROM noi_register WHERE id=?", (noi_id,))
@@ -2461,6 +2559,11 @@ def generate_noi_docx(noi_id, path):
             t.alignment = WD_TABLE_ALIGNMENT.CENTER
             t.cell(0, 0).text = xml_safe(value)
             style_docx_table(t, header=False, font_size=9)
+    # Include the actual NOI evidence in the exported report. Images are inserted
+    # directly; PDF pages are rendered into the report where PyMuPDF is available;
+    # text/CSV files are reproduced as readable appendix content. Other file types
+    # remain listed with their stored filename and type for traceability.
+    add_noi_docx_attachments(doc, attachment_rows("noi_attachments", noi_id))
     doc.add_heading("Review and Authorization", 2)
     approvals = doc.add_table(rows=2, cols=3)
     approvals.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -9651,9 +9754,64 @@ class MainWindow(QMainWindow):
         field("investigation_required", "Investigation Required", existing["investigation_required"] if existing else "No", 6, 1, options=["Yes", "No"])
         field("description", "Basic Details - What Happened", existing["description"] if existing else "", 7, 0, 2, True)
         field("immediate_action", "Immediate Action Taken", existing["immediate_action"] if existing else "", 8, 0, 2, True)
-        field("prepared_by", "Prepared By", existing["prepared_by"] if existing else "", 9, 0)
-        field("reviewed_by", "Reviewed By", existing["reviewed_by"] if existing else "", 9, 1)
-        field("approved_by", "Approved By", existing["approved_by"] if existing else "", 10, 0)
+
+        # NOI-only attachment picker. Existing files are shown while editing;
+        # newly selected files are copied into the application's attachment store
+        # only after the NOI has been saved successfully.
+        attachment_box = QGroupBox("Supporting Attachments / Evidence")
+        attachment_layout = QVBoxLayout(attachment_box)
+        attachment_list = QListWidget()
+        attachment_list.setMinimumHeight(76)
+        pending_noi_files = []
+        removed_noi_attachment_ids = []
+        existing_noi_attachments = attachment_rows("noi_attachments", noi_id) if existing else []
+        for attachment in existing_noi_attachments:
+            item = QListWidgetItem(Path(safe(attachment["file_path"]).replace("\\", "/")).name)
+            item.setToolTip(safe(attachment["file_path"]))
+            item.setData(Qt.ItemDataRole.UserRole, int(attachment["id"]))
+            attachment_list.addItem(item)
+        attachment_layout.addWidget(attachment_list)
+        attachment_buttons = QHBoxLayout()
+        add_attachment_btn = QPushButton("+ Add Attachment")
+        remove_attachment_btn = QPushButton("Remove Selected")
+        attachment_buttons.addWidget(add_attachment_btn)
+        attachment_buttons.addWidget(remove_attachment_btn)
+        attachment_buttons.addStretch()
+        attachment_layout.addLayout(attachment_buttons)
+        attachment_hint = QLabel("Attach photographs, PDF reports, witness statements or other incident evidence.")
+        attachment_hint.setWordWrap(True)
+        attachment_hint.setStyleSheet("color:#64748b;font-size:11px;")
+        attachment_layout.addWidget(attachment_hint)
+        grid.addWidget(attachment_box, 11, 0, 1, 2)
+        def pick_noi_attachments():
+            paths, _ = QFileDialog.getOpenFileNames(dialog, "Select NOI Attachments", "", "All Files (*)")
+            for selected_path in paths:
+                if selected_path not in pending_noi_files and Path(selected_path).is_file():
+                    pending_noi_files.append(selected_path)
+                    item = QListWidgetItem(Path(selected_path).name + "  (new)")
+                    item.setToolTip(selected_path)
+                    item.setData(Qt.ItemDataRole.UserRole, selected_path)
+                    attachment_list.addItem(item)
+        def remove_noi_attachment():
+            item = attachment_list.currentItem()
+            if not item:
+                return
+            stored_id = item.data(Qt.ItemDataRole.UserRole)
+            pending_path = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(pending_path, str) and pending_path in pending_noi_files:
+                pending_noi_files.remove(pending_path)
+            elif stored_id:
+                answer = QMessageBox.question(dialog, "Remove Attachment", "Remove this attachment from the NOI record when you save?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                removed_noi_attachment_ids.append(int(stored_id))
+            attachment_list.takeItem(attachment_list.row(item))
+        add_attachment_btn.clicked.connect(pick_noi_attachments)
+        remove_attachment_btn.clicked.connect(remove_noi_attachment)
+
+        field("prepared_by", "Prepared By", existing["prepared_by"] if existing else "", 12, 0)
+        field("reviewed_by", "Reviewed By", existing["reviewed_by"] if existing else "", 12, 1)
+        field("approved_by", "Approved By", existing["approved_by"] if existing else "", 13, 0)
         for col in (0, 1): grid.setColumnStretch(col, 1)
         scroll.setWidget(content); outer.addWidget(scroll, 1)
         footer = QHBoxLayout(); footer.addStretch()
@@ -9677,9 +9835,20 @@ class MainWindow(QMainWindow):
                 values = tuple(val(k) for k in ["report_date", "incident_date", "happened_time", "location", "project", "company", "department", "activity", "incident_type", "injury_type", "reported_by", "reported_by_designation", "person_involved", "description", "immediate_action", "investigation_required", "prepared_by", "reviewed_by", "approved_by"])
                 if existing:
                     db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,reviewed_by=?,approved_by=?,updated_at=? WHERE id=?""", values + (now, noi_id))
+                    saved_noi_id = int(noi_id)
+                    saved_noi_number = safe(existing["number"])
                 else:
                     number = next_number("HSE-NOI", "noi_register")
                     db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,reviewed_by,approved_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + ("Reported", now, now))
+                    saved = db.fetchone("SELECT id FROM noi_register WHERE number=?", (number,))
+                    if not saved:
+                        raise RuntimeError("NOI was saved but its new register ID could not be retrieved.")
+                    saved_noi_id = int(saved["id"])
+                    saved_noi_number = number
+                for attachment_id in removed_noi_attachment_ids:
+                    db.execute("DELETE FROM noi_attachments WHERE id=? AND noi_id=?", (attachment_id, saved_noi_id))
+                if pending_noi_files:
+                    copy_attachments(pending_noi_files, saved_noi_number, "noi_attachments", saved_noi_id, "NOI Supporting Evidence")
                 dialog.accept(); refresh()
             except Exception as exc:
                 logging.exception("NOI save failed"); QMessageBox.critical(dialog, "NOI Save Error", f"Unable to save the Notification of Incident.\n\n{exc}")
