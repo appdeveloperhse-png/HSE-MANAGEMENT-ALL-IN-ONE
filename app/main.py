@@ -2210,22 +2210,63 @@ def add_docx_boxed_section(document, title, text, font_size=8):
 
 
 def add_docx_attachments(document, rows):
+    """Embed incident evidence in the investigation report, not just list filenames."""
     document.add_heading("Evidence / Attachments", level=2)
     if not rows:
         document.add_paragraph("No attachments recorded.")
         return
-    for i,row in enumerate(rows,1):
-        path=Path(safe(row["file_path"])); remark=safe(row["remark"]) if "remark" in row.keys() else ""
-        document.add_paragraph(f"{i}. {path.name} | Type: {safe(row['attachment_type'])} | Remark: {remark}")
-        if path.exists() and path.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+    for index, row in enumerate(rows, 1):
+        stored = safe(row["file_path"])
+        path = resolve_attachment_path(stored)
+        filename = Path(stored.replace("\\", "/")).name or f"Attachment {index}"
+        kind = safe(row["attachment_type"]) if "attachment_type" in row.keys() else "Evidence"
+        remark = safe(row["remark"]) if "remark" in row.keys() else ""
+        para = document.add_paragraph()
+        label = para.add_run(f"{index}. {filename} | Type: {kind}")
+        label.bold = True
+        if remark:
+            document.add_paragraph(f"Remark: {remark}")
+        if not path:
+            document.add_paragraph("Attachment file could not be located. The stored filename is retained for traceability.")
+            continue
+        suffix = path.suffix.lower()
+        if suffix in image_exts:
+            # Normalize with Pillow first. This fixes unsupported/rotated formats and
+            # avoids silently omitting valid photos from the final investigation report.
+            stream = attachment_image_stream(str(path))
+            if stream is not None:
+                try:
+                    pic = document.add_paragraph()
+                    pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    pic.add_run().add_picture(stream, width=Inches(5.7))
+                    continue
+                except Exception:
+                    logging.exception("Unable to embed incident image attachment: %s", path)
+            document.add_paragraph("Image was found but could not be converted for Word embedding.")
+        elif suffix == ".pdf":
             try:
-                p=document.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                p.add_run().add_picture(str(path), width=Inches(2.0), height=Inches(2.0))
+                import fitz
+                pdf = fitz.open(str(path))
+                for page_no, page in enumerate(pdf, 1):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                    stream = io.BytesIO(pix.tobytes("png"))
+                    cap = document.add_paragraph(f"{filename} — Page {page_no}")
+                    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    document.add_picture(stream, width=Inches(5.8))
+                pdf.close()
             except Exception:
-                pass
-        elif path.exists() and path.suffix.lower()==".pdf":
-            document.add_paragraph("PDF attachment: " + path.name)
-    
+                logging.exception("Unable to embed incident PDF attachment: %s", path)
+                document.add_paragraph("PDF could not be rendered on this computer; the original file remains in the attachment store.")
+        elif suffix in {".txt", ".csv", ".log"}:
+            try:
+                content = path.read_text(encoding="utf-8", errors="replace")
+                document.add_paragraph(content[:20000] if content else "(No readable text content.)")
+            except Exception:
+                document.add_paragraph("Text attachment could not be read during export.")
+        else:
+            document.add_paragraph(f"Original file retained in the attachment store ({path.suffix or 'unknown file type'}).")
+
 
 def add_docx_signatures(document):
     document.add_paragraph()
@@ -2363,13 +2404,18 @@ def generate_incident_docx(incident_id, path):
                 else:
                     cells[4].text=""
                     for nm in att_names:
-                        fp=incident_attach_map.get(Path(nm).name, ATTACH_DIR / Path(nm).name)
-                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                        stored_fp=incident_attach_map.get(Path(nm).name, ATTACH_DIR / Path(nm).name)
+                        fp=resolve_attachment_path(str(stored_fp))
+                        if fp and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif",".tif",".tiff",".webp"}:
                             try:
                                 pp=cells[4].paragraphs[0] if not cells[4].paragraphs[0].runs else cells[4].add_paragraph()
-                                pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(fp),width=Inches(2.0),height=Inches(2.0))
+                                pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                                stream=attachment_image_stream(str(fp))
+                                if stream: pp.add_run().add_picture(stream,width=Inches(1.8))
                                 cells[4].add_paragraph(xml_safe(fp.name))
-                            except Exception: cells[4].add_paragraph(xml_safe(fp.name))
+                            except Exception:
+                                logging.exception("Unable to embed Fishbone image: %s", fp)
+                                cells[4].add_paragraph(xml_safe(Path(nm).name))
                         else:
                             cells[4].add_paragraph(xml_safe(fp.name))
             style_docx_table(ft,font_size=7)
@@ -2465,10 +2511,16 @@ def add_noi_docx_attachments(document, rows):
             document.add_paragraph("Original file could not be located at export time.")
             continue
         suffix = path.suffix.lower()
-        if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"}:
+        if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}:
             try:
-                document.add_picture(str(path), width=Inches(5.8))
+                image_stream = attachment_image_stream(str(path))
+                if image_stream is None:
+                    raise ValueError("Image format could not be converted for Word.")
+                image_para = document.add_paragraph()
+                image_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                image_para.add_run().add_picture(image_stream, width=Inches(5.8))
             except Exception as exc:
+                logging.exception("Unable to embed NOI image attachment: %s", path)
                 document.add_paragraph(f"Image could not be embedded: {exc}")
         elif suffix == ".pdf":
             try:
@@ -2548,6 +2600,7 @@ def generate_noi_docx(noi_id, path):
         ("Designation", row["reported_by_designation"]),
         ("Investigation Required", row["investigation_required"]),
         ("NOI Status", row["status"]),
+        ("Prepared By", row["prepared_by"]), ("Reviewed By", row["reviewed_by"]), ("Approved By", row["approved_by"]),
         ("Linked Investigation", (db.fetchone("SELECT number FROM incidents WHERE id=?", (row["linked_incident_id"],))["number"]
                                   if row["linked_incident_id"] and db.fetchone("SELECT number FROM incidents WHERE id=?", (row["linked_incident_id"],)) else "Not linked")),
     ])
@@ -9557,10 +9610,10 @@ class MainWindow(QMainWindow):
         noi_layout.addWidget(noi_title)
         noi_toolbar = QHBoxLayout()
         noi_buttons = {}
-        for label in ["+ New NOI", "Edit Selected", "Delete Selected", "Export NOI Report", "Create / Open Investigation"]:
+        for label in ["+ New NOI", "Edit Selected", "Submit NOI", "Review NOI", "Approve NOI", "Delete Selected", "Export NOI Report", "Create / Open Investigation"]:
             b = QPushButton(label); b.setMinimumHeight(34); b.setMinimumWidth(125); noi_toolbar.addWidget(b); noi_buttons[label] = b
         noi_toolbar.addStretch(); noi_layout.addLayout(noi_toolbar)
-        noi_table = QTableWidget(); noi_headers = ["ID", "NOI Number", "Report Date", "Incident Date", "Time", "Location", "Incident Type", "Injury Type", "Reported By", "Investigation Required", "Investigation"]
+        noi_table = QTableWidget(); noi_headers = ["ID", "NOI Number", "Report Date", "Incident Date", "Time", "Location", "Incident Type", "Injury Type", "Reported By", "Investigation Required", "Workflow Status", "Investigation"]
         noi_table.setColumnCount(len(noi_headers)); noi_table.setHorizontalHeaderLabels(noi_headers)
         noi_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         noi_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -9573,13 +9626,53 @@ class MainWindow(QMainWindow):
             rows = db.fetchall("SELECT n.*, i.number AS investigation_number FROM noi_register n LEFT JOIN incidents i ON i.id=n.linked_incident_id ORDER BY n.id DESC")
             noi_table.setRowCount(len(rows))
             for r, row in enumerate(rows):
-                vals = [row["id"], row["number"], row["report_date"], row["incident_date"], row["happened_time"], row["location"], row["incident_type"], row["injury_type"], row["reported_by"], row["investigation_required"], row["investigation_number"] or "Not Linked"]
+                vals = [row["id"], row["number"], row["report_date"], row["incident_date"], row["happened_time"], row["location"], row["incident_type"], row["injury_type"], row["reported_by"], row["investigation_required"], row["status"], row["investigation_number"] or "Not Linked"]
                 for c, value in enumerate(vals):
                     item = QTableWidgetItem(safe(value)); item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignCenter if c in (0, 9) else Qt.AlignmentFlag.AlignLeft))
                     noi_table.setItem(r, c, item)
 
         def selected_noi_id(action="NOI"):
             return self.selected_id(noi_table, action)
+
+        def noi_workflow(action):
+            rid = selected_noi_id(action)
+            if rid is None:
+                return
+            record = db.fetchone("SELECT * FROM noi_register WHERE id=?", (rid,))
+            if not record:
+                return
+            current = safe(record["status"]) or "Draft"
+            if action == "Submit NOI":
+                if current not in {"Reported", "Draft", "Prepared"}:
+                    QMessageBox.information(self, "NOI Workflow", f"This NOI is already {current}.")
+                    return
+                prepared = safe(record["prepared_by"]).strip()
+                if not prepared:
+                    QMessageBox.warning(self, "Prepared By Required", "Open Edit Selected and enter the Prepared By name before submitting the NOI.")
+                    return
+                db.execute("UPDATE noi_register SET status='Submitted', updated_at=? WHERE id=?", (datetime.now().isoformat(), rid))
+            elif action == "Review NOI":
+                if current != "Submitted":
+                    QMessageBox.warning(self, "Workflow Order", "The NOI must be submitted before it can be reviewed.")
+                    return
+                name, ok = QInputDialog.getText(self, "Review Notification of Incident", "Reviewed By - Full Name:")
+                if not ok: return
+                if not name.strip():
+                    QMessageBox.warning(self, "Name Required", "Enter the reviewer’s full name.")
+                    return
+                db.execute("UPDATE noi_register SET reviewed_by=?, status='Reviewed', updated_at=? WHERE id=?", (name.strip(), datetime.now().isoformat(), rid))
+            elif action == "Approve NOI":
+                if current != "Reviewed":
+                    QMessageBox.warning(self, "Workflow Order", "The NOI must be reviewed before it can be approved.")
+                    return
+                name, ok = QInputDialog.getText(self, "Approve Notification of Incident", "Approved By - Full Name:")
+                if not ok: return
+                if not name.strip():
+                    QMessageBox.warning(self, "Name Required", "Enter the approver’s full name.")
+                    return
+                db.execute("UPDATE noi_register SET approved_by=?, status='Approved', updated_at=? WHERE id=?", (name.strip(), datetime.now().isoformat(), rid))
+            load_noi()
+            QMessageBox.information(self, "NOI Workflow", f"{action} completed successfully.")
 
         def export_noi_report():
             rid = selected_noi_id("Export NOI Report")
@@ -9626,6 +9719,9 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.Yes:
                 db.execute("DELETE FROM noi_register WHERE id=?", (rid,)); load_noi()
         noi_buttons["Delete Selected"].clicked.connect(delete_noi)
+        noi_buttons["Submit NOI"].clicked.connect(lambda checked=False: noi_workflow("Submit NOI"))
+        noi_buttons["Review NOI"].clicked.connect(lambda checked=False: noi_workflow("Review NOI"))
+        noi_buttons["Approve NOI"].clicked.connect(lambda checked=False: noi_workflow("Approve NOI"))
         noi_buttons["Export NOI Report"].clicked.connect(export_noi_report)
         noi_buttons["Create / Open Investigation"].clicked.connect(open_noi_investigation)
         noi_table.cellDoubleClicked.connect(lambda _r, _c: (self.noi_form(load_noi, selected_noi_id("Edit NOI")) if selected_noi_id("Edit NOI") is not None else None))
@@ -9809,9 +9905,11 @@ class MainWindow(QMainWindow):
         add_attachment_btn.clicked.connect(pick_noi_attachments)
         remove_attachment_btn.clicked.connect(remove_noi_attachment)
 
-        field("prepared_by", "Prepared By", existing["prepared_by"] if existing else "", 12, 0)
-        field("reviewed_by", "Reviewed By", existing["reviewed_by"] if existing else "", 12, 1)
-        field("approved_by", "Approved By", existing["approved_by"] if existing else "", 13, 0)
+        field("prepared_by", "Prepared By (Full Name)", existing["prepared_by"] if existing else "", 12, 0, 2)
+        workflow_note = QLabel("After saving, use Submit NOI → Review NOI → Approve NOI in the register. Reviewer and approver names are recorded by their respective workflow actions.")
+        workflow_note.setWordWrap(True)
+        workflow_note.setStyleSheet("color:#526477;background:#eef4fa;border:1px solid #d5e1ed;border-radius:6px;padding:8px;")
+        grid.addWidget(workflow_note, 13, 0, 1, 2)
         for col in (0, 1): grid.setColumnStretch(col, 1)
         scroll.setWidget(content); outer.addWidget(scroll, 1)
         footer = QHBoxLayout(); footer.addStretch()
@@ -9832,14 +9930,14 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(dialog, "Linked Investigation", "Investigation Required cannot be changed to No because this NOI is already linked to an investigation."); return
             try:
                 now = datetime.now().isoformat()
-                values = tuple(val(k) for k in ["report_date", "incident_date", "happened_time", "location", "project", "company", "department", "activity", "incident_type", "injury_type", "reported_by", "reported_by_designation", "person_involved", "description", "immediate_action", "investigation_required", "prepared_by", "reviewed_by", "approved_by"])
+                values = tuple(val(k) for k in ["report_date", "incident_date", "happened_time", "location", "project", "company", "department", "activity", "incident_type", "injury_type", "reported_by", "reported_by_designation", "person_involved", "description", "immediate_action", "investigation_required", "prepared_by"])
                 if existing:
-                    db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,reviewed_by=?,approved_by=?,updated_at=? WHERE id=?""", values + (now, noi_id))
+                    db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,updated_at=? WHERE id=?""", values + (now, noi_id))
                     saved_noi_id = int(noi_id)
                     saved_noi_number = safe(existing["number"])
                 else:
                     number = next_number("HSE-NOI", "noi_register")
-                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,reviewed_by,approved_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + ("Reported", now, now))
+                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + ("Draft", now, now))
                     saved = db.fetchone("SELECT id FROM noi_register WHERE number=?", (number,))
                     if not saved:
                         raise RuntimeError("NOI was saved but its new register ID could not be retrieved.")
@@ -9860,11 +9958,25 @@ class MainWindow(QMainWindow):
         if incident_id and not existing: return
         linked_noi_id = noi_id or (existing["noi_id"] if existing and "noi_id" in existing.keys() else None)
         noi_record = db.fetchone("SELECT * FROM noi_register WHERE id=?", (linked_noi_id,)) if linked_noi_id else None
-        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1200,850); dialog.setMinimumSize(1100,750)
-        outer=QVBoxLayout(dialog); title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
-        scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
+        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1240,900); dialog.setMinimumSize(980,680)
+        dialog.setStyleSheet("""
+            QDialog { background:#f3f6fa; }
+            QLabel#incidentFormTitle { color:#17365D; font-size:21px; font-weight:800; padding:12px 14px; background:#ffffff; border:1px solid #d9e2ec; border-left:5px solid #2F75B5; border-radius:8px; }
+            QScrollArea { border:0; background:transparent; }
+            QWidget#incidentFormContent { background:#ffffff; }
+            QGroupBox { font-weight:700; color:#17365D; border:1px solid #cbd8e6; border-radius:8px; margin-top:12px; padding:12px 8px 8px 8px; background:#fbfdff; }
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; }
+            QLineEdit, QTextEdit, QComboBox, QDateEdit { background:#ffffff; border:1px solid #c5d0dc; border-radius:5px; padding:7px; min-height:20px; selection-background-color:#2F75B5; }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus { border:2px solid #2F75B5; }
+            QPushButton { background:#edf3f9; color:#17365D; border:1px solid #c4d3e2; border-radius:5px; padding:7px 11px; font-weight:600; }
+            QPushButton:hover { background:#dceaf7; }
+            QScrollBar:vertical { width:12px; background:#edf1f5; }
+        """)
+        outer=QVBoxLayout(dialog); outer.setContentsMargins(16,14,16,14); outer.setSpacing(12)
+        title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setObjectName("incidentFormTitle"); outer.addWidget(title)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame); content=QWidget(); content.setObjectName("incidentFormContent"); form=QFormLayout(content); form.setContentsMargins(18,16,18,18); form.setHorizontalSpacing(18); form.setVerticalSpacing(11); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter); edits={}
         def add_edit(name,label=None,value=""):
-            e=QLineEdit(safe(value)); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
+            e=QLineEdit(safe(value)); e.setMinimumHeight(34); e.setPlaceholderText(label or name.replace("_"," ").title()); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
         add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else (f"{safe(noi_record['incident_type'])} - {safe(noi_record['location'])}" if noi_record else ""))
         add_edit("permit_number","Permit Number",existing["permit_number"] if existing and "permit_number" in existing.keys() else "")
         if noi_record:
@@ -10425,7 +10537,7 @@ class MainWindow(QMainWindow):
                 db.execute("UPDATE incidents SET incident_title=?, permit_number=?, noi_id=? WHERE id=?",
                            (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), linked_noi_id, rid))
                 if linked_noi_id:
-                    db.execute("UPDATE noi_register SET linked_incident_id=?, status='Investigation Linked', updated_at=? WHERE id=?",
+                    db.execute("UPDATE noi_register SET linked_incident_id=?, status=CASE WHEN status='Approved' THEN status ELSE 'Investigation Linked' END, updated_at=? WHERE id=?",
                                (rid, datetime.now().isoformat(), linked_noi_id))
                 # Save Fishbone cause attachments and replace temporary source paths with
                 # the saved filenames so reports can display the actual evidence.
