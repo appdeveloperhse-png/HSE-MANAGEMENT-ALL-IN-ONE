@@ -2112,7 +2112,7 @@ def report_logo_path():
             logging.exception("Unable to resolve report logo")
     return None
 
-def add_docx_report_header(document,title,kind="REPORT",report_no=""):
+def add_docx_report_header(document,title,kind="REPORT",report_no="",normalize_logo=False):
     section=document.sections[0]; header=section.header
     usable=(section.page_width-section.left_margin-section.right_margin)/914400.0
     if usable < 9.0:
@@ -2125,9 +2125,17 @@ def add_docx_report_header(document,title,kind="REPORT",report_no=""):
     left,mid,right=table.rows[0].cells
     lp=left.paragraphs[0]; lp.alignment=WD_ALIGN_PARAGRAPH.CENTER; logo=report_logo_path()
     if logo:
-        try: lp.add_run().add_picture(str(logo),width=Inches(1.15))
-        except Exception: lp.add_run(xml_safe(company_name())).bold=True
-    else: lp.add_run(xml_safe(company_name())).bold=True
+        try:
+            logo_stream = attachment_image_stream(str(logo)) if normalize_logo else None
+            if logo_stream is not None:
+                lp.add_run().add_picture(logo_stream, width=Inches(1.15))
+            else:
+                lp.add_run().add_picture(str(logo), width=Inches(1.15))
+        except Exception:
+            logging.exception("Unable to embed Settings company logo in Word report")
+            lp.add_run(xml_safe(company_name())).bold=True
+    else:
+        lp.add_run(xml_safe(company_name())).bold=True
     mp=mid.paragraphs[0]; mp.alignment=WD_ALIGN_PARAGRAPH.CENTER
     r=mp.add_run(xml_safe(title)); r.bold=True; r.font.size=Pt(14)
     r=mp.add_run("\n"+xml_safe(company_name())); r.bold=True; r.font.size=Pt(9)
@@ -2287,7 +2295,7 @@ def generate_incident_docx(incident_id, path):
     # investigation tables and evidence fields, so landscape prevents table
     # compression while preserving the existing report content.
     set_docx_landscape(doc)
-    add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"])
+    add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"],normalize_logo=True)
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
     noi_reference = ""
     if "noi_id" in row.keys() and row["noi_id"]:
@@ -2459,13 +2467,39 @@ def generate_incident_docx(incident_id, path):
     add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id))
     sig=details.get("approval_signatures",{}) if isinstance(details.get("approval_signatures",{}),dict) else {}
     prepared=sig.get("prepared_by",{}) if isinstance(sig.get("prepared_by",{}),dict) else {}
+    workflow=details.get("investigation_workflow",{}) if isinstance(details.get("investigation_workflow",{}),dict) else {}
+
+    def workflow_date(value):
+        value=safe(value).strip()
+        if not value:
+            return ""
+        try:
+            return datetime.fromisoformat(value).strftime("%d-%b-%Y")
+        except Exception:
+            return value[:10]
+
     doc.add_paragraph()
-    doc.add_heading("Prepared By", level=2)
-    st=doc.add_table(rows=0, cols=2); st.style="Table Grid"; st.autofit=False
-    for label, value in [("Name", prepared.get("name", "")), ("Position", prepared.get("position", "")),
-                         ("Signature", prepared.get("signature", "")), ("Date", prepared.get("date", ""))]:
-        cells=st.add_row().cells; cells[0].text=label; cells[1].text=safe(value)
-    style_docx_table(st,header=False,font_size=9)
+    doc.add_heading("Review and Authorization", level=2)
+    approval_table=doc.add_table(rows=2, cols=3)
+    approval_table.alignment=WD_TABLE_ALIGNMENT.CENTER
+    approval_table.autofit=False
+    approval_labels=["Prepared By","Reviewed By","Approved By"]
+    approval_values=[
+        safe(prepared.get("name","")),
+        safe(workflow.get("reviewed_by","")),
+        safe(workflow.get("approved_by","")),
+    ]
+    approval_details=[
+        "Position: "+safe(prepared.get("position",""))+"\nSignature: "+safe(prepared.get("signature",""))+"\nDate: "+safe(prepared.get("date","")),
+        "Signature: __________________\nDate: "+workflow_date(workflow.get("reviewed_at","")),
+        "Signature: __________________\nDate: "+workflow_date(workflow.get("approved_at","")),
+    ]
+    for col in range(3):
+        approval_table.cell(0,col).text=approval_labels[col]
+        approval_table.cell(1,col).text=(approval_values[col] or "________________________")+"\n"+approval_details[col]
+        approval_table.cell(0,col).vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        approval_table.cell(1,col).vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    style_docx_table(approval_table,header=True,font_size=8)
     add_docx_footer(doc); save_docx_validated(doc,path)
 
 
@@ -10032,30 +10066,30 @@ class MainWindow(QMainWindow):
         if incident_id and not existing: return
         linked_noi_id = noi_id or (existing["noi_id"] if existing and "noi_id" in existing.keys() else None)
         noi_record = db.fetchone("SELECT * FROM noi_register WHERE id=?", (linked_noi_id,)) if linked_noi_id else None
-        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1240,900); dialog.setMinimumSize(980,680)
+        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1120,780); dialog.setMinimumSize(900,620)
         dialog.setStyleSheet("""
-            QDialog { background:#dce5ef; color:#172b43; }
-            QLabel { color:#172b43; font-size:10pt; font-weight:600; }
-            QLabel#incidentFormTitle { color:#ffffff; font-size:21px; font-weight:900; padding:14px 16px; background:#17365D; border:1px solid #102943; border-left:7px solid #12A6A0; border-radius:9px; }
+            QDialog { background:#d4e0ec; color:#102a43; }
+            QLabel { color:#183650; font-size:9.5pt; font-weight:600; }
+            QLabel#incidentFormTitle { color:#ffffff; font-size:19px; font-weight:900; padding:11px 14px; background:#123b5d; border:1px solid #0b2943; border-left:6px solid #00a6a6; border-radius:8px; }
             QScrollArea { border:0; background:transparent; }
-            QWidget#incidentFormContent { background:#edf2f8; }
-            QGroupBox { font-weight:800; font-size:11pt; color:#123456; border:1px solid #8fa8c2; border-top:4px solid #2F75B5; border-radius:9px; margin-top:15px; padding:14px 10px 10px 10px; background:#f8fbff; }
-            QGroupBox::title { subcontrol-origin:margin; left:13px; padding:2px 8px; color:#123456; background:#dce8f5; border-radius:4px; }
-            QLineEdit, QTextEdit, QComboBox, QDateEdit { background:#ffffff; color:#172b43; border:1px solid #8299b2; border-radius:6px; padding:8px; min-height:22px; selection-background-color:#176B87; selection-color:#ffffff; }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus { border:2px solid #087F8C; background:#ffffff; }
-            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QDateEdit:disabled { background:#e2e8f0; color:#52657a; }
-            QComboBox QAbstractItemView { background:#ffffff; color:#172b43; selection-background-color:#176B87; selection-color:#ffffff; }
-            QPushButton { background:#24476b; color:#ffffff; border:1px solid #17365D; border-radius:7px; padding:8px 13px; font-weight:800; min-height:22px; }
-            QPushButton:hover { background:#087F8C; border-color:#06656f; }
-            QPushButton:pressed { background:#123456; }
-            QDialogButtonBox QPushButton { min-width:125px; padding:9px 15px; }
-            QScrollBar:vertical { width:13px; background:#d5dfeb; }
-            QScrollBar::handle:vertical { background:#7892ad; border-radius:5px; min-height:25px; }
+            QWidget#incidentFormContent { background:#e7eef6; }
+            QGroupBox { font-weight:800; font-size:10pt; color:#103b5c; border:1px solid #7898b6; border-top:3px solid #087f8c; border-radius:8px; margin-top:12px; padding:11px 9px 8px 9px; background:#f8fbff; }
+            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:2px 7px; color:#103b5c; background:#d4e4f2; border-radius:4px; }
+            QLineEdit, QTextEdit, QComboBox, QDateEdit { background:#ffffff; color:#102a43; border:1px solid #6f8ca8; border-radius:5px; padding:6px 8px; min-height:20px; selection-background-color:#087f8c; selection-color:#ffffff; }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus { border:2px solid #007f87; background:#ffffff; }
+            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QDateEdit:disabled { background:#dce5ee; color:#52677b; }
+            QComboBox QAbstractItemView { background:#ffffff; color:#102a43; selection-background-color:#087f8c; selection-color:#ffffff; }
+            QPushButton { background:#174f75; color:#ffffff; border:1px solid #103b5c; border-radius:6px; padding:7px 11px; font-weight:800; min-height:21px; }
+            QPushButton:hover { background:#008b8b; border-color:#006d73; }
+            QPushButton:pressed { background:#0b304d; }
+            QDialogButtonBox QPushButton { min-width:112px; padding:8px 12px; }
+            QScrollBar:vertical { width:12px; background:#d1deea; }
+            QScrollBar::handle:vertical { background:#6888a5; border-radius:5px; min-height:24px; }
             QScrollBar::handle:vertical:hover { background:#315b80; }
         """)
-        outer=QVBoxLayout(dialog); outer.setContentsMargins(16,14,16,14); outer.setSpacing(12)
+        outer=QVBoxLayout(dialog); outer.setContentsMargins(12,10,12,10); outer.setSpacing(8)
         title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setObjectName("incidentFormTitle"); outer.addWidget(title)
-        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame); content=QWidget(); content.setObjectName("incidentFormContent"); form=QFormLayout(content); form.setContentsMargins(18,16,18,18); form.setHorizontalSpacing(18); form.setVerticalSpacing(11); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter); edits={}
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame); content=QWidget(); content.setObjectName("incidentFormContent"); form=QFormLayout(content); form.setContentsMargins(14,12,14,14); form.setHorizontalSpacing(14); form.setVerticalSpacing(8); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter); edits={}
         def add_edit(name,label=None,value=""):
             e=QLineEdit(safe(value)); e.setMinimumHeight(34); e.setPlaceholderText(label or name.replace("_"," ").title()); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
         add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else (f"{safe(noi_record['incident_type'])} - {safe(noi_record['location'])}" if noi_record else ""))
