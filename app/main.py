@@ -55,7 +55,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.23"
+APP_VERSION = "1.4.24"
 
 
 def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
@@ -4881,7 +4881,8 @@ class MainWindow(QMainWindow):
             "Reports",
             "Master Data",
             "Settings",
-            "Cloud Sync"
+            "Cloud Sync",
+            "Emergency Drill Management"
         ]
 
         self.nav.addItems(modules)
@@ -4963,6 +4964,9 @@ class MainWindow(QMainWindow):
                 self.settings_page()
             elif row == 13:
                 self.cloud_sync_page()
+            elif row == 14:
+                w, layout = self.page("Emergency Drill Management")
+                layout.addWidget(EmergencyDrillModule(self, db), 1)
             self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
@@ -39551,6 +39555,1016 @@ class RiskAssessmentModule(QWidget):
         except Exception as exc:
             logging.exception("RA Word export failed")
             QMessageBox.critical(self, "Export Failed", str(exc))
+
+
+# ============================================================
+# EMERGENCY DRILL MANAGEMENT MODULE
+# Self-contained module. Its tables and workflows are isolated
+# from existing HSE modules and are created additively.
+# ============================================================
+
+EMERGENCY_DRILL_TYPES = [
+    "Fire & Evacuation", "Medical Emergency", "Chemical Spill",
+    "Gas Leakage", "Confined Space Rescue", "Working at Height Rescue",
+    "Electrical Emergency", "Explosion Emergency", "Natural Disaster",
+    "Severe Weather", "Security Threat / Bomb Threat",
+    "First Aid Response", "Environmental / Oil Spill", "Business Continuity",
+    "Other"
+]
+
+EMERGENCY_CHECKLISTS = {
+    "Fire & Evacuation": [
+        "Emergency alarm activated and audible throughout the area",
+        "Employees responded promptly to the alarm",
+        "Emergency exits and evacuation routes were accessible",
+        "Fire wardens performed assigned duties",
+        "Employees proceeded to the designated assembly point",
+        "Headcount completed and personnel accounted for",
+        "Emergency response team mobilised effectively",
+        "Persons requiring assistance were supported",
+        "Communication between response team and control point was effective",
+        "All-clear was communicated and re-entry controlled",
+    ],
+    "Medical Emergency": [
+        "Emergency reported promptly and location communicated",
+        "First aider / response team arrived promptly",
+        "First aid equipment was available and suitable",
+        "Casualty assessment and scene safety were demonstrated",
+        "Emergency services escalation process was followed",
+        "Access route for ambulance was clear",
+        "Communication and handover were effective",
+        "Incident area was controlled and protected",
+    ],
+    "Chemical Spill": [
+        "Spill was identified and reported promptly",
+        "Area was isolated and access controlled",
+        "Correct SDS and spill response procedure were available",
+        "Suitable PPE was selected and used",
+        "Correct spill kit and containment materials were used",
+        "Drain and environmental receptors were protected",
+        "Waste was collected and labelled appropriately",
+        "Decontamination and reporting arrangements were followed",
+    ],
+    "Gas Leakage": [
+        "Leak was identified and alarm raised promptly",
+        "Area was evacuated and access restricted",
+        "Ignition sources were controlled where safe to do so",
+        "Emergency isolation arrangements were demonstrated",
+        "Assembly and headcount were completed",
+        "Emergency response team used suitable detection equipment",
+        "External emergency escalation was demonstrated where applicable",
+    ],
+    "Confined Space Rescue": [
+        "Emergency was raised and entry stopped",
+        "Rescue plan and permit controls were available",
+        "Standby person maintained communication",
+        "No unauthorised entry or unplanned rescue attempt occurred",
+        "Rescue equipment was available and inspected",
+        "Rescue team used the planned retrieval method",
+        "Casualty handover and post-rescue arrangements were demonstrated",
+    ],
+    "Working at Height Rescue": [
+        "Emergency was raised and work stopped",
+        "Rescue plan and suitable rescue equipment were available",
+        "Rescue team mobilised within the planned response time",
+        "Rescue was performed without creating additional exposure",
+        "Casualty was lowered / recovered using the planned method",
+        "Post-rescue first aid and monitoring arrangements were demonstrated",
+    ],
+    "Electrical Emergency": [
+        "Emergency was reported and area isolated",
+        "Electrical supply isolation was demonstrated by an authorised person",
+        "Rescuers avoided contact with live electrical parts",
+        "Suitable first aid / CPR response was demonstrated where applicable",
+        "Emergency services escalation was followed",
+        "Area was secured against re-energisation",
+    ],
+    "Explosion Emergency": [
+        "Alarm and emergency communication were activated",
+        "Evacuation routes and assembly points were used",
+        "Personnel were accounted for",
+        "Secondary hazard / restricted area controls were demonstrated",
+        "Emergency response team and escalation arrangements were effective",
+        "Re-entry was controlled and authorised",
+    ],
+    "Natural Disaster": [
+        "Warning and communication arrangements were activated",
+        "Personnel followed the designated shelter / evacuation procedure",
+        "Assembly and accountability arrangements were effective",
+        "Critical equipment / utilities response was demonstrated",
+        "Emergency coordination and communication were effective",
+        "Recovery and all-clear arrangements were controlled",
+    ],
+    "Severe Weather": [
+        "Weather warning was communicated promptly",
+        "Work suspension / shelter arrangements were followed",
+        "Personnel were accounted for",
+        "Outdoor areas and vulnerable activities were made safe",
+        "Emergency communication remained effective",
+        "Restart was authorised after conditions were assessed",
+    ],
+    "Security Threat / Bomb Threat": [
+        "Threat was reported and escalation protocol followed",
+        "Personnel followed instructions without creating panic",
+        "Restricted area and evacuation / shelter arrangements were controlled",
+        "Headcount and accountability were completed",
+        "External authority liaison arrangements were demonstrated",
+        "Re-entry was authorised by the responsible authority",
+    ],
+    "First Aid Response": [
+        "Emergency was reported promptly",
+        "First aider responded within the expected time",
+        "First aid kit and equipment were suitable and available",
+        "Casualty assessment and treatment were demonstrated",
+        "Emergency escalation and handover were effective",
+        "Records and replenishment arrangements were completed",
+    ],
+    "Environmental / Oil Spill": [
+        "Spill was reported and source stopped where safe",
+        "Drainage and sensitive receptors were protected",
+        "Containment equipment was suitable and used correctly",
+        "Response team and escalation arrangements were effective",
+        "Recovered waste was segregated and labelled",
+        "Notification and environmental reporting requirements were followed",
+    ],
+    "Business Continuity": [
+        "Business disruption was identified and escalated",
+        "Incident command and decision-making roles were clear",
+        "Critical functions and recovery priorities were identified",
+        "Communication with affected personnel and stakeholders was effective",
+        "Recovery arrangements and alternate resources were activated",
+        "Lessons learned and recovery records were captured",
+    ],
+    "Other": [
+        "Emergency was identified and reported promptly",
+        "Emergency response roles were understood",
+        "Communication and escalation arrangements were effective",
+        "Personnel accountability was completed",
+        "Emergency equipment was available and suitable",
+        "Lessons learned and follow-up actions were recorded",
+    ],
+}
+
+class EmergencyDrillModule(QWidget):
+    """Professional emergency drill lifecycle with isolated SQLite storage."""
+
+    def __init__(self, parent=None, database=None):
+        super().__init__(parent)
+        self.db = database or db
+        self._ensure_tables()
+        self._build_ui()
+        self.refresh_all()
+
+    def _ensure_tables(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS emergency_drills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT UNIQUE NOT NULL,
+            title TEXT DEFAULT '',
+            drill_type TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            planned_date TEXT DEFAULT '',
+            planned_time TEXT DEFAULT '',
+            coordinator TEXT DEFAULT '',
+            response_team TEXT DEFAULT '',
+            expected_participants INTEGER DEFAULT 0,
+            objectives TEXT DEFAULT '',
+            scenario TEXT DEFAULT '',
+            equipment TEXT DEFAULT '',
+            external_agencies TEXT DEFAULT '',
+            status TEXT DEFAULT 'Planned',
+            actual_date TEXT DEFAULT '',
+            actual_start TEXT DEFAULT '',
+            alarm_time TEXT DEFAULT '',
+            response_time TEXT DEFAULT '',
+            evacuation_time TEXT DEFAULT '',
+            actual_finish TEXT DEFAULT '',
+            people_evacuated INTEGER DEFAULT 0,
+            people_accounted INTEGER DEFAULT 0,
+            missing_persons INTEGER DEFAULT 0,
+            execution_notes TEXT DEFAULT '',
+            evaluation_score REAL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS emergency_drill_plan (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_year INTEGER NOT NULL,
+            drill_type TEXT DEFAULT '',
+            title TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            planned_month TEXT DEFAULT '',
+            target_date TEXT DEFAULT '',
+            coordinator TEXT DEFAULT '',
+            priority TEXT DEFAULT 'Medium',
+            status TEXT DEFAULT 'Planned',
+            linked_drill_id INTEGER,
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(linked_drill_id) REFERENCES emergency_drills(id) ON DELETE SET NULL
+        );
+        CREATE TABLE IF NOT EXISTS emergency_drill_evaluations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            drill_id INTEGER NOT NULL,
+            item_no INTEGER NOT NULL,
+            checklist_item TEXT NOT NULL,
+            result TEXT DEFAULT 'Not Assessed',
+            comments TEXT DEFAULT '',
+            evidence_path TEXT DEFAULT '',
+            severity TEXT DEFAULT 'Medium',
+            updated_at TEXT DEFAULT '',
+            UNIQUE(drill_id, item_no),
+            FOREIGN KEY(drill_id) REFERENCES emergency_drills(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS emergency_drill_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            drill_id INTEGER NOT NULL,
+            action_no TEXT UNIQUE,
+            finding TEXT NOT NULL,
+            severity TEXT DEFAULT 'Medium',
+            corrective_action TEXT DEFAULT '',
+            responsible TEXT DEFAULT '',
+            target_date TEXT DEFAULT '',
+            status TEXT DEFAULT 'Open',
+            verification TEXT DEFAULT '',
+            closure_date TEXT DEFAULT '',
+            capa_number TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT '',
+            FOREIGN KEY(drill_id) REFERENCES emergency_drills(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS emergency_drill_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            drill_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL,
+            attachment_type TEXT DEFAULT 'Drill Evidence',
+            remark TEXT DEFAULT '',
+            uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(drill_id) REFERENCES emergency_drills(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_emergency_drill_date ON emergency_drills(planned_date);
+        CREATE INDEX IF NOT EXISTS idx_emergency_drill_status ON emergency_drills(status);
+        CREATE INDEX IF NOT EXISTS idx_emergency_drill_plan_year ON emergency_drill_plan(plan_year);
+        CREATE INDEX IF NOT EXISTS idx_emergency_drill_actions_drill ON emergency_drill_actions(drill_id);
+        """)
+        self.db.conn.commit()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 14)
+        header = QHBoxLayout()
+        title_box = QVBoxLayout()
+        title = QLabel("Emergency Drill Management")
+        title.setStyleSheet("font-size:22px;font-weight:700;color:#17365D;")
+        subtitle = QLabel("Plan, schedule, execute, evaluate and improve emergency preparedness.")
+        subtitle.setStyleSheet("color:#526579;font-size:11px;")
+        title_box.addWidget(title)
+        title_box.addWidget(subtitle)
+        header.addLayout(title_box, 1)
+        self.btn_new = QPushButton("＋  Schedule Drill")
+        self.btn_new.clicked.connect(self.new_drill)
+        header.addWidget(self.btn_new)
+        root.addLayout(header)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        root.addWidget(self.tabs, 1)
+        self._make_dashboard_tab()
+        self._make_plan_tab()
+        self._make_planning_tab()
+        self._make_execution_tab()
+        self._make_evaluation_tab()
+        self._make_actions_tab()
+        self._make_register_tab()
+        self._make_reports_tab()
+        self._make_settings_tab()
+
+    def _table(self, headers, hidden_first=False):
+        t = QTableWidget(0, len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.verticalHeader().setVisible(False)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t.horizontalHeader().setStretchLastSection(True)
+        if hidden_first:
+            t.setColumnHidden(0, True)
+        return t
+
+    def _fill_table(self, table, rows, fields):
+        table.setRowCount(0)
+        for row in rows:
+            r = table.rowCount()
+            table.insertRow(r)
+            for c, field in enumerate(fields):
+                val = row[field] if isinstance(field, str) and field in row.keys() else ""
+                item = QTableWidgetItem(safe(val))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row["id"] if "id" in row.keys() else None)
+                table.setItem(r, c, item)
+        table.resizeRowsToContents()
+
+    def _selected_id(self, table):
+        row = table.currentRow()
+        if row < 0 or table.item(row, 0) is None:
+            return None
+        value = table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if value is not None:
+            return int(value)
+        try:
+            return int(table.item(row, 0).text())
+        except Exception:
+            return None
+
+    def _make_dashboard_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        self.kpi_labels = {}
+        cards = QGridLayout()
+        names = ["Total Drills", "Planned", "Completed", "Overdue", "Open Actions", "Closed Actions"]
+        for i, name in enumerate(names):
+            box = QGroupBox(name)
+            v = QVBoxLayout(box)
+            value = QLabel("0"); value.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            value.setStyleSheet("font-size:25px;font-weight:700;color:#17365D;padding:8px;")
+            v.addWidget(value)
+            self.kpi_labels[name] = value
+            cards.addWidget(box, i // 3, i % 3)
+        lay.addLayout(cards)
+        self.dashboard_table = self._table(["ID", "Drill No.", "Title", "Type", "Location", "Planned Date", "Coordinator", "Status"], hidden_first=True)
+        lay.addWidget(QLabel("Upcoming and recently updated drills"))
+        lay.addWidget(self.dashboard_table, 1)
+        bar = QHBoxLayout()
+        refresh = QPushButton("Refresh Dashboard"); refresh.clicked.connect(self.refresh_all)
+        bar.addStretch(1); bar.addWidget(refresh); lay.addLayout(bar)
+        self.tabs.addTab(w, "Dashboard")
+
+    def _make_plan_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.plan_year = QSpinBox(); self.plan_year.setRange(2020, 2100); self.plan_year.setValue(date.today().year)
+        add = QPushButton("Add Annual Plan Item"); add.clicked.connect(self.add_plan_item)
+        edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_plan_item)
+        delete = QPushButton("Delete Selected"); delete.clicked.connect(self.delete_plan_item)
+        convert = QPushButton("Create Scheduled Drill"); convert.clicked.connect(self.create_drill_from_plan)
+        bar.addWidget(QLabel("Plan Year:")); bar.addWidget(self.plan_year); bar.addWidget(add); bar.addWidget(edit); bar.addWidget(delete); bar.addStretch(1); bar.addWidget(convert)
+        lay.addLayout(bar)
+        self.plan_table = self._table(["ID", "Year", "Month", "Target Date", "Drill Type", "Title", "Location", "Coordinator", "Priority", "Status"])
+        self.plan_table.setColumnHidden(0, True)
+        lay.addWidget(self.plan_table, 1)
+        self.plan_year.valueChanged.connect(self.refresh_plan)
+        self.tabs.addTab(w, "Annual Plan")
+
+    def _make_planning_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        add = QPushButton("＋ New Drill"); add.clicked.connect(self.new_drill)
+        edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_drill)
+        schedule = QPushButton("Mark Scheduled"); schedule.clicked.connect(lambda: self.set_drill_status("Scheduled"))
+        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(schedule); bar.addStretch(1)
+        lay.addLayout(bar)
+        self.planning_table = self._table(["ID", "Drill No.", "Title", "Type", "Project", "Location", "Planned Date", "Time", "Coordinator", "Status"])
+        self.planning_table.setColumnHidden(0, True)
+        lay.addWidget(self.planning_table, 1)
+        self.tabs.addTab(w, "Drill Planning")
+
+    def _make_execution_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        info = QLabel("Select a scheduled drill and record actual response, evacuation and accountability details.")
+        info.setWordWrap(True); info.setStyleSheet("color:#526579;padding:5px;")
+        lay.addWidget(info)
+        self.execution_table = self._table(["ID", "Drill No.", "Title", "Type", "Planned Date", "Actual Date", "Start", "Finish", "Evacuated", "Accounted", "Status"])
+        self.execution_table.setColumnHidden(0, True)
+        lay.addWidget(self.execution_table, 1)
+        bar = QHBoxLayout()
+        start = QPushButton("Record / Update Execution"); start.clicked.connect(self.record_execution)
+        complete = QPushButton("Mark Drill Completed"); complete.clicked.connect(lambda: self.set_drill_status("Completed", self.execution_table))
+        bar.addWidget(start); bar.addWidget(complete); bar.addStretch(1); lay.addLayout(bar)
+        self.tabs.addTab(w, "Drill Execution")
+
+    def _make_evaluation_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.eval_drill_combo = QComboBox()
+        self.eval_drill_combo.currentIndexChanged.connect(self.load_evaluation)
+        bar.addWidget(QLabel("Select Drill:")); bar.addWidget(self.eval_drill_combo, 1)
+        save = QPushButton("Save Evaluation"); save.clicked.connect(self.save_evaluation)
+        bar.addWidget(save)
+        lay.addLayout(bar)
+        self.eval_table = self._table(["No.", "Evaluation Criteria", "Result", "Comments", "Severity"])
+        self.eval_table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
+        self.eval_table.setColumnWidth(1, 430)
+        lay.addWidget(self.eval_table, 1)
+        self.eval_score = QLabel("Performance Score: Not assessed")
+        self.eval_score.setStyleSheet("font-size:15px;font-weight:700;color:#17365D;padding:6px;")
+        lay.addWidget(self.eval_score)
+        self.tabs.addTab(w, "Evaluation Checklist")
+
+    def _make_actions_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        add = QPushButton("＋ Add Finding / Action"); add.clicked.connect(self.add_action)
+        edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_action)
+        close = QPushButton("Close Selected Action"); close.clicked.connect(self.close_action)
+        capa = QPushButton("Create CAPA for Selected"); capa.clicked.connect(self.create_capa_for_action)
+        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(close); bar.addWidget(capa); bar.addStretch(1)
+        lay.addLayout(bar)
+        self.actions_table = self._table(["ID", "Action No.", "Drill No.", "Finding", "Severity", "Corrective Action", "Responsible", "Target Date", "Status", "CAPA No."])
+        self.actions_table.setColumnHidden(0, True)
+        lay.addWidget(self.actions_table, 1)
+        self.tabs.addTab(w, "Findings & Actions")
+
+    def _make_register_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        bar = QHBoxLayout()
+        self.register_search = QLineEdit(); self.register_search.setPlaceholderText("Search drill number, title, type, location or coordinator...")
+        self.register_search.textChanged.connect(self.refresh_register)
+        edit = QPushButton("Open / Edit Selected"); edit.clicked.connect(self.edit_drill)
+        evidence = QPushButton("Manage Evidence"); evidence.clicked.connect(self.manage_attachments)
+        bar.addWidget(self.register_search, 1); bar.addWidget(edit); bar.addWidget(evidence)
+        lay.addLayout(bar)
+        self.register_table = self._table(["ID", "Drill No.", "Title", "Type", "Project", "Location", "Planned Date", "Actual Date", "Score", "Status"])
+        self.register_table.setColumnHidden(0, True)
+        lay.addWidget(self.register_table, 1)
+        self.tabs.addTab(w, "Drill Register")
+
+    def _make_reports_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        intro = QLabel("Generate a drill report containing planning details, execution results, evaluation checklist, findings and action status.")
+        intro.setWordWrap(True); lay.addWidget(intro)
+        bar = QHBoxLayout()
+        self.report_drill_combo = QComboBox()
+        bar.addWidget(QLabel("Drill:")); bar.addWidget(self.report_drill_combo, 1)
+        pdf = QPushButton("Export PDF Report"); pdf.clicked.connect(self.export_pdf)
+        xlsx = QPushButton("Export Excel Register"); xlsx.clicked.connect(self.export_excel)
+        bar.addWidget(pdf); bar.addWidget(xlsx); lay.addLayout(bar)
+        self.tabs.addTab(w, "Reports")
+
+    def _make_settings_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        lay.addWidget(QLabel("Emergency drill checklist master library"))
+        note = QLabel("Default scenario checklists are loaded automatically. You can add additional checklist criteria for a selected scenario.")
+        note.setWordWrap(True); note.setStyleSheet("color:#526579;"); lay.addWidget(note)
+        row = QHBoxLayout()
+        self.template_type = QComboBox(); self.template_type.addItems(EMERGENCY_DRILL_TYPES)
+        self.template_item = QLineEdit(); self.template_item.setPlaceholderText("Enter new evaluation criterion")
+        add = QPushButton("Add Checklist Item"); add.clicked.connect(self.add_template_item)
+        row.addWidget(self.template_type); row.addWidget(self.template_item, 1); row.addWidget(add)
+        lay.addLayout(row)
+        self.template_table = self._table(["ID", "Scenario", "Checklist Criterion", "Active"])
+        self.template_table.setColumnHidden(0, True)
+        lay.addWidget(self.template_table, 1)
+        self.tabs.addTab(w, "Master Settings")
+
+    def _next_drill_no(self):
+        return next_number("EDR", "emergency_drills")
+
+    def _drill_dialog(self, row=None, initial=None):
+        data = dict(row) if row else {}
+        data.update(initial or {})
+        dlg = QDialog(self); dlg.setWindowTitle("Emergency Drill Details"); dlg.resize(760, 700)
+        form = QFormLayout()
+        title = QLineEdit(safe(data.get("title")))
+        dtype = QComboBox(); dtype.addItems(EMERGENCY_DRILL_TYPES)
+        if safe(data.get("drill_type")): dtype.setCurrentText(safe(data.get("drill_type")))
+        project = QLineEdit(safe(data.get("project")))
+        location = QLineEdit(safe(data.get("location")))
+        department = QLineEdit(safe(data.get("department")))
+        planned = QDateEdit(); planned.setCalendarPopup(True); planned.setDisplayFormat("dd-MMM-yyyy")
+        planned.setDate(QDate.fromString(safe(data.get("planned_date")) or today(), "yyyy-MM-dd"))
+        ptime = QLineEdit(safe(data.get("planned_time"))); ptime.setPlaceholderText("HH:MM")
+        coordinator = QLineEdit(safe(data.get("coordinator")))
+        team = QLineEdit(safe(data.get("response_team")))
+        expected = QSpinBox(); expected.setRange(0, 100000); expected.setValue(int(data.get("expected_participants") or 0))
+        objectives = QTextEdit(); objectives.setPlainText(safe(data.get("objectives"))); objectives.setMaximumHeight(75)
+        scenario = QTextEdit(); scenario.setPlainText(safe(data.get("scenario"))); scenario.setMaximumHeight(90)
+        equipment = QLineEdit(safe(data.get("equipment")))
+        agencies = QLineEdit(safe(data.get("external_agencies")))
+        form.addRow("Drill Title *", title); form.addRow("Emergency Scenario *", dtype)
+        form.addRow("Project", project); form.addRow("Location / Area *", location)
+        form.addRow("Department", department); form.addRow("Planned Date *", planned)
+        form.addRow("Planned Time", ptime); form.addRow("Drill Coordinator", coordinator)
+        form.addRow("Emergency Response Team", team); form.addRow("Expected Participants", expected)
+        form.addRow("Drill Objectives", objectives); form.addRow("Scenario Description", scenario)
+        form.addRow("Required Equipment", equipment); form.addRow("External Agencies", agencies)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        if not title.text().strip() or not location.text().strip():
+            QMessageBox.warning(self, "Required Fields", "Please enter a drill title and location.")
+            return None
+        return {
+            "title": title.text().strip(), "drill_type": dtype.currentText(),
+            "project": project.text().strip(), "location": location.text().strip(),
+            "department": department.text().strip(), "planned_date": planned.date().toString("yyyy-MM-dd"),
+            "planned_time": ptime.text().strip(), "coordinator": coordinator.text().strip(),
+            "response_team": team.text().strip(), "expected_participants": expected.value(),
+            "objectives": objectives.toPlainText().strip(), "scenario": scenario.toPlainText().strip(),
+            "equipment": equipment.text().strip(), "external_agencies": agencies.text().strip()
+        }
+
+    def new_drill(self):
+        data = self._drill_dialog()
+        if not data: return
+        number = self._next_drill_no()
+        cols = ["number"] + list(data.keys())
+        cur = self.db.execute(
+            f"INSERT INTO emergency_drills ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+            [number] + list(data.values())
+        )
+        self._seed_evaluation(int(cur.lastrowid), data["drill_type"])
+        self.refresh_all()
+        QMessageBox.information(self, "Drill Created", f"Drill {number} has been created.")
+
+    def edit_drill(self):
+        # Resolve selection from the currently active drill list only.
+        active = self.tabs.currentWidget()
+        if active is self.tabs.widget(2):
+            source_table = self.planning_table
+        elif active is self.tabs.widget(3):
+            source_table = self.execution_table
+        elif active is self.tabs.widget(6):
+            source_table = self.actions_table
+        else:
+            source_table = self.register_table
+        selected = self._selected_id(source_table)
+        if not selected:
+            QMessageBox.warning(self, "Select Drill", "Select a drill record first."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (selected,))
+        data = self._drill_dialog(row)
+        if not data: return
+        assignments = ",".join(f"{k}=?" for k in data)
+        self.db.execute(f"UPDATE emergency_drills SET {assignments},updated_at=? WHERE id=?",
+                        list(data.values()) + [datetime.now().isoformat(timespec="seconds"), selected])
+        self.refresh_all()
+
+    def set_drill_status(self, status, table=None):
+        table = table or self.planning_table
+        did = self._selected_id(table)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill record first."); return
+        self.db.execute("UPDATE emergency_drills SET status=?,updated_at=? WHERE id=?",
+                        (status, datetime.now().isoformat(timespec="seconds"), did))
+        self.refresh_all()
+
+    def _seed_evaluation(self, drill_id, drill_type):
+        items = list(EMERGENCY_CHECKLISTS.get(drill_type, EMERGENCY_CHECKLISTS["Other"]))
+        custom = json.loads(self.db.setting("emergency_drill_checklist_" + drill_type, "[]") or "[]")
+        items.extend(x for x in custom if x and x not in items)
+        for n, item in enumerate(items, 1):
+            self.db.execute("""INSERT OR IGNORE INTO emergency_drill_evaluations
+                (drill_id,item_no,checklist_item,result) VALUES(?,?,?,'Not Assessed')""",
+                (drill_id, n, item))
+
+    def _make_eval_rows(self, drill_id, drill_type):
+        existing = self.db.fetchall("SELECT COUNT(*) AS n FROM emergency_drill_evaluations WHERE drill_id=?", (drill_id,))
+        if not existing or not existing[0]["n"]:
+            self._seed_evaluation(drill_id, drill_type)
+
+    def _selected_drill_from_combo(self, combo):
+        val = combo.currentData()
+        return int(val) if val else None
+
+    def load_evaluation(self):
+        did = self._selected_drill_from_combo(self.eval_drill_combo)
+        self.eval_table.setRowCount(0)
+        if not did: return
+        rows = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
+        for row in rows:
+            r = self.eval_table.rowCount(); self.eval_table.insertRow(r)
+            values = [str(row["item_no"]), row["checklist_item"], row["result"], row["comments"], row["severity"]]
+            for c, value in enumerate(values):
+                self.eval_table.setItem(r, c, QTableWidgetItem(safe(value)))
+            result = QComboBox(); result.addItems(["Not Assessed", "Satisfactory", "Unsatisfactory", "Not Applicable"])
+            result.setCurrentText(safe(row["result"]) or "Not Assessed")
+            self.eval_table.setCellWidget(r, 2, result)
+            severity = QComboBox(); severity.addItems(["Low", "Medium", "High", "Critical"])
+            severity.setCurrentText(safe(row["severity"]) or "Medium")
+            self.eval_table.setCellWidget(r, 4, severity)
+            self.eval_table.item(r, 0).setData(Qt.ItemDataRole.UserRole, row["id"])
+        self._update_score_label()
+
+    def _evaluation_values(self):
+        total = good = 0
+        for r in range(self.eval_table.rowCount()):
+            result = self.eval_table.cellWidget(r, 2).currentText()
+            if result != "Not Applicable":
+                total += 1
+                if result == "Satisfactory": good += 1
+        score = round((good / total) * 100, 1) if total else 0
+        return score, total, good
+
+    def _update_score_label(self):
+        score, total, good = self._evaluation_values()
+        self.eval_score.setText(f"Performance Score: {score:.1f}%  |  Satisfactory: {good} / {total} applicable criteria")
+
+    def save_evaluation(self):
+        did = self._selected_drill_from_combo(self.eval_drill_combo)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill first."); return
+        for r in range(self.eval_table.rowCount()):
+            rid = self.eval_table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+            result = self.eval_table.cellWidget(r, 2).currentText()
+            severity = self.eval_table.cellWidget(r, 4).currentText()
+            comments = self.eval_table.item(r, 3).text() if self.eval_table.item(r, 3) else ""
+            self.db.execute("""UPDATE emergency_drill_evaluations
+                SET result=?,comments=?,severity=?,updated_at=? WHERE id=?""",
+                (result, comments, severity, datetime.now().isoformat(timespec="seconds"), rid))
+            if result == "Unsatisfactory":
+                self._ensure_action_for_failed_item(did, self.eval_table.item(r, 1).text(), severity)
+        score, _, _ = self._evaluation_values()
+        self.db.execute("UPDATE emergency_drills SET evaluation_score=?,updated_at=? WHERE id=?",
+                        (score, datetime.now().isoformat(timespec="seconds"), did))
+        self.refresh_all()
+        QMessageBox.information(self, "Evaluation Saved", f"Checklist saved. Performance score: {score:.1f}%")
+
+    def _ensure_action_for_failed_item(self, did, finding, severity):
+        exists = self.db.fetchone("SELECT id FROM emergency_drill_actions WHERE drill_id=? AND finding=?", (did, finding))
+        if not exists:
+            drill = self.db.fetchone("SELECT number FROM emergency_drills WHERE id=?", (did,))
+            count = self.db.fetchone("SELECT COUNT(*) AS n FROM emergency_drill_actions WHERE drill_id=?", (did,))["n"] + 1
+            no = f"{drill['number']}-F{count:03d}"
+            self.db.execute("""INSERT INTO emergency_drill_actions
+                (drill_id,action_no,finding,severity,status) VALUES(?,?,?,?,'Open')""",
+                (did, no, finding, severity))
+
+    def _action_dialog(self, row=None):
+        data = dict(row) if row else {}
+        dlg = QDialog(self); dlg.setWindowTitle("Drill Finding / Corrective Action"); dlg.resize(620, 520)
+        form = QFormLayout()
+        drill = QComboBox()
+        for d in self.db.fetchall("SELECT id,number,title FROM emergency_drills ORDER BY id DESC"):
+            drill.addItem(f"{d['number']} — {d['title']}", d["id"])
+        if data.get("drill_id"):
+            idx = drill.findData(int(data["drill_id"]))
+            if idx >= 0: drill.setCurrentIndex(idx)
+        finding = QTextEdit(); finding.setPlainText(safe(data.get("finding"))); finding.setMaximumHeight(80)
+        severity = QComboBox(); severity.addItems(["Low", "Medium", "High", "Critical"]); severity.setCurrentText(safe(data.get("severity")) or "Medium")
+        action = QTextEdit(); action.setPlainText(safe(data.get("corrective_action"))); action.setMaximumHeight(90)
+        responsible = QLineEdit(safe(data.get("responsible")))
+        target = QDateEdit(); target.setCalendarPopup(True); target.setDisplayFormat("dd-MMM-yyyy")
+        target.setDate(QDate.fromString(safe(data.get("target_date")) or today(), "yyyy-MM-dd"))
+        status = QComboBox(); status.addItems(["Open", "In Progress", "Pending Verification", "Closed"]); status.setCurrentText(safe(data.get("status")) or "Open")
+        form.addRow("Related Drill *", drill); form.addRow("Finding *", finding); form.addRow("Severity", severity)
+        form.addRow("Corrective Action", action); form.addRow("Responsible Person", responsible); form.addRow("Target Date", target); form.addRow("Status", status)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return None
+        if not drill.currentData() or not finding.toPlainText().strip():
+            QMessageBox.warning(self, "Required Fields", "Select a drill and enter the finding."); return None
+        return {"drill_id": int(drill.currentData()), "finding": finding.toPlainText().strip(),
+                "severity": severity.currentText(), "corrective_action": action.toPlainText().strip(),
+                "responsible": responsible.text().strip(), "target_date": target.date().toString("yyyy-MM-dd"),
+                "status": status.currentText()}
+
+    def add_action(self):
+        data = self._action_dialog()
+        if not data: return
+        drill = self.db.fetchone("SELECT number FROM emergency_drills WHERE id=?", (data["drill_id"],))
+        n = self.db.fetchone("SELECT COUNT(*) AS n FROM emergency_drill_actions WHERE drill_id=?", (data["drill_id"],))["n"] + 1
+        data["action_no"] = f"{drill['number']}-F{n:03d}"
+        cols = list(data.keys())
+        self.db.execute(f"INSERT INTO emergency_drill_actions ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                        list(data.values()))
+        self.refresh_all()
+
+    def edit_action(self):
+        aid = self._selected_id(self.actions_table)
+        if not aid: QMessageBox.warning(self, "Select Action", "Select a finding first."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drill_actions WHERE id=?", (aid,))
+        data = self._action_dialog(row)
+        if not data: return
+        assignments = ",".join(f"{k}=?" for k in data)
+        self.db.execute(f"UPDATE emergency_drill_actions SET {assignments},updated_at=? WHERE id=?",
+                        list(data.values()) + [datetime.now().isoformat(timespec="seconds"), aid])
+        self.refresh_all()
+
+    def close_action(self):
+        aid = self._selected_id(self.actions_table)
+        if not aid: QMessageBox.warning(self, "Select Action", "Select a finding first."); return
+        comment, ok = QInputDialog.getMultiLineText(self, "Verification", "Enter verification / closure comments:")
+        if not ok: return
+        self.db.execute("""UPDATE emergency_drill_actions SET status='Closed',verification=?,closure_date=?,updated_at=? WHERE id=?""",
+                        (comment, today(), datetime.now().isoformat(timespec="seconds"), aid))
+        self.refresh_all()
+
+    def _make_plan_dialog(self, row=None):
+        data = dict(row) if row else {}
+        dlg = QDialog(self); dlg.setWindowTitle("Annual Emergency Drill Plan"); dlg.resize(600, 500)
+        form = QFormLayout()
+        year = QSpinBox(); year.setRange(2020, 2100); year.setValue(int(data.get("plan_year") or self.plan_year.value()))
+        dtype = QComboBox(); dtype.addItems(EMERGENCY_DRILL_TYPES); dtype.setCurrentText(safe(data.get("drill_type")) or EMERGENCY_DRILL_TYPES[0])
+        title = QLineEdit(safe(data.get("title")))
+        project = QLineEdit(safe(data.get("project")))
+        location = QLineEdit(safe(data.get("location")))
+        month = QComboBox(); month.addItems(calendar.month_name[1:]); month.setCurrentText(safe(data.get("planned_month")) or calendar.month_name[date.today().month])
+        target = QDateEdit(); target.setCalendarPopup(True); target.setDate(QDate.fromString(safe(data.get("target_date")) or today(), "yyyy-MM-dd"))
+        coordinator = QLineEdit(safe(data.get("coordinator")))
+        priority = QComboBox(); priority.addItems(["Low", "Medium", "High", "Critical"]); priority.setCurrentText(safe(data.get("priority")) or "Medium")
+        notes = QTextEdit(); notes.setPlainText(safe(data.get("notes"))); notes.setMaximumHeight(70)
+        form.addRow("Plan Year", year); form.addRow("Drill Type", dtype); form.addRow("Title", title)
+        form.addRow("Project", project); form.addRow("Location", location); form.addRow("Planned Month", month)
+        form.addRow("Target Date", target); form.addRow("Coordinator", coordinator); form.addRow("Priority", priority); form.addRow("Notes", notes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return None
+        return {"plan_year": year.value(), "drill_type": dtype.currentText(), "title": title.text().strip() or dtype.currentText(),
+                "project": project.text().strip(), "location": location.text().strip(),
+                "planned_month": month.currentText(), "target_date": target.date().toString("yyyy-MM-dd"),
+                "coordinator": coordinator.text().strip(), "priority": priority.currentText(), "notes": notes.toPlainText().strip()}
+
+    def add_plan_item(self):
+        data = self._make_plan_dialog()
+        if not data: return
+        cols = list(data.keys())
+        self.db.execute(f"INSERT INTO emergency_drill_plan ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})", list(data.values()))
+        self.refresh_plan()
+
+    def edit_plan_item(self):
+        pid = self._selected_id(self.plan_table)
+        if not pid: QMessageBox.warning(self, "Select Plan Item", "Select an annual plan item."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drill_plan WHERE id=?", (pid,))
+        data = self._make_plan_dialog(row)
+        if not data: return
+        self.db.execute("UPDATE emergency_drill_plan SET " + ",".join(f"{k}=?" for k in data) + " WHERE id=?",
+                        list(data.values()) + [pid])
+        self.refresh_plan()
+
+    def delete_plan_item(self):
+        pid = self._selected_id(self.plan_table)
+        if not pid: QMessageBox.warning(self, "Select Plan Item", "Select an annual plan item."); return
+        if QMessageBox.question(self, "Delete Plan Item", "Delete the selected annual plan item?") == QMessageBox.StandardButton.Yes:
+            self.db.execute("DELETE FROM emergency_drill_plan WHERE id=?", (pid,)); self.refresh_plan()
+
+    def create_drill_from_plan(self):
+        pid = self._selected_id(self.plan_table)
+        if not pid: QMessageBox.warning(self, "Select Plan Item", "Select an annual plan item."); return
+        plan = self.db.fetchone("SELECT * FROM emergency_drill_plan WHERE id=?", (pid,))
+        if plan["linked_drill_id"]:
+            QMessageBox.information(self, "Already Scheduled", "This annual plan item is already linked to a drill."); return
+        initial = {"title": plan["title"], "drill_type": plan["drill_type"], "project": plan["project"],
+                   "location": plan["location"], "planned_date": plan["target_date"], "coordinator": plan["coordinator"]}
+        data = self._drill_dialog(initial=initial)
+        if not data: return
+        number = self._next_drill_no()
+        cols = ["number"] + list(data.keys())
+        cur = self.db.execute(f"INSERT INTO emergency_drills ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                              [number] + list(data.values()))
+        did = int(cur.lastrowid); self._seed_evaluation(did, data["drill_type"])
+        self.db.execute("UPDATE emergency_drill_plan SET linked_drill_id=?,status='Scheduled' WHERE id=?", (did, pid))
+        self.refresh_all()
+        QMessageBox.information(self, "Drill Scheduled", f"Drill {number} created and linked to the annual plan.")
+
+    def record_execution(self):
+        did = self._selected_id(self.execution_table)
+        if not did: QMessageBox.warning(self, "Select Drill", "Select a drill to record execution."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
+        dlg = QDialog(self); dlg.setWindowTitle("Drill Execution Record"); dlg.resize(650, 570)
+        form = QFormLayout()
+        actual_date = QDateEdit(); actual_date.setCalendarPopup(True); actual_date.setDate(QDate.fromString(safe(row["actual_date"]) or today(), "yyyy-MM-dd"))
+        fields = {}
+        for key, label in [("actual_start","Actual Start Time"),("alarm_time","Alarm Activation Time"),("response_time","Response Team Arrival Time"),("evacuation_time","Evacuation Completion Time"),("actual_finish","Actual Finish Time")]:
+            fields[key] = QLineEdit(safe(row[key])); fields[key].setPlaceholderText("HH:MM")
+            form.addRow(label, fields[key])
+        evacuated = QSpinBox(); evacuated.setRange(0,100000); evacuated.setValue(int(row["people_evacuated"] or 0))
+        accounted = QSpinBox(); accounted.setRange(0,100000); accounted.setValue(int(row["people_accounted"] or 0))
+        missing = QSpinBox(); missing.setRange(0,100000); missing.setValue(int(row["missing_persons"] or 0))
+        notes = QTextEdit(); notes.setPlainText(safe(row["execution_notes"])); notes.setMaximumHeight(90)
+        form.addRow("Actual Drill Date", actual_date); form.addRow("People Evacuated", evacuated)
+        form.addRow("People Accounted For", accounted); form.addRow("Missing Persons (if any)", missing)
+        form.addRow("Execution Notes", notes)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        values = {k: v.text().strip() for k,v in fields.items()}
+        values.update({"actual_date": actual_date.date().toString("yyyy-MM-dd"), "people_evacuated": evacuated.value(),
+                       "people_accounted": accounted.value(), "missing_persons": missing.value(), "execution_notes": notes.toPlainText().strip()})
+        self.db.execute("UPDATE emergency_drills SET " + ",".join(f"{k}=?" for k in values) + ",status='In Progress',updated_at=? WHERE id=?",
+                        list(values.values()) + [datetime.now().isoformat(timespec="seconds"), did])
+        self.refresh_all()
+
+    def manage_attachments(self):
+        did = self._selected_id(self.register_table)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill in the register.")
+            return
+        dlg = QDialog(self); dlg.setWindowTitle("Drill Evidence & Attachments"); dlg.resize(680, 430)
+        outer = QVBoxLayout(dlg)
+        hint = QLabel("Attach photographs, attendance sheets, drill records and other supporting evidence.")
+        hint.setWordWrap(True); outer.addWidget(hint)
+        listing = QListWidget(); outer.addWidget(listing, 1)
+        def reload_files():
+            listing.clear()
+            for item in self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY id", (did,)):
+                li = QListWidgetItem(Path(safe(item["file_path"])).name + "  |  " + safe(item["attachment_type"]))
+                li.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+                li.setToolTip(safe(item["file_path"]))
+                listing.addItem(li)
+        def add_files():
+            paths, _ = QFileDialog.getOpenFileNames(dlg, "Attach Drill Evidence", "", "All Files (*.*)")
+            for path in paths:
+                try:
+                    source = Path(path)
+                    destination = ATTACH_DIR / f"EDR-{did}_{source.name}"
+                    n = 1
+                    while destination.exists():
+                        destination = ATTACH_DIR / f"EDR-{did}_{n}_{source.name}"
+                        n += 1
+                    shutil.copy2(source, destination)
+                    self.db.execute("INSERT INTO emergency_drill_attachments(drill_id,file_path,attachment_type) VALUES(?,?,?)",
+                                    (did, str(destination), "Drill Evidence"))
+                except Exception:
+                    logging.exception("Unable to attach emergency drill evidence")
+                    QMessageBox.warning(dlg, "Attachment Error", f"Could not attach: {path}")
+            reload_files()
+        def open_file():
+            item = listing.currentItem()
+            if not item: return
+            rec = self.db.fetchone("SELECT file_path FROM emergency_drill_attachments WHERE id=?",
+                                   (item.data(Qt.ItemDataRole.UserRole),))
+            fp = resolve_attachment_path(rec["file_path"]) if rec else None
+            if fp:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(fp)))
+            else:
+                QMessageBox.warning(dlg, "File Not Found", "The attachment file could not be located.")
+        def remove_file():
+            item = listing.currentItem()
+            if not item: return
+            if QMessageBox.question(dlg, "Remove Attachment", "Remove this attachment from the drill record?") == QMessageBox.StandardButton.Yes:
+                self.db.execute("DELETE FROM emergency_drill_attachments WHERE id=?", (item.data(Qt.ItemDataRole.UserRole),))
+                reload_files()
+        buttons = QHBoxLayout()
+        add = QPushButton("＋ Attach Files"); add.clicked.connect(add_files)
+        open_btn = QPushButton("Open Selected"); open_btn.clicked.connect(open_file)
+        remove = QPushButton("Remove Link"); remove.clicked.connect(remove_file)
+        close = QPushButton("Close"); close.clicked.connect(dlg.accept)
+        buttons.addWidget(add); buttons.addWidget(open_btn); buttons.addWidget(remove); buttons.addStretch(1); buttons.addWidget(close)
+        outer.addLayout(buttons)
+        reload_files()
+        dlg.exec()
+
+
+    def create_capa_for_action(self):
+        aid = self._selected_id(self.actions_table)
+        if not aid:
+            QMessageBox.warning(self, "Select Finding", "Select a drill finding first.")
+            return
+        action = self.db.fetchone("SELECT * FROM emergency_drill_actions WHERE id=?", (aid,))
+        if not action:
+            return
+        if safe(action["capa_number"]).strip():
+            QMessageBox.information(self, "CAPA Already Linked", f"This finding is already linked to {action['capa_number']}.")
+            return
+        number = next_number("CAPA", "capa")
+        self.db.execute("""INSERT INTO capa
+            (number,source,reference_number,finding,corrective_action,responsible,priority,target_date,status,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (number, "Emergency Drill", safe(action["action_no"]), safe(action["finding"]),
+             safe(action["corrective_action"]), safe(action["responsible"]), safe(action["severity"]),
+             safe(action["target_date"]), "Open", datetime.now().isoformat(timespec="seconds")))
+        self.db.execute("UPDATE emergency_drill_actions SET capa_number=?,updated_at=? WHERE id=?",
+                        (number, datetime.now().isoformat(timespec="seconds"), aid))
+        self.refresh_all()
+        QMessageBox.information(self, "CAPA Created", f"CAPA {number} was created in the existing CAPA Tracking Register.")
+
+    def add_template_item(self):
+        item = self.template_item.text().strip()
+        if not item: return
+        # Store custom criteria in a dedicated settings key; keep defaults immutable.
+        key = "emergency_drill_checklist_" + self.template_type.currentText()
+        current = json.loads(self.db.setting(key, "[]") or "[]")
+        if item not in current: current.append(item)
+        self.db.set_setting(key, json.dumps(current, ensure_ascii=False))
+        self.template_item.clear(); self.refresh_templates()
+
+    def refresh_templates(self):
+        self.template_table.setRowCount(0)
+        for dtype in EMERGENCY_DRILL_TYPES:
+            key = "emergency_drill_checklist_" + dtype
+            items = json.loads(self.db.setting(key, "[]") or "[]")
+            for item in items:
+                r = self.template_table.rowCount(); self.template_table.insertRow(r)
+                for c, val in enumerate(["", dtype, item, "Yes"]):
+                    self.template_table.setItem(r, c, QTableWidgetItem(str(val)))
+
+    def refresh_plan(self):
+        rows = self.db.fetchall("SELECT * FROM emergency_drill_plan WHERE plan_year=? ORDER BY target_date,id", (self.plan_year.value(),))
+        self._fill_table(self.plan_table, rows, ["id","plan_year","planned_month","target_date","drill_type","title","location","coordinator","priority","status"])
+
+    def refresh_register(self):
+        query = safe(self.register_search.text()).strip().lower() if hasattr(self, "register_search") else ""
+        rows = self.db.fetchall("SELECT * FROM emergency_drills ORDER BY planned_date DESC,id DESC")
+        if query:
+            rows = [r for r in rows if query in " ".join(safe(r[k]).lower() for k in ["number","title","drill_type","location","coordinator","project"])]
+        self._fill_table(self.register_table, rows, ["id","number","title","drill_type","project","location","planned_date","actual_date","evaluation_score","status"])
+
+    def refresh_all(self):
+        if not hasattr(self, "tabs"): return
+        drills = self.db.fetchall("SELECT * FROM emergency_drills ORDER BY planned_date DESC,id DESC")
+        actions = self.db.fetchall("SELECT * FROM emergency_drill_actions ORDER BY id DESC")
+        counts = {
+            "Total Drills": len(drills),
+            "Planned": sum(1 for x in drills if x["status"] in ("Planned","Scheduled")),
+            "Completed": sum(1 for x in drills if x["status"] == "Completed"),
+            "Overdue": sum(1 for x in drills if overdue(safe(x["planned_date"]), safe(x["status"]))),
+            "Open Actions": sum(1 for x in actions if x["status"] != "Closed"),
+            "Closed Actions": sum(1 for x in actions if x["status"] == "Closed"),
+        }
+        for key, value in counts.items(): self.kpi_labels[key].setText(str(value))
+        upcoming = sorted(drills, key=lambda x: safe(x["planned_date"]))[:100]
+        self._fill_table(self.dashboard_table, upcoming, ["id","number","title","drill_type","location","planned_date","coordinator","status"])
+        self._fill_table(self.planning_table, drills, ["id","number","title","drill_type","project","location","planned_date","planned_time","coordinator","status"])
+        self._fill_table(self.execution_table, drills, ["id","number","title","drill_type","planned_date","actual_date","actual_start","actual_finish","people_evacuated","people_accounted","status"])
+        action_rows = self.db.fetchall("""SELECT a.*,d.number AS drill_number FROM emergency_drill_actions a
+            JOIN emergency_drills d ON d.id=a.drill_id ORDER BY a.id DESC""")
+        self.actions_table.setRowCount(0)
+        for row in action_rows:
+            r=self.actions_table.rowCount(); self.actions_table.insertRow(r)
+            vals=[row["id"],row["action_no"],row["drill_number"],row["finding"],row["severity"],row["corrective_action"],row["responsible"],row["target_date"],row["status"],row["capa_number"]]
+            for c,val in enumerate(vals):
+                item=QTableWidgetItem(safe(val))
+                if c==0: item.setData(Qt.ItemDataRole.UserRole,row["id"])
+                self.actions_table.setItem(r,c,item)
+        self.refresh_plan(); self.refresh_register(); self.refresh_templates()
+        for combo in (self.eval_drill_combo, self.report_drill_combo):
+            current = combo.currentData()
+            combo.blockSignals(True); combo.clear()
+            for d in drills: combo.addItem(f"{d['number']} — {d['title']}", d["id"])
+            idx=combo.findData(current) if current else -1
+            if idx>=0: combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+        self.load_evaluation()
+
+    def export_pdf(self):
+        did = self._selected_drill_from_combo(self.report_drill_combo)
+        if not did: QMessageBox.warning(self, "Select Drill", "Select a drill to report."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
+        ev = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
+        acts = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
+        path, _ = QFileDialog.getSaveFileName(self, "Save Drill PDF Report", f"{row['number']}_Drill_Report.pdf", "PDF Files (*.pdf)")
+        if not path: return
+        try:
+            doc = SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
+            styles=getSampleStyleSheet(); story=[]
+            story += [Paragraph("EMERGENCY DRILL REPORT", styles["Title"]), Spacer(1,10)]
+            info=[["Drill Number",row["number"],"Status",row["status"]],
+                  ["Drill Title",row["title"],"Scenario",row["drill_type"]],
+                  ["Location",row["location"],"Project",row["project"]],
+                  ["Planned Date",row["planned_date"],"Actual Date",row["actual_date"]],
+                  ["Coordinator",row["coordinator"],"Response Team",row["response_team"]],
+                  ["Expected Participants",str(row["expected_participants"]),"People Accounted",str(row["people_accounted"])],
+                  ["Evacuated",str(row["people_evacuated"]),"Missing Persons",str(row["missing_persons"])],
+                  ["Performance Score",f"{row['evaluation_score']}%","Start / Finish",f"{row['actual_start']} / {row['actual_finish']}"]]
+            t=Table(info,colWidths=[100,155,100,155]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(0,-1),colors.HexColor("#E8EEF5")),("BACKGROUND",(2,0),(2,-1),colors.HexColor("#E8EEF5")),("GRID",(0,0),(-1,-1),.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),8),("PADDING",(0,0),(-1,-1),5)]))
+            story += [t,Spacer(1,10),Paragraph("Objectives",styles["Heading2"]),Paragraph(html.escape(xml_safe(row["objectives"])).replace("\\n","<br/>") or "—",styles["BodyText"]),Paragraph("Scenario Description",styles["Heading2"]),Paragraph(html.escape(xml_safe(row["scenario"])).replace("\\n","<br/>") or "—",styles["BodyText"]),Spacer(1,8)]
+            story.append(Paragraph("Evaluation Checklist",styles["Heading2"]))
+            data=[["No.","Criteria","Result","Comments","Severity"]]
+            for x in ev: data.append([str(x["item_no"]),html.escape(xml_safe(x["checklist_item"])),x["result"],html.escape(xml_safe(x["comments"])),x["severity"]])
+            t=Table(data,colWidths=[28,220,75,145,65],repeatRows=1); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),4)])); story += [t,Spacer(1,10),Paragraph("Findings & Corrective Actions",styles["Heading2"])]
+            data=[["Action No.","Finding","Severity","Corrective Action","Responsible","Due","Status"]]
+            for x in acts: data.append([x["action_no"],html.escape(xml_safe(x["finding"])),x["severity"],html.escape(xml_safe(x["corrective_action"])),html.escape(xml_safe(x["responsible"])),x["target_date"],x["status"]])
+            if len(data)==1: data.append(["—","No findings recorded","—","—","—","—","—"])
+            t=Table(data,colWidths=[65,100,48,115,65,50,55],repeatRows=1); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),6.5),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),3)])); story.append(t)
+            doc.build(story); QMessageBox.information(self,"Report Exported",f"PDF report saved:\\n{path}")
+        except Exception as exc:
+            logging.exception("Emergency drill PDF export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
+    def export_excel(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Export Emergency Drill Register", "Emergency_Drill_Register.xlsx", "Excel Files (*.xlsx)")
+        if not path: return
+        try:
+            wb=Workbook(); ws=wb.active; ws.title="Drill Register"
+            headers=["Drill No.","Title","Type","Project","Location","Department","Planned Date","Planned Time","Actual Date","Coordinator","Expected Participants","Evacuated","Accounted","Missing","Score %","Status"]
+            ws.append(headers)
+            for r in self.db.fetchall("SELECT * FROM emergency_drills ORDER BY planned_date,id"):
+                ws.append([r["number"],r["title"],r["drill_type"],r["project"],r["location"],r["department"],r["planned_date"],r["planned_time"],r["actual_date"],r["coordinator"],r["expected_participants"],r["people_evacuated"],r["people_accounted"],r["missing_persons"],r["evaluation_score"],r["status"]])
+            for cell in ws[1]:
+                cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D"); cell.alignment=Alignment(horizontal="center")
+            ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width=min(32,max(12,max(len(safe(c.value)) for c in col)+2))
+            wa=wb.create_sheet("Findings & Actions")
+            wa.append(["Action No.","Drill No.","Finding","Severity","Corrective Action","Responsible","Target Date","Status","Verification"])
+            for r in self.db.fetchall("""SELECT a.*,d.number AS drill_no FROM emergency_drill_actions a JOIN emergency_drills d ON d.id=a.drill_id ORDER BY a.id"""):
+                wa.append([r["action_no"],r["drill_no"],r["finding"],r["severity"],r["corrective_action"],r["responsible"],r["target_date"],r["status"],r["verification"]])
+            for cell in wa[1]:
+                cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D")
+            wa.freeze_panes="A2"; wa.auto_filter.ref=wa.dimensions
+            for col in wa.columns: wa.column_dimensions[col[0].column_letter].width=min(40,max(12,max(len(safe(c.value)) for c in col)+2))
+            wb.save(path); QMessageBox.information(self,"Exported",f"Excel register saved:\\n{path}")
+        except Exception as exc:
+            logging.exception("Emergency drill Excel export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
+
 
 # ============================================================
 # APPLICATION START
