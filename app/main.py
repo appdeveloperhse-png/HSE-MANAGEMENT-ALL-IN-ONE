@@ -519,6 +519,40 @@ class Database:
         for col, definition in incident_extra.items():
             if col not in incident_cols:
                 self.conn.execute(f"ALTER TABLE incidents ADD COLUMN {col} {definition}")
+        # Notification of Incident (NOI) is a separate register. This is an additive
+        # Accident / Incident Investigation migration; existing incident records remain intact.
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS noi_register (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            number TEXT UNIQUE NOT NULL,
+            report_date TEXT DEFAULT '',
+            incident_date TEXT DEFAULT '',
+            happened_time TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            company TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            activity TEXT DEFAULT '',
+            incident_type TEXT DEFAULT '',
+            injury_type TEXT DEFAULT '',
+            reported_by TEXT DEFAULT '',
+            reported_by_designation TEXT DEFAULT '',
+            person_involved TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            immediate_action TEXT DEFAULT '',
+            investigation_required TEXT DEFAULT 'No',
+            prepared_by TEXT DEFAULT '',
+            reviewed_by TEXT DEFAULT '',
+            approved_by TEXT DEFAULT '',
+            status TEXT DEFAULT 'Reported',
+            linked_incident_id INTEGER,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        )""")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_noi_register_date ON noi_register(incident_date)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_noi_register_link ON noi_register(linked_incident_id)")
+        if "noi_id" not in incident_cols:
+            self.conn.execute("ALTER TABLE incidents ADD COLUMN noi_id INTEGER DEFAULT NULL")
+
         # Add attachment remarks without replacing any existing attachment data.
         incident_attachment_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(incident_attachments)").fetchall()]
         if "remark" not in incident_attachment_cols:
@@ -2202,8 +2236,12 @@ def generate_incident_docx(incident_id, path):
     set_docx_landscape(doc)
     add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"])
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
+    noi_reference = ""
+    if "noi_id" in row.keys() and row["noi_id"]:
+        noi_row = db.fetchone("SELECT number FROM noi_register WHERE id=?", (row["noi_id"],))
+        noi_reference = noi_row["number"] if noi_row else ""
     add_docx_kv_table(doc,[
-        ("Incident Title",title),("Permit Number",safe(row["permit_number"]) if "permit_number" in row.keys() else ""),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),
+        ("NOI Reference",noi_reference), ("Incident Title",title),("Permit Number",safe(row["permit_number"]) if "permit_number" in row.keys() else ""),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),
         ("Company",row["company"] or company_name()),("Project",row["project"]),("Location",row["location"]),
         ("Department",row["department"]),("Activity",row["activity"]),("Incident Type",row["incident_type"]),
         ("Investigation Method",row["investigation_method"]),("Status",row["status"]),
@@ -2392,6 +2430,48 @@ OBSERVATION_EXPORT_FIELDS = [
     ("Closeout Comments", "closeout_comments"), ("Verification", "verification"),
     ("Evidence", "__attachments__"),
 ]
+
+
+def generate_noi_docx(noi_id, path):
+    """Create a formal Notification of Incident report from the separate NOI register."""
+    row = db.fetchone("SELECT * FROM noi_register WHERE id=?", (noi_id,))
+    if not row:
+        raise ValueError("Notification of Incident record not found.")
+    doc = Document()
+    add_docx_report_header(doc, "NOTIFICATION OF INCIDENT (NOI)", "NOI", row["number"])
+    add_docx_kv_table(doc, [
+        ("NOI Number", row["number"]), ("Document Number", f"{document_prefix()}-NOI"),
+        ("Report Date", row["report_date"]), ("Incident Date", row["incident_date"]),
+        ("Time Happened", row["happened_time"]), ("Location", row["location"]),
+        ("Project", row["project"]), ("Company", row["company"] or company_name()),
+        ("Department", row["department"]), ("Activity", row["activity"]),
+        ("Incident Type", row["incident_type"]), ("Type of Injury / Harm", row["injury_type"]),
+        ("Person Involved", row["person_involved"]), ("Reported By", row["reported_by"]),
+        ("Designation", row["reported_by_designation"]),
+        ("Investigation Required", row["investigation_required"]),
+        ("NOI Status", row["status"]),
+        ("Linked Investigation", (db.fetchone("SELECT number FROM incidents WHERE id=?", (row["linked_incident_id"],))["number"]
+                                  if row["linked_incident_id"] and db.fetchone("SELECT number FROM incidents WHERE id=?", (row["linked_incident_id"],)) else "Not linked")),
+    ])
+    for heading, value in [("Incident Description / What Happened", row["description"]),
+                           ("Immediate Action Taken", row["immediate_action"])]:
+        if safe(value).strip():
+            doc.add_heading(heading, 2)
+            t = doc.add_table(rows=1, cols=1)
+            t.alignment = WD_TABLE_ALIGNMENT.CENTER
+            t.cell(0, 0).text = xml_safe(value)
+            style_docx_table(t, header=False, font_size=9)
+    doc.add_heading("Review and Authorization", 2)
+    approvals = doc.add_table(rows=2, cols=3)
+    approvals.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for i, (label, value) in enumerate([("Prepared By", row["prepared_by"]), ("Reviewed By", row["reviewed_by"]), ("Approved By", row["approved_by"])]):
+        approvals.cell(0, i).text = label
+        approvals.cell(1, i).text = (safe(value) or "________________________") + "\nSignature: __________________\nDate: __________________"
+    style_docx_table(approvals, header=True, font_size=8)
+    footer = doc.sections[0].footer.paragraphs[0]
+    footer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    footer.add_run(f"{company_name()} | Controlled HSE Record | {row['number']}").font.size = Pt(8)
+    doc.save(path)
 
 
 def observation_export_rows(record_ids=None):
@@ -9357,124 +9437,289 @@ class MainWindow(QMainWindow):
 
     def incidents(self):
         w, layout = self.page("Accident / Incident Investigation")
-        banner=QHBoxLayout(); logo=QLabel(); logo.setFixedSize(80,60); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_path=db.setting("company_logo","")
+        banner = QHBoxLayout()
+        logo = QLabel(); logo.setFixedSize(80, 60); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_path = db.setting("company_logo", "")
         if logo_path and Path(logo_path).exists():
-            logo.setPixmap(QPixmap(logo_path).scaled(70,55,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
-        banner.addWidget(logo); banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"),1); layout.addLayout(banner)
-        toolbar=QHBoxLayout()
-        buttons=[
-            ("+ New Incident", None),
-            ("Edit Selected", None),
-            ("Delete Selected", None),
-            ("Export CSV", lambda: self.export_csv("incidents")),
-            ("Export Excel", lambda: self.export_excel("incidents")),
-            ("Export PDF", lambda: self.export_pdf("incidents")),
-            ("Export Word", lambda: self.export_docx("incidents")),
-            ("Professional Report", None),
-        ]
-        btns={}
-        for text,fn in buttons:
-            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
-            if fn:b.clicked.connect(fn)
-        layout.addLayout(toolbar)
-        table=QTableWidget(); headers=["ID","Number","Date","Type","Location","Project","Method","Status","Completion","Attachments","Professional Report"]
-        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
-        def load():
-            rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC"); table.setRowCount(len(rows))
-            for r,row in enumerate(rows):
-                # Show the actual evidence file names in the register instead of an
-                # attachment count, so the user can immediately see what is attached.
-                attached_names=attachment_names("incident_attachments",row["id"]) or "No attachment"
-                
-                total=10; done=sum(bool(safe(row[k])) for k in ["incident_date","incident_time","location","project","incident_type","description","immediate_action","investigation_method","direct_cause","root_cause"])
-                pct=round(done*100/total)
-                try:
-                    report_details=json.loads(safe(row["investigation_details"]) or "{}")
-                except Exception:
-                    report_details={}
-                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",attached_names,"Available" if report_details.get("professional_report_generated") else "Not Generated"]
-                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
-        def professional():
-            # Professional Investigation Report for the SELECTED incident only
-            # (not the full register export).
-            incident_id = self.selected_id(table, "Professional Report")
-            if incident_id is None:
-                return
-            row = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,))
-            if not row:
-                QMessageBox.warning(self, "Professional Report", "The selected incident no longer exists.")
-                return
-            number = safe(row["number"]) or f"INC-{incident_id}"
-            path, _ = QFileDialog.getSaveFileName(
-                self,
-                "Save Investigation Professional Report",
-                f"{number}_Investigation_Report.docx",
-                "Word Document (*.docx)"
-            )
-            if not path:
-                return
-            if not path.lower().endswith(".docx"):
-                path += ".docx"
+            logo.setPixmap(QPixmap(logo_path).scaled(70, 55, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        banner.addWidget(logo)
+        banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Management"), 1)
+        layout.addLayout(banner)
+        tabs = QTabWidget(); layout.addWidget(tabs, 1)
+
+        # ---------------- Notification of Incident Register ----------------
+        noi_tab = QWidget(); noi_layout = QVBoxLayout(noi_tab)
+        noi_title = QLabel("NOTIFICATION OF INCIDENT REGISTER")
+        noi_title.setStyleSheet("font-size:17px;font-weight:700;color:#17365D;padding:5px;")
+        noi_layout.addWidget(noi_title)
+        noi_toolbar = QHBoxLayout()
+        noi_buttons = {}
+        for label in ["+ New NOI", "Edit Selected", "Delete Selected", "Export NOI Report", "Create / Open Investigation"]:
+            b = QPushButton(label); b.setMinimumHeight(34); b.setMinimumWidth(125); noi_toolbar.addWidget(b); noi_buttons[label] = b
+        noi_toolbar.addStretch(); noi_layout.addLayout(noi_toolbar)
+        noi_table = QTableWidget(); noi_headers = ["ID", "NOI Number", "Report Date", "Incident Date", "Time", "Location", "Incident Type", "Injury Type", "Reported By", "Investigation Required", "Investigation"]
+        noi_table.setColumnCount(len(noi_headers)); noi_table.setHorizontalHeaderLabels(noi_headers)
+        noi_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        noi_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        noi_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        noi_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        noi_table.horizontalHeader().setStretchLastSection(True)
+        noi_layout.addWidget(noi_table, 1)
+
+        def load_noi():
+            rows = db.fetchall("SELECT n.*, i.number AS investigation_number FROM noi_register n LEFT JOIN incidents i ON i.id=n.linked_incident_id ORDER BY n.id DESC")
+            noi_table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                vals = [row["id"], row["number"], row["report_date"], row["incident_date"], row["happened_time"], row["location"], row["incident_type"], row["injury_type"], row["reported_by"], row["investigation_required"], row["investigation_number"] or "Not Linked"]
+                for c, value in enumerate(vals):
+                    item = QTableWidgetItem(safe(value)); item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | (Qt.AlignmentFlag.AlignCenter if c in (0, 9) else Qt.AlignmentFlag.AlignLeft))
+                    noi_table.setItem(r, c, item)
+
+        def selected_noi_id(action="NOI"):
+            return self.selected_id(noi_table, action)
+
+        def export_noi_report():
+            rid = selected_noi_id("Export NOI Report")
+            if rid is None: return
+            row = db.fetchone("SELECT number FROM noi_register WHERE id=?", (rid,))
+            if not row: return
+            path, _ = QFileDialog.getSaveFileName(self, "Export Notification of Incident", f"{row['number']}_NOI.docx", "Word Document (*.docx)")
+            if not path: return
+            if not path.lower().endswith(".docx"): path += ".docx"
             try:
-                generate_incident_docx(int(incident_id), path)
-                if not Path(path).exists() or Path(path).stat().st_size < 800:
-                    raise ValueError("The Investigation Professional Report was not created correctly.")
+                generate_noi_docx(rid, path)
+                if not Path(path).exists() or Path(path).stat().st_size < 700: raise ValueError("NOI report was not created correctly.")
                 with zipfile.ZipFile(path, "r") as z:
                     bad = z.testzip()
-                    if bad:
-                        raise ValueError(f"Generated report is corrupt: {bad}")
-                rr = db.fetchone("SELECT investigation_details FROM incidents WHERE id=?", (incident_id,))
-                try:
-                    details = json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
-                except Exception:
-                    details = {}
-                details["professional_report_generated"] = True
-                details["professional_report_path"] = str(path)
-                db.execute(
-                    "UPDATE incidents SET investigation_details=? WHERE id=?",
-                    (json.dumps(details, ensure_ascii=False), incident_id)
-                )
+                    if bad: raise ValueError(f"Generated report is corrupt: {bad}")
                 self.show_export_success(path)
-                load()
-            except Exception as e:
-                logging.exception("Incident professional report failed")
-                QMessageBox.critical(self, "Report Error", str(e))
-        btns["+ New Incident"].clicked.connect(lambda: self.incident_form(load))
+            except Exception as exc:
+                logging.exception("NOI report export failed")
+                QMessageBox.critical(self, "NOI Export Error", str(exc))
+
+        def open_noi_investigation():
+            rid = selected_noi_id("Create / Open Investigation")
+            if rid is None: return
+            row = db.fetchone("SELECT * FROM noi_register WHERE id=?", (rid,))
+            if not row: return
+            if safe(row["investigation_required"]).lower() != "yes":
+                QMessageBox.information(self, "Investigation Not Required", "This NOI is marked Investigation Required = No. Edit the NOI and change the decision to Yes before creating an investigation.")
+                return
+            if row["linked_incident_id"]:
+                self.incident_form(load_investigations, int(row["linked_incident_id"]), noi_id=rid)
+            else:
+                self.incident_form(load_investigations, None, noi_id=rid)
+
+        noi_buttons["+ New NOI"].clicked.connect(lambda checked=False: self.noi_form(load_noi))
+        noi_buttons["Edit Selected"].clicked.connect(lambda checked=False: (self.noi_form(load_noi, selected_noi_id("Edit NOI")) if selected_noi_id("Edit NOI") is not None else None))
+        def delete_noi():
+            rid = selected_noi_id("Delete NOI")
+            if rid is None: return
+            row = db.fetchone("SELECT number, linked_incident_id FROM noi_register WHERE id=?", (rid,))
+            if row and row["linked_incident_id"]:
+                QMessageBox.warning(self, "Linked NOI", "This NOI is linked to an investigation. It cannot be deleted; retain it as part of the incident record.")
+                return
+            answer = QMessageBox.question(self, "Delete NOI", f"Delete {row['number'] if row else 'selected NOI'}?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if answer == QMessageBox.StandardButton.Yes:
+                db.execute("DELETE FROM noi_register WHERE id=?", (rid,)); load_noi()
+        noi_buttons["Delete Selected"].clicked.connect(delete_noi)
+        noi_buttons["Export NOI Report"].clicked.connect(export_noi_report)
+        noi_buttons["Create / Open Investigation"].clicked.connect(open_noi_investigation)
+        noi_table.cellDoubleClicked.connect(lambda _r, _c: (self.noi_form(load_noi, selected_noi_id("Edit NOI")) if selected_noi_id("Edit NOI") is not None else None))
+
+        # ---------------- Existing Investigation Register ----------------
+        inv_tab = QWidget(); inv_layout = QVBoxLayout(inv_tab)
+        toolbar = QHBoxLayout()
+        buttons = [("+ New Incident", None), ("Edit Selected", None), ("Delete Selected", None),
+                   ("Export CSV", lambda: self.export_csv("incidents")), ("Export Excel", lambda: self.export_excel("incidents")),
+                   ("Export PDF", lambda: self.export_pdf("incidents")), ("Export Word", lambda: self.export_docx("incidents")), ("Professional Report", None)]
+        btns = {}
+        for label, fn in buttons:
+            b = QPushButton(label); b.setMinimumHeight(34); toolbar.addWidget(b); btns[label] = b
+            if fn: b.clicked.connect(fn)
+        inv_layout.addLayout(toolbar)
+        table = QTableWidget(); headers = ["ID", "Number", "NOI Reference", "Date", "Type", "Location", "Project", "Method", "Status", "Completion", "Attachments", "Professional Report"]
+        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); table.horizontalHeader().setStretchLastSection(True)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); inv_layout.addWidget(table, 1)
+
+        def load_investigations():
+            rows = db.fetchall("SELECT i.*, n.number AS noi_number FROM incidents i LEFT JOIN noi_register n ON n.id=i.noi_id ORDER BY i.id DESC")
+            table.setRowCount(len(rows))
+            for r, row in enumerate(rows):
+                attached_names = attachment_names("incident_attachments", row["id"]) or "No attachment"
+                total = 10; done = sum(bool(safe(row[k])) for k in ["incident_date", "incident_time", "location", "project", "incident_type", "description", "immediate_action", "investigation_method", "direct_cause", "root_cause"])
+                pct = round(done * 100 / total)
+                try: report_details = json.loads(safe(row["investigation_details"]) or "{}")
+                except Exception: report_details = {}
+                vals = [row["id"], row["number"], row["noi_number"] or "—", row["incident_date"], row["incident_type"], row["location"], row["project"], row["investigation_method"], row["status"], f"{pct}%", attached_names, "Available" if report_details.get("professional_report_generated") else "Not Generated"]
+                for c, value in enumerate(vals): table.setItem(r, c, QTableWidgetItem(safe(value)))
+
+        def professional():
+            incident_id = self.selected_id(table, "Professional Report")
+            if incident_id is None: return
+            row = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,))
+            if not row:
+                QMessageBox.warning(self, "Professional Report", "The selected incident no longer exists."); return
+            number = safe(row["number"]) or f"INC-{incident_id}"
+            path, _ = QFileDialog.getSaveFileName(self, "Save Investigation Professional Report", f"{number}_Investigation_Report.docx", "Word Document (*.docx)")
+            if not path: return
+            if not path.lower().endswith(".docx"): path += ".docx"
+            try:
+                generate_incident_docx(int(incident_id), path)
+                if not Path(path).exists() or Path(path).stat().st_size < 800: raise ValueError("The Investigation Professional Report was not created correctly.")
+                with zipfile.ZipFile(path, "r") as z:
+                    bad = z.testzip()
+                    if bad: raise ValueError(f"Generated report is corrupt: {bad}")
+                rr = db.fetchone("SELECT investigation_details FROM incidents WHERE id=?", (incident_id,))
+                try: details = json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
+                except Exception: details = {}
+                details["professional_report_generated"] = True; details["professional_report_path"] = str(path)
+                db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(details, ensure_ascii=False), incident_id))
+                self.show_export_success(path); load_investigations()
+            except Exception as exc:
+                logging.exception("Incident professional report failed"); QMessageBox.critical(self, "Report Error", str(exc))
+
+        btns["+ New Incident"].clicked.connect(lambda checked=False: self.incident_form(load_investigations))
         def edit_selected():
             rid = self.selected_id(table, "Edit Incident")
-            if rid is None:
-                return
+            if rid is None: return
             rr = db.fetchone("SELECT status FROM incidents WHERE id=?", (rid,))
             if rr and safe(rr["status"]).lower() == "closed":
-                QMessageBox.information(self, "Submitted", "This report has been submitted and cannot be edited.")
-                return
-            self.incident_form(load, rid)
+                QMessageBox.information(self, "Submitted", "This report has been submitted and cannot be edited."); return
+            self.incident_form(load_investigations, rid)
         btns["Edit Selected"].clicked.connect(edit_selected)
-        btns["Delete Selected"].clicked.connect(
-            lambda: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load)
-        )
+        btns["Delete Selected"].clicked.connect(lambda checked=False: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load_investigations))
         btns["Professional Report"].clicked.connect(professional)
-        load()
+        table.cellDoubleClicked.connect(lambda _r, _c: edit_selected())
+        tabs.addTab(noi_tab, "Notification of Incident (NOI)")
+        tabs.addTab(inv_tab, "Investigation Register")
+        load_noi(); load_investigations()
 
+    def noi_form(self, refresh, noi_id=None):
+        existing = db.fetchone("SELECT * FROM noi_register WHERE id=?", (noi_id,)) if noi_id else None
+        if noi_id and not existing: return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Notification of Incident" if existing else "New Notification of Incident")
+        dialog.resize(1050, 760); dialog.setMinimumSize(680, 500)
+        fit_dialog_to_desktop(dialog, 0.92, 0.88)
+        outer = QVBoxLayout(dialog); outer.setContentsMargins(16, 14, 16, 12); outer.setSpacing(10)
+        heading = QLabel("NOTIFICATION OF INCIDENT (NOI)")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setStyleSheet("font-size:19px;font-weight:700;color:#17365D;padding:8px;border-bottom:2px solid #2F75B5;")
+        outer.addWidget(heading)
+        intro = QLabel("Record the initial incident notification. If investigation is required, use Create / Open Investigation from the NOI Register.")
+        intro.setWordWrap(True); intro.setStyleSheet("color:#526477;padding:2px 4px;"); outer.addWidget(intro)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget(); grid = QGridLayout(content); grid.setContentsMargins(6, 6, 6, 8); grid.setHorizontalSpacing(16); grid.setVerticalSpacing(10)
+        fields = {}
+        def field(key, label, value="", row=None, col=0, span=1, multiline=False, options=None):
+            wrap = QWidget(); box = QVBoxLayout(wrap); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(4)
+            lab = QLabel(label); lab.setStyleSheet("font-weight:600;color:#33465A;"); box.addWidget(lab)
+            if options is not None:
+                widget = QComboBox(); widget.addItems(options); widget.setCurrentText(safe(value))
+            elif multiline:
+                widget = QTextEdit(); widget.setMinimumHeight(72); widget.setPlainText(safe(value))
+            else:
+                widget = QLineEdit(safe(value)); widget.setMinimumHeight(32)
+            if isinstance(widget, QLineEdit): widget.setPlaceholderText(label)
+            fields[key] = widget; box.addWidget(widget)
+            grid.addWidget(wrap, row, col, 1, span)
+            return widget
+        def date_field(key, label, value="", row=0, col=0):
+            wrap = QWidget(); box = QVBoxLayout(wrap); box.setContentsMargins(0, 0, 0, 0); box.setSpacing(4)
+            lab = QLabel(label); lab.setStyleSheet("font-weight:600;color:#33465A;"); box.addWidget(lab)
+            widget = QDateEdit(); widget.setCalendarPopup(True); widget.setDisplayFormat("dd-MMM-yyyy"); widget.setMinimumHeight(32)
+            parsed = QDate.fromString(safe(value), "yyyy-MM-dd") if value else QDate.currentDate()
+            widget.setDate(parsed if parsed.isValid() else QDate.currentDate())
+            fields[key] = widget; box.addWidget(widget); grid.addWidget(wrap, row, col)
+            return widget
+        date_field("report_date", "Date Reported", existing["report_date"] if existing else "", 0, 0)
+        date_field("incident_date", "Date of Incident", existing["incident_date"] if existing else "", 0, 1)
+        field("happened_time", "Time Happened (HH:MM)", existing["happened_time"] if existing else "", 1, 0)
+        field("location", "Incident Location *", existing["location"] if existing else "", 1, 1)
+        field("project", "Project / Site", existing["project"] if existing else db.setting("project_name", ""), 2, 0)
+        field("company", "Company / Contractor", existing["company"] if existing else db.setting("company_name", ""), 2, 1)
+        field("department", "Department", existing["department"] if existing else "", 3, 0)
+        field("activity", "Activity at Time of Incident", existing["activity"] if existing else "", 3, 1)
+        field("incident_type", "Incident Type", existing["incident_type"] if existing else "", 4, 0, options=INCIDENT_TYPES)
+        field("injury_type", "Type of Injury / Harm", existing["injury_type"] if existing else "", 4, 1, options=["Not Applicable", "Cut / Laceration", "Bruise / Contusion", "Fracture", "Burn", "Eye Injury", "Sprain / Strain", "Inhalation / Exposure", "Multiple Injuries", "Other / To Be Confirmed"])
+        field("person_involved", "Injured / Affected Person (if known)", existing["person_involved"] if existing else "", 5, 0)
+        field("reported_by", "Reported By *", existing["reported_by"] if existing else "", 5, 1)
+        field("reported_by_designation", "Reported By - Designation", existing["reported_by_designation"] if existing else "", 6, 0)
+        field("investigation_required", "Investigation Required", existing["investigation_required"] if existing else "No", 6, 1, options=["Yes", "No"])
+        field("description", "Basic Details - What Happened", existing["description"] if existing else "", 7, 0, 2, True)
+        field("immediate_action", "Immediate Action Taken", existing["immediate_action"] if existing else "", 8, 0, 2, True)
+        field("prepared_by", "Prepared By", existing["prepared_by"] if existing else "", 9, 0)
+        field("reviewed_by", "Reviewed By", existing["reviewed_by"] if existing else "", 9, 1)
+        field("approved_by", "Approved By", existing["approved_by"] if existing else "", 10, 0)
+        for col in (0, 1): grid.setColumnStretch(col, 1)
+        scroll.setWidget(content); outer.addWidget(scroll, 1)
+        footer = QHBoxLayout(); footer.addStretch()
+        save_btn = QPushButton("Save NOI"); cancel_btn = QPushButton("Cancel")
+        for b in (save_btn, cancel_btn): b.setMinimumHeight(38); b.setMinimumWidth(125)
+        footer.addWidget(save_btn); footer.addWidget(cancel_btn); outer.addLayout(footer)
+        cancel_btn.clicked.connect(dialog.reject)
+        def val(key):
+            widget = fields[key]
+            if isinstance(widget, QDateEdit): return widget.date().toString("yyyy-MM-dd")
+            if isinstance(widget, QTextEdit): return widget.toPlainText().strip()
+            if isinstance(widget, QComboBox): return widget.currentText().strip()
+            return widget.text().strip()
+        def save_noi():
+            if not val("location") or not val("reported_by") or not val("incident_type"):
+                QMessageBox.warning(dialog, "Required Information", "Please enter Incident Type, Incident Location and Reported By."); return
+            if existing and existing["linked_incident_id"] and val("investigation_required") != "Yes":
+                QMessageBox.warning(dialog, "Linked Investigation", "Investigation Required cannot be changed to No because this NOI is already linked to an investigation."); return
+            try:
+                now = datetime.now().isoformat()
+                values = tuple(val(k) for k in ["report_date", "incident_date", "happened_time", "location", "project", "company", "department", "activity", "incident_type", "injury_type", "reported_by", "reported_by_designation", "person_involved", "description", "immediate_action", "investigation_required", "prepared_by", "reviewed_by", "approved_by"])
+                if existing:
+                    db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,reviewed_by=?,approved_by=?,updated_at=? WHERE id=?""", values + (now, noi_id))
+                else:
+                    number = next_number("HSE-NOI", "noi_register")
+                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,reviewed_by,approved_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + ("Reported", now, now))
+                dialog.accept(); refresh()
+            except Exception as exc:
+                logging.exception("NOI save failed"); QMessageBox.critical(dialog, "NOI Save Error", f"Unable to save the Notification of Incident.\n\n{exc}")
+        save_btn.clicked.connect(save_noi)
+        dialog.exec()
 
-    def incident_form(self, refresh, incident_id=None):
+    def incident_form(self, refresh, incident_id=None, noi_id=None):
         existing = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,)) if incident_id else None
         if incident_id and not existing: return
+        linked_noi_id = noi_id or (existing["noi_id"] if existing and "noi_id" in existing.keys() else None)
+        noi_record = db.fetchone("SELECT * FROM noi_register WHERE id=?", (linked_noi_id,)) if linked_noi_id else None
         dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1200,850); dialog.setMinimumSize(1100,750)
         outer=QVBoxLayout(dialog); title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
         def add_edit(name,label=None,value=""):
             e=QLineEdit(safe(value)); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
-        add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else "")
+        add_edit("incident_title","Incident Title",existing["incident_title"] if existing and "incident_title" in existing.keys() else (f"{safe(noi_record['incident_type'])} - {safe(noi_record['location'])}" if noi_record else ""))
         add_edit("permit_number","Permit Number",existing["permit_number"] if existing and "permit_number" in existing.keys() else "")
+        if noi_record:
+            add_edit("noi_reference", "NOI Reference", noi_record["number"])
+            edits["noi_reference"].setReadOnly(True)
+        elif existing and "noi_id" in existing.keys() and existing["noi_id"]:
+            nr = db.fetchone("SELECT number FROM noi_register WHERE id=?", (existing["noi_id"],))
+            add_edit("noi_reference", "NOI Reference", nr["number"] if nr else "")
+            edits["noi_reference"].setReadOnly(True)
+        incident_date = QDateEdit(); incident_date.setCalendarPopup(True); incident_date.setDisplayFormat("dd-MMM-yyyy")
+        date_value = (safe(existing["incident_date"]) if existing else safe(noi_record["incident_date"]) if noi_record else today())
+        parsed_date = QDate.fromString(date_value, "yyyy-MM-dd")
+        incident_date.setDate(parsed_date if parsed_date.isValid() else QDate.currentDate())
+        form.addRow("Date of Incident:", incident_date)
         for name in ["incident_time","location","project","company","department","activity"]:
-            default_value = existing[name] if existing else (db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
+            default_value = existing[name] if existing else (safe(noi_record["happened_time"]) if noi_record and name == "incident_time" else safe(noi_record["location"]) if noi_record and name == "location" else safe(noi_record["project"]) if noi_record and name == "project" else safe(noi_record["company"]) if noi_record and name == "company" else safe(noi_record["department"]) if noi_record and name == "department" else safe(noi_record["activity"]) if noi_record and name == "activity" else db.setting("project_name", "") if name == "project" else db.setting("company_name", "") if name == "company" else "")
             add_edit(name,value=default_value)
         for name in ["supervisor","witnesses"]: add_edit(name,value=existing[name] if existing else "")
-        incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); form.addRow("Type of Incident:",incident_type)
-        description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else ""); form.addRow("Incident Description:",description)
-        immediate=QTextEdit(); immediate.setMinimumHeight(70); immediate.setPlainText(safe(existing["immediate_action"]) if existing else ""); form.addRow("Immediate Action:",immediate)
+        incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES)
+        if existing: incident_type.setCurrentText(safe(existing["incident_type"]))
+        elif noi_record: incident_type.setCurrentText(safe(noi_record["incident_type"]))
+        form.addRow("Type of Incident:",incident_type)
+        description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else safe(noi_record["description"]) if noi_record else ""); form.addRow("Incident Description:",description)
+        immediate=QTextEdit(); immediate.setMinimumHeight(70); immediate.setPlainText(safe(existing["immediate_action"]) if existing else safe(noi_record["immediate_action"]) if noi_record else ""); form.addRow("Immediate Action:",immediate)
         # People involved
         people_box=QGroupBox("People Involved"); people_layout=QVBoxLayout(people_box); people_rows=[]
         def add_person(data=None):
@@ -10002,14 +10247,17 @@ class MainWindow(QMainWindow):
                 people=[{"name":n.text().strip(),"role":role.currentText(),"designation":d.text().strip(),"id":i.text().strip()} for _,n,role,d,i in people_rows if n.text().strip()]
                 equipment=[{"name":n.text().strip(),"id":i.text().strip(),"specification":sp.text().strip()} for _,n,i,sp in equipment_rows if n.text().strip()]
                 primary_corrective="\n".join(f"{i}. {x['action']}" for i,x in enumerate(actions,1))
-                params=(today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),"", "", equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),"", "", "", "", edits["organization"].text(), "", edits["report_reference"].text(),mode,datetime.now().isoformat())
+                params=(incident_date.date().toString("yyyy-MM-dd"),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),"", "", equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),"", "", "", "", edits["organization"].text(), "", edits["report_reference"].text(),mode,datetime.now().isoformat())
                 if existing:
                     db.execute("""UPDATE incidents SET incident_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,person_involved=?,employee_id=?,designation=?,supervisor=?,witnesses=?,description=?,immediate_action=?,consequences=?,potential_consequences=?,equipment=?,investigation_method=?,why1=?,why2=?,why3=?,why4=?,why5=?,direct_cause=?,contributing_factors=?,root_cause=?,corrective_action=?,preventive_action=?,investigation_details=?,people_details=?,equipment_details=?,environmental_category=?,environmental_quantity=?,property_name=?,property_damage_cost=?,organization=?,procedure_reference=?,report_reference=?,status=?,created_at=? WHERE id=?""",params+(incident_id,))
                 else:
                     db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
                 rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
-                db.execute("UPDATE incidents SET incident_title=?, permit_number=? WHERE id=?",
-                           (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), rid))
+                db.execute("UPDATE incidents SET incident_title=?, permit_number=?, noi_id=? WHERE id=?",
+                           (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), linked_noi_id, rid))
+                if linked_noi_id:
+                    db.execute("UPDATE noi_register SET linked_incident_id=?, status='Investigation Linked', updated_at=? WHERE id=?",
+                               (rid, datetime.now().isoformat(), linked_noi_id))
                 # Save Fishbone cause attachments and replace temporary source paths with
                 # the saved filenames so reports can display the actual evidence.
                 if method.currentText()=="Fishbone / Ishikawa":
