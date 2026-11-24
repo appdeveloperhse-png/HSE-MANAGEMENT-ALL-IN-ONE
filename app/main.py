@@ -2458,16 +2458,14 @@ def generate_incident_docx(incident_id, path):
     section_table("Corrective Action Plan",["Action","Responsible","Target Date","Status","Closeout Evidence"],[[a.get("action",""),a.get("responsible",""),a.get("target_date",""),a.get("status","Open"),"; ".join(a.get("attachments",[])) or "None"] for a in actions])
     add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id))
     sig=details.get("approval_signatures",{}) if isinstance(details.get("approval_signatures",{}),dict) else {}
+    prepared=sig.get("prepared_by",{}) if isinstance(sig.get("prepared_by",{}),dict) else {}
     doc.add_paragraph()
-    doc.add_heading("Review and Approval / Sign-off", level=2)
-    st=doc.add_table(rows=4, cols=3); st.style="Table Grid"; st.autofit=False
-    for i,label in enumerate(["Prepared by","Reviewed by","Approved by"]):
-        st.cell(0,i).text=label
-        x=sig.get(label.lower().replace(" ","_"),{}) or {}
-        st.cell(1,i).text=f"Name: {x.get('name','')}"
-        st.cell(2,i).text=f"Position: {x.get('position','')}"
-        st.cell(3,i).text=f"Signature: {x.get('signature','')}\nDate: {x.get('date','')}"
-    style_docx_table(st,header=True,font_size=8)
+    doc.add_heading("Prepared By", level=2)
+    st=doc.add_table(rows=0, cols=2); st.style="Table Grid"; st.autofit=False
+    for label, value in [("Name", prepared.get("name", "")), ("Position", prepared.get("position", "")),
+                         ("Signature", prepared.get("signature", "")), ("Date", prepared.get("date", ""))]:
+        cells=st.add_row().cells; cells[0].text=label; cells[1].text=safe(value)
+    style_docx_table(st,header=False,font_size=9)
     add_docx_footer(doc); save_docx_validated(doc,path)
 
 
@@ -9728,16 +9726,29 @@ class MainWindow(QMainWindow):
 
         # ---------------- Existing Investigation Register ----------------
         inv_tab = QWidget(); inv_layout = QVBoxLayout(inv_tab)
+        inv_tab.setStyleSheet("""
+            QTableWidget { background:#ffffff; color:#172b43; gridline-color:#c5d2df; alternate-background-color:#edf3f8; selection-background-color:#245b83; selection-color:#ffffff; }
+            QHeaderView::section { background:#17365D; color:#ffffff; padding:8px 6px; border:1px solid #294d70; font-weight:800; }
+            QPushButton { background:#24476b; color:#ffffff; border:1px solid #17365D; border-radius:7px; padding:8px 12px; font-weight:800; }
+            QPushButton:hover { background:#087F8C; border-color:#06656f; }
+        """)
         toolbar = QHBoxLayout()
         buttons = [("+ New Incident", None), ("Edit Selected", None), ("Delete Selected", None),
                    ("Export CSV", lambda: self.export_csv("incidents")), ("Export Excel", lambda: self.export_excel("incidents")),
                    ("Export PDF", lambda: self.export_pdf("incidents")), ("Export Word", lambda: self.export_docx("incidents")), ("Professional Report", None)]
         btns = {}
         for label, fn in buttons:
-            b = QPushButton(label); b.setMinimumHeight(34); toolbar.addWidget(b); btns[label] = b
+            b = QPushButton(label); b.setMinimumHeight(36); toolbar.addWidget(b); btns[label] = b
             if fn: b.clicked.connect(fn)
-        inv_layout.addLayout(toolbar)
-        table = QTableWidget(); headers = ["ID", "Number", "NOI Reference", "Date", "Type", "Location", "Project", "Method", "Status", "Completion", "Attachments", "Professional Report"]
+        toolbar.addStretch(); inv_layout.addLayout(toolbar)
+        workflow_toolbar = QHBoxLayout()
+        workflow_title = QLabel("INVESTIGATION APPROVAL WORKFLOW")
+        workflow_title.setStyleSheet("color:#17365D;font-size:10pt;font-weight:900;padding:5px 10px;background:#dce8f5;border-radius:6px;")
+        workflow_toolbar.addWidget(workflow_title)
+        for label in ["Submit Investigation", "Review Investigation", "Approve Investigation"]:
+            b=QPushButton(label); b.setMinimumHeight(38); b.setMinimumWidth(175); workflow_toolbar.addWidget(b); btns[label]=b
+        workflow_toolbar.addStretch(); inv_layout.addLayout(workflow_toolbar)
+        table = QTableWidget(); headers = ["ID", "Number", "NOI Reference", "Date", "Type", "Location", "Project", "Method", "Status", "Approval Workflow", "Reviewed By", "Approved By", "Completion", "Attachments", "Professional Report"]
         table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -9752,8 +9763,68 @@ class MainWindow(QMainWindow):
                 pct = round(done * 100 / total)
                 try: report_details = json.loads(safe(row["investigation_details"]) or "{}")
                 except Exception: report_details = {}
-                vals = [row["id"], row["number"], row["noi_number"] or "—", row["incident_date"], row["incident_type"], row["location"], row["project"], row["investigation_method"], row["status"], f"{pct}%", attached_names, "Available" if report_details.get("professional_report_generated") else "Not Generated"]
+                wf = report_details.get("investigation_workflow", {}) if isinstance(report_details.get("investigation_workflow", {}), dict) else {}
+                wf_status = safe(wf.get("status", "Draft")) or "Draft"
+                vals = [row["id"], row["number"], row["noi_number"] or "—", row["incident_date"], row["incident_type"], row["location"], row["project"], row["investigation_method"], row["status"], wf_status, safe(wf.get("reviewed_by", "")), safe(wf.get("approved_by", "")), f"{pct}%", attached_names, "Available" if report_details.get("professional_report_generated") else "Not Generated"]
                 for c, value in enumerate(vals): table.setItem(r, c, QTableWidgetItem(safe(value)))
+
+        def investigation_workflow(action):
+            incident_id = self.selected_id(table, action)
+            if incident_id is None:
+                return
+            record = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,))
+            if not record:
+                QMessageBox.warning(self, "Investigation Workflow", "The selected investigation could not be found.")
+                return
+            try:
+                details = json.loads(safe(record["investigation_details"]) or "{}")
+            except Exception:
+                details = {}
+            if not isinstance(details, dict):
+                details = {}
+            workflow = details.get("investigation_workflow", {})
+            if not isinstance(workflow, dict):
+                workflow = {}
+            current = safe(workflow.get("status", "Draft")) or "Draft"
+            signatures = details.get("approval_signatures", {})
+            if not isinstance(signatures, dict):
+                signatures = {}
+            prepared = signatures.get("prepared_by", {})
+            prepared_name = safe(prepared.get("name", "")) if isinstance(prepared, dict) else ""
+            if action == "Submit Investigation":
+                if current not in {"Draft", "Prepared", "Open"}:
+                    QMessageBox.information(self, "Investigation Workflow", f"This investigation is already {current}.")
+                    return
+                if not prepared_name.strip():
+                    QMessageBox.warning(self, "Prepared By Required", "Open Edit Selected and enter the Prepared By name before submitting this investigation.")
+                    return
+                workflow.update({"status": "Submitted", "submitted_at": datetime.now().isoformat()})
+            elif action == "Review Investigation":
+                if current != "Submitted":
+                    QMessageBox.warning(self, "Workflow Order", "The investigation must be submitted before it can be reviewed.")
+                    return
+                name, ok = QInputDialog.getText(self, "Review Investigation", "Reviewed By - Full Name:")
+                if not ok:
+                    return
+                if not name.strip():
+                    QMessageBox.warning(self, "Name Required", "Enter the reviewer's full name.")
+                    return
+                workflow.update({"status": "Reviewed", "reviewed_by": name.strip(), "reviewed_at": datetime.now().isoformat()})
+            elif action == "Approve Investigation":
+                if current != "Reviewed":
+                    QMessageBox.warning(self, "Workflow Order", "The investigation must be reviewed before it can be approved.")
+                    return
+                name, ok = QInputDialog.getText(self, "Approve Investigation", "Approved By - Full Name:")
+                if not ok:
+                    return
+                if not name.strip():
+                    QMessageBox.warning(self, "Name Required", "Enter the approver's full name.")
+                    return
+                workflow.update({"status": "Approved", "approved_by": name.strip(), "approved_at": datetime.now().isoformat()})
+            details["investigation_workflow"] = workflow
+            db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(details, ensure_ascii=False), incident_id))
+            load_investigations()
+            QMessageBox.information(self, "Investigation Workflow", f"{action} completed successfully.")
 
         def professional():
             incident_id = self.selected_id(table, "Professional Report")
@@ -9789,6 +9860,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Submitted", "This report has been submitted and cannot be edited."); return
             self.incident_form(load_investigations, rid)
         btns["Edit Selected"].clicked.connect(edit_selected)
+        btns["Submit Investigation"].clicked.connect(lambda checked=False: investigation_workflow("Submit Investigation"))
+        btns["Review Investigation"].clicked.connect(lambda checked=False: investigation_workflow("Review Investigation"))
+        btns["Approve Investigation"].clicked.connect(lambda checked=False: investigation_workflow("Approve Investigation"))
         btns["Delete Selected"].clicked.connect(lambda checked=False: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load_investigations))
         btns["Professional Report"].clicked.connect(professional)
         table.cellDoubleClicked.connect(lambda _r, _c: edit_selected())
@@ -9960,17 +10034,24 @@ class MainWindow(QMainWindow):
         noi_record = db.fetchone("SELECT * FROM noi_register WHERE id=?", (linked_noi_id,)) if linked_noi_id else None
         dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1240,900); dialog.setMinimumSize(980,680)
         dialog.setStyleSheet("""
-            QDialog { background:#f3f6fa; }
-            QLabel#incidentFormTitle { color:#17365D; font-size:21px; font-weight:800; padding:12px 14px; background:#ffffff; border:1px solid #d9e2ec; border-left:5px solid #2F75B5; border-radius:8px; }
+            QDialog { background:#dce5ef; color:#172b43; }
+            QLabel { color:#172b43; font-size:10pt; font-weight:600; }
+            QLabel#incidentFormTitle { color:#ffffff; font-size:21px; font-weight:900; padding:14px 16px; background:#17365D; border:1px solid #102943; border-left:7px solid #12A6A0; border-radius:9px; }
             QScrollArea { border:0; background:transparent; }
-            QWidget#incidentFormContent { background:#ffffff; }
-            QGroupBox { font-weight:700; color:#17365D; border:1px solid #cbd8e6; border-radius:8px; margin-top:12px; padding:12px 8px 8px 8px; background:#fbfdff; }
-            QGroupBox::title { subcontrol-origin:margin; left:12px; padding:0 6px; }
-            QLineEdit, QTextEdit, QComboBox, QDateEdit { background:#ffffff; border:1px solid #c5d0dc; border-radius:5px; padding:7px; min-height:20px; selection-background-color:#2F75B5; }
-            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus { border:2px solid #2F75B5; }
-            QPushButton { background:#edf3f9; color:#17365D; border:1px solid #c4d3e2; border-radius:5px; padding:7px 11px; font-weight:600; }
-            QPushButton:hover { background:#dceaf7; }
-            QScrollBar:vertical { width:12px; background:#edf1f5; }
+            QWidget#incidentFormContent { background:#edf2f8; }
+            QGroupBox { font-weight:800; font-size:11pt; color:#123456; border:1px solid #8fa8c2; border-top:4px solid #2F75B5; border-radius:9px; margin-top:15px; padding:14px 10px 10px 10px; background:#f8fbff; }
+            QGroupBox::title { subcontrol-origin:margin; left:13px; padding:2px 8px; color:#123456; background:#dce8f5; border-radius:4px; }
+            QLineEdit, QTextEdit, QComboBox, QDateEdit { background:#ffffff; color:#172b43; border:1px solid #8299b2; border-radius:6px; padding:8px; min-height:22px; selection-background-color:#176B87; selection-color:#ffffff; }
+            QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QDateEdit:focus { border:2px solid #087F8C; background:#ffffff; }
+            QLineEdit:disabled, QTextEdit:disabled, QComboBox:disabled, QDateEdit:disabled { background:#e2e8f0; color:#52657a; }
+            QComboBox QAbstractItemView { background:#ffffff; color:#172b43; selection-background-color:#176B87; selection-color:#ffffff; }
+            QPushButton { background:#24476b; color:#ffffff; border:1px solid #17365D; border-radius:7px; padding:8px 13px; font-weight:800; min-height:22px; }
+            QPushButton:hover { background:#087F8C; border-color:#06656f; }
+            QPushButton:pressed { background:#123456; }
+            QDialogButtonBox QPushButton { min-width:125px; padding:9px 15px; }
+            QScrollBar:vertical { width:13px; background:#d5dfeb; }
+            QScrollBar::handle:vertical { background:#7892ad; border-radius:5px; min-height:25px; }
+            QScrollBar::handle:vertical:hover { background:#315b80; }
         """)
         outer=QVBoxLayout(dialog); outer.setContentsMargins(16,14,16,14); outer.setSpacing(12)
         title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setObjectName("incidentFormTitle"); outer.addWidget(title)
@@ -10420,16 +10501,22 @@ class MainWindow(QMainWindow):
             except Exception: pass
         if not witness_rows: add_witness()
         form.addRow(witness_box)
-        approval_box=QGroupBox("Prepared / Reviewed / Approved By"); approval_form=QFormLayout(approval_box)
+        approval_box=QGroupBox("Prepared By"); approval_form=QFormLayout(approval_box)
         approval_rows={}
         approval_old={}
         try: approval_old=json.loads(safe(existing["investigation_details"]) or "{}").get("approval_signatures",{}) if existing else {}
         except Exception: approval_old={}
-        for role in ["Prepared by","Reviewed by","Approved by"]:
-            key=role.lower().replace(" ","_"); data=approval_old.get(key,{}) if isinstance(approval_old,dict) else {}
-            n=QLineEdit(safe(data.get("name",""))); pos=QLineEdit(safe(data.get("position",""))); sig=QLineEdit(safe(data.get("signature",""))); dt=QLineEdit(safe(data.get("date","")))
-            approval_form.addRow(role+" - Name:",n); approval_form.addRow(role+" - Position:",pos); approval_form.addRow(role+" - Signature:",sig); approval_form.addRow(role+" - Date:",dt)
-            approval_rows[key]=(n,pos,sig,dt)
+        prepared_data=approval_old.get("prepared_by",{}) if isinstance(approval_old,dict) else {}
+        if not isinstance(prepared_data,dict): prepared_data={}
+        prepared_name=QLineEdit(safe(prepared_data.get("name", ""))); prepared_name.setPlaceholderText("Enter the report preparer's full name")
+        prepared_position=QLineEdit(safe(prepared_data.get("position", ""))); prepared_position.setPlaceholderText("Position / Designation")
+        prepared_signature=QLineEdit(safe(prepared_data.get("signature", ""))); prepared_signature.setPlaceholderText("Signature / e-sign reference")
+        prepared_date=QLineEdit(safe(prepared_data.get("date", ""))); prepared_date.setPlaceholderText("Date")
+        approval_form.addRow("Prepared By - Name:", prepared_name)
+        approval_form.addRow("Position:", prepared_position)
+        approval_form.addRow("Signature:", prepared_signature)
+        approval_form.addRow("Date:", prepared_date)
+        approval_rows["prepared_by"]=(prepared_name, prepared_position, prepared_signature, prepared_date)
         form.addRow(approval_box)
         status=QComboBox(); status.addItems(["Draft","Open","Closed"]); status.setCurrentText(safe(existing["status"]) if existing else "Draft"); form.addRow("Investigation Status:",status)
         evidence_box=QGroupBox("Evidence Attachments"); evidence_lay=QVBoxLayout(evidence_box); evidence_rows=[]
@@ -10514,8 +10601,16 @@ class MainWindow(QMainWindow):
                 if incident_capa_required.currentText() == "Yes" and not any(safe(a.get("action", "")).strip() for a in actions):
                     QMessageBox.warning(dialog, "Corrective Action Required", "Add at least one corrective action before linking this incident to CAPA Tracking.")
                     return
+                old_details_for_workflow={}
+                if existing:
+                    try: old_details_for_workflow=json.loads(safe(existing["investigation_details"]) or "{}")
+                    except Exception: old_details_for_workflow={}
+                if not isinstance(old_details_for_workflow, dict): old_details_for_workflow={}
+                preserved_workflow=old_details_for_workflow.get("investigation_workflow", {})
+                if not isinstance(preserved_workflow, dict): preserved_workflow={}
                 details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
-                details["approval_signatures"]={key:{"name":vals[0].text().strip(),"position":vals[1].text().strip(),"signature":vals[2].text().strip(),"date":vals[3].text().strip()} for key,vals in approval_rows.items()}
+                details["approval_signatures"]={"prepared_by":{"name":prepared_name.text().strip(),"position":prepared_position.text().strip(),"signature":prepared_signature.text().strip(),"date":prepared_date.text().strip()}}
+                details["investigation_workflow"]=preserved_workflow
                 if method.currentText()=="Fishbone / Ishikawa":
                     details["fishbone"]=fishbone_rows_data
                 details["environmental_items"]=[{"category":widgets[0].currentText().strip(),"quantity":widgets[1].text().strip()} for _,widgets in environmental_rows if widgets[0].currentText().strip() or widgets[1].text().strip()]
