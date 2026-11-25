@@ -40101,8 +40101,8 @@ class EmergencyDrillModule(QWidget):
             for rec in rows:
                 rr=t.rowCount(); t.insertRow(rr)
                 for c,key in enumerate(fields): t.setItem(rr,c,QTableWidgetItem(safe(rec[key])))
-        controls=QHBoxLayout(); export=QPushButton("Export Review Report (PDF)"); export.clicked.connect(lambda: self.export_pdf(did_override=did)); review=QPushButton("Review / Return"); review.clicked.connect(lambda: self._review_decision(did,dlg)); approve=QPushButton("Final Approve"); approve.clicked.connect(lambda: self._approval_decision(did,dlg)); close=QPushButton("Close"); close.clicked.connect(dlg.accept)
-        controls.addWidget(export)
+        controls=QHBoxLayout(); export=QPushButton("Export Review Report (PDF)"); export.clicked.connect(lambda: self.export_pdf(did_override=did)); export_word=QPushButton("Export Review Report (Word)"); export_word.clicked.connect(lambda: self.export_word(did_override=did)); review=QPushButton("Review / Return"); review.clicked.connect(lambda: self._review_decision(did,dlg)); approve=QPushButton("Final Approve"); approve.clicked.connect(lambda: self._approval_decision(did,dlg)); close=QPushButton("Close"); close.clicked.connect(dlg.accept)
+        controls.addWidget(export); controls.addWidget(export_word)
         if self.tabs.currentWidget() is self.approval_table.parentWidget(): controls.addWidget(approve)
         else: controls.addWidget(review)
         controls.addStretch(1); controls.addWidget(close); outer.addLayout(controls); dlg.exec()
@@ -40155,9 +40155,10 @@ class EmergencyDrillModule(QWidget):
         self.report_drill_combo = QComboBox()
         bar.addWidget(QLabel("Drill:")); bar.addWidget(self.report_drill_combo, 1)
         pdf = QPushButton("Export PDF Report"); pdf.clicked.connect(self.export_pdf)
+        word = QPushButton("Export Word Report"); word.clicked.connect(self.export_word)
         xlsx = QPushButton("Export Excel Register"); xlsx.clicked.connect(self.export_excel)
         delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill_by_combo(self.report_drill_combo))
-        bar.addWidget(pdf); bar.addWidget(xlsx); bar.addWidget(delete); lay.addLayout(bar)
+        bar.addWidget(pdf); bar.addWidget(word); bar.addWidget(xlsx); bar.addWidget(delete); lay.addLayout(bar)
         self.tabs.addTab(w, "Reports")
 
     def _make_settings_tab(self):
@@ -40773,10 +40774,42 @@ class EmergencyDrillModule(QWidget):
             data=[["No.","Criteria","Result","Comments","Severity"]]
             for x in ev: data.append([str(x["item_no"]),html.escape(xml_safe(x["checklist_item"])),x["result"],html.escape(xml_safe(x["comments"])),x["severity"]])
             t=Table(data,colWidths=[28,220,75,145,65],repeatRows=1); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),4)])); story += [t,Spacer(1,10),Paragraph("Findings & Corrective Actions",styles["Heading2"])]
-            data=[["Action No.","Finding","Severity","Corrective Action","Responsible","Due","Status"]]
-            for x in acts: data.append([x["action_no"],html.escape(xml_safe(x["finding"])),x["severity"],html.escape(xml_safe(x["corrective_action"])),html.escape(xml_safe(x["responsible"])),x["target_date"],x["status"]])
-            if len(data)==1: data.append(["—","No findings recorded","—","—","—","—","—"])
-            t=Table(data,colWidths=[65,100,48,115,65,50,55],repeatRows=1); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),6.5),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),3)])); story.append(t)
+            # Use Paragraph objects in every findings cell. This forces long text to wrap
+            # inside its own cell instead of drawing across adjacent columns.
+            from reportlab.lib.styles import ParagraphStyle
+            finding_cell_style = ParagraphStyle(
+                "DrillFindingCell", parent=styles["BodyText"], fontName="Helvetica",
+                fontSize=7, leading=9, spaceAfter=0, wordWrap="CJK", splitLongWords=1,
+            )
+            finding_header_style = ParagraphStyle(
+                "DrillFindingHeader", parent=finding_cell_style, fontName="Helvetica-Bold",
+                textColor=colors.white, alignment=1, fontSize=7, leading=8,
+            )
+            def _finding_cell(value, header=False):
+                value = safe(value) if value is not None else ""
+                value = html.escape(xml_safe(value)).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
+                return Paragraph(value or "—", finding_header_style if header else finding_cell_style)
+            data=[[ _finding_cell(v, True) for v in ["Action No.","Finding","Severity","Corrective Action","Responsible","Due","Status"] ]]
+            for x in acts:
+                data.append([
+                    _finding_cell(x["action_no"]), _finding_cell(x["finding"]),
+                    _finding_cell(x["severity"]), _finding_cell(x["corrective_action"]),
+                    _finding_cell(x["responsible"]), _finding_cell(x["target_date"]),
+                    _finding_cell(x["status"]),
+                ])
+            if len(data)==1:
+                data.append([_finding_cell(v) for v in ["—","No findings recorded","—","—","—","—","—"]])
+            # Landscape A4 printable width = page width less 48pt side margins.
+            finding_widths=[58,166,58,205,92,76,91]
+            t=Table(data,colWidths=finding_widths,repeatRows=1,hAlign="LEFT")
+            t.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),
+                ("GRID",(0,0),(-1,-1),.55,colors.HexColor("#7B8794")),
+                ("VALIGN",(0,0),(-1,-1),"TOP"),
+                ("LEFTPADDING",(0,0),(-1,-1),5), ("RIGHTPADDING",(0,0),(-1,-1),5),
+                ("TOPPADDING",(0,0),(-1,-1),5), ("BOTTOMPADDING",(0,0),(-1,-1),5),
+            ]))
+            story.append(t)
             evidence=self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY section,sequence_no,id",(did,))
             story += [Spacer(1,10),Paragraph("Evidence Register",styles["Heading2"])]
             edata=[["Seq.","Section","Category","File / Attachment","Remarks"]]
@@ -40811,6 +40844,126 @@ class EmergencyDrillModule(QWidget):
             doc.build(story,onFirstPage=_page_border,onLaterPages=_page_border); QMessageBox.information(self,"Report Exported",f"PDF report saved:\\n{path}")
         except Exception as exc:
             logging.exception("Emergency drill PDF export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
+
+    def export_word(self, did_override=None):
+        """Create a professional, wrapped Word drill report for review and approval."""
+        did = did_override or self._selected_drill_from_combo(self.report_drill_combo)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill to report.")
+            return
+        row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
+        if not row:
+            QMessageBox.warning(self, "Drill Not Found", "The selected drill record could not be found.")
+            return
+        ev = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
+        acts = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
+        evidence = self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY section,sequence_no,id", (did,))
+        path, _ = QFileDialog.getSaveFileName(self, "Save Drill Word Report", f"{row['number']}_Drill_Report.docx", "Word Documents (*.docx)")
+        if not path:
+            return
+        if not path.lower().endswith(".docx"):
+            path += ".docx"
+        try:
+            doc = Document()
+            section = doc.sections[0]
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width, section.page_height = section.page_height, section.page_width
+            section.left_margin = Inches(0.55); section.right_margin = Inches(0.55)
+            section.top_margin = Inches(0.55); section.bottom_margin = Inches(0.55)
+            # Subtle professional page border.
+            sectPr = section._sectPr
+            pgBorders = OxmlElement('w:pgBorders'); pgBorders.set(qn('w:offsetFrom'), 'page')
+            for edge in ('top', 'left', 'bottom', 'right'):
+                el = OxmlElement(f'w:{edge}'); el.set(qn('w:val'), 'single'); el.set(qn('w:sz'), '8')
+                el.set(qn('w:space'), '18'); el.set(qn('w:color'), '17365D'); pgBorders.append(el)
+            sectPr.append(pgBorders)
+            company = safe(self.db.setting("company_name", "")) or "COMPANY NAME"
+            logo_path = safe(self.db.setting("company_logo", ""))
+            report_no = f"{safe(self.db.setting('document_prefix','HSE'))}-EDR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            header = doc.add_table(rows=1, cols=3); header.alignment = WD_TABLE_ALIGNMENT.CENTER
+            header.autofit = False
+            widths = [Inches(1.25), Inches(5.0), Inches(3.0)]
+            for c,w in zip(header.rows[0].cells,widths): c.width=w
+            if logo_path and Path(logo_path).exists():
+                try: header.cell(0,0).paragraphs[0].add_run().add_picture(logo_path, width=Inches(1.0))
+                except Exception: header.cell(0,0).text = company
+            else: header.cell(0,0).text = company
+            hp=header.cell(0,1).paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            rr=hp.add_run(company.upper()+"\nEMERGENCY DRILL REPORT"); rr.bold=True; rr.font.size=Pt(15)
+            header.cell(0,2).text=f"Document No.: {report_no}\nDate: {date.today().strftime('%d-%b-%Y')}\nRevision: 00"
+            for cell in header.rows[0].cells:
+                cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            doc.add_paragraph()
+            def set_cell_shading(cell, fill):
+                tcPr=cell._tc.get_or_add_tcPr(); shd=OxmlElement('w:shd'); shd.set(qn('w:fill'),fill); tcPr.append(shd)
+            def style_table(table, header_row=True, font_size=8):
+                table.style='Table Grid'; table.autofit=False; table.alignment=WD_TABLE_ALIGNMENT.CENTER
+                for ri,r in enumerate(table.rows):
+                    for cell in r.cells:
+                        cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
+                        for para in cell.paragraphs:
+                            para.paragraph_format.space_after=Pt(2)
+                            para.paragraph_format.line_spacing=1.0
+                            for run in para.runs: run.font.name='Arial'; run.font.size=Pt(font_size)
+                        if header_row and ri==0:
+                            set_cell_shading(cell,'17365D')
+                            for para in cell.paragraphs:
+                                for run in para.runs: run.bold=True; run.font.color.rgb=__import__('docx').shared.RGBColor(255,255,255)
+            def add_section(title, headers, rows, widths_in, font_size=8):
+                doc.add_heading(title, level=2)
+                table=doc.add_table(rows=1, cols=len(headers))
+                for i,h in enumerate(headers): table.rows[0].cells[i].text=str(h)
+                for values in rows:
+                    cells=table.add_row().cells
+                    for i,val in enumerate(values):
+                        cells[i].text=safe(val).replace('\\r\\n','\\n').replace('\\r','\\n')
+                for r in table.rows:
+                    for i,w in enumerate(widths_in): r.cells[i].width=Inches(w)
+                style_table(table, True, font_size)
+                doc.add_paragraph()
+                return table
+            add_section("Drill Information", ["Field","Details","Field","Details"], [
+                ["Drill Number",row['number'],"Status",row['status']], ["Title",row['title'],"Type",row['drill_type']],
+                ["Location",row['location'],"Project",row['project']], ["Planned Date",row['planned_date'],"Actual Date",row['actual_date']],
+                ["Coordinator",row['coordinator'],"Response Team",row['response_team']],
+                ["Expected Participants",row['expected_participants'],"People Accounted",row['people_accounted']],
+                ["Evacuated",row['people_evacuated'],"Missing Persons",row['missing_persons']],
+                ["Performance Score",f"{row['evaluation_score']}%","Start / Finish",f"{row['actual_start']} / {row['actual_finish']}"]
+            ], [1.4,3.3,1.4,3.3], 8)
+            doc.add_heading("Objectives", level=2); doc.add_paragraph(safe(row['objectives']) or '—')
+            doc.add_heading("Scenario Description", level=2); doc.add_paragraph(safe(row['scenario']) or '—')
+            add_section("Evaluation Checklist", ["No.","Criteria","Result","Comments","Severity"],
+                [[x['item_no'],x['checklist_item'],x['result'],x['comments'],x['severity']] for x in ev] or [["—","No evaluation entries","—","—","—"]],
+                [0.45,4.2,1.0,3.4,1.0], 8)
+            add_section("Findings & Corrective Actions", ["Action No.","Finding / Observation","Severity","Corrective Action","Responsible","Target Date","Status"],
+                [[x['action_no'],x['finding'],x['severity'],x['corrective_action'],x['responsible'],x['target_date'],x['status']] for x in acts] or [["—","No findings recorded","—","—","—","—","—"]],
+                [0.85,2.0,0.75,2.5,1.25,1.0,0.9], 8)
+            add_section("Evidence Register", ["Seq.","Section","Category","File / Attachment","Remarks"],
+                [[e['sequence_no'],e['section'],e['attachment_type'],Path(safe(e['file_path'])).name,e['remark']] for e in evidence] or [["—","—","—","No evidence attached","—"]],
+                [0.55,1.35,1.4,2.9,3.05], 8)
+            photos=[e for e in evidence if (resolve_attachment_path(e['file_path']) and Path(resolve_attachment_path(e['file_path'])).suffix.lower() in ('.png','.jpg','.jpeg','.bmp'))]
+            if photos:
+                doc.add_heading("Photographic Evidence", level=2)
+                for e in photos:
+                    fp=resolve_attachment_path(e['file_path'])
+                    para=doc.add_paragraph(); para.add_run(f"{safe(e['section'])} — {safe(e['attachment_type'])}: ").bold=True
+                    para.add_run(safe(e['remark']))
+                    try: doc.add_picture(str(fp), width=Inches(2.4))
+                    except Exception: logging.exception("Unable to embed Word drill evidence image")
+            add_section("Review & Approval Record", ["Stage","Status","Responsible Person","Comments"], [
+                ["Prepared",row['status'],row['prepared_by'],""], ["Review",row['review_status'],row['reviewed_by'],row['review_comments']],
+                ["Final Approval",row['approval_status'],row['approved_by'],row['approval_comments']]
+            ], [1.1,1.3,2.0,5.0], 8)
+            sig=doc.add_table(rows=3, cols=3); sig.style='Table Grid'
+            for i,v in enumerate(["PREPARED BY","REVIEWED BY","APPROVED BY"]): sig.cell(0,i).text=v
+            for i,v in enumerate([safe(row['prepared_by']),safe(row['reviewed_by']),safe(row['approved_by'])]): sig.cell(1,i).text=v
+            for i in range(3): sig.cell(2,i).text="Signature: ____________________    Date: ______________"
+            style_table(sig, True, 9)
+            doc.save(path)
+            QMessageBox.information(self,"Word Report Exported",f"Word report saved:\\n{path}")
+        except Exception as exc:
+            logging.exception("Emergency drill Word export failed")
+            QMessageBox.critical(self,"Word Export Failed",str(exc))
 
     def export_excel(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export Emergency Drill Register", "Emergency_Drill_Register.xlsx", "Excel Files (*.xlsx)")
