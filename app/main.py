@@ -41230,6 +41230,7 @@ class EnvironmentalMonitoringModule(QWidget):
         self._build_ui()
         self.refresh_register()
         self.refresh_dashboard()
+        self.refresh_review_register()
 
     def _ensure_tables(self):
         self.db.conn.executescript("""
@@ -41259,6 +41260,12 @@ class EnvironmentalMonitoringModule(QWidget):
             ('env_noise_sessions','reviewed_by',"TEXT DEFAULT ''"),
             ('env_noise_sessions','approved_by',"TEXT DEFAULT ''"),
             ('env_noise_locations','evidence_path',"TEXT DEFAULT ''"),
+            ('env_noise_sessions','workflow_status',"TEXT DEFAULT 'Draft'"),
+            ('env_noise_sessions','submitted_at',"TEXT DEFAULT ''"),
+            ('env_noise_sessions','reviewed_at',"TEXT DEFAULT ''"),
+            ('env_noise_sessions','approved_at',"TEXT DEFAULT ''"),
+            ('env_noise_sessions','review_comments',"TEXT DEFAULT ''"),
+            ('env_noise_sessions','approval_comments',"TEXT DEFAULT ''"),
         ):
             cols = [r[1] for r in self.db.conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if column not in cols:
@@ -41300,6 +41307,7 @@ class EnvironmentalMonitoringModule(QWidget):
         self.tabs.addTab(self._build_noise_tab(), 'Noise Monitoring')
         self.tabs.addTab(self._build_register_tab(), 'Monitoring Register')
         self.tabs.addTab(self._build_threshold_tab(), 'Thresholds & Controls')
+        self.tabs.addTab(self._build_review_tab(), 'Review & Approval')
 
     def _build_dashboard_tab(self):
         page=QWidget(); layout=QVBoxLayout(page)
@@ -41319,95 +41327,27 @@ class EnvironmentalMonitoringModule(QWidget):
         return page
 
     def _build_noise_tab(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(12)
-
-        meta = QGroupBox('Monitoring Session Details')
-        meta.setStyleSheet('QGroupBox{font-weight:700;border:1px solid #D5DEE7;border-radius:9px;margin-top:9px;padding:9px;background:#FAFCFE;} QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;color:#17365D;}')
-        form = QGridLayout(meta)
-        form.setContentsMargins(14, 18, 14, 12)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(5)
-        self.date_edit = QDateEdit(QDate.currentDate())
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.setDisplayFormat('dd-MMM-yyyy')
-        self.time_edit = QLineEdit(datetime.now().strftime('%H:%M'))
-        self.project_edit = QLineEdit()
-        self.activity_edit = QLineEdit()
-        self.monitored_by_edit = QLineEdit()
-        self.reviewed_by_edit = QLineEdit()
-        self.approved_by_edit = QLineEdit()
-        self.instrument_edit = QLineEdit()
-        self.calibration_edit = QLineEdit()
-        self.notes_edit = QLineEdit()
-        fields = [('Monitoring Date', self.date_edit), ('Time (24-hour)', self.time_edit),
-                  ('Project / Site', self.project_edit), ('Activity', self.activity_edit),
-                  ('Monitored By', self.monitored_by_edit), ('Reviewed By', self.reviewed_by_edit),
-                  ('Approved By', self.approved_by_edit), ('Sound Level Meter', self.instrument_edit),
-                  ('Calibration Reference', self.calibration_edit), ('General Notes', self.notes_edit)]
-        # Five compact columns keep session details readable without consuming the full page height.
-        for i, (label, widget) in enumerate(fields):
-            row, col = divmod(i, 5)
-            lab = QLabel(label)
-            lab.setStyleSheet('font-size:11px;font-weight:600;color:#526477;')
-            form.addWidget(lab, row * 2, col)
-            form.addWidget(widget, row * 2 + 1, col)
-            widget.setMinimumWidth(125)
-        for col in range(5):
-            form.setColumnStretch(col, 1)
-        layout.addWidget(meta, 0)
-
-        bar = QHBoxLayout()
-        lbl = QLabel('Location-wise Noise Readings')
-        lbl.setStyleSheet('font-size:17px;font-weight:800;color:#17365D;')
-        bar.addWidget(lbl)
-        bar.addStretch(1)
-        add = QPushButton('+ Add Specific Location')
-        remove = QPushButton('Remove Selected')
-        add.setMinimumHeight(34); remove.setMinimumHeight(34)
-        add.clicked.connect(self.add_location_row)
-        remove.clicked.connect(self.remove_location_row)
-        bar.addWidget(add); bar.addWidget(remove)
-        layout.addLayout(bar)
-
-        hint = QLabel('Enter the exact area (e.g. Yard 1, Workshop Bay 2 or Generator Room) and its measured dB(A). Status and controls update as soon as the reading is entered.')
-        hint.setWordWrap(True)
-        hint.setStyleSheet('color:#526477;background:#F2F6FA;border:1px solid #E0E7EE;border-radius:6px;padding:8px 10px;')
-        layout.addWidget(hint)
-
-        self.location_table = QTableWidget(1, 8)
-        self.location_table.setHorizontalHeaderLabels(['Specific Location / Area', 'Noise Source / Equipment', 'Reading dB(A)', 'Duration (min)', 'Status', 'Recommended Controls', 'Remarks', 'Evidence Photo'])
-        self.location_table.setWordWrap(True)
-        self.location_table.setAlternatingRowColors(True)
-        self.location_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.location_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.location_table.verticalHeader().setDefaultSectionSize(104)
-        self.location_table.verticalHeader().setMinimumSectionSize(82)
-        self.location_table.setMinimumHeight(300)
-        self.location_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.location_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        header = self.location_table.horizontalHeader()
-        widths = {0:190, 1:175, 2:112, 3:105, 4:105, 5:330, 6:190, 7:135}
-        for col, width in widths.items():
-            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
-            self.location_table.setColumnWidth(col, width)
-        header.setStretchLastSection(False)
-        self.location_table.cellChanged.connect(self._location_cell_changed)
-        layout.addWidget(self.location_table, 1)
-        self.add_location_row()
-
-        actions = QHBoxLayout()
-        actions.addStretch(1)
-        clear = QPushButton('Clear Form')
-        save = QPushButton('Save Monitoring Session')
-        clear.setMinimumHeight(38); save.setMinimumHeight(38)
-        clear.clicked.connect(self.clear_form)
-        save.clicked.connect(self.save_monitoring)
-        save.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:800;padding:9px 20px;border-radius:7px;} QPushButton:hover{background:#12566D;}')
-        actions.addWidget(clear); actions.addWidget(save)
-        layout.addLayout(actions)
+        page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(28,24,28,24); layout.setSpacing(16)
+        intro=QLabel('Create a monitoring session first. After saving, open it from the register to add one or more specific locations, readings and evidence.')
+        intro.setWordWrap(True); intro.setStyleSheet('padding:14px 18px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:9px;color:#24445D;font-size:13px;')
+        layout.addWidget(intro)
+        card=QGroupBox('New Monitoring Session — Basic Details')
+        card.setStyleSheet('QGroupBox{font-size:15px;font-weight:700;color:#17365D;border:1px solid #D5DEE7;border-radius:10px;margin-top:12px;padding:16px;background:#FFFFFF;} QGroupBox::title{subcontrol-origin:margin;left:14px;padding:0 7px;}')
+        grid=QGridLayout(card); grid.setContentsMargins(20,25,20,20); grid.setHorizontalSpacing(18); grid.setVerticalSpacing(12)
+        self.date_edit=QDateEdit(QDate.currentDate()); self.date_edit.setCalendarPopup(True); self.date_edit.setDisplayFormat('dd-MMM-yyyy')
+        self.time_edit=QLineEdit(datetime.now().strftime('%H:%M')); self.project_edit=QLineEdit(); self.activity_edit=QLineEdit(); self.monitored_by_edit=QLineEdit(); self.instrument_edit=QLineEdit(); self.calibration_edit=QLineEdit(); self.notes_edit=QLineEdit()
+        fields=[('Monitoring Date',self.date_edit),('Time (24-hour)',self.time_edit),('Project / Site',self.project_edit),('Activity / Work Scope',self.activity_edit),('Monitored By',self.monitored_by_edit),('Sound Level Meter',self.instrument_edit),('Calibration Reference',self.calibration_edit),('General Notes',self.notes_edit)]
+        for i,(label,w) in enumerate(fields):
+            r,col=divmod(i,2); lab=QLabel(label); lab.setStyleSheet('font-size:12px;font-weight:650;color:#526477;')
+            w.setMinimumHeight(38); w.setMinimumWidth(250)
+            grid.addWidget(lab,r*2,col); grid.addWidget(w,r*2+1,col); grid.setColumnStretch(col,1)
+        layout.addWidget(card)
+        actions=QHBoxLayout(); actions.addStretch(1)
+        clear=QPushButton('Clear'); save=QPushButton('Save Basic Details')
+        for b in (clear,save): b.setMinimumHeight(42); b.setMinimumWidth(150)
+        save.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:800;border-radius:7px;padding:9px 18px;}')
+        clear.clicked.connect(self.clear_form); save.clicked.connect(self.save_monitoring)
+        actions.addWidget(clear); actions.addWidget(save); layout.addLayout(actions); layout.addStretch(1)
         return page
 
     def _build_threshold_tab(self):
@@ -41486,13 +41426,23 @@ class EnvironmentalMonitoringModule(QWidget):
             QMessageBox.critical(self, 'Save Failed', str(exc))
 
     def _build_register_tab(self):
-        page=QWidget(); layout=QVBoxLayout(page); buttons=QHBoxLayout()
-        view=QPushButton('View / Export Selected'); delete=QPushButton('Delete Selected'); refresh=QPushButton('Refresh')
-        view.clicked.connect(self.view_selected_session); delete.clicked.connect(self.delete_selected_session); refresh.clicked.connect(self.refresh_register)
-        buttons.addWidget(view); buttons.addWidget(delete); buttons.addStretch(1); buttons.addWidget(refresh); layout.addLayout(buttons)
-        self.register_table=QTableWidget(0,10); self.register_table.setHorizontalHeaderLabels(['ID','Session No.','Date','Time','Project / Site','Activity','Locations','Monitored By','Reviewed By','Approved By']); self.register_table.setColumnHidden(0,True)
-        self.register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.register_table.setAlternatingRowColors(True)
+        page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(16,16,16,16); layout.setSpacing(10)
+        title=QLabel('Monitoring Session Register'); title.setStyleSheet('font-size:18px;font-weight:800;color:#17365D;'); layout.addWidget(title)
+        hint=QLabel('Double-click a session to open its details, add multiple specific locations, enter readings and attach evidence.'); hint.setWordWrap(True); hint.setStyleSheet('color:#526477;padding:8px;'); layout.addWidget(hint)
+        buttons=QHBoxLayout(); open_btn=QPushButton('Open Session Details'); delete=QPushButton('Delete Selected'); refresh=QPushButton('Refresh')
+        open_btn.clicked.connect(self.view_selected_session); delete.clicked.connect(self.delete_selected_session); refresh.clicked.connect(self.refresh_register)
+        buttons.addWidget(open_btn); buttons.addWidget(delete); buttons.addStretch(1); buttons.addWidget(refresh); layout.addLayout(buttons)
+        self.register_table=QTableWidget(0,8); self.register_table.setHorizontalHeaderLabels(['ID','Session No.','Date','Time','Project / Site','Activity','Locations','Workflow Status']); self.register_table.setColumnHidden(0,True)
+        self.register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.register_table.setAlternatingRowColors(True); self.register_table.setWordWrap(True)
         self.register_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.register_table.horizontalHeader().setStretchLastSection(True); self.register_table.doubleClicked.connect(self.view_selected_session); layout.addWidget(self.register_table,1)
+        return page
+
+    def _build_review_tab(self):
+        page=QWidget(); layout=QVBoxLayout(page); layout.setContentsMargins(16,16,16,16); layout.setSpacing(10)
+        title=QLabel('Noise Monitoring — Review & Approval'); title.setStyleSheet('font-size:18px;font-weight:800;color:#17365D;'); layout.addWidget(title)
+        note=QLabel('Submitted reports appear here. Select or double-click a report to review the submitted readings, controls and evidence, then record review and approval decisions.'); note.setWordWrap(True); note.setStyleSheet('padding:10px;background:#EEF4F8;border:1px solid #D8E3EC;border-radius:7px;color:#34495E;'); layout.addWidget(note)
+        bar=QHBoxLayout(); open_btn=QPushButton('Open Review / Approval'); refresh=QPushButton('Refresh'); open_btn.clicked.connect(self.review_selected_session); refresh.clicked.connect(self.refresh_review_register); bar.addWidget(open_btn); bar.addStretch(1); bar.addWidget(refresh); layout.addLayout(bar)
+        self.review_table=QTableWidget(0,7); self.review_table.setHorizontalHeaderLabels(['ID','Session No.','Date','Project / Site','Locations','Monitored By','Status']); self.review_table.setColumnHidden(0,True); self.review_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.review_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.review_table.setAlternatingRowColors(True); self.review_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.review_table.horizontalHeader().setStretchLastSection(True); self.review_table.doubleClicked.connect(self.review_selected_session); layout.addWidget(self.review_table,1)
         return page
 
     def add_location_row(self):
@@ -41563,45 +41513,39 @@ class EnvironmentalMonitoringModule(QWidget):
     def save_monitoring(self):
         monitoring_date=self.date_edit.date().toString('yyyy-MM-dd'); monitoring_time=self.time_edit.text().strip()
         if monitoring_time and not re.fullmatch(r'(?:[01]\d|2[0-3]):[0-5]\d',monitoring_time): QMessageBox.warning(self,'Invalid Time','Enter time in HH:MM format.'); return
-        if not self.activity_edit.text().strip(): QMessageBox.warning(self,'Required','Enter the monitoring activity.'); return
-        locations=[]
-        for row in range(self.location_table.rowCount()):
-            get=lambda c:self.location_table.item(row,c).text().strip() if self.location_table.item(row,c) else ''
-            location,source,reading_text,duration_text,remarks=get(0),get(1),get(2),get(3),get(6)
-            evidence_item=self.location_table.item(row,7); evidence=evidence_item.data(Qt.ItemDataRole.UserRole) if evidence_item else ''
-            if not any((location,source,reading_text,duration_text,remarks,evidence)):continue
-            if not location or not reading_text: QMessageBox.warning(self,'Incomplete Location',f'Row {row+1}: enter a specific location and its noise reading.'); return
-            try:
-                reading=float(reading_text.replace(',','.')); duration=float(duration_text.replace(',','.')) if duration_text else 0.0
-                if reading<0 or duration<0:raise ValueError
-            except ValueError: QMessageBox.warning(self,'Invalid Reading',f'Row {row+1}: reading and duration must be non-negative numbers.'); return
-            level,controls=self._recommendation(reading); locations.append((location,source,reading,duration,level,controls,remarks,evidence or ''))
-        if not locations: QMessageBox.warning(self,'No Locations','Add at least one specific location with a valid noise reading.'); return
+        if not self.project_edit.text().strip() or not self.activity_edit.text().strip(): QMessageBox.warning(self,'Required','Enter both Project / Site and Activity / Work Scope.'); return
         try:
             next_id=self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_noise_sessions'),0)+1").fetchone()[0]
             session_no=f"NMS-{datetime.now().year}-{int(next_id):04d}"
-            cur=self.db.conn.execute("""INSERT INTO env_noise_sessions(session_no,monitoring_date,monitoring_time,project,activity,monitored_by,instrument,calibration_ref,notes,reviewed_by,approved_by) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (session_no,monitoring_date,monitoring_time,self.project_edit.text().strip(),self.activity_edit.text().strip(),self.monitored_by_edit.text().strip(),self.instrument_edit.text().strip(),self.calibration_edit.text().strip(),self.notes_edit.text().strip(),self.reviewed_by_edit.text().strip(),self.approved_by_edit.text().strip()))
-            session_id=cur.lastrowid
-            self.db.conn.executemany("""INSERT INTO env_noise_locations(session_id,location,noise_source,reading_dba,duration_minutes,risk_level,recommended_controls,remarks,evidence_path) VALUES(?,?,?,?,?,?,?,?,?)""",[(session_id,)+x for x in locations])
-            self.db.conn.commit(); self.refresh_register(); self.refresh_dashboard(); QMessageBox.information(self,'Saved',f'{session_no} saved with {len(locations)} location reading(s).')
+            self.db.conn.execute("INSERT INTO env_noise_sessions(session_no,monitoring_date,monitoring_time,project,activity,monitored_by,instrument,calibration_ref,notes,workflow_status) VALUES(?,?,?,?,?,?,?,?,?,'Draft')",(session_no,monitoring_date,monitoring_time,self.project_edit.text().strip(),self.activity_edit.text().strip(),self.monitored_by_edit.text().strip(),self.instrument_edit.text().strip(),self.calibration_edit.text().strip(),self.notes_edit.text().strip()))
+            self.db.conn.commit(); self.refresh_register(); self.refresh_dashboard(); self.refresh_review_register()
+            QMessageBox.information(self,'Session Saved',f'{session_no} basic details saved. Open it in Monitoring Register to add specific locations and readings.')
             self.clear_form(); self.tabs.setCurrentIndex(2)
         except Exception as exc:
-            self.db.conn.rollback(); logging.exception('Unable to save environmental noise monitoring'); QMessageBox.critical(self,'Save Failed',str(exc))
+            self.db.conn.rollback(); logging.exception('Unable to save environmental noise session'); QMessageBox.critical(self,'Save Failed',str(exc))
 
     def clear_form(self):
         self.date_edit.setDate(QDate.currentDate()); self.time_edit.setText(datetime.now().strftime('%H:%M'))
-        for w in (self.project_edit,self.activity_edit,self.monitored_by_edit,self.reviewed_by_edit,self.approved_by_edit,self.instrument_edit,self.calibration_edit,self.notes_edit):w.clear()
-        self.location_table.blockSignals(True); self.location_table.setRowCount(0); self.location_table.blockSignals(False); self.add_location_row()
+        for w in (self.project_edit,self.activity_edit,self.monitored_by_edit,self.instrument_edit,self.calibration_edit,self.notes_edit): w.clear()
 
     def refresh_register(self):
-        if not hasattr(self,'register_table'):return
+        if not hasattr(self,'register_table'): return
         rows=self.db.conn.execute("SELECT s.*,COUNT(l.id) location_count FROM env_noise_sessions s LEFT JOIN env_noise_locations l ON l.session_id=s.id GROUP BY s.id ORDER BY s.monitoring_date DESC,s.id DESC").fetchall()
         self.register_table.setRowCount(0)
         for rec in rows:
             r=self.register_table.rowCount(); self.register_table.insertRow(r)
-            vals=[rec['id'],rec['session_no'],rec['monitoring_date'],rec['monitoring_time'],rec['project'],rec['activity'],rec['location_count'],rec['monitored_by'],rec['reviewed_by'],rec['approved_by']]
-            for c,v in enumerate(vals):self.register_table.setItem(r,c,QTableWidgetItem(str(v if v is not None else '')))
+            vals=[rec['id'],rec['session_no'],rec['monitoring_date'],rec['monitoring_time'],rec['project'],rec['activity'],rec['location_count'],rec['workflow_status'] or 'Draft']
+            for col,v in enumerate(vals): self.register_table.setItem(r,col,QTableWidgetItem(str(v if v is not None else '')))
+        self.refresh_review_register()
+
+    def refresh_review_register(self):
+        if not hasattr(self,'review_table'): return
+        rows=self.db.conn.execute("SELECT s.*,COUNT(l.id) location_count FROM env_noise_sessions s LEFT JOIN env_noise_locations l ON l.session_id=s.id WHERE COALESCE(s.workflow_status,'Draft') IN ('Submitted for Review','Reviewed','Approved') GROUP BY s.id ORDER BY s.id DESC").fetchall()
+        self.review_table.setRowCount(0)
+        for rec in rows:
+            r=self.review_table.rowCount(); self.review_table.insertRow(r)
+            vals=[rec['id'],rec['session_no'],rec['monitoring_date'],rec['project'],rec['location_count'],rec['monitored_by'],rec['workflow_status']]
+            for col,v in enumerate(vals): self.review_table.setItem(r,col,QTableWidgetItem(str(v if v is not None else '')))
 
     def refresh_dashboard(self):
         if not hasattr(self,'dashboard_table'):return
@@ -41625,27 +41569,133 @@ class EnvironmentalMonitoringModule(QWidget):
         return int(self.register_table.item(row,0).text())
 
     def view_selected_session(self,*_):
-        sid=self._selected_session_id()
-        if sid is None:return
+        row=self.register_table.currentRow()
+        if row<0 or not self.register_table.item(row,0): QMessageBox.information(self,'Noise Monitoring','Select a monitoring session first.'); return
+        self.open_session_details(int(self.register_table.item(row,0).text()))
+
+    def open_session_details(self,sid):
         session=self.db.conn.execute('SELECT * FROM env_noise_sessions WHERE id=?',(sid,)).fetchone()
-        locations=self.db.conn.execute('SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id',(sid,)).fetchall()
-        if not session:return
-        dlg=QDialog(self); dlg.setWindowTitle(f"Noise Monitoring — {session['session_no']}"); dlg.resize(1180,760); layout=QVBoxLayout(dlg)
-        summary=QLabel(f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp; <b>Date / Time:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'])}<br><b>Project:</b> {html.escape(session['project'])} &nbsp; <b>Activity:</b> {html.escape(session['activity'])}<br><b>Monitored By:</b> {html.escape(session['monitored_by'])} &nbsp; <b>Reviewed By:</b> {html.escape(session['reviewed_by'])} &nbsp; <b>Approved By:</b> {html.escape(session['approved_by'])}<br><b>Instrument:</b> {html.escape(session['instrument'])} &nbsp; <b>Calibration:</b> {html.escape(session['calibration_ref'])}")
-        summary.setWordWrap(True); summary.setStyleSheet('padding:12px;background:#F1F5F8;border:1px solid #D5E0E8;border-radius:6px;'); layout.addWidget(summary)
-        table=QTableWidget(len(locations),8); table.setHorizontalHeaderLabels(['Specific Location','Source / Equipment','Reading dB(A)','Duration (min)','Status','Recommended Controls','Remarks','Evidence']); table.setWordWrap(True); table.setAlternatingRowColors(True); table.verticalHeader().setDefaultSectionSize(84)
-        for c in range(5):table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); table.horizontalHeader().setSectionResizeMode(6,QHeaderView.ResizeMode.Stretch); table.horizontalHeader().setSectionResizeMode(7,QHeaderView.ResizeMode.ResizeToContents)
-        for r,rec in enumerate(locations):
-            vals=[rec['location'],rec['noise_source'],rec['reading_dba'],rec['duration_minutes'],rec['risk_level'],rec['recommended_controls'],rec['remarks'],'Attached' if rec['evidence_path'] else '—']
-            for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(str(v if v is not None else '')))
+        if not session: return
+        dlg=QDialog(self); dlg.setWindowTitle(f"Session Details — {session['session_no']}"); dlg.resize(1320,820); root=QVBoxLayout(dlg)
+        summary=QLabel(f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp; <b>Date / Time:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'])}<br><b>Project / Site:</b> {html.escape(session['project'])} &nbsp; <b>Activity:</b> {html.escape(session['activity'])}<br><b>Monitored By:</b> {html.escape(session['monitored_by'])} &nbsp; <b>Instrument:</b> {html.escape(session['instrument'])} &nbsp; <b>Calibration:</b> {html.escape(session['calibration_ref'])}<br><b>Workflow:</b> {html.escape(session['workflow_status'] or 'Draft')}")
+        summary.setWordWrap(True); summary.setStyleSheet('padding:14px;background:#EEF4F8;border:1px solid #D5E0E8;border-radius:7px;'); root.addWidget(summary)
+        table=QTableWidget(0,8); table.setHorizontalHeaderLabels(['Specific Location / Area','Noise Source / Equipment','Reading dB(A)','Duration (min)','Status','Recommended Controls','Remarks','Evidence Photo']); table.setWordWrap(True); table.setAlternatingRowColors(True); table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.verticalHeader().setDefaultSectionSize(95)
+        widths=[190,175,105,105,105,340,180,130]
+        for col,w in enumerate(widths): table.setColumnWidth(col,w); table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.Interactive)
+        rows=self.db.conn.execute('SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id',(sid,)).fetchall()
+        for rec in rows:
+            r=table.rowCount(); table.insertRow(r)
+            vals=[rec['location'],rec['noise_source'],str(rec['reading_dba']),str(rec['duration_minutes']),rec['risk_level'],rec['recommended_controls'],rec['remarks'],'']
+            for col,val in enumerate(vals):
+                item=QTableWidgetItem(str(val or ''))
+                if col in (4,5,7): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(r,col,item)
             if rec['evidence_path'] and os.path.exists(rec['evidence_path']):
-                btn=QPushButton('View Photo'); btn.clicked.connect(lambda checked=False,path=rec['evidence_path']:self._show_evidence(path)); table.setCellWidget(r,7,btn)
+                table.item(r,7).setData(Qt.ItemDataRole.UserRole,rec['evidence_path'])
+                b=QPushButton('View / Replace Photo'); b.clicked.connect(lambda checked=False,path=rec['evidence_path']:self._show_evidence(path)); table.setCellWidget(r,7,b); table.item(r,7).setData(Qt.ItemDataRole.UserRole,rec['evidence_path'])
+            else:
+                b=QPushButton('Attach Photo'); b.clicked.connect(lambda checked=False,rr=r:self._attach_dialog_evidence(table,rr)); table.setCellWidget(r,7,b)
+        def add_row():
+            r=table.rowCount(); table.insertRow(r)
+            for col in range(8):
+                item=QTableWidgetItem('Awaiting Reading' if col==4 else ('Enter dB(A) reading to calculate controls' if col==5 else ''))
+                if col in (4,5,7): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                table.setItem(r,col,item)
+            b=QPushButton('Attach Photo'); b.clicked.connect(lambda checked=False,rr=r:self._attach_dialog_evidence(table,rr)); table.setCellWidget(r,7,b)
+        def update_cell(r,col):
+            if col!=2:return
+            text=table.item(r,2).text().strip() if table.item(r,2) else ''
+            if not text:
+                level='Awaiting Reading'; controls='Enter a measured noise level in dB(A) to generate recommended controls.'
+            else:
+                try:
+                    reading=float(text.replace(',','.'))
+                    if reading<0: raise ValueError
+                    level,controls=self._recommendation(reading)
+                except ValueError: level,controls='Check Reading','Enter a valid non-negative numeric reading in dB(A).'
+            palette={'Low':('#E2F4E8','#176B36'),'Moderate':('#FFF3CD','#805B00'),'High':('#FFE1C2','#9A4300'),'Critical':('#F9D7DA','#8A1C27'),'Check Reading':('#E9ECEF','#495057'),'Awaiting Reading':('#F1F3F5','#495057')}
+            bg,fg=palette.get(level,palette['Check Reading']); table.blockSignals(True)
+            table.item(r,4).setText(level); table.item(r,5).setText(controls)
+            for cc in (2,4,5): table.item(r,cc).setBackground(QColor(bg)); table.item(r,cc).setForeground(QColor(fg))
+            table.blockSignals(False)
+        table.cellChanged.connect(update_cell)
+        root.addWidget(table,1)
+        actions=QHBoxLayout(); add=QPushButton('+ Add Specific Location'); remove=QPushButton('Remove Selected'); add.clicked.connect(add_row); remove.clicked.connect(lambda:table.removeRow(table.currentRow()) if table.currentRow()>=0 else None); actions.addWidget(add); actions.addWidget(remove); actions.addStretch(1); root.addLayout(actions)
+        comment=QLineEdit(session['notes'] or ''); comment.setPlaceholderText('Session notes / submission comments'); root.addWidget(comment)
+        buttons=QHBoxLayout(); save=QPushButton('Save Location Details'); submit=QPushButton('Submit for Review'); export_pdf=QPushButton('Export PDF'); export_word=QPushButton('Export Word'); export_excel=QPushButton('Export Excel'); close=QPushButton('Close')
+        buttons.addWidget(save); buttons.addWidget(submit); buttons.addStretch(1); buttons.addWidget(export_pdf); buttons.addWidget(export_word); buttons.addWidget(export_excel); buttons.addWidget(close); root.addLayout(buttons)
+        def persist(submit_now=False):
+            entries=[]
+            for rr in range(table.rowCount()):
+                get=lambda cc:table.item(rr,cc).text().strip() if table.item(rr,cc) else ''
+                loc,source,reading_txt,duration_txt,remarks=get(0),get(1),get(2),get(3),get(6)
+                cell=table.item(rr,7); evidence=cell.data(Qt.ItemDataRole.UserRole) if cell else ''
+                if not any((loc,source,reading_txt,duration_txt,remarks,evidence)): continue
+                if not loc or not reading_txt: QMessageBox.warning(dlg,'Incomplete Location',f'Row {rr+1}: enter a specific location and reading.'); return False
+                try:
+                    reading=float(reading_txt.replace(',','.')); duration=float(duration_txt.replace(',','.')) if duration_txt else 0
+                    if reading<0 or duration<0: raise ValueError
+                except ValueError: QMessageBox.warning(dlg,'Invalid Reading',f'Row {rr+1}: reading and duration must be non-negative numbers.'); return False
+                level,controls=self._recommendation(reading); entries.append((loc,source,reading,duration,level,controls,remarks,evidence or ''))
+            if not entries: QMessageBox.warning(dlg,'No Readings','Add at least one specific location and noise reading before saving or submitting.'); return False
+            try:
+                self.db.conn.execute('DELETE FROM env_noise_locations WHERE session_id=?',(sid,))
+                self.db.conn.executemany('INSERT INTO env_noise_locations(session_id,location,noise_source,reading_dba,duration_minutes,risk_level,recommended_controls,remarks,evidence_path) VALUES(?,?,?,?,?,?,?,?,?)',[(sid,)+x for x in entries])
+                self.db.conn.execute('UPDATE env_noise_sessions SET notes=? WHERE id=?',(comment.text().strip(),sid))
+                if submit_now:
+                    self.db.conn.execute("UPDATE env_noise_sessions SET workflow_status='Submitted for Review',submitted_at=?,reviewed_by='',approved_by='',reviewed_at='',approved_at='' WHERE id=?",(datetime.now().isoformat(timespec='seconds'),sid))
+                self.db.conn.commit(); self.refresh_register(); self.refresh_dashboard(); self.refresh_review_register()
+                QMessageBox.information(dlg,'Saved','Location readings and evidence saved.' if not submit_now else 'Report submitted for review and approval.')
+                return True
+            except Exception as exc:
+                self.db.conn.rollback(); logging.exception('Unable to save noise session details'); QMessageBox.critical(dlg,'Save Failed',str(exc)); return False
+        save.clicked.connect(lambda:persist(False))
+        # Submit only after all location rows and evidence references have been validated and saved.
+        def submit_report():
+            if persist(True): dlg.accept()
+        submit.clicked.disconnect(); submit.clicked.connect(submit_report)
+        export_pdf.clicked.connect(lambda:self._export_session(sid,'pdf')); export_word.clicked.connect(lambda:self._export_session(sid,'docx')); export_excel.clicked.connect(lambda:self._export_session(sid,'xlsx')); close.clicked.connect(dlg.accept)
+        fit_dialog_to_desktop(dlg,0.97,0.94); dlg.exec()
+
+    def _attach_dialog_evidence(self,table,row):
+        path,_=QFileDialog.getOpenFileName(self,'Attach Noise Reading Evidence','','Images (*.png *.jpg *.jpeg *.bmp *.webp)')
+        if not path:return
+        try:
+            folder=ATTACH_DIR/'noise_monitoring'; folder.mkdir(parents=True,exist_ok=True); suffix=Path(path).suffix.lower() or '.jpg'; dest=folder/f"noise_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{suffix}"; shutil.copy2(path,dest)
+            item=table.item(row,7); item.setData(Qt.ItemDataRole.UserRole,str(dest)); button=table.cellWidget(row,7)
+            if button: button.setText('Photo Attached ✓'); button.setToolTip(str(dest))
+        except Exception as exc: QMessageBox.warning(self,'Evidence',f'Unable to store image: {exc}')
+
+    def review_selected_session(self,*_):
+        row=self.review_table.currentRow()
+        if row<0 or not self.review_table.item(row,0): QMessageBox.information(self,'Review & Approval','Select a submitted report first.'); return
+        sid=int(self.review_table.item(row,0).text()); session=self.db.conn.execute('SELECT * FROM env_noise_sessions WHERE id=?',(sid,)).fetchone()
+        if not session:return
+        dlg=QDialog(self); dlg.setWindowTitle(f"Review & Approval — {session['session_no']}"); dlg.resize(1200,760); layout=QVBoxLayout(dlg)
+        status=QLabel(f"<b>{session['session_no']}</b> &nbsp; | &nbsp; Status: <b>{session['workflow_status']}</b> &nbsp; | &nbsp; Site: {html.escape(session['project'])}"); status.setStyleSheet('padding:12px;background:#EEF4F8;border:1px solid #D5E0E8;border-radius:7px;'); layout.addWidget(status)
+        rows=self.db.conn.execute('SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id',(sid,)).fetchall(); table=QTableWidget(len(rows),7); table.setHorizontalHeaderLabels(['Specific Location','Equipment / Source','dB(A)','Duration','Status','Recommended Controls','Evidence'])
+        for col in range(5): table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); table.horizontalHeader().setSectionResizeMode(6,QHeaderView.ResizeMode.ResizeToContents)
+        for rr,rec in enumerate(rows):
+            vals=[rec['location'],rec['noise_source'],rec['reading_dba'],rec['duration_minutes'],rec['risk_level'],rec['recommended_controls'],'Attached' if rec['evidence_path'] else '—']
+            for cc,val in enumerate(vals): table.setItem(rr,cc,QTableWidgetItem(str(val or '')))
+            if rec['evidence_path'] and os.path.exists(rec['evidence_path']):
+                b=QPushButton('View Photo'); b.clicked.connect(lambda checked=False,path=rec['evidence_path']:self._show_evidence(path)); table.setCellWidget(rr,6,b)
         layout.addWidget(table,1)
-        exports=QHBoxLayout(); pdf=QPushButton('Export PDF'); word=QPushButton('Export Word'); excel=QPushButton('Export Excel'); close=QPushButton('Close')
-        pdf.clicked.connect(lambda:self._export_session(sid,'pdf')); word.clicked.connect(lambda:self._export_session(sid,'docx')); excel.clicked.connect(lambda:self._export_session(sid,'xlsx')); close.clicked.connect(dlg.accept)
-        exports.addWidget(pdf); exports.addWidget(word); exports.addWidget(excel); exports.addStretch(1); exports.addWidget(close); layout.addLayout(exports)
-        fit_dialog_to_desktop(dlg,0.96,0.92); dlg.exec()
+        reviewer=QLineEdit(session['reviewed_by'] or ''); reviewer.setPlaceholderText('Reviewer name'); review_comment=QLineEdit(session['review_comments'] or ''); review_comment.setPlaceholderText('Review comments / findings')
+        approver=QLineEdit(session['approved_by'] or ''); approver.setPlaceholderText('Approver name'); approval_comment=QLineEdit(session['approval_comments'] or ''); approval_comment.setPlaceholderText('Approval comments')
+        for label,w in [('Reviewed By',reviewer),('Review Comments',review_comment),('Approved By',approver),('Approval Comments',approval_comment)]:
+            rowbox=QHBoxLayout(); rowbox.addWidget(QLabel(label)); rowbox.addWidget(w,1); layout.addLayout(rowbox)
+        actions=QHBoxLayout(); mark_review=QPushButton('Complete Review'); approve=QPushButton('Approve Report'); close=QPushButton('Close'); actions.addWidget(mark_review); actions.addWidget(approve); actions.addStretch(1); actions.addWidget(close); layout.addLayout(actions)
+        def complete_review():
+            if not reviewer.text().strip(): QMessageBox.warning(dlg,'Reviewer Required','Enter the reviewer name.'); return
+            self.db.conn.execute("UPDATE env_noise_sessions SET reviewed_by=?,review_comments=?,reviewed_at=?,workflow_status='Reviewed' WHERE id=?",(reviewer.text().strip(),review_comment.text().strip(),datetime.now().isoformat(timespec='seconds'),sid)); self.db.conn.commit(); self.refresh_register(); self.refresh_review_register(); QMessageBox.information(dlg,'Review Saved','Review recorded. The report is ready for approval.'); dlg.accept()
+        def approve_report():
+            if not reviewer.text().strip() or not approver.text().strip(): QMessageBox.warning(dlg,'Required','Enter both reviewer and approver names before approval.'); return
+            if session['workflow_status'] not in ('Reviewed','Approved') and not session['reviewed_by']:
+                QMessageBox.warning(dlg,'Review Required','Complete the review before approving this report.'); return
+            self.db.conn.execute("UPDATE env_noise_sessions SET reviewed_by=?,review_comments=?,approved_by=?,approval_comments=?,approved_at=?,workflow_status='Approved' WHERE id=?",(reviewer.text().strip(),review_comment.text().strip(),approver.text().strip(),approval_comment.text().strip(),datetime.now().isoformat(timespec='seconds'),sid)); self.db.conn.commit(); self.refresh_register(); self.refresh_review_register(); QMessageBox.information(dlg,'Approved','Noise monitoring report approved.'); dlg.accept()
+        mark_review.clicked.connect(complete_review); approve.clicked.connect(approve_report); close.clicked.connect(dlg.accept); fit_dialog_to_desktop(dlg,0.96,0.92); dlg.exec()
 
     def _show_evidence(self,path):
         if not os.path.exists(path):QMessageBox.warning(self,'Evidence','The attached image file could not be found.'); return
@@ -41668,7 +41718,7 @@ class EnvironmentalMonitoringModule(QWidget):
                     try: story.append(RLImage(str(logo_path),width=105,height=48,kind='proportional')); story.append(Spacer(1,5))
                     except Exception: logging.exception('Noise report logo could not be embedded')
                 story += [Paragraph(title,styles['Title']),Spacer(1,10)]
-                meta=[[f"Session: {session['session_no']}",f"Date / Time: {session['monitoring_date']} {session['monitoring_time']}"],[f"Project / Site: {session['project']}",f"Activity: {session['activity']}"],[f"Monitored By: {session['monitored_by']}",f"Reviewed By: {session['reviewed_by']}"],[f"Approved By: {session['approved_by']}",f"Instrument: {session['instrument']} / Calibration: {session['calibration_ref']}"]]
+                meta=[[f"Session: {session['session_no']}",f"Date / Time: {session['monitoring_date']} {session['monitoring_time']}"],[f"Project / Site: {session['project']}",f"Activity: {session['activity']}"],[f"Monitored By: {session['monitored_by']}",f"Reviewed By: {session['reviewed_by']}"],[f"Approved By: {session['approved_by']}",f"Instrument: {session['instrument']} / Calibration: {session['calibration_ref']}"],[f"Workflow Status: {session['workflow_status'] or 'Draft'}",f"Review Comments: {session['review_comments'] or ''}"],[f"Approval Comments: {session['approval_comments'] or ''}",'']]
                 mt=Table(meta,colWidths=[255,255]); mt.setStyle(TableStyle([('GRID',(0,0),(-1,-1),.6,colors.HexColor('#657786')),('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#EEF3F7')),('PADDING',(0,0),(-1,-1),7)])); story += [mt,Spacer(1,12)]
                 data=[['Specific Location','Source','dB(A)','Duration','Status','Recommended Controls','Remarks']]
                 for x in rows:data.append([x['location'],x['noise_source'],str(x['reading_dba']),str(x['duration_minutes']),x['risk_level'],Paragraph(html.escape(x['recommended_controls']),styles['BodyText']),Paragraph(html.escape(x['remarks']),styles['BodyText'])])
@@ -41679,7 +41729,7 @@ class EnvironmentalMonitoringModule(QWidget):
             elif kind=='docx':
                 doc=Document(); sec=doc.sections[0]; sec.orientation=WD_ORIENT.LANDSCAPE; sec.page_width,sec.page_height=sec.page_height,sec.page_width
                 add_docx_report_header(doc,title,kind='ENV',report_no=session['session_no'],normalize_logo=True)
-                for a,b in [('Session',session['session_no']),('Date / Time',f"{session['monitoring_date']} {session['monitoring_time']}"),('Project / Site',session['project']),('Activity',session['activity']),('Monitored By',session['monitored_by']),('Reviewed By',session['reviewed_by']),('Approved By',session['approved_by']),('Instrument / Calibration',f"{session['instrument']} / {session['calibration_ref']}")]:doc.add_paragraph(f'{a}: {b or ""}')
+                for a,b in [('Session',session['session_no']),('Date / Time',f"{session['monitoring_date']} {session['monitoring_time']}"),('Project / Site',session['project']),('Activity',session['activity']),('Monitored By',session['monitored_by']),('Reviewed By',session['reviewed_by']),('Approved By',session['approved_by']),('Workflow Status',session['workflow_status'] or 'Draft'),('Review Comments',session['review_comments']),('Approval Comments',session['approval_comments']),('Instrument / Calibration',f"{session['instrument']} / {session['calibration_ref']}")]:doc.add_paragraph(f'{a}: {b or ""}')
                 tb=doc.add_table(rows=1,cols=7); tb.style='Table Grid'; tb.alignment=WD_TABLE_ALIGNMENT.CENTER
                 for cell,val in zip(tb.rows[0].cells,['Specific Location','Source','dB(A)','Duration','Status','Recommended Controls','Remarks']):cell.text=val
                 for x in rows:
@@ -41695,7 +41745,7 @@ class EnvironmentalMonitoringModule(QWidget):
                     try:
                         logo_img=XLImage(str(logo_path)); logo_img.height=42; logo_img.width=int(logo_img.width*42/max(logo_img.height,1)); ws.add_image(logo_img,'A1')
                     except Exception: logging.exception('Noise Excel logo could not be embedded')
-                meta=[('Session',session['session_no']),('Date / Time',f"{session['monitoring_date']} {session['monitoring_time']}"),('Project / Site',session['project']),('Activity',session['activity']),('Monitored By',session['monitored_by']),('Reviewed By',session['reviewed_by']),('Approved By',session['approved_by'])]
+                meta=[('Session',session['session_no']),('Date / Time',f"{session['monitoring_date']} {session['monitoring_time']}"),('Project / Site',session['project']),('Activity',session['activity']),('Monitored By',session['monitored_by']),('Reviewed By',session['reviewed_by']),('Approved By',session['approved_by']),('Workflow Status',session['workflow_status'] or 'Draft'),('Review Comments',session['review_comments']),('Approval Comments',session['approval_comments'])]
                 for i,(a,b) in enumerate(meta,3):ws.cell(i,1,a);ws.cell(i,2,b or '')
                 headers=['Specific Location','Source','dB(A)','Duration','Status','Recommended Controls','Remarks']; start=12
                 for c,v in enumerate(headers,1):cell=ws.cell(start,c,v);cell.font=Font(bold=True,color='FFFFFF');cell.fill=PatternFill('solid',fgColor='17365D');cell.alignment=Alignment(wrap_text=True,vertical='top')
