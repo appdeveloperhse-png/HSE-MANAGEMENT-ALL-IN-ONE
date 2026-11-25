@@ -4926,11 +4926,48 @@ class MainWindow(QMainWindow):
                     pass
             return
 
+        # Emergency Drill has its own dedicated cache validation.  In earlier
+        # navigation builds, the generic "last created page" tracker could be
+        # overwritten while a module initialized nested widgets.  That allowed
+        # the Drill row to retain a reference to the Training page after the
+        # first visit.  Validate the actual page contents every time before
+        # reusing the cached Drill page.
+        if row == 7:
+            cached_drill_page = self._module_cache.get(7)
+            if cached_drill_page is not None:
+                try:
+                    drill_widget = cached_drill_page.findChild(EmergencyDrillModule)
+                    if self.stack.indexOf(cached_drill_page) >= 0 and drill_widget is not None:
+                        self.stack.setCurrentWidget(cached_drill_page)
+                        return
+                except Exception:
+                    logging.exception("Unable to validate cached Emergency Drill page")
+                # Do not delete this widget: if the stale reference points to a
+                # page owned by another module (for example Training), that
+                # module must keep its own page and cache entry.
+                self._module_cache.pop(7, None)
+
+            try:
+                drill_page, drill_layout = self.page("Emergency Drill Management")
+                drill_module = EmergencyDrillModule(self, db)
+                drill_layout.addWidget(drill_module, 1)
+                self._module_cache[7] = drill_page
+                self.stack.setCurrentWidget(drill_page)
+            except Exception as exc:
+                logging.exception("Navigation failed for Emergency Drill Management")
+                try:
+                    QMessageBox.critical(self, "Module Error", f"Unable to open Emergency Drill Management.\n\n{exc}")
+                except Exception:
+                    pass
+            return
+
         cached = self._module_cache.get(row)
         if cached is not None:
             try:
-                self.stack.setCurrentWidget(cached)
-                return
+                if self.stack.indexOf(cached) >= 0:
+                    self.stack.setCurrentWidget(cached)
+                    return
+                self._module_cache.pop(row, None)
             except Exception:
                 self._module_cache.pop(row, None)
 
@@ -4953,9 +4990,6 @@ class MainWindow(QMainWindow):
                 layout.addWidget(PTWModule(self, db), 1)
             elif row == 6:
                 self.training()
-            elif row == 7:
-                w, layout = self.page("Emergency Drill Management")
-                layout.addWidget(EmergencyDrillModule(self, db), 1)
             elif row == 8:
                 self.manpower_details()
             elif row == 9:
