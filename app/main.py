@@ -4876,6 +4876,7 @@ class MainWindow(QMainWindow):
             "Permit to Work (PTW)",
             "Training",
             "Emergency Drill Management",
+            "Environmental Monitoring",
             "Manpower Details",
             "Chemical & SDS Register",
             "Risk Assessment",
@@ -4991,20 +4992,23 @@ class MainWindow(QMainWindow):
             elif row == 6:
                 self.training()
             elif row == 8:
-                self.manpower_details()
+                w, layout = self.page("Environmental Monitoring")
+                layout.addWidget(EnvironmentalMonitoringModule(self, db), 1)
             elif row == 9:
+                self.manpower_details()
+            elif row == 10:
                 w, layout = self.page("Chemical Register & SDS Management")
                 layout.addWidget(ChemicalSDSModule(self, db), 1)
-            elif row == 10:
+            elif row == 11:
                 w, layout = self.page("Risk Assessment / JSA / JHA")
                 layout.addWidget(RiskAssessmentModule(self, db), 1)
-            elif row == 11:
-                self.reports()
             elif row == 12:
-                self.master_data()
+                self.reports()
             elif row == 13:
-                self.settings_page()
+                self.master_data()
             elif row == 14:
+                self.settings_page()
+            elif row == 15:
                 self.cloud_sync_page()
 
             # page() records the exact top-level page built by this module.
@@ -16088,7 +16092,7 @@ class MainWindow(QMainWindow):
             ("Audit Register (Excel)", lambda: export_table("audits", "Audit Register")),
             ("CAPA Register (Excel)", lambda: export_table("capa", "CAPA Register")),
             ("Open Training Module Exports", lambda: self.nav.setCurrentRow(6)),
-            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(13)),
+            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(14)),
         ]
         for i, (label, fn) in enumerate(buttons):
             b = QPushButton(label)
@@ -41207,6 +41211,465 @@ class EmergencyDrillModule(QWidget):
         except Exception as exc:
             logging.exception("Emergency drill Excel export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
 
+
+
+# ============================================================
+# ENVIRONMENTAL MONITORING MODULE
+# Additive module: noise monitoring records are stored in their
+# own tables and do not modify existing HSE module data.
+# ============================================================
+
+class EnvironmentalMonitoringModule(QWidget):
+    """Environmental monitoring workspace with multi-location noise readings."""
+
+    def __init__(self, parent=None, database=None):
+        super().__init__(parent)
+        self.db = database or db
+        self._ensure_tables()
+        self._load_thresholds()
+        self._build_ui()
+        self.refresh_register()
+
+    def _ensure_tables(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS env_noise_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_no TEXT NOT NULL UNIQUE,
+            monitoring_date TEXT NOT NULL,
+            monitoring_time TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            activity TEXT DEFAULT '',
+            monitored_by TEXT DEFAULT '',
+            instrument TEXT DEFAULT '',
+            calibration_ref TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS env_noise_locations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            location TEXT NOT NULL,
+            noise_source TEXT DEFAULT '',
+            reading_dba REAL NOT NULL,
+            duration_minutes REAL DEFAULT 0,
+            risk_level TEXT DEFAULT '',
+            recommended_controls TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            FOREIGN KEY(session_id) REFERENCES env_noise_sessions(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_env_noise_date ON env_noise_sessions(monitoring_date);
+        CREATE INDEX IF NOT EXISTS idx_env_noise_session ON env_noise_locations(session_id);
+        CREATE TABLE IF NOT EXISTS env_noise_thresholds (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            moderate REAL NOT NULL DEFAULT 80,
+            high REAL NOT NULL DEFAULT 85,
+            critical REAL NOT NULL DEFAULT 90,
+            updated_at TEXT DEFAULT ''
+        );
+        INSERT OR IGNORE INTO env_noise_thresholds(id, moderate, high, critical)
+        VALUES(1, 80, 85, 90);
+        """)
+        self.db.conn.commit()
+
+    def _load_thresholds(self):
+        row = self.db.conn.execute(
+            "SELECT moderate, high, critical FROM env_noise_thresholds WHERE id=1"
+        ).fetchone()
+        self.thresholds = {
+            "moderate": float(row[0]) if row else 80.0,
+            "high": float(row[1]) if row else 85.0,
+            "critical": float(row[2]) if row else 90.0,
+        }
+
+    def _recommendation(self, reading):
+        t = self.thresholds
+        if reading < t["moderate"]:
+            return (
+                "Routine / Low",
+                "Maintain existing controls and equipment maintenance. Continue routine "
+                "monitoring and review if the activity, equipment or work conditions change."
+            )
+        if reading < t["high"]:
+            return (
+                "Moderate",
+                "Review the noise source and work method; maintain distance where practicable; "
+                "avoid unnecessary exposure and consider scheduling or rotating noisy tasks. "
+                "Use hearing protection where the risk assessment requires it."
+            )
+        if reading < t["critical"]:
+            return (
+                "High",
+                "Prioritise engineering controls such as equipment maintenance, silencers, "
+                "acoustic enclosures or barriers. Restrict exposure time, establish warning "
+                "signage / hearing protection zones, provide suitable hearing protection and "
+                "reassess exposure, including personal dosimetry where appropriate."
+            )
+        return (
+            "Critical",
+            "Immediately restrict or stop the noisy activity until effective controls are "
+            "implemented and verified. Apply engineering isolation / enclosure, establish "
+            "an exclusion or hearing-protection zone, limit access and exposure, provide "
+            "suitable hearing protection, and arrange a documented reassessment before restart."
+        )
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 6, 8, 8)
+        heading = QLabel("Environmental Monitoring")
+        heading.setStyleSheet("font-size:21px;font-weight:700;color:#17365D;padding:4px;")
+        root.addWidget(heading)
+        intro = QLabel(
+            "Record noise measurements at multiple locations in one monitoring session. "
+            "Recommended controls are generated for each location from the configured dB(A) thresholds."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:7px;background:#E8F1FB;color:#17365D;border-radius:4px;")
+        root.addWidget(intro)
+
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._build_noise_tab(), "Noise Monitoring")
+        self.tabs.addTab(self._build_register_tab(), "Monitoring Register")
+        self.tabs.addTab(self._build_threshold_tab(), "Thresholds & Controls")
+
+    def _build_noise_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QGridLayout()
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd-MMM-yyyy")
+        self.time_edit = QLineEdit(datetime.now().strftime("%H:%M"))
+        self.project_edit = QLineEdit()
+        self.activity_edit = QLineEdit()
+        self.monitored_by_edit = QLineEdit()
+        self.instrument_edit = QLineEdit()
+        self.calibration_edit = QLineEdit()
+        self.notes_edit = QLineEdit()
+        fields = [
+            ("Monitoring Date", self.date_edit), ("Time (24-hour)", self.time_edit),
+            ("Project / Site", self.project_edit), ("Activity", self.activity_edit),
+            ("Monitored By", self.monitored_by_edit), ("Sound Level Meter", self.instrument_edit),
+            ("Calibration Reference", self.calibration_edit), ("General Notes", self.notes_edit),
+        ]
+        for i, (label, widget) in enumerate(fields):
+            r, c = divmod(i, 4)
+            form.addWidget(QLabel(label), r * 2, c)
+            form.addWidget(widget, r * 2 + 1, c)
+        layout.addLayout(form)
+
+        loc_head = QHBoxLayout()
+        loc_head.addWidget(QLabel("Location-wise Noise Readings"))
+        loc_head.addStretch(1)
+        add_btn = QPushButton("+ Add Location")
+        remove_btn = QPushButton("Remove Selected Location")
+        add_btn.clicked.connect(self.add_location_row)
+        remove_btn.clicked.connect(self.remove_location_row)
+        loc_head.addWidget(add_btn)
+        loc_head.addWidget(remove_btn)
+        layout.addLayout(loc_head)
+
+        self.location_table = QTableWidget(1, 7)
+        self.location_table.setHorizontalHeaderLabels([
+            "Location / Area", "Noise Source / Equipment", "Reading dB(A)",
+            "Duration (min)", "Risk Level", "Recommended Control Measures", "Remarks"
+        ])
+        self.location_table.setWordWrap(True)
+        self.location_table.setAlternatingRowColors(True)
+        self.location_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.location_table.verticalHeader().setDefaultSectionSize(72)
+        self.location_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.location_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.location_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.location_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.location_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.location_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        self.location_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        self.location_table.cellChanged.connect(self._location_cell_changed)
+        layout.addWidget(self.location_table, 1)
+        self.add_location_row()
+
+        action_row = QHBoxLayout()
+        action_row.addStretch(1)
+        clear_btn = QPushButton("Clear Form")
+        save_btn = QPushButton("Save Noise Monitoring")
+        clear_btn.clicked.connect(self.clear_form)
+        save_btn.clicked.connect(self.save_monitoring)
+        action_row.addWidget(clear_btn)
+        action_row.addWidget(save_btn)
+        layout.addLayout(action_row)
+        return page
+
+    def _build_register_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        buttons = QHBoxLayout()
+        view_btn = QPushButton("View Selected Session")
+        delete_btn = QPushButton("Delete Selected Session")
+        refresh_btn = QPushButton("Refresh")
+        view_btn.clicked.connect(self.view_selected_session)
+        delete_btn.clicked.connect(self.delete_selected_session)
+        refresh_btn.clicked.connect(self.refresh_register)
+        buttons.addWidget(view_btn)
+        buttons.addWidget(delete_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(refresh_btn)
+        layout.addLayout(buttons)
+        self.register_table = QTableWidget(0, 8)
+        self.register_table.setHorizontalHeaderLabels([
+            "ID", "Session No.", "Date", "Time", "Project / Site", "Activity", "Locations", "Monitored By"
+        ])
+        self.register_table.setColumnHidden(0, True)
+        self.register_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.register_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.register_table.setAlternatingRowColors(True)
+        self.register_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.register_table.horizontalHeader().setStretchLastSection(True)
+        self.register_table.doubleClicked.connect(self.view_selected_session)
+        layout.addWidget(self.register_table, 1)
+        return page
+
+    def _build_threshold_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        note = QLabel(
+            "Set the dB(A) trigger values used to classify each location and recommend controls. "
+            "The initial values (80 / 85 / 90 dB(A)) are configurable guidance defaults, not a "
+            "statement of legal limits. Set them to the applicable Qatar requirements, client "
+            "standard and project exposure criteria. Consider exposure duration and personal dosimetry."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("padding:10px;background:#FFF4D6;border:1px solid #E6C66A;border-radius:4px;")
+        layout.addWidget(note)
+        grid = QGridLayout()
+        self.moderate_spin = QDoubleSpinBox(); self.moderate_spin.setRange(40, 140); self.moderate_spin.setDecimals(1); self.moderate_spin.setSuffix(" dB(A)")
+        self.high_spin = QDoubleSpinBox(); self.high_spin.setRange(40, 140); self.high_spin.setDecimals(1); self.high_spin.setSuffix(" dB(A)")
+        self.critical_spin = QDoubleSpinBox(); self.critical_spin.setRange(40, 140); self.critical_spin.setDecimals(1); self.critical_spin.setSuffix(" dB(A)")
+        self.moderate_spin.setValue(self.thresholds["moderate"])
+        self.high_spin.setValue(self.thresholds["high"])
+        self.critical_spin.setValue(self.thresholds["critical"])
+        grid.addWidget(QLabel("Moderate threshold begins at"), 0, 0); grid.addWidget(self.moderate_spin, 0, 1)
+        grid.addWidget(QLabel("High threshold begins at"), 1, 0); grid.addWidget(self.high_spin, 1, 1)
+        grid.addWidget(QLabel("Critical threshold begins at"), 2, 0); grid.addWidget(self.critical_spin, 2, 1)
+        layout.addLayout(grid)
+        save_btn = QPushButton("Save Threshold Settings")
+        save_btn.clicked.connect(self.save_thresholds)
+        layout.addWidget(save_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch(1)
+        return page
+
+    def add_location_row(self):
+        row = self.location_table.rowCount()
+        self.location_table.blockSignals(True)
+        self.location_table.insertRow(row)
+        for col in range(7):
+            item = QTableWidgetItem("")
+            if col in (4, 5):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.location_table.setItem(row, col, item)
+        self.location_table.blockSignals(False)
+
+    def remove_location_row(self):
+        row = self.location_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Remove Location", "Select a location row first.")
+            return
+        self.location_table.removeRow(row)
+
+    def _location_cell_changed(self, row, column):
+        if column != 2 or row < 0:
+            return
+        item = self.location_table.item(row, 2)
+        if not item or not item.text().strip():
+            return
+        try:
+            reading = float(item.text().strip().replace(",", "."))
+            level, controls = self._recommendation(reading)
+        except ValueError:
+            level, controls = "Check Reading", "Enter a valid numeric reading in dB(A)."
+        self.location_table.blockSignals(True)
+        self.location_table.item(row, 4).setText(level)
+        self.location_table.item(row, 5).setText(controls)
+        self.location_table.blockSignals(False)
+
+    def save_thresholds(self):
+        moderate = self.moderate_spin.value()
+        high = self.high_spin.value()
+        critical = self.critical_spin.value()
+        if not moderate < high < critical:
+            QMessageBox.warning(self, "Invalid Thresholds", "Thresholds must increase in order: Moderate < High < Critical.")
+            return
+        self.db.conn.execute(
+            "UPDATE env_noise_thresholds SET moderate=?, high=?, critical=?, updated_at=? WHERE id=1",
+            (moderate, high, critical, datetime.now().isoformat(timespec="seconds"))
+        )
+        self.db.conn.commit()
+        self._load_thresholds()
+        for row in range(self.location_table.rowCount()):
+            self._location_cell_changed(row, 2)
+        QMessageBox.information(self, "Saved", "Noise threshold settings updated.")
+
+    def save_monitoring(self):
+        monitoring_date = self.date_edit.date().toString("yyyy-MM-dd")
+        monitoring_time = self.time_edit.text().strip()
+        if monitoring_time and not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", monitoring_time):
+            QMessageBox.warning(self, "Invalid Time", "Enter time in 24-hour HH:MM format, for example 14:30.")
+            return
+        if not self.activity_edit.text().strip():
+            QMessageBox.warning(self, "Required", "Enter the monitoring activity.")
+            return
+        locations = []
+        for row in range(self.location_table.rowCount()):
+            location = self.location_table.item(row, 0).text().strip() if self.location_table.item(row, 0) else ""
+            source = self.location_table.item(row, 1).text().strip() if self.location_table.item(row, 1) else ""
+            reading_text = self.location_table.item(row, 2).text().strip() if self.location_table.item(row, 2) else ""
+            duration_text = self.location_table.item(row, 3).text().strip() if self.location_table.item(row, 3) else ""
+            remarks = self.location_table.item(row, 6).text().strip() if self.location_table.item(row, 6) else ""
+            if not any((location, source, reading_text, duration_text, remarks)):
+                continue
+            if not location or not reading_text:
+                QMessageBox.warning(self, "Incomplete Location", f"Location row {row + 1}: enter both Location and Reading dB(A).")
+                return
+            try:
+                reading = float(reading_text.replace(",", "."))
+                duration = float(duration_text.replace(",", ".")) if duration_text else 0.0
+                if reading < 0 or duration < 0:
+                    raise ValueError
+            except ValueError:
+                QMessageBox.warning(self, "Invalid Reading", f"Location row {row + 1}: reading and duration must be non-negative numbers.")
+                return
+            level, controls = self._recommendation(reading)
+            locations.append((location, source, reading, duration, level, controls, remarks))
+        if not locations:
+            QMessageBox.warning(self, "No Locations", "Add at least one location with a valid noise reading.")
+            return
+
+        try:
+            next_id = self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_noise_sessions'),0)+1").fetchone()[0]
+            session_no = f"NMS-{datetime.now().year}-{int(next_id):04d}"
+            cur = self.db.conn.execute(
+                """INSERT INTO env_noise_sessions
+                (session_no, monitoring_date, monitoring_time, project, activity, monitored_by, instrument, calibration_ref, notes)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (session_no, monitoring_date, monitoring_time, self.project_edit.text().strip(),
+                 self.activity_edit.text().strip(), self.monitored_by_edit.text().strip(),
+                 self.instrument_edit.text().strip(), self.calibration_edit.text().strip(), self.notes_edit.text().strip())
+            )
+            session_id = cur.lastrowid
+            self.db.conn.executemany(
+                """INSERT INTO env_noise_locations
+                (session_id, location, noise_source, reading_dba, duration_minutes, risk_level, recommended_controls, remarks)
+                VALUES(?,?,?,?,?,?,?,?)""",
+                [(session_id,) + item for item in locations]
+            )
+            self.db.conn.commit()
+            self.refresh_register()
+            QMessageBox.information(self, "Saved", f"Noise monitoring session {session_no} saved with {len(locations)} location(s).")
+            self.clear_form()
+            self.tabs.setCurrentIndex(1)
+        except Exception as exc:
+            self.db.conn.rollback()
+            logging.exception("Unable to save environmental noise monitoring")
+            QMessageBox.critical(self, "Save Failed", str(exc))
+
+    def clear_form(self):
+        self.date_edit.setDate(QDate.currentDate())
+        self.time_edit.setText(datetime.now().strftime("%H:%M"))
+        for widget in (self.project_edit, self.activity_edit, self.monitored_by_edit,
+                       self.instrument_edit, self.calibration_edit, self.notes_edit):
+            widget.clear()
+        self.location_table.blockSignals(True)
+        self.location_table.setRowCount(1)
+        for col in range(7):
+            item = QTableWidgetItem("")
+            if col in (4, 5):
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.location_table.setItem(0, col, item)
+        self.location_table.blockSignals(False)
+
+    def refresh_register(self):
+        if not hasattr(self, "register_table"):
+            return
+        rows = self.db.conn.execute("""
+            SELECT s.*, COUNT(l.id) AS location_count
+            FROM env_noise_sessions s LEFT JOIN env_noise_locations l ON l.session_id=s.id
+            GROUP BY s.id ORDER BY s.monitoring_date DESC, s.id DESC
+        """).fetchall()
+        self.register_table.setRowCount(0)
+        for record in rows:
+            r = self.register_table.rowCount(); self.register_table.insertRow(r)
+            values = [record["id"], record["session_no"], record["monitoring_date"], record["monitoring_time"],
+                      record["project"], record["activity"], record["location_count"], record["monitored_by"]]
+            for c, value in enumerate(values):
+                item = QTableWidgetItem(str(value if value is not None else ""))
+                if c == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, int(record["id"]))
+                self.register_table.setItem(r, c, item)
+
+    def _selected_session_id(self):
+        row = self.register_table.currentRow()
+        if row < 0 or not self.register_table.item(row, 0):
+            QMessageBox.information(self, "Noise Monitoring", "Select a monitoring session first.")
+            return None
+        return int(self.register_table.item(row, 0).text())
+
+    def view_selected_session(self, *_):
+        session_id = self._selected_session_id()
+        if session_id is None:
+            return
+        session = self.db.conn.execute("SELECT * FROM env_noise_sessions WHERE id=?", (session_id,)).fetchone()
+        locations = self.db.conn.execute("SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id", (session_id,)).fetchall()
+        if not session:
+            return
+        dlg = QDialog(self); dlg.setWindowTitle(f"Noise Monitoring — {session['session_no']}"); dlg.resize(1050, 650)
+        layout = QVBoxLayout(dlg)
+        summary = QLabel(
+            f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp;&nbsp; "
+            f"<b>Date / Time:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'])}<br/>"
+            f"<b>Project:</b> {html.escape(session['project'])} &nbsp;&nbsp; "
+            f"<b>Activity:</b> {html.escape(session['activity'])}<br/>"
+            f"<b>Monitored By:</b> {html.escape(session['monitored_by'])} &nbsp;&nbsp; "
+            f"<b>Instrument:</b> {html.escape(session['instrument'])} &nbsp;&nbsp; "
+            f"<b>Calibration:</b> {html.escape(session['calibration_ref'])}"
+        )
+        summary.setWordWrap(True); layout.addWidget(summary)
+        table = QTableWidget(len(locations), 6)
+        table.setHorizontalHeaderLabels(["Location", "Source / Equipment", "Reading dB(A)", "Duration (min)", "Risk Level", "Recommended Controls"])
+        table.setWordWrap(True); table.verticalHeader().setDefaultSectionSize(78)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        for r, item in enumerate(locations):
+            values = [item["location"], item["noise_source"], item["reading_dba"], item["duration_minutes"], item["risk_level"], item["recommended_controls"]]
+            for c, value in enumerate(values): table.setItem(r, c, QTableWidgetItem(str(value if value is not None else "")))
+        layout.addWidget(table, 1)
+        close_btn = QPushButton("Close"); close_btn.clicked.connect(dlg.accept); layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        fit_dialog_to_desktop(dlg, 0.94, 0.9)
+        dlg.exec()
+
+    def delete_selected_session(self):
+        session_id = self._selected_session_id()
+        if session_id is None:
+            return
+        answer = QMessageBox.question(
+            self, "Delete Monitoring Session",
+            "Delete this noise monitoring session and all its location readings? This cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.db.conn.execute("DELETE FROM env_noise_sessions WHERE id=?", (session_id,))
+            self.db.conn.commit()
+            self.refresh_register()
+        except Exception as exc:
+            self.db.conn.rollback()
+            logging.exception("Unable to delete environmental noise monitoring session")
+            QMessageBox.critical(self, "Delete Failed", str(exc))
 
 
 # ============================================================
