@@ -41282,17 +41282,24 @@ class EnvironmentalMonitoringModule(QWidget):
         return ('Critical','Stop or restrict the activity until effective controls are verified. Isolate or enclose the source, establish an exclusion/hearing-protection zone, limit access and exposure, and document reassessment before restart.')
 
     def _build_ui(self):
-        root=QVBoxLayout(self); root.setContentsMargins(14,10,14,12); root.setSpacing(10)
-        heading=QLabel('Environmental Monitoring  /  Noise'); heading.setStyleSheet('font-size:23px;font-weight:800;color:#17365D;padding:5px;')
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 12, 16, 14)
+        root.setSpacing(12)
+        heading = QLabel('Environmental Monitoring  /  Noise')
+        heading.setStyleSheet('font-size:24px;font-weight:800;color:#17365D;padding:4px 2px;')
         root.addWidget(heading)
-        intro=QLabel('Capture location-specific noise readings, evidence and control actions. Each saved session is available in the register and dashboard.')
-        intro.setWordWrap(True); intro.setStyleSheet('padding:11px;background:#EAF2F8;color:#23445F;border:1px solid #D4E2ED;border-radius:8px;')
+        intro = QLabel('Record site-specific noise levels, review recommended controls and retain photographic evidence for each monitored area.')
+        intro.setWordWrap(True)
+        intro.setStyleSheet('padding:12px 14px;background:#EAF2F8;color:#23445F;border:1px solid #D4E2ED;border-radius:9px;font-size:13px;')
         root.addWidget(intro)
-        self.tabs=QTabWidget(); self.tabs.setDocumentMode(True); self.tabs.setStyleSheet('QTabBar::tab{padding:10px 18px;font-weight:600;} QTabWidget::pane{border:1px solid #D7E0E8;border-radius:7px;}')
-        root.addWidget(self.tabs,1)
-        self.tabs.addTab(self._build_dashboard_tab(),'Dashboard')
-        self.tabs.addTab(self._build_noise_tab(),'Noise Monitoring')
-        self.tabs.addTab(self._build_register_tab(),'Monitoring Register')
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet('QTabBar::tab{padding:11px 18px;min-width:125px;font-weight:700;} QTabWidget::pane{border:1px solid #D7E0E8;border-radius:8px;top:-1px;}')
+        root.addWidget(self.tabs, 1)
+        self.tabs.addTab(self._build_dashboard_tab(), 'Dashboard')
+        self.tabs.addTab(self._build_noise_tab(), 'Noise Monitoring')
+        self.tabs.addTab(self._build_register_tab(), 'Monitoring Register')
+        self.tabs.addTab(self._build_threshold_tab(), 'Thresholds & Controls')
 
     def _build_dashboard_tab(self):
         page=QWidget(); layout=QVBoxLayout(page)
@@ -41312,26 +41319,171 @@ class EnvironmentalMonitoringModule(QWidget):
         return page
 
     def _build_noise_tab(self):
-        page=QWidget(); layout=QVBoxLayout(page); layout.setSpacing(10)
-        meta=QGroupBox('Monitoring Session Details'); meta.setStyleSheet('QGroupBox{font-weight:700;border:1px solid #D5DEE7;border-radius:8px;margin-top:8px;padding:10px;} QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 5px;}')
-        form=QGridLayout(meta)
-        self.date_edit=QDateEdit(QDate.currentDate()); self.date_edit.setCalendarPopup(True); self.date_edit.setDisplayFormat('dd-MMM-yyyy')
-        self.time_edit=QLineEdit(datetime.now().strftime('%H:%M')); self.project_edit=QLineEdit(); self.activity_edit=QLineEdit()
-        self.monitored_by_edit=QLineEdit(); self.reviewed_by_edit=QLineEdit(); self.approved_by_edit=QLineEdit()
-        self.instrument_edit=QLineEdit(); self.calibration_edit=QLineEdit(); self.notes_edit=QLineEdit()
-        fields=[('Monitoring Date',self.date_edit),('Time (24-hour)',self.time_edit),('Project / Site',self.project_edit),('Activity',self.activity_edit),('Monitored By',self.monitored_by_edit),('Reviewed By',self.reviewed_by_edit),('Approved By',self.approved_by_edit),('Sound Level Meter',self.instrument_edit),('Calibration Reference',self.calibration_edit),('General Notes',self.notes_edit)]
-        for i,(label,w) in enumerate(fields):
-            r,c=divmod(i,4); form.addWidget(QLabel(label),r*2,c); form.addWidget(w,r*2+1,c)
-        layout.addWidget(meta)
-        bar=QHBoxLayout(); lbl=QLabel('Location-wise Noise Readings'); lbl.setStyleSheet('font-size:16px;font-weight:700;color:#17365D;'); bar.addWidget(lbl); bar.addStretch(1)
-        add=QPushButton('+ Add Specific Location'); remove=QPushButton('Remove Selected'); add.clicked.connect(self.add_location_row); remove.clicked.connect(self.remove_location_row); bar.addWidget(add); bar.addWidget(remove); layout.addLayout(bar)
-        self.location_table=QTableWidget(1,8); self.location_table.setHorizontalHeaderLabels(['Specific Location / Area','Noise Source / Equipment','Reading dB(A)','Duration (min)','Status','Recommended Controls','Remarks','Evidence Photo'])
-        self.location_table.setWordWrap(True); self.location_table.setAlternatingRowColors(True); self.location_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.location_table.verticalHeader().setDefaultSectionSize(76)
-        for c in range(5): self.location_table.horizontalHeader().setSectionResizeMode(c,QHeaderView.ResizeMode.ResizeToContents)
-        self.location_table.horizontalHeader().setSectionResizeMode(5,QHeaderView.ResizeMode.Stretch); self.location_table.horizontalHeader().setSectionResizeMode(6,QHeaderView.ResizeMode.Stretch); self.location_table.horizontalHeader().setSectionResizeMode(7,QHeaderView.ResizeMode.ResizeToContents)
-        self.location_table.cellChanged.connect(self._location_cell_changed); layout.addWidget(self.location_table,1); self.add_location_row()
-        actions=QHBoxLayout(); actions.addStretch(1); clear=QPushButton('Clear Form'); save=QPushButton('Save Monitoring Session'); clear.clicked.connect(self.clear_form); save.clicked.connect(self.save_monitoring); save.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:700;padding:9px 18px;border-radius:6px;}'); actions.addWidget(clear); actions.addWidget(save); layout.addLayout(actions)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(12)
+
+        meta = QGroupBox('Monitoring Session Details')
+        meta.setStyleSheet('QGroupBox{font-weight:700;border:1px solid #D5DEE7;border-radius:9px;margin-top:9px;padding:9px;background:#FAFCFE;} QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;color:#17365D;}')
+        form = QGridLayout(meta)
+        form.setContentsMargins(14, 18, 14, 12)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(5)
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat('dd-MMM-yyyy')
+        self.time_edit = QLineEdit(datetime.now().strftime('%H:%M'))
+        self.project_edit = QLineEdit()
+        self.activity_edit = QLineEdit()
+        self.monitored_by_edit = QLineEdit()
+        self.reviewed_by_edit = QLineEdit()
+        self.approved_by_edit = QLineEdit()
+        self.instrument_edit = QLineEdit()
+        self.calibration_edit = QLineEdit()
+        self.notes_edit = QLineEdit()
+        fields = [('Monitoring Date', self.date_edit), ('Time (24-hour)', self.time_edit),
+                  ('Project / Site', self.project_edit), ('Activity', self.activity_edit),
+                  ('Monitored By', self.monitored_by_edit), ('Reviewed By', self.reviewed_by_edit),
+                  ('Approved By', self.approved_by_edit), ('Sound Level Meter', self.instrument_edit),
+                  ('Calibration Reference', self.calibration_edit), ('General Notes', self.notes_edit)]
+        # Five compact columns keep session details readable without consuming the full page height.
+        for i, (label, widget) in enumerate(fields):
+            row, col = divmod(i, 5)
+            lab = QLabel(label)
+            lab.setStyleSheet('font-size:11px;font-weight:600;color:#526477;')
+            form.addWidget(lab, row * 2, col)
+            form.addWidget(widget, row * 2 + 1, col)
+            widget.setMinimumWidth(125)
+        for col in range(5):
+            form.setColumnStretch(col, 1)
+        layout.addWidget(meta, 0)
+
+        bar = QHBoxLayout()
+        lbl = QLabel('Location-wise Noise Readings')
+        lbl.setStyleSheet('font-size:17px;font-weight:800;color:#17365D;')
+        bar.addWidget(lbl)
+        bar.addStretch(1)
+        add = QPushButton('+ Add Specific Location')
+        remove = QPushButton('Remove Selected')
+        add.setMinimumHeight(34); remove.setMinimumHeight(34)
+        add.clicked.connect(self.add_location_row)
+        remove.clicked.connect(self.remove_location_row)
+        bar.addWidget(add); bar.addWidget(remove)
+        layout.addLayout(bar)
+
+        hint = QLabel('Enter the exact area (e.g. Yard 1, Workshop Bay 2 or Generator Room) and its measured dB(A). Status and controls update as soon as the reading is entered.')
+        hint.setWordWrap(True)
+        hint.setStyleSheet('color:#526477;background:#F2F6FA;border:1px solid #E0E7EE;border-radius:6px;padding:8px 10px;')
+        layout.addWidget(hint)
+
+        self.location_table = QTableWidget(1, 8)
+        self.location_table.setHorizontalHeaderLabels(['Specific Location / Area', 'Noise Source / Equipment', 'Reading dB(A)', 'Duration (min)', 'Status', 'Recommended Controls', 'Remarks', 'Evidence Photo'])
+        self.location_table.setWordWrap(True)
+        self.location_table.setAlternatingRowColors(True)
+        self.location_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.location_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.location_table.verticalHeader().setDefaultSectionSize(104)
+        self.location_table.verticalHeader().setMinimumSectionSize(82)
+        self.location_table.setMinimumHeight(300)
+        self.location_table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.location_table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        header = self.location_table.horizontalHeader()
+        widths = {0:190, 1:175, 2:112, 3:105, 4:105, 5:330, 6:190, 7:135}
+        for col, width in widths.items():
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+            self.location_table.setColumnWidth(col, width)
+        header.setStretchLastSection(False)
+        self.location_table.cellChanged.connect(self._location_cell_changed)
+        layout.addWidget(self.location_table, 1)
+        self.add_location_row()
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        clear = QPushButton('Clear Form')
+        save = QPushButton('Save Monitoring Session')
+        clear.setMinimumHeight(38); save.setMinimumHeight(38)
+        clear.clicked.connect(self.clear_form)
+        save.clicked.connect(self.save_monitoring)
+        save.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:800;padding:9px 20px;border-radius:7px;} QPushButton:hover{background:#12566D;}')
+        actions.addWidget(clear); actions.addWidget(save)
+        layout.addLayout(actions)
         return page
+
+    def _build_threshold_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+        title = QLabel('Noise Exposure Thresholds & Recommended Controls')
+        title.setStyleSheet('font-size:19px;font-weight:800;color:#17365D;')
+        layout.addWidget(title)
+        explanation = QLabel('Set the dB(A) bands used to classify each location reading. When a reading is entered or changed, the status colour and recommended control measures are updated immediately using these thresholds.')
+        explanation.setWordWrap(True)
+        explanation.setStyleSheet('padding:12px;background:#EEF4F8;border:1px solid #D8E3EC;border-radius:8px;color:#34495E;')
+        layout.addWidget(explanation)
+
+        card = QGroupBox('Threshold Configuration — dB(A)')
+        card.setStyleSheet('QGroupBox{font-weight:700;border:1px solid #D5DEE7;border-radius:9px;margin-top:10px;padding:12px;} QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;color:#17365D;}')
+        grid = QGridLayout(card)
+        grid.setContentsMargins(16, 22, 16, 16)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(10)
+        self.moderate_threshold = QDoubleSpinBox(); self.moderate_threshold.setRange(0, 200); self.moderate_threshold.setDecimals(1); self.moderate_threshold.setSuffix(' dB(A)'); self.moderate_threshold.setValue(self.thresholds['moderate'])
+        self.high_threshold = QDoubleSpinBox(); self.high_threshold.setRange(0, 200); self.high_threshold.setDecimals(1); self.high_threshold.setSuffix(' dB(A)'); self.high_threshold.setValue(self.thresholds['high'])
+        self.critical_threshold = QDoubleSpinBox(); self.critical_threshold.setRange(0, 200); self.critical_threshold.setDecimals(1); self.critical_threshold.setSuffix(' dB(A)'); self.critical_threshold.setValue(self.thresholds['critical'])
+        threshold_fields = [('Moderate threshold', self.moderate_threshold, '#FFF3CD', '#805B00'), ('High threshold', self.high_threshold, '#FFE1C2', '#9A4300'), ('Critical threshold', self.critical_threshold, '#F9D7DA', '#8A1C27')]
+        for col, (name, widget, bg, fg) in enumerate(threshold_fields):
+            lab = QLabel(name); lab.setStyleSheet('font-weight:700;color:#34495E;')
+            widget.setMinimumHeight(38); widget.setStyleSheet(f'QDoubleSpinBox{{padding:6px;border:1px solid #C9D3DF;border-radius:6px;background:{bg};color:{fg};font-weight:700;}}')
+            grid.addWidget(lab, 0, col); grid.addWidget(widget, 1, col)
+            grid.setColumnStretch(col, 1)
+        save = QPushButton('Save Thresholds & Recalculate Readings')
+        save.setMinimumHeight(40)
+        save.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:800;padding:9px 18px;border-radius:7px;}')
+        save.clicked.connect(self.save_thresholds)
+        grid.addWidget(save, 2, 0, 1, 3)
+        layout.addWidget(card)
+
+        legend = QGroupBox('Automatic Status and Control Guidance')
+        legend_grid = QGridLayout(legend)
+        legend_grid.setContentsMargins(14, 20, 14, 14)
+        guidance = [
+            ('LOW', 'Below Moderate', 'Maintain existing controls, maintain equipment and continue routine monitoring.', '#E2F4E8', '#176B36'),
+            ('MODERATE', 'Moderate to High threshold', 'Review the source and work method; increase distance where practicable, reduce unnecessary exposure and consider task rotation. Use hearing protection where required by the risk assessment.', '#FFF3CD', '#805B00'),
+            ('HIGH', 'High to Critical threshold', 'Prioritise engineering controls such as maintenance, silencers, acoustic enclosures or barriers. Restrict exposure time, mark hearing-protection zones and provide suitable hearing protection. Reassess exposure.', '#FFE1C2', '#9A4300'),
+            ('CRITICAL', 'At or above Critical threshold', 'Stop or restrict the activity until effective controls are verified. Isolate or enclose the source, establish an exclusion/hearing-protection zone, limit access and exposure, and document reassessment before restart.', '#F9D7DA', '#8A1C27')]
+        for r, (name, band, advice, bg, fg) in enumerate(guidance):
+            badge = QLabel(name); badge.setAlignment(Qt.AlignmentFlag.AlignCenter); badge.setMinimumWidth(112); badge.setStyleSheet(f'padding:9px;background:{bg};color:{fg};font-weight:800;border-radius:6px;')
+            desc = QLabel(f'<b>{band}</b><br>{advice}'); desc.setWordWrap(True); desc.setStyleSheet('padding:7px;color:#34495E;')
+            legend_grid.addWidget(badge, r, 0); legend_grid.addWidget(desc, r, 1)
+        legend_grid.setColumnStretch(1, 1)
+        layout.addWidget(legend)
+        layout.addStretch(1)
+        return page
+
+    def save_thresholds(self):
+        moderate = float(self.moderate_threshold.value())
+        high = float(self.high_threshold.value())
+        critical = float(self.critical_threshold.value())
+        if not (moderate < high < critical):
+            QMessageBox.warning(self, 'Invalid Thresholds', 'Thresholds must be in ascending order: Moderate < High < Critical.')
+            return
+        try:
+            self.db.conn.execute('UPDATE env_noise_thresholds SET moderate=?, high=?, critical=?, updated_at=? WHERE id=1', (moderate, high, critical, datetime.now().isoformat(timespec='seconds')))
+            self._load_thresholds()
+            records = self.db.conn.execute('SELECT id, reading_dba FROM env_noise_locations').fetchall()
+            for rec in records:
+                level, controls = self._recommendation(float(rec['reading_dba']))
+                self.db.conn.execute('UPDATE env_noise_locations SET risk_level=?, recommended_controls=? WHERE id=?', (level, controls, rec['id']))
+            self.db.conn.commit()
+            self._load_thresholds()
+            self.refresh_dashboard()
+            QMessageBox.information(self, 'Thresholds Saved', 'Noise thresholds saved. Existing and future readings now use the updated control bands.')
+        except Exception as exc:
+            self.db.conn.rollback()
+            logging.exception('Unable to save noise thresholds')
+            QMessageBox.critical(self, 'Save Failed', str(exc))
 
     def _build_register_tab(self):
         page=QWidget(); layout=QVBoxLayout(page); buttons=QHBoxLayout()
@@ -41346,7 +41498,7 @@ class EnvironmentalMonitoringModule(QWidget):
     def add_location_row(self):
         row=self.location_table.rowCount(); self.location_table.blockSignals(True); self.location_table.insertRow(row)
         for col in range(8):
-            item=QTableWidgetItem('')
+            item=QTableWidgetItem('Awaiting Reading' if col == 4 else ('Enter dB(A) reading to calculate controls' if col == 5 else ''))
             if col in (4,5,7): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.location_table.setItem(row,col,item)
         evidence=QPushButton('Attach Photo'); evidence.clicked.connect(lambda checked=False,r=row:self.attach_evidence(r)); self.location_table.setCellWidget(row,7,evidence)
@@ -41375,14 +41527,38 @@ class EnvironmentalMonitoringModule(QWidget):
         self.location_table.removeRow(row)
 
     def _location_cell_changed(self,row,column):
-        if column!=2 or row<0:return
-        item=self.location_table.item(row,2)
-        if not item or not item.text().strip():return
-        try: reading=float(item.text().strip().replace(',','.')); level,controls=self._recommendation(reading)
-        except ValueError: level,controls='Check Reading','Enter a valid numeric reading in dB(A).'
-        self.location_table.blockSignals(True); self.location_table.item(row,4).setText(level); self.location_table.item(row,5).setText(controls)
-        palette={'Low':('#E2F4E8','#176B36'),'Moderate':('#FFF3CD','#805B00'),'High':('#FFE1C2','#9A4300'),'Critical':('#F9D7DA','#8A1C27'),'Check Reading':('#E9ECEF','#495057')}
-        bg,fg=palette.get(level,palette['Check Reading']); self.location_table.item(row,4).setBackground(QColor(bg)); self.location_table.item(row,4).setForeground(QColor(fg)); self.location_table.blockSignals(False)
+        if column != 2 or row < 0:
+            return
+        item = self.location_table.item(row, 2)
+        if not item:
+            return
+        text_value = item.text().strip()
+        if not text_value:
+            self.location_table.blockSignals(True)
+            self.location_table.item(row, 4).setText('Awaiting Reading')
+            self.location_table.item(row, 5).setText('Enter a measured noise level in dB(A) to generate recommended controls.')
+            self.location_table.item(row, 4).setBackground(QColor('#E9ECEF'))
+            self.location_table.item(row, 4).setForeground(QColor('#495057'))
+            self.location_table.blockSignals(False)
+            return
+        try:
+            reading = float(text_value.replace(',', '.'))
+            if reading < 0:
+                raise ValueError
+            level, controls = self._recommendation(reading)
+        except ValueError:
+            level, controls = 'Check Reading', 'Enter a valid non-negative numeric reading in dB(A).'
+        palette = {'Low': ('#E2F4E8', '#176B36'), 'Moderate': ('#FFF3CD', '#805B00'), 'High': ('#FFE1C2', '#9A4300'), 'Critical': ('#F9D7DA', '#8A1C27'), 'Check Reading': ('#E9ECEF', '#495057')}
+        self.location_table.blockSignals(True)
+        self.location_table.item(row, 4).setText(level)
+        self.location_table.item(row, 5).setText(controls)
+        bg, fg = palette.get(level, palette['Check Reading'])
+        for col in (2, 4):
+            self.location_table.item(row, col).setBackground(QColor(bg))
+            self.location_table.item(row, col).setForeground(QColor(fg))
+        self.location_table.item(row, 5).setBackground(QColor(bg))
+        self.location_table.item(row, 5).setForeground(QColor(fg))
+        self.location_table.blockSignals(False)
 
     def save_monitoring(self):
         monitoring_date=self.date_edit.date().toString('yyyy-MM-dd'); monitoring_time=self.time_edit.text().strip()
