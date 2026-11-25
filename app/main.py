@@ -41340,8 +41340,15 @@ class EnvironmentalMonitoringModule(QWidget):
         fields=[('Monitoring Date',self.date_edit),('Time (24-hour)',self.time_edit),('Project / Site',self.project_edit),('Activity / Work Scope',self.activity_edit),('Monitored By',self.monitored_by_edit),('Sound Level Meter',self.instrument_edit),('Calibration Reference',self.calibration_edit),('General Notes',self.notes_edit)]
         for i,(label,w) in enumerate(fields):
             r,col=divmod(i,2); lab=QLabel(label); lab.setStyleSheet('font-size:12px;font-weight:650;color:#526477;')
-            w.setMinimumHeight(38); w.setMinimumWidth(250)
-            grid.addWidget(lab,r*2,col); grid.addWidget(w,r*2+1,col); grid.setColumnStretch(col,1)
+            lab.setWordWrap(True)
+            w.setMinimumHeight(38)
+            # Let each field shrink with the available window width; fixed 250px
+            # minimums forced the two-column form to overlap on narrower screens.
+            w.setMinimumWidth(0)
+            w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            grid.addWidget(lab,r*2,col); grid.addWidget(w,r*2+1,col)
+        grid.setColumnStretch(0,1); grid.setColumnStretch(1,1)
+        grid.setColumnMinimumWidth(0,0); grid.setColumnMinimumWidth(1,0)
         layout.addWidget(card)
         actions=QHBoxLayout(); actions.addStretch(1)
         clear=QPushButton('Clear'); save=QPushButton('Save Basic Details')
@@ -41593,6 +41600,7 @@ class EnvironmentalMonitoringModule(QWidget):
         summary=QLabel(f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp; <b>Date / Time:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'])}<br><b>Project / Site:</b> {html.escape(session['project'])} &nbsp; <b>Activity:</b> {html.escape(session['activity'])}<br><b>Monitored By:</b> {html.escape(session['monitored_by'])} &nbsp; <b>Instrument:</b> {html.escape(session['instrument'])} &nbsp; <b>Calibration:</b> {html.escape(session['calibration_ref'])}<br><b>Workflow:</b> {html.escape(session['workflow_status'] or 'Draft')}")
         summary.setWordWrap(True); summary.setStyleSheet('padding:14px;background:#EEF4F8;border:1px solid #D5E0E8;border-radius:7px;'); root.addWidget(summary)
         table=QTableWidget(0,8); table.setHorizontalHeaderLabels(['Specific Location / Area','Noise Source / Equipment','Reading dB(A)','Duration (min)','Status','Recommended Controls','Remarks','Evidence Photo']); table.setWordWrap(True); table.setAlternatingRowColors(True); table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.verticalHeader().setDefaultSectionSize(95)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed | QAbstractItemView.EditTrigger.AnyKeyPressed)
         widths=[190,175,105,105,105,340,180,130]
         for col,w in enumerate(widths): table.setColumnWidth(col,w); table.horizontalHeader().setSectionResizeMode(col,QHeaderView.ResizeMode.Interactive)
         rows=self.db.conn.execute('SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id',(sid,)).fetchall()
@@ -41601,7 +41609,10 @@ class EnvironmentalMonitoringModule(QWidget):
             vals=[rec['location'],rec['noise_source'],str(rec['reading_dba']),str(rec['duration_minutes']),rec['risk_level'],rec['recommended_controls'],rec['remarks'],'']
             for col,val in enumerate(vals):
                 item=QTableWidgetItem(str(val or ''))
-                if col in (4,5,7): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col in (0,1,2,3,6):
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(r,col,item)
             table.item(r,0).setData(Qt.ItemDataRole.UserRole, int(rec['id']))
             if rec['evidence_path'] and os.path.exists(rec['evidence_path']):
@@ -41613,7 +41624,10 @@ class EnvironmentalMonitoringModule(QWidget):
             r=table.rowCount(); table.insertRow(r)
             for col in range(8):
                 item=QTableWidgetItem('Awaiting Reading' if col==4 else ('Enter dB(A) reading to calculate controls' if col==5 else ''))
-                if col in (4,5,7): item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if col in (0,1,2,3,6):
+                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                else:
+                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(r,col,item)
             table.item(r,0).setData(Qt.ItemDataRole.UserRole,None)
             b=QPushButton('Attach Photo'); b.clicked.connect(lambda checked=False,rr=r:self._attach_dialog_evidence(table,rr)); table.setCellWidget(r,7,b)
@@ -41649,16 +41663,17 @@ class EnvironmentalMonitoringModule(QWidget):
                     level,controls='Check Reading','Enter a valid non-negative numeric reading in dB(A).'
             palette={'Low':('#E2F4E8','#176B36'),'Moderate':('#FFF3CD','#805B00'),'High':('#FFE1C2','#9A4300'),'Critical':('#F9D7DA','#8A1C27'),'Check Reading':('#E9ECEF','#495057'),'Awaiting Reading':('#F1F3F5','#495057')}
             bg,fg=palette.get(level,palette['Check Reading'])
-            table.blockSignals(True)
+            # Update only the calculated columns while the Reading editor is active.
+            # Do not touch the edited Reading item or block the table's signals here:
+            # doing so can interrupt QTableWidget's editor/model synchronization.
             if table.item(r,4) is not None:
                 table.item(r,4).setText(level)
             if table.item(r,5) is not None:
                 table.item(r,5).setText(controls)
-            for cc in (2,4,5):
+            for cc in (4,5):
                 if table.item(r,cc) is not None:
                     table.item(r,cc).setBackground(QColor(bg))
                     table.item(r,cc).setForeground(QColor(fg))
-            table.blockSignals(False)
 
         # QTableWidget emits cellChanged only after the editor is committed.
         # Listen to the active editor too, so controls update while the user types.
@@ -41666,8 +41681,12 @@ class EnvironmentalMonitoringModule(QWidget):
             def createEditor(delegate_self, parent, option, index):
                 editor = super().createEditor(parent, option, index)
                 if isinstance(editor, QLineEdit):
-                    editor.textChanged.connect(
-                        lambda value, row=index.row(): update_reading_display(row, value)
+                    # textEdited fires only for user input, not when Qt initially
+                    # loads the existing cell value into the editor.
+                    editor.textEdited.connect(
+                        lambda value, row=index.row(): QTimer.singleShot(
+                            0, lambda rr=row, vv=value: update_reading_display(rr, vv)
+                        )
                     )
                 return editor
 
