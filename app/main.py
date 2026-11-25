@@ -29,7 +29,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
     QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QTabWidget, QListWidgetItem,
-    QGridLayout, QDateTimeEdit, QInputDialog, QFrame, QSizePolicy, QMenu
+    QGridLayout, QDateTimeEdit, QInputDialog, QFrame, QSizePolicy, QMenu,
+    QStyledItemDelegate
 )
 from PySide6.QtPrintSupport import QPrinter, QPrintDialog
 
@@ -41631,25 +41632,53 @@ class EnvironmentalMonitoringModule(QWidget):
                     self.db.conn.rollback(); QMessageBox.critical(dlg,'Remove Failed',str(exc)); return
             table.removeRow(r)
             self.refresh_register(); self.refresh_dashboard(); self.refresh_review_register()
+        def update_reading_display(r, text):
+            if r < 0 or r >= table.rowCount():
+                return
+            text = (text or '').strip()
+            if not text:
+                level='Awaiting Reading'
+                controls='Enter a measured noise level in dB(A) to generate recommended controls.'
+            else:
+                try:
+                    reading=float(text.replace(',','.'))
+                    if reading < 0:
+                        raise ValueError
+                    level,controls=self._recommendation(reading)
+                except ValueError:
+                    level,controls='Check Reading','Enter a valid non-negative numeric reading in dB(A).'
+            palette={'Low':('#E2F4E8','#176B36'),'Moderate':('#FFF3CD','#805B00'),'High':('#FFE1C2','#9A4300'),'Critical':('#F9D7DA','#8A1C27'),'Check Reading':('#E9ECEF','#495057'),'Awaiting Reading':('#F1F3F5','#495057')}
+            bg,fg=palette.get(level,palette['Check Reading'])
+            table.blockSignals(True)
+            if table.item(r,4) is not None:
+                table.item(r,4).setText(level)
+            if table.item(r,5) is not None:
+                table.item(r,5).setText(controls)
+            for cc in (2,4,5):
+                if table.item(r,cc) is not None:
+                    table.item(r,cc).setBackground(QColor(bg))
+                    table.item(r,cc).setForeground(QColor(fg))
+            table.blockSignals(False)
+
+        # QTableWidget emits cellChanged only after the editor is committed.
+        # Listen to the active editor too, so controls update while the user types.
+        class LiveNoiseReadingDelegate(QStyledItemDelegate):
+            def createEditor(delegate_self, parent, option, index):
+                editor = super().createEditor(parent, option, index)
+                if isinstance(editor, QLineEdit):
+                    editor.textChanged.connect(
+                        lambda value, row=index.row(): update_reading_display(row, value)
+                    )
+                return editor
+
+        table.setItemDelegateForColumn(2, LiveNoiseReadingDelegate(table))
+
         def update_cell(r,col):
             if r < 0 or r >= table.rowCount():
                 return
             if col == 2:
-                text=table.item(r,2).text().strip() if table.item(r,2) else ''
-                if not text:
-                    level='Awaiting Reading'; controls='Enter a measured noise level in dB(A) to generate recommended controls.'
-                else:
-                    try:
-                        reading=float(text.replace(',','.'))
-                        if reading<0: raise ValueError
-                        level,controls=self._recommendation(reading)
-                    except ValueError:
-                        level,controls='Check Reading','Enter a valid non-negative numeric reading in dB(A).'
-                palette={'Low':('#E2F4E8','#176B36'),'Moderate':('#FFF3CD','#805B00'),'High':('#FFE1C2','#9A4300'),'Critical':('#F9D7DA','#8A1C27'),'Check Reading':('#E9ECEF','#495057'),'Awaiting Reading':('#F1F3F5','#495057')}
-                bg,fg=palette.get(level,palette['Check Reading']); table.blockSignals(True)
-                table.item(r,4).setText(level); table.item(r,5).setText(controls)
-                for cc in (2,4,5): table.item(r,cc).setBackground(QColor(bg)); table.item(r,cc).setForeground(QColor(fg))
-                table.blockSignals(False)
+                reading_text=table.item(r,2).text().strip() if table.item(r,2) else ''
+                update_reading_display(r, reading_text)
             # Save a complete, valid location as soon as its fields are edited.
             # Incomplete rows remain in the dialog until the user finishes them.
             if col not in (0,1,2,3,6):
