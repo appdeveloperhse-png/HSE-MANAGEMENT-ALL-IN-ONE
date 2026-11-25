@@ -4935,6 +4935,11 @@ class MainWindow(QMainWindow):
                 self._module_cache.pop(row, None)
 
         try:
+            # Keep the page created for this navigation row as the authoritative
+            # page. Some modules build nested tabs/widgets during initialization;
+            # relying only on stack.currentWidget() after that work can cache a
+            # different page and make Training appear when Drill is selected.
+            self._last_created_page = None
             if row == 1:
                 self.observations()
             elif row == 2:
@@ -4967,7 +4972,16 @@ class MainWindow(QMainWindow):
                 self.settings_page()
             elif row == 14:
                 self.cloud_sync_page()
-            self._module_cache[row] = self.stack.currentWidget()
+
+            # page() records the exact top-level page built by this module.
+            # Explicitly select and cache it, rather than whichever widget may
+            # happen to be current after child widgets have been initialized.
+            target_page = getattr(self, "_last_created_page", None)
+            if target_page is not None and self.stack.indexOf(target_page) >= 0:
+                self.stack.setCurrentWidget(target_page)
+                self._module_cache[row] = target_page
+            else:
+                self._module_cache[row] = self.stack.currentWidget()
         except Exception as exc:
             logging.exception("Navigation failed for row %s", row)
             try:
@@ -4992,6 +5006,9 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(w)
         self.stack.setCurrentWidget(w)
+        # Track the exact top-level page being created so navigation can cache
+        # the correct module page even when that module initializes nested UI.
+        self._last_created_page = w
 
         return w, layout
 
