@@ -39811,7 +39811,9 @@ class EmergencyDrillModule(QWidget):
             attachment_type TEXT DEFAULT 'Drill Evidence',
             remark TEXT DEFAULT '',
             uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(drill_id) REFERENCES emergency_drills(id) ON DELETE CASCADE
+            action_id INTEGER,
+            FOREIGN KEY(drill_id) REFERENCES emergency_drills(id) ON DELETE CASCADE,
+            FOREIGN KEY(action_id) REFERENCES emergency_drill_actions(id) ON DELETE CASCADE
         );
         CREATE INDEX IF NOT EXISTS idx_emergency_drill_date ON emergency_drills(planned_date);
         CREATE INDEX IF NOT EXISTS idx_emergency_drill_status ON emergency_drills(status);
@@ -39833,7 +39835,7 @@ class EmergencyDrillModule(QWidget):
             if name not in existing:
                 self.db.conn.execute(f"ALTER TABLE emergency_drills ADD COLUMN {name} {definition}")
         attach_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(emergency_drill_attachments)").fetchall()}
-        for name, definition in {"sequence_no": "INTEGER DEFAULT 1", "section": "TEXT DEFAULT 'Drill Evidence'"}.items():
+        for name, definition in {"sequence_no": "INTEGER DEFAULT 1", "section": "TEXT DEFAULT 'Drill Evidence'", "action_id": "INTEGER"}.items():
             if name not in attach_cols:
                 self.db.conn.execute(f"ALTER TABLE emergency_drill_attachments ADD COLUMN {name} {definition}")
         self.db.conn.commit()
@@ -39987,7 +39989,8 @@ class EmergencyDrillModule(QWidget):
         save = QPushButton("Save Evaluation"); save.clicked.connect(self.save_evaluation)
         submit = QPushButton("Submit Evaluation"); submit.clicked.connect(self.submit_evaluation)
         delete = QPushButton("Delete Selected Criterion"); delete.clicked.connect(self.delete_evaluation_item)
-        bar.addWidget(save); bar.addWidget(submit); bar.addWidget(delete)
+        delete_drill = QPushButton("Delete Selected Drill"); delete_drill.clicked.connect(lambda: self.delete_drill_by_combo(self.eval_drill_combo))
+        bar.addWidget(save); bar.addWidget(submit); bar.addWidget(delete); bar.addWidget(delete_drill)
         lay.addLayout(bar)
         self.eval_table = self._table(["No.", "Evaluation Criteria", "Result", "Comments", "Severity"])
         self.eval_table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
@@ -40026,9 +40029,14 @@ class EmergencyDrillModule(QWidget):
 
     def _make_closeout_evidence_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
-        note = QLabel("Upload close-out evidence separately, such as attendance confirmation, equipment return, area restoration, action closure and final photographs."); note.setWordWrap(True); lay.addWidget(note)
+        note = QLabel("Select a drill, then open its findings list to attach close-out evidence to each individual finding. General drill close-out documents can still be attached below."); note.setWordWrap(True); lay.addWidget(note)
         row = QHBoxLayout(); self.closeout_drill_combo = QComboBox(); row.addWidget(QLabel("Drill:")); row.addWidget(self.closeout_drill_combo, 1)
-        add = QPushButton("＋ Add Close-out Evidence"); add.clicked.connect(lambda: self.manage_attachments(section="Close-out Evidence", combo=self.closeout_drill_combo)); delete = QPushButton("Delete Selected Evidence"); delete.clicked.connect(lambda: self.delete_attachment(self.closeout_table)); row.addWidget(add); row.addWidget(delete); lay.addLayout(row)
+        finding_evidence = QPushButton("Open Findings & Attach Close-out Evidence"); finding_evidence.clicked.connect(self.open_finding_closeout_dialog)
+        add = QPushButton("＋ Add General Close-out Evidence"); add.clicked.connect(lambda: self.manage_attachments(section="Close-out Evidence", combo=self.closeout_drill_combo)); delete = QPushButton("Delete Selected Evidence"); delete.clicked.connect(lambda: self.delete_attachment(self.closeout_table))
+        row.addWidget(finding_evidence); row.addWidget(add); row.addWidget(delete); lay.addLayout(row)
+        # A deliberate user selection (not programmatic refresh) opens the finding list
+        # for that drill, so close-out evidence is managed against each finding.
+        self.closeout_drill_combo.activated.connect(lambda *_: self.open_finding_closeout_dialog())
         self.closeout_table = self._table(["ID", "Sequence", "Category", "File", "Remarks", "Added On"]); self.closeout_table.setColumnHidden(0, True); self.closeout_table.setWordWrap(True); self.closeout_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(self.closeout_table, 1)
         self.tabs.addTab(w, "Close-out Evidence")
 
@@ -40066,6 +40074,106 @@ class EmergencyDrillModule(QWidget):
                     if c==0: cell.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
                     table.setItem(r,c,cell)
             table.resizeRowsToContents()
+
+    def open_finding_closeout_dialog(self):
+        """List every finding for the selected drill and manage evidence per finding."""
+        did = self._selected_drill_from_combo(self.closeout_drill_combo)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill before opening its findings.")
+            return
+        drill = self.db.fetchone("SELECT number,title FROM emergency_drills WHERE id=?", (did,))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Finding Close-out Evidence — {drill['number']}")
+        dlg.resize(980, 620)
+        outer = QVBoxLayout(dlg)
+        heading = QLabel(f"{drill['number']} — {drill['title']}\nSelect a finding to attach or review its close-out evidence.")
+        heading.setWordWrap(True); heading.setStyleSheet("font-weight:700;color:#17365D;padding:6px;")
+        outer.addWidget(heading)
+        findings = self._table(["ID", "Finding No.", "Finding / Observation", "Corrective Action", "Status", "Evidence Count"])
+        findings.setColumnHidden(0, True)
+        findings.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        outer.addWidget(findings, 1)
+        evidence = self._table(["ID", "File", "Remark", "Added On"])
+        evidence.setColumnHidden(0, True)
+        evidence.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        outer.addWidget(QLabel("Close-out evidence linked to selected finding"))
+        outer.addWidget(evidence, 1)
+        def selected_action_id():
+            return self._selected_id(findings)
+        def refresh_findings():
+            findings.setRowCount(0)
+            finding_rows = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
+            for a in finding_rows:
+                count = self.db.fetchone("SELECT COUNT(*) AS n FROM emergency_drill_attachments WHERE drill_id=? AND action_id=? AND section='Finding Close-out Evidence'", (did, a['id']))['n']
+                rr=findings.rowCount(); findings.insertRow(rr)
+                vals=[a['id'],a['action_no'],a['finding'],a['corrective_action'],a['status'],count]
+                for c,v in enumerate(vals):
+                    it=QTableWidgetItem(safe(v))
+                    if c==0: it.setData(Qt.ItemDataRole.UserRole, int(a['id']))
+                    findings.setItem(rr,c,it)
+            if not finding_rows:
+                findings.insertRow(0)
+                findings.setItem(0, 1, QTableWidgetItem("No findings recorded for this drill"))
+            findings.resizeRowsToContents()
+        def refresh_evidence():
+            evidence.setRowCount(0)
+            aid=selected_action_id()
+            if not aid: return
+            for e in self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? AND action_id=? AND section='Finding Close-out Evidence' ORDER BY sequence_no,id", (did,aid)):
+                rr=evidence.rowCount(); evidence.insertRow(rr)
+                vals=[e['id'],Path(safe(e['file_path'])).name,e['remark'],e['uploaded_at']]
+                for c,v in enumerate(vals):
+                    it=QTableWidgetItem(safe(v))
+                    if c==0: it.setData(Qt.ItemDataRole.UserRole,int(e['id']))
+                    evidence.setItem(rr,c,it)
+            evidence.resizeRowsToContents()
+        def attach_files():
+            aid=selected_action_id()
+            if not aid:
+                QMessageBox.warning(dlg,"Select Finding","Select a finding before attaching evidence."); return
+            remark,ok=QInputDialog.getMultiLineText(dlg,"Evidence Description","Enter the close-out evidence description / remark:")
+            if not ok: return
+            paths,_=QFileDialog.getOpenFileNames(dlg,"Attach Finding Close-out Evidence","","Images and Documents (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.pdf *.doc *.docx *.xls *.xlsx);;All Files (*.*)")
+            if not paths: return
+            for source_name in paths:
+                try:
+                    source=Path(source_name)
+                    destination=ATTACH_DIR / f"EDR-{did}-F{aid}_{source.name}"
+                    n=1
+                    while destination.exists():
+                        destination=ATTACH_DIR / f"EDR-{did}-F{aid}_{n}_{source.name}"; n+=1
+                    shutil.copy2(source,destination)
+                    seq=self.db.fetchone("SELECT COALESCE(MAX(sequence_no),0)+1 AS n FROM emergency_drill_attachments WHERE drill_id=? AND action_id=? AND section='Finding Close-out Evidence'",(did,aid))['n']
+                    self.db.execute("INSERT INTO emergency_drill_attachments(drill_id,file_path,attachment_type,remark,sequence_no,section,action_id) VALUES(?,?,?,?,?,'Finding Close-out Evidence',?)",(did,str(destination),"Finding Close-out",remark.strip(),seq,aid))
+                except Exception:
+                    logging.exception("Unable to attach finding close-out evidence")
+                    QMessageBox.warning(dlg,"Attachment Error",f"Could not attach: {source_name}")
+            refresh_findings(); refresh_evidence(); self.refresh_all()
+        def remove_evidence():
+            eid=self._selected_id(evidence)
+            if not eid:
+                QMessageBox.warning(dlg,"Select Evidence","Select an evidence record first."); return
+            if QMessageBox.question(dlg,"Delete Close-out Evidence","Remove the selected finding close-out evidence record?") == QMessageBox.StandardButton.Yes:
+                self.db.execute("DELETE FROM emergency_drill_attachments WHERE id=?",(eid,))
+                refresh_findings(); refresh_evidence(); self.refresh_all()
+        def open_evidence():
+            eid=self._selected_id(evidence)
+            if not eid: return
+            rec=self.db.fetchone("SELECT file_path FROM emergency_drill_attachments WHERE id=?",(eid,))
+            fp=resolve_attachment_path(rec['file_path']) if rec else None
+            if fp: QDesktopServices.openUrl(QUrl.fromLocalFile(str(fp)))
+            else: QMessageBox.warning(dlg,"File Not Found","The selected evidence file could not be located.")
+        findings.itemSelectionChanged.connect(refresh_evidence)
+        buttons=QHBoxLayout()
+        attach=QPushButton("＋ Attach to Selected Finding"); attach.clicked.connect(attach_files)
+        open_btn=QPushButton("Open Selected Evidence"); open_btn.clicked.connect(open_evidence)
+        delete_btn=QPushButton("Delete Selected Evidence"); delete_btn.clicked.connect(remove_evidence)
+        close=QPushButton("Close"); close.clicked.connect(dlg.accept)
+        buttons.addWidget(attach); buttons.addWidget(open_btn); buttons.addWidget(delete_btn); buttons.addStretch(1); buttons.addWidget(close)
+        outer.addLayout(buttons)
+        refresh_findings()
+        if findings.rowCount(): findings.selectRow(0)
+        dlg.exec()
 
     def submit_for_review(self):
         did = self._selected_id(self.review_table)
@@ -40938,18 +41046,75 @@ class EmergencyDrillModule(QWidget):
             add_section("Findings & Corrective Actions", ["Action No.","Finding / Observation","Severity","Corrective Action","Responsible","Target Date","Status"],
                 [[x['action_no'],x['finding'],x['severity'],x['corrective_action'],x['responsible'],x['target_date'],x['status']] for x in acts] or [["—","No findings recorded","—","—","—","—","—"]],
                 [0.85,2.0,0.75,2.5,1.25,1.0,0.9], 8)
+            # Evidence register includes general evidence and evidence attached to each finding.
+            evidence_rows = []
+            for e in evidence:
+                linked_action = None
+                if 'action_id' in e.keys() and e['action_id']:
+                    linked_action = self.db.fetchone("SELECT action_no,finding FROM emergency_drill_actions WHERE id=?", (e['action_id'],))
+                link_text = (f"{safe(linked_action['action_no'])} — {safe(linked_action['finding'])}" if linked_action else "")
+                remark_text = safe(e['remark'])
+                if link_text:
+                    remark_text = (remark_text + " | " if remark_text else "") + "Finding: " + link_text
+                evidence_rows.append([e['sequence_no'], e['section'], e['attachment_type'], Path(safe(e['file_path'])).name, remark_text])
             add_section("Evidence Register", ["Seq.","Section","Category","File / Attachment","Remarks"],
-                [[e['sequence_no'],e['section'],e['attachment_type'],Path(safe(e['file_path'])).name,e['remark']] for e in evidence] or [["—","—","—","No evidence attached","—"]],
-                [0.55,1.35,1.4,2.9,3.05], 8)
-            photos=[e for e in evidence if (resolve_attachment_path(e['file_path']) and Path(resolve_attachment_path(e['file_path'])).suffix.lower() in ('.png','.jpg','.jpeg','.bmp'))]
-            if photos:
-                doc.add_heading("Photographic Evidence", level=2)
-                for e in photos:
-                    fp=resolve_attachment_path(e['file_path'])
-                    para=doc.add_paragraph(); para.add_run(f"{safe(e['section'])} — {safe(e['attachment_type'])}: ").bold=True
-                    para.add_run(safe(e['remark']))
-                    try: doc.add_picture(str(fp), width=Inches(2.4))
-                    except Exception: logging.exception("Unable to embed Word drill evidence image")
+                evidence_rows or [["—","—","—","No evidence attached","—"]],
+                [0.55,1.45,1.25,2.8,3.2], 8)
+
+            # Separate finding close-out register makes the evidence-to-finding relationship
+            # explicit in Word rather than relying only on the general attachment listing.
+            finding_closeout_rows = []
+            for e in evidence:
+                if 'action_id' not in e.keys() or not e['action_id'] or safe(e['section']) != 'Finding Close-out Evidence':
+                    continue
+                linked = self.db.fetchone("SELECT action_no,finding,corrective_action,status FROM emergency_drill_actions WHERE id=?", (e['action_id'],))
+                if linked:
+                    finding_closeout_rows.append([linked['action_no'], linked['finding'], linked['corrective_action'], Path(safe(e['file_path'])).name, e['remark'], e['uploaded_at']])
+            add_section("Finding-wise Close-out Evidence", ["Finding No.","Finding / Observation","Corrective Action","Attached File","Remark","Added On"],
+                finding_closeout_rows or [["—","No finding-wise close-out evidence attached","—","—","—","—"]],
+                [0.9,2.0,2.0,1.6,1.7,0.9], 7)
+
+            # Embed image attachments directly in the DOCX. Normalize every image to PNG
+            # (including WEBP/HEIC-compatible Pillow formats) and rewind its stream before
+            # python-docx consumes it. This covers both drill evidence and finding close-out images.
+            photo_items = []
+            missing_images = []
+            for e in evidence:
+                fp = resolve_attachment_path(e['file_path'])
+                if not fp:
+                    missing_images.append(Path(safe(e['file_path'])).name or safe(e['file_path']))
+                    continue
+                image_stream = attachment_image_stream(str(fp))
+                if image_stream is not None:
+                    action_label = ""
+                    if 'action_id' in e.keys() and e['action_id']:
+                        linked = self.db.fetchone("SELECT action_no,finding FROM emergency_drill_actions WHERE id=?", (e['action_id'],))
+                        if linked:
+                            action_label = f" | {safe(linked['action_no'])}: {safe(linked['finding'])}"
+                    photo_items.append((e, image_stream, action_label))
+            if photo_items:
+                doc.add_heading("Embedded Photographic Evidence", level=2)
+                for e, image_stream, action_label in photo_items:
+                    para = doc.add_paragraph()
+                    para.paragraph_format.keep_with_next = True
+                    para.add_run(f"{safe(e['section'])} — {safe(e['attachment_type'])}{action_label}").bold = True
+                    if safe(e['remark']).strip():
+                        cap = doc.add_paragraph(safe(e['remark']))
+                        cap.paragraph_format.keep_with_next = True
+                    try:
+                        image_stream.seek(0)
+                        picture_para = doc.add_paragraph()
+                        picture_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        picture_para.add_run().add_picture(image_stream, width=Inches(4.2))
+                    except Exception:
+                        logging.exception("Unable to embed Word drill evidence image: %s", safe(e['file_path']))
+                        doc.add_paragraph("Image could not be embedded; see the Evidence Register for the attachment reference.")
+            else:
+                doc.add_heading("Embedded Photographic Evidence", level=2)
+                doc.add_paragraph("No accessible image attachments were found for this drill.")
+            if missing_images:
+                doc.add_paragraph("Attachments whose source files could not be located: " + "; ".join(missing_images))
+
             add_section("Review & Approval Record", ["Stage","Status","Responsible Person","Comments"], [
                 ["Prepared",row['status'],row['prepared_by'],""], ["Review",row['review_status'],row['reviewed_by'],row['review_comments']],
                 ["Final Approval",row['approval_status'],row['approved_by'],row['approval_comments']]
