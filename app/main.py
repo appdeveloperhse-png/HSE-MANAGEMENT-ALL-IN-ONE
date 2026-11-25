@@ -16037,7 +16037,7 @@ class MainWindow(QMainWindow):
             ("Audit Register (Excel)", lambda: export_table("audits", "Audit Register")),
             ("CAPA Register (Excel)", lambda: export_table("capa", "CAPA Register")),
             ("Open Training Module Exports", lambda: self.nav.setCurrentRow(6)),
-            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(11)),
+            ("Open Settings (logo / footer)", lambda: self.nav.setCurrentRow(13)),
         ]
         for i, (label, fn) in enumerate(buttons):
             b = QPushButton(label)
@@ -39746,6 +39746,14 @@ class EmergencyDrillModule(QWidget):
             missing_persons INTEGER DEFAULT 0,
             execution_notes TEXT DEFAULT '',
             evaluation_score REAL DEFAULT 0,
+            review_status TEXT DEFAULT 'Not Submitted',
+            approval_status TEXT DEFAULT 'Pending Review',
+            prepared_by TEXT DEFAULT '',
+            reviewed_by TEXT DEFAULT '',
+            approved_by TEXT DEFAULT '',
+            review_comments TEXT DEFAULT '',
+            approval_comments TEXT DEFAULT '',
+            submitted_at TEXT DEFAULT '',
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT ''
         );
@@ -39810,24 +39818,24 @@ class EmergencyDrillModule(QWidget):
         CREATE INDEX IF NOT EXISTS idx_emergency_drill_plan_year ON emergency_drill_plan(plan_year);
         CREATE INDEX IF NOT EXISTS idx_emergency_drill_actions_drill ON emergency_drill_actions(drill_id);
         """)
-        # Additive drill workflow fields; existing drill records and other modules remain untouched.
-        drill_cols = {r["name"] for r in self.db.conn.execute("PRAGMA table_info(emergency_drills)").fetchall()}
-        for col, definition in {
-            "prepared_by": "TEXT DEFAULT ''", "execution_submitted": "INTEGER DEFAULT 0",
-            "evaluation_submitted": "INTEGER DEFAULT 0", "submitted_at": "TEXT DEFAULT ''"
+        # Additive columns for the review / approval workflow; existing drill data is preserved.
+        existing = {r[1] for r in self.db.conn.execute("PRAGMA table_info(emergency_drills)").fetchall()}
+        for name, definition in {
+            "review_status": "TEXT DEFAULT 'Not Submitted'",
+            "approval_status": "TEXT DEFAULT 'Pending Review'",
+            "prepared_by": "TEXT DEFAULT ''",
+            "reviewed_by": "TEXT DEFAULT ''",
+            "approved_by": "TEXT DEFAULT ''",
+            "review_comments": "TEXT DEFAULT ''",
+            "approval_comments": "TEXT DEFAULT ''",
+            "submitted_at": "TEXT DEFAULT ''",
         }.items():
-            if col not in drill_cols:
-                self.db.conn.execute(f"ALTER TABLE emergency_drills ADD COLUMN {col} {definition}")
-        attachment_cols = {r["name"] for r in self.db.conn.execute("PRAGMA table_info(emergency_drill_attachments)").fetchall()}
-        sequence_column_added = "sequence_no" not in attachment_cols
-        for col, definition in {"sequence_no": "INTEGER DEFAULT 1", "uploaded_by": "TEXT DEFAULT ''"}.items():
-            if col not in attachment_cols:
-                self.db.conn.execute(f"ALTER TABLE emergency_drill_attachments ADD COLUMN {col} {definition}")
-        if sequence_column_added:
-            for drill in self.db.conn.execute("SELECT DISTINCT drill_id FROM emergency_drill_attachments").fetchall():
-                items = self.db.conn.execute("SELECT id FROM emergency_drill_attachments WHERE drill_id=? ORDER BY id", (drill[0],)).fetchall()
-                for seq, item in enumerate(items, 1):
-                    self.db.conn.execute("UPDATE emergency_drill_attachments SET sequence_no=? WHERE id=?", (seq, item[0]))
+            if name not in existing:
+                self.db.conn.execute(f"ALTER TABLE emergency_drills ADD COLUMN {name} {definition}")
+        attach_cols = {r[1] for r in self.db.conn.execute("PRAGMA table_info(emergency_drill_attachments)").fetchall()}
+        for name, definition in {"sequence_no": "INTEGER DEFAULT 1", "section": "TEXT DEFAULT 'Drill Evidence'"}.items():
+            if name not in attach_cols:
+                self.db.conn.execute(f"ALTER TABLE emergency_drill_attachments ADD COLUMN {name} {definition}")
         self.db.conn.commit()
 
     def _build_ui(self):
@@ -39851,13 +39859,16 @@ class EmergencyDrillModule(QWidget):
         self.tabs.setDocumentMode(True)
         root.addWidget(self.tabs, 1)
         self._make_dashboard_tab()
+        self._make_plan_tab()
         self._make_planning_tab()
         self._make_execution_tab()
         self._make_evaluation_tab()
         self._make_actions_tab()
+        self._make_evidence_tab()
+        self._make_closeout_evidence_tab()
+        self._make_review_approval_tab()
         self._make_register_tab()
         self._make_reports_tab()
-        self._make_plan_tab()
         self._make_settings_tab()
 
     def _table(self, headers, hidden_first=False):
@@ -39917,8 +39928,9 @@ class EmergencyDrillModule(QWidget):
         lay.addWidget(QLabel("Upcoming and recently updated drills"))
         lay.addWidget(self.dashboard_table, 1)
         bar = QHBoxLayout()
+        delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill(self.dashboard_table))
         refresh = QPushButton("Refresh Dashboard"); refresh.clicked.connect(self.refresh_all)
-        bar.addStretch(1); bar.addWidget(refresh); lay.addLayout(bar)
+        bar.addWidget(delete); bar.addStretch(1); bar.addWidget(refresh); lay.addLayout(bar)
         self.tabs.addTab(w, "Dashboard")
 
     def _make_plan_tab(self):
@@ -39935,7 +39947,7 @@ class EmergencyDrillModule(QWidget):
         self.plan_table.setColumnHidden(0, True)
         lay.addWidget(self.plan_table, 1)
         self.plan_year.valueChanged.connect(self.refresh_plan)
-        self.tabs.addTab(w, "Annual Plan (Optional)")
+        self.tabs.addTab(w, "Annual Plan")
 
     def _make_planning_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
@@ -39943,12 +39955,13 @@ class EmergencyDrillModule(QWidget):
         add = QPushButton("＋ New Drill"); add.clicked.connect(self.new_drill)
         edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_drill)
         schedule = QPushButton("Mark Scheduled"); schedule.clicked.connect(lambda: self.set_drill_status("Scheduled"))
-        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(schedule); bar.addStretch(1)
+        delete = QPushButton("Delete Selected"); delete.clicked.connect(lambda: self.delete_drill(self.planning_table))
+        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(schedule); bar.addWidget(delete); bar.addStretch(1)
         lay.addLayout(bar)
         self.planning_table = self._table(["ID", "Drill No.", "Title", "Type", "Project", "Location", "Planned Date", "Time", "Coordinator", "Status"])
         self.planning_table.setColumnHidden(0, True)
         lay.addWidget(self.planning_table, 1)
-        self.tabs.addTab(w, "Drill Schedule")
+        self.tabs.addTab(w, "Drill Planning")
 
     def _make_execution_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
@@ -39961,7 +39974,8 @@ class EmergencyDrillModule(QWidget):
         bar = QHBoxLayout()
         start = QPushButton("Record / Update Execution"); start.clicked.connect(self.record_execution)
         complete = QPushButton("Mark Drill Completed"); complete.clicked.connect(lambda: self.set_drill_status("Completed", self.execution_table))
-        bar.addWidget(start); bar.addWidget(complete); bar.addStretch(1); lay.addLayout(bar)
+        delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill(self.execution_table))
+        bar.addWidget(start); bar.addWidget(complete); bar.addWidget(delete); bar.addStretch(1); lay.addLayout(bar)
         self.tabs.addTab(w, "Drill Execution")
 
     def _make_evaluation_tab(self):
@@ -39971,8 +39985,9 @@ class EmergencyDrillModule(QWidget):
         self.eval_drill_combo.currentIndexChanged.connect(self.load_evaluation)
         bar.addWidget(QLabel("Select Drill:")); bar.addWidget(self.eval_drill_combo, 1)
         save = QPushButton("Save Evaluation"); save.clicked.connect(self.save_evaluation)
-        submit = QPushButton("Submit Evaluation & Exit"); submit.clicked.connect(self.submit_evaluation)
-        bar.addWidget(save); bar.addWidget(submit)
+        submit = QPushButton("Submit Evaluation"); submit.clicked.connect(self.submit_evaluation)
+        delete = QPushButton("Delete Selected Criterion"); delete.clicked.connect(self.delete_evaluation_item)
+        bar.addWidget(save); bar.addWidget(submit); bar.addWidget(delete)
         lay.addLayout(bar)
         self.eval_table = self._table(["No.", "Evaluation Criteria", "Result", "Comments", "Severity"])
         self.eval_table.setEditTriggers(QAbstractItemView.EditTrigger.AllEditTriggers)
@@ -39986,16 +40001,135 @@ class EmergencyDrillModule(QWidget):
     def _make_actions_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
         bar = QHBoxLayout()
-        add = QPushButton("＋ Add Finding / Action"); add.clicked.connect(self.add_action)
+        add = QPushButton("＋ Add Finding / Corrective Action"); add.clicked.connect(self.add_action)
         edit = QPushButton("Edit Selected"); edit.clicked.connect(self.edit_action)
         close = QPushButton("Close Selected Action"); close.clicked.connect(self.close_action)
         capa = QPushButton("Create CAPA for Selected"); capa.clicked.connect(self.create_capa_for_action)
-        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(close); bar.addWidget(capa); bar.addStretch(1)
+        delete = QPushButton("Delete Selected Finding"); delete.clicked.connect(self.delete_action)
+        bar.addWidget(add); bar.addWidget(edit); bar.addWidget(close); bar.addWidget(capa); bar.addWidget(delete); bar.addStretch(1)
         lay.addLayout(bar)
         self.actions_table = self._table(["ID", "Action No.", "Drill No.", "Finding", "Severity", "Corrective Action", "Responsible", "Target Date", "Status", "CAPA No."])
         self.actions_table.setColumnHidden(0, True)
+        self.actions_table.setWordWrap(True)
+        self.actions_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        for col, width in {1:85,2:85,3:180,4:65,5:190,6:95,7:90,8:95,9:85}.items(): self.actions_table.setColumnWidth(col, width)
         lay.addWidget(self.actions_table, 1)
         self.tabs.addTab(w, "Findings & Actions")
+
+    def _make_evidence_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        note = QLabel("Attach drill execution evidence in numbered sequence. Select a category, add multiple files and record a clear remark for each item."); note.setWordWrap(True); lay.addWidget(note)
+        row = QHBoxLayout(); self.evidence_drill_combo = QComboBox(); row.addWidget(QLabel("Drill:")); row.addWidget(self.evidence_drill_combo, 1)
+        add = QPushButton("＋ Add Evidence"); add.clicked.connect(lambda: self.manage_attachments(section="Drill Execution Evidence", combo=self.evidence_drill_combo)); delete = QPushButton("Delete Selected Evidence"); delete.clicked.connect(lambda: self.delete_attachment(self.evidence_table)); row.addWidget(add); row.addWidget(delete); lay.addLayout(row)
+        self.evidence_table = self._table(["ID", "Sequence", "Category", "File", "Remarks", "Added On"]); self.evidence_table.setColumnHidden(0, True); self.evidence_table.setWordWrap(True); self.evidence_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(self.evidence_table, 1)
+        self.tabs.addTab(w, "Drill Evidence")
+
+    def _make_closeout_evidence_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        note = QLabel("Upload close-out evidence separately, such as attendance confirmation, equipment return, area restoration, action closure and final photographs."); note.setWordWrap(True); lay.addWidget(note)
+        row = QHBoxLayout(); self.closeout_drill_combo = QComboBox(); row.addWidget(QLabel("Drill:")); row.addWidget(self.closeout_drill_combo, 1)
+        add = QPushButton("＋ Add Close-out Evidence"); add.clicked.connect(lambda: self.manage_attachments(section="Close-out Evidence", combo=self.closeout_drill_combo)); delete = QPushButton("Delete Selected Evidence"); delete.clicked.connect(lambda: self.delete_attachment(self.closeout_table)); row.addWidget(add); row.addWidget(delete); lay.addLayout(row)
+        self.closeout_table = self._table(["ID", "Sequence", "Category", "File", "Remarks", "Added On"]); self.closeout_table.setColumnHidden(0, True); self.closeout_table.setWordWrap(True); self.closeout_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); lay.addWidget(self.closeout_table, 1)
+        self.tabs.addTab(w, "Close-out Evidence")
+
+    def _make_review_approval_tab(self):
+        w = QWidget(); lay = QVBoxLayout(w)
+        note = QLabel("Submit completed drills for independent review. Reviewers can inspect the full report, return it for correction or recommend approval."); note.setWordWrap(True); lay.addWidget(note)
+        row = QHBoxLayout(); submit = QPushButton("Submit Selected Drill"); submit.clicked.connect(self.submit_for_review); open_btn = QPushButton("Open Review Report"); open_btn.clicked.connect(self.open_drill_review_dialog); delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill(self.review_table)); row.addWidget(submit); row.addWidget(open_btn); row.addWidget(delete); row.addStretch(1); lay.addLayout(row)
+        self.review_table = self._table(["ID", "Drill No.", "Title", "Prepared By", "Review Status", "Reviewed By", "Approval Status"]); self.review_table.setColumnHidden(0, True); self.review_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self.review_table.cellDoubleClicked.connect(lambda *_: self.open_drill_review_dialog()); lay.addWidget(self.review_table, 1)
+        self.tabs.addTab(w, "Review")
+
+        aw = QWidget(); al = QVBoxLayout(aw)
+        anote = QLabel("Final approval is available only after the independent review has been completed and recommended for approval."); anote.setWordWrap(True); al.addWidget(anote)
+        abar = QHBoxLayout(); approve = QPushButton("Open for Final Approval"); approve.clicked.connect(self.open_drill_review_dialog); delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill(self.approval_table)); abar.addWidget(approve); abar.addWidget(delete); abar.addStretch(1); al.addLayout(abar)
+        self.approval_table = self._table(["ID", "Drill No.", "Title", "Review Status", "Reviewed By", "Approval Status", "Approved By"]); self.approval_table.setColumnHidden(0, True); self.approval_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self.approval_table.cellDoubleClicked.connect(lambda *_: self.open_drill_review_dialog()); al.addWidget(self.approval_table, 1)
+        self.tabs.addTab(aw, "Approval")
+
+    def delete_attachment(self, table):
+        aid = self._selected_id(table)
+        if not aid: QMessageBox.warning(self, "Select Evidence", "Select an evidence row first."); return
+        if QMessageBox.question(self, "Delete Evidence", "Remove the selected evidence record from this drill?") == QMessageBox.StandardButton.Yes:
+            self.db.execute("DELETE FROM emergency_drill_attachments WHERE id=?", (aid,)); self.refresh_all()
+
+    def _refresh_attachment_tables(self):
+        for table, section in ((getattr(self, "evidence_table", None), "Drill Execution Evidence"), (getattr(self, "closeout_table", None), "Close-out Evidence")):
+            if table is None: continue
+            table.setRowCount(0)
+            did = self._selected_drill_from_combo(self.evidence_drill_combo if section == "Drill Execution Evidence" else self.closeout_drill_combo)
+            if not did: continue
+            rows = self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? AND section=? ORDER BY sequence_no,id", (did, section))
+            for item in rows:
+                r=table.rowCount(); table.insertRow(r)
+                vals=[item["id"], item["sequence_no"], item["attachment_type"], Path(safe(item["file_path"])).name, item["remark"], item["uploaded_at"]]
+                for c,v in enumerate(vals):
+                    cell=QTableWidgetItem(safe(v))
+                    if c==0: cell.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+                    table.setItem(r,c,cell)
+            table.resizeRowsToContents()
+
+    def submit_for_review(self):
+        did = self._selected_id(self.review_table)
+        if not did: QMessageBox.warning(self, "Select Drill", "Select a drill in Review & Approval."); return
+        prepared, ok = QInputDialog.getText(self, "Submit Drill", "Prepared by (name):")
+        if not ok or not prepared.strip(): return
+        self.db.execute("UPDATE emergency_drills SET prepared_by=?,review_status='Pending Review',approval_status='Pending Review',submitted_at=?,status='Submitted',updated_at=? WHERE id=?", (prepared.strip(), datetime.now().isoformat(timespec="seconds"), datetime.now().isoformat(timespec="seconds"), did))
+        self.refresh_all(); QMessageBox.information(self, "Submitted", "Drill submitted for independent review.")
+
+    def open_drill_review_dialog(self):
+        active = self.tabs.currentWidget()
+        if active is self.review_table.parentWidget():
+            did = self._selected_id(self.review_table)
+        elif active is self.approval_table.parentWidget():
+            did = self._selected_id(self.approval_table)
+        else:
+            did = self._selected_id(self.register_table)
+        if not did:
+            did = self._selected_id(self.review_table) or self._selected_id(self.approval_table) or self._selected_id(self.register_table)
+        if not did: QMessageBox.warning(self, "Select Drill", "Select a drill record first."); return
+        row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
+        ev = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
+        acts = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
+        files = self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY section,sequence_no,id", (did,))
+        dlg=QDialog(self); dlg.setWindowTitle(f"Drill Review — {row['number']}"); dlg.resize(1050,760); outer=QVBoxLayout(dlg)
+        heading=QLabel(f"{row['number']}  |  {row['title']}  |  {row['status']}"); heading.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:8px;"); outer.addWidget(heading)
+        detail=QTextEdit(); detail.setReadOnly(True); detail.setMinimumHeight(135)
+        detail.setPlainText("\n".join([f"Drill Type: {row['drill_type']}",f"Project / Location: {row['project']} / {row['location']}",f"Planned / Actual: {row['planned_date']} / {row['actual_date']}",f"Coordinator: {row['coordinator']} | Prepared by: {row['prepared_by']}",f"Execution: Start {row['actual_start']} | Alarm {row['alarm_time']} | Response {row['response_time']} | Evacuation {row['evacuation_time']} | Finish {row['actual_finish']}",f"People evacuated / accounted / missing: {row['people_evacuated']} / {row['people_accounted']} / {row['missing_persons']}",f"Execution notes: {row['execution_notes']}",f"Review: {row['review_status']} — {row['reviewed_by']} — {row['review_comments']}",f"Approval: {row['approval_status']} — {row['approved_by']} — {row['approval_comments']}"]))
+        outer.addWidget(detail)
+        tabs=QTabWidget(); outer.addWidget(tabs,1)
+        for title, headers, rows, fields in [("Evaluation",["No.","Criteria","Result","Comments","Severity"],ev,["item_no","checklist_item","result","comments","severity"]),("Findings & Actions",["Finding No.","Finding","Severity","Corrective Action","Responsible","Due","Status"],acts,["action_no","finding","severity","corrective_action","responsible","target_date","status"]),("Evidence",["Sequence","Section","Category","File","Remark"],files,["sequence_no","section","attachment_type","file_path","remark"])]:
+            t=self._table(headers); t.setWordWrap(True); t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); tabs.addTab(t,title)
+            for rec in rows:
+                rr=t.rowCount(); t.insertRow(rr)
+                for c,key in enumerate(fields): t.setItem(rr,c,QTableWidgetItem(safe(rec[key])))
+        controls=QHBoxLayout(); export=QPushButton("Export Review Report (PDF)"); export.clicked.connect(lambda: self.export_pdf(did_override=did)); review=QPushButton("Review / Return"); review.clicked.connect(lambda: self._review_decision(did,dlg)); approve=QPushButton("Final Approve"); approve.clicked.connect(lambda: self._approval_decision(did,dlg)); close=QPushButton("Close"); close.clicked.connect(dlg.accept)
+        controls.addWidget(export)
+        if self.tabs.currentWidget() is self.approval_table.parentWidget(): controls.addWidget(approve)
+        else: controls.addWidget(review)
+        controls.addStretch(1); controls.addWidget(close); outer.addLayout(controls); dlg.exec()
+
+    def _review_decision(self, did, dlg):
+        name,ok=QInputDialog.getText(dlg,"Reviewer","Reviewer name:")
+        if not ok or not name.strip(): return
+        decision,ok=QInputDialog.getItem(dlg,"Review Decision","Decision:",["Reviewed — Recommend Approval","Returned for Correction"],0,False)
+        if not ok: return
+        comment,ok=QInputDialog.getMultiLineText(dlg,"Review Comments","Enter review comments / required corrections:")
+        if not ok: return
+        status="Reviewed" if decision.startswith("Reviewed") else "Returned"
+        self.db.execute("UPDATE emergency_drills SET reviewed_by=?,review_status=?,review_comments=?,approval_status=?,status=?,updated_at=? WHERE id=?",(name.strip(),status,comment,"Pending Approval" if status=="Reviewed" else "Pending Review", "Pending Approval" if status=="Reviewed" else "Returned",datetime.now().isoformat(timespec="seconds"),did))
+        self.refresh_all(); QMessageBox.information(dlg,"Review Saved",f"Review status: {status}")
+
+    def _approval_decision(self, did, dlg):
+        row=self.db.fetchone("SELECT review_status FROM emergency_drills WHERE id=?",(did,))
+        if not row or row["review_status"]!="Reviewed": QMessageBox.warning(dlg,"Review Required","The drill must be reviewed and recommended for approval before final approval."); return
+        name,ok=QInputDialog.getText(dlg,"Approver","Approver name:")
+        if not ok or not name.strip(): return
+        decision,ok=QInputDialog.getItem(dlg,"Approval Decision","Decision:",["Approved","Returned for Correction"],0,False)
+        if not ok: return
+        comment,ok=QInputDialog.getMultiLineText(dlg,"Approval Comments","Enter approval comments:")
+        if not ok: return
+        status="Approved" if decision=="Approved" else "Returned"
+        self.db.execute("UPDATE emergency_drills SET approved_by=?,approval_status=?,approval_comments=?,status=?,updated_at=? WHERE id=?",(name.strip(),status,comment,status,datetime.now().isoformat(timespec="seconds"),did))
+        self.refresh_all(); QMessageBox.information(dlg,"Approval Saved",f"Drill {status.lower()}.")
 
     def _make_register_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
@@ -40004,58 +40138,14 @@ class EmergencyDrillModule(QWidget):
         self.register_search.textChanged.connect(self.refresh_register)
         edit = QPushButton("Open / Edit Selected"); edit.clicked.connect(self.edit_drill)
         evidence = QPushButton("Manage Evidence"); evidence.clicked.connect(self.manage_attachments)
-        bar.addWidget(self.register_search, 1); bar.addWidget(edit); bar.addWidget(evidence)
+        delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill(self.register_table))
+        bar.addWidget(self.register_search, 1); bar.addWidget(edit); bar.addWidget(evidence); bar.addWidget(delete)
         lay.addLayout(bar)
         self.register_table = self._table(["ID", "Drill No.", "Title", "Type", "Project", "Location", "Planned Date", "Actual Date", "Score", "Status"])
         self.register_table.setColumnHidden(0, True)
-        self.register_table.cellDoubleClicked.connect(lambda *_: self.open_register_review())
-        review = QPushButton("Open Professional Drill Review"); review.clicked.connect(self.open_register_review)
-        bar.addWidget(review)
+        self.register_table.cellDoubleClicked.connect(lambda *_: self.open_drill_review_dialog())
         lay.addWidget(self.register_table, 1)
         self.tabs.addTab(w, "Drill Register")
-
-    def open_register_review(self):
-        did = self._selected_id(self.register_table)
-        if not did:
-            QMessageBox.warning(self, "Select Drill", "Select a drill in the register.")
-            return
-        d = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
-        ev = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
-        acts = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
-        files = self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY sequence_no,id", (did,))
-        dlg = QDialog(self); dlg.setWindowTitle(f"Drill Review — {d['number']}"); dlg.resize(1050, 760)
-        outer = QVBoxLayout(dlg)
-        heading = QLabel(f"EMERGENCY DRILL REVIEW  |  {d['number']}\n{d['title']}  •  {d['drill_type']}  •  {d['status']}")
-        heading.setStyleSheet("font-size:18px;font-weight:700;color:#17365D;padding:10px;background:#EAF0F7;border-radius:6px;")
-        outer.addWidget(heading)
-        details = QTextEdit(); details.setReadOnly(True); details.setMaximumHeight(190)
-        details.setPlainText("\n".join([f"Project: {d['project']}    Location: {d['location']}    Department: {d['department']}",
-            f"Planned: {d['planned_date']} {d['planned_time']}    Actual: {d['actual_date']} {d['actual_start']}–{d['actual_finish']}",
-            f"Coordinator: {d['coordinator']}    Response Team: {d['response_team']}    Prepared By: {d['prepared_by']}",
-            f"Participants: Expected {d['expected_participants']} | Evacuated {d['people_evacuated']} | Accounted {d['people_accounted']} | Missing {d['missing_persons']}",
-            f"Performance Score: {d['evaluation_score']}%", "", "Objectives:", safe(d['objectives']), "", "Scenario:", safe(d['scenario']), "", "Execution Notes:", safe(d['execution_notes'])]))
-        outer.addWidget(details)
-        tabs = QTabWidget(); outer.addWidget(tabs, 1)
-        for title, headers, records, keys in [
-            ("Evaluation Checklist", ["No.","Criteria","Result","Comments","Severity"], ev, ["item_no","checklist_item","result","comments","severity"]),
-            ("Findings & Corrective Actions", ["Action No.","Finding","Severity","Corrective Action","Responsible","Target Date","Status"], acts, ["action_no","finding","severity","corrective_action","responsible","target_date","status"]),
-            ("Evidence Register", ["Seq.","Evidence Type","File","Remark","Uploaded"], files, ["sequence_no","attachment_type","file_path","remark","uploaded_at"]),
-        ]:
-            page = QWidget(); v = QVBoxLayout(page); table = QTableWidget(0, len(headers)); table.setHorizontalHeaderLabels(headers)
-            table.setAlternatingRowColors(True); table.setWordWrap(True); table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            for rec in records:
-                rr = table.rowCount(); table.insertRow(rr)
-                for cc, key in enumerate(keys):
-                    val = rec[key]
-                    if key == "file_path": val = Path(safe(val)).name
-                    table.setItem(rr, cc, QTableWidgetItem(safe(val)))
-            table.resizeRowsToContents(); v.addWidget(table); tabs.addTab(page, title)
-        actions = QHBoxLayout(); manage = QPushButton("Manage Evidence"); manage.clicked.connect(lambda: self.manage_attachments(did))
-        report = QPushButton("Export This Drill Report"); report.clicked.connect(lambda: self.export_pdf(did))
-        close = QPushButton("Close"); close.clicked.connect(dlg.accept)
-        actions.addWidget(manage); actions.addWidget(report); actions.addStretch(1); actions.addWidget(close); outer.addLayout(actions)
-        dlg.exec()
 
     def _make_reports_tab(self):
         w = QWidget(); lay = QVBoxLayout(w)
@@ -40066,7 +40156,8 @@ class EmergencyDrillModule(QWidget):
         bar.addWidget(QLabel("Drill:")); bar.addWidget(self.report_drill_combo, 1)
         pdf = QPushButton("Export PDF Report"); pdf.clicked.connect(self.export_pdf)
         xlsx = QPushButton("Export Excel Register"); xlsx.clicked.connect(self.export_excel)
-        bar.addWidget(pdf); bar.addWidget(xlsx); lay.addLayout(bar)
+        delete = QPushButton("Delete Selected Drill"); delete.clicked.connect(lambda: self.delete_drill_by_combo(self.report_drill_combo))
+        bar.addWidget(pdf); bar.addWidget(xlsx); bar.addWidget(delete); lay.addLayout(bar)
         self.tabs.addTab(w, "Reports")
 
     def _make_settings_tab(self):
@@ -40078,7 +40169,8 @@ class EmergencyDrillModule(QWidget):
         self.template_type = QComboBox(); self.template_type.addItems(EMERGENCY_DRILL_TYPES)
         self.template_item = QLineEdit(); self.template_item.setPlaceholderText("Enter new evaluation criterion")
         add = QPushButton("Add Checklist Item"); add.clicked.connect(self.add_template_item)
-        row.addWidget(self.template_type); row.addWidget(self.template_item, 1); row.addWidget(add)
+        delete = QPushButton("Delete Selected Item"); delete.clicked.connect(self.delete_template_item)
+        row.addWidget(self.template_type); row.addWidget(self.template_item, 1); row.addWidget(add); row.addWidget(delete)
         lay.addLayout(row)
         self.template_table = self._table(["ID", "Scenario", "Checklist Criterion", "Active"])
         self.template_table.setColumnHidden(0, True)
@@ -40148,16 +40240,11 @@ class EmergencyDrillModule(QWidget):
         QMessageBox.information(self, "Drill Created", f"Drill {number} has been created.")
 
     def edit_drill(self):
-        # Resolve selection from the currently active drill list only.
         active = self.tabs.currentWidget()
-        if active is self.tabs.widget(1):
-            source_table = self.planning_table
-        elif active is self.tabs.widget(2):
-            source_table = self.execution_table
-        elif active is self.tabs.widget(4):
-            source_table = self.actions_table
-        else:
-            source_table = self.register_table
+        if active is self.tabs.widget(2): source_table = self.planning_table
+        elif active is self.tabs.widget(3): source_table = self.execution_table
+        elif active is self.tabs.widget(0): source_table = self.dashboard_table
+        else: source_table = self.register_table
         selected = self._selected_id(source_table)
         if not selected:
             QMessageBox.warning(self, "Select Drill", "Select a drill record first."); return
@@ -40165,9 +40252,43 @@ class EmergencyDrillModule(QWidget):
         data = self._drill_dialog(row)
         if not data: return
         assignments = ",".join(f"{k}=?" for k in data)
-        self.db.execute(f"UPDATE emergency_drills SET {assignments},updated_at=? WHERE id=?",
-                        list(data.values()) + [datetime.now().isoformat(timespec="seconds"), selected])
+        self.db.execute(f"UPDATE emergency_drills SET {assignments},updated_at=? WHERE id=?", list(data.values()) + [datetime.now().isoformat(timespec="seconds"), selected])
         self.refresh_all()
+
+    def delete_drill(self, table=None):
+        did = self._selected_id(table or self.register_table)
+        if not did:
+            QMessageBox.warning(self, "Select Drill", "Select a drill record first."); return
+        row = self.db.fetchone("SELECT number,title FROM emergency_drills WHERE id=?", (did,))
+        if QMessageBox.question(self, "Delete Drill", f"Permanently delete drill {row['number']} — {row['title']} and its linked checklist, findings and evidence? This cannot be undone.") != QMessageBox.StandardButton.Yes: return
+        self.db.execute("DELETE FROM emergency_drill_attachments WHERE drill_id=?", (did,))
+        self.db.execute("DELETE FROM emergency_drill_actions WHERE drill_id=?", (did,))
+        self.db.execute("DELETE FROM emergency_drill_evaluations WHERE drill_id=?", (did,))
+        self.db.execute("UPDATE emergency_drill_plan SET linked_drill_id=NULL WHERE linked_drill_id=?", (did,))
+        self.db.execute("DELETE FROM emergency_drills WHERE id=?", (did,))
+        self.refresh_all()
+
+    def delete_drill_by_combo(self, combo):
+        did=self._selected_drill_from_combo(combo)
+        if not did: QMessageBox.warning(self,"Select Drill","Select a drill first."); return
+        class _Selected:
+            def currentRow(self): return 0
+            def item(self, row, col):
+                item=QTableWidgetItem(str(did)); item.setData(Qt.ItemDataRole.UserRole,did); return item
+        self.delete_drill(_Selected())
+
+    def delete_action(self):
+        aid = self._selected_id(self.actions_table)
+        if not aid: QMessageBox.warning(self, "Select Finding", "Select a finding first."); return
+        if QMessageBox.question(self, "Delete Finding", "Delete the selected finding and corrective action?") == QMessageBox.StandardButton.Yes:
+            self.db.execute("DELETE FROM emergency_drill_actions WHERE id=?", (aid,)); self.refresh_all()
+
+    def delete_evaluation_item(self):
+        row = self.eval_table.currentRow()
+        if row < 0: QMessageBox.warning(self, "Select Criterion", "Select an evaluation criterion first."); return
+        rid = self.eval_table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+        if QMessageBox.question(self, "Delete Criterion", "Delete the selected evaluation criterion from this drill?") == QMessageBox.StandardButton.Yes:
+            self.db.execute("DELETE FROM emergency_drill_evaluations WHERE id=?", (rid,)); self.refresh_all()
 
     def set_drill_status(self, status, table=None):
         table = table or self.planning_table
@@ -40229,56 +40350,35 @@ class EmergencyDrillModule(QWidget):
         score, total, good = self._evaluation_values()
         self.eval_score.setText(f"Performance Score: {score:.1f}%  |  Satisfactory: {good} / {total} applicable criteria")
 
-    def _persist_evaluation(self, submit=False):
+    def save_evaluation(self):
         did = self._selected_drill_from_combo(self.eval_drill_combo)
         if not did:
-            QMessageBox.warning(self, "Select Drill", "Select a drill first.")
-            return False
+            QMessageBox.warning(self, "Select Drill", "Select a drill first."); return
         for r in range(self.eval_table.rowCount()):
             rid = self.eval_table.item(r, 0).data(Qt.ItemDataRole.UserRole)
             result = self.eval_table.cellWidget(r, 2).currentText()
             severity = self.eval_table.cellWidget(r, 4).currentText()
             comments = self.eval_table.item(r, 3).text() if self.eval_table.item(r, 3) else ""
-            self.db.execute("UPDATE emergency_drill_evaluations SET result=?,comments=?,severity=?,updated_at=? WHERE id=?",
+            self.db.execute("""UPDATE emergency_drill_evaluations
+                SET result=?,comments=?,severity=?,updated_at=? WHERE id=?""",
                 (result, comments, severity, datetime.now().isoformat(timespec="seconds"), rid))
             if result == "Unsatisfactory":
-                self._ensure_action_for_failed_item(did, self.eval_table.item(r, 1).text(), severity, comments)
+                self._ensure_action_for_failed_item(did, self.eval_table.item(r, 1).text(), severity)
         score, _, _ = self._evaluation_values()
-        self.db.execute("UPDATE emergency_drills SET evaluation_score=?,evaluation_submitted=?,status=?,updated_at=? WHERE id=?",
-            (score, 1 if submit else 0, "Evaluation Submitted" if submit else "Execution Submitted", datetime.now().isoformat(timespec="seconds"), did))
+        self.db.execute("UPDATE emergency_drills SET evaluation_score=?,updated_at=? WHERE id=?",
+                        (score, datetime.now().isoformat(timespec="seconds"), did))
         self.refresh_all()
-        return True
+        QMessageBox.information(self, "Evaluation Saved", f"Checklist saved. Performance score: {score:.1f}%")
 
-    def save_evaluation(self):
-        if self._persist_evaluation(False):
-            QMessageBox.information(self, "Evaluation Saved", "Evaluation checklist saved. You can continue editing it.")
-
-    def submit_evaluation(self):
-        if self._persist_evaluation(True):
-            self.tabs.setCurrentIndex(4)
-            QMessageBox.information(self, "Evaluation Submitted", "Evaluation submitted. Review the generated findings and corrective actions in Findings & Actions, then open the Drill Register for the consolidated report.")
-
-    def _ensure_action_for_failed_item(self, did, finding, severity, comments=""):
+    def _ensure_action_for_failed_item(self, did, finding, severity):
         exists = self.db.fetchone("SELECT id FROM emergency_drill_actions WHERE drill_id=? AND finding=?", (did, finding))
         if not exists:
             drill = self.db.fetchone("SELECT number FROM emergency_drills WHERE id=?", (did,))
             count = self.db.fetchone("SELECT COUNT(*) AS n FROM emergency_drill_actions WHERE drill_id=?", (did,))["n"] + 1
             no = f"{drill['number']}-F{count:03d}"
-            low = finding.casefold()
-            if any(k in low for k in ("alarm", "communication", "notification")):
-                suggestion = "Review the alarm and communication arrangements, assign responsible personnel, brief all relevant teams and conduct a repeat test."
-            elif any(k in low for k in ("evacuat", "assembly", "muster", "account")):
-                suggestion = "Update the evacuation and headcount procedure, clearly identify marshals and assembly points, and repeat the exercise to verify accountability."
-            elif any(k in low for k in ("equipment", "fire extinguisher", "spill", "first aid")):
-                suggestion = "Inspect and maintain the required emergency equipment, confirm accessibility and competency, and retain inspection evidence."
-            elif any(k in low for k in ("response", "team", "role", "responsib")):
-                suggestion = "Clarify emergency response roles, provide role-specific briefing or refresher training, and verify performance during a follow-up drill."
-            else:
-                suggestion = "Investigate the gap, agree a corrective action with the responsible person, set a completion date and verify effectiveness during the next drill."
-            finding_text = finding + (" — " + comments.strip() if comments.strip() else "")
             self.db.execute("""INSERT INTO emergency_drill_actions
-                (drill_id,action_no,finding,severity,corrective_action,status) VALUES(?,?,?,?,?,'Open')""",
-                (did, no, finding_text, severity, suggestion))
+                (drill_id,action_no,finding,severity,status) VALUES(?,?,?,?,'Open')""",
+                (did, no, finding, severity))
 
     def _action_dialog(self, row=None):
         data = dict(row) if row else {}
@@ -40290,14 +40390,20 @@ class EmergencyDrillModule(QWidget):
         if data.get("drill_id"):
             idx = drill.findData(int(data["drill_id"]))
             if idx >= 0: drill.setCurrentIndex(idx)
-        finding = QTextEdit(); finding.setPlainText(safe(data.get("finding"))); finding.setMaximumHeight(80)
+        drill_summary = QLabel(); drill_summary.setWordWrap(True); drill_summary.setStyleSheet("color:#526579;padding:4px;background:#F2F5F9;border:1px solid #D5DEE8;")
+        def update_drill_summary(*_):
+            selected_id=drill.currentData()
+            selected_row=self.db.fetchone("SELECT number,drill_type,location,planned_date,coordinator FROM emergency_drills WHERE id=?",(selected_id,)) if selected_id else None
+            drill_summary.setText(f"{selected_row['number']}  |  {selected_row['drill_type']}  |  {selected_row['location']}  |  Planned: {selected_row['planned_date']}  |  Coordinator: {selected_row['coordinator']}" if selected_row else "Select a drill to view its details.")
+        drill.currentIndexChanged.connect(update_drill_summary); update_drill_summary()
+        finding = QTextEdit(); finding.setPlainText(safe(data.get("finding"))); finding.setMinimumHeight(85); finding.setMaximumHeight(125)
         severity = QComboBox(); severity.addItems(["Low", "Medium", "High", "Critical"]); severity.setCurrentText(safe(data.get("severity")) or "Medium")
         action = QTextEdit(); action.setPlainText(safe(data.get("corrective_action"))); action.setMaximumHeight(90)
         responsible = QLineEdit(safe(data.get("responsible")))
         target = QDateEdit(); target.setCalendarPopup(True); target.setDisplayFormat("dd-MMM-yyyy")
         target.setDate(QDate.fromString(safe(data.get("target_date")) or today(), "yyyy-MM-dd"))
         status = QComboBox(); status.addItems(["Open", "In Progress", "Pending Verification", "Closed"]); status.setCurrentText(safe(data.get("status")) or "Open")
-        form.addRow("Related Drill *", drill); form.addRow("Finding *", finding); form.addRow("Severity", severity)
+        form.addRow("Related Drill *", drill); form.addRow("Selected Drill Details", drill_summary); form.addRow("Finding *", finding); form.addRow("Severity", severity)
         form.addRow("Corrective Action", action); form.addRow("Responsible Person", responsible); form.addRow("Target Date", target); form.addRow("Status", status)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
@@ -40411,97 +40517,67 @@ class EmergencyDrillModule(QWidget):
 
     def record_execution(self):
         did = self._selected_id(self.execution_table)
-        if not did:
-            QMessageBox.warning(self, "Select Drill", "Select a scheduled drill to record execution.")
-            return
+        if not did: QMessageBox.warning(self, "Select Drill", "Select a drill to record execution."); return
         row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
-        dlg = QDialog(self); dlg.setWindowTitle("Drill Execution — Record Details"); dlg.resize(760, 720)
+        dlg = QDialog(self); dlg.setWindowTitle("Drill Execution Record"); dlg.resize(720, 640)
         form = QFormLayout()
-        actual_date = QDateEdit(); actual_date.setCalendarPopup(True); actual_date.setDisplayFormat("dd-MMM-yyyy")
-        actual_date.setDate(QDate.fromString(safe(row["actual_date"]) or today(), "yyyy-MM-dd"))
+        actual_date = QDateEdit(); actual_date.setCalendarPopup(True); actual_date.setDate(QDate.fromString(safe(row["actual_date"]) or today(), "yyyy-MM-dd"))
         fields = {}
-        for key, label in [("actual_start","Actual Start Time"),("alarm_time","Alarm Activation Time"),
-                           ("response_time","Response Team Arrival Time"),("evacuation_time","Evacuation Completion Time"),
-                           ("actual_finish","Actual Finish Time")]:
-            fields[key] = QLineEdit(safe(row[key])); fields[key].setPlaceholderText("HH:MM")
-            form.addRow(label, fields[key])
+        for key, label in [("actual_start","Actual Start Time"),("alarm_time","Alarm Activation Time"),("response_time","Response Team Arrival Time"),("evacuation_time","Evacuation Completion Time"),("actual_finish","Actual Finish Time")]:
+            fields[key] = QLineEdit(safe(row[key])); fields[key].setPlaceholderText("HH:MM"); form.addRow(label, fields[key])
         evacuated = QSpinBox(); evacuated.setRange(0,100000); evacuated.setValue(int(row["people_evacuated"] or 0))
         accounted = QSpinBox(); accounted.setRange(0,100000); accounted.setValue(int(row["people_accounted"] or 0))
         missing = QSpinBox(); missing.setRange(0,100000); missing.setValue(int(row["missing_persons"] or 0))
-        notes = QTextEdit(); notes.setPlainText(safe(row["execution_notes"])); notes.setMinimumHeight(90)
-        prepared = QLineEdit(safe(row["prepared_by"])); prepared.setPlaceholderText("Name of person preparing the drill report")
+        notes = QTextEdit(); notes.setPlainText(safe(row["execution_notes"])); notes.setMinimumHeight(100)
         form.addRow("Actual Drill Date", actual_date); form.addRow("People Evacuated", evacuated)
-        form.addRow("People Accounted For", accounted); form.addRow("Missing Persons", missing)
-        form.addRow("Execution Notes / Observations", notes); form.addRow("Report Prepared By *", prepared)
-        attach = QPushButton("Manage Execution Evidence & Remarks")
-        attach.clicked.connect(lambda: self.manage_attachments(did))
-        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(attach)
-        buttons = QHBoxLayout()
-        save_exit = QPushButton("Save and Exit")
-        submit_exit = QPushButton("Submit and Exit")
-        cancel = QPushButton("Cancel")
-        buttons.addStretch(1); buttons.addWidget(save_exit); buttons.addWidget(submit_exit); buttons.addWidget(cancel)
-        outer.addLayout(buttons)
-        result = {"submitted": False}
-        def persist(submit=False):
-            if not prepared.text().strip():
-                QMessageBox.warning(dlg, "Required", "Enter Report Prepared By before saving.")
-                return
-            values = {k: v.text().strip() for k,v in fields.items()}
-            values.update({"actual_date": actual_date.date().toString("yyyy-MM-dd"),
-                           "people_evacuated": evacuated.value(), "people_accounted": accounted.value(),
-                           "missing_persons": missing.value(), "execution_notes": notes.toPlainText().strip(),
-                           "prepared_by": prepared.text().strip()})
-            values["status"] = "Execution Submitted" if submit else "In Progress"
-            values["execution_submitted"] = 1 if submit else 0
-            self.db.execute("UPDATE emergency_drills SET " + ",".join(f"{k}=?" for k in values) +
-                            ",updated_at=?,submitted_at=CASE WHEN ?=1 THEN ? ELSE submitted_at END WHERE id=?",
-                            list(values.values()) + [datetime.now().isoformat(timespec="seconds"), 1 if submit else 0,
-                            datetime.now().isoformat(timespec="seconds"), did])
-            result["submitted"] = submit
-            dlg.accept()
-        save_exit.clicked.connect(lambda: persist(False))
-        submit_exit.clicked.connect(lambda: persist(True))
-        cancel.clicked.connect(dlg.reject)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+        form.addRow("People Accounted For", accounted); form.addRow("Missing Persons (if any)", missing); form.addRow("Execution Notes", notes)
+        outer = QVBoxLayout(dlg); outer.addLayout(form)
+        buttons=QHBoxLayout(); save=QPushButton("Save & Exit"); submit=QPushButton("Submit & Exit"); cancel=QPushButton("Cancel")
+        buttons.addStretch(1); buttons.addWidget(save); buttons.addWidget(submit); buttons.addWidget(cancel); outer.addLayout(buttons)
+        save.clicked.connect(lambda: dlg.done(1)); submit.clicked.connect(lambda: dlg.done(2)); cancel.clicked.connect(dlg.reject)
+        result=dlg.exec()
+        if result not in (1,2): return
+        values = {k: v.text().strip() for k,v in fields.items()}
+        values.update({"actual_date": actual_date.date().toString("yyyy-MM-dd"), "people_evacuated": evacuated.value(), "people_accounted": accounted.value(), "missing_persons": missing.value(), "execution_notes": notes.toPlainText().strip()})
+        if result == 2:
+            prepared,ok=QInputDialog.getText(self,"Submit Drill Execution","Prepared by (name):")
+            if not ok or not prepared.strip(): return
+            values.update({"prepared_by":prepared.strip(),"review_status":"Pending Review","approval_status":"Pending Review","submitted_at":datetime.now().isoformat(timespec="seconds"),"status":"Submitted"})
+        else:
+            values["status"]="In Progress"
+        self.db.execute("UPDATE emergency_drills SET " + ",".join(f"{k}=?" for k in values) + ",updated_at=? WHERE id=?", list(values.values()) + [datetime.now().isoformat(timespec="seconds"), did])
         self.refresh_all()
-        if result["submitted"]:
-            self.tabs.setCurrentIndex(3)
-            self.eval_drill_combo.setCurrentIndex(self.eval_drill_combo.findData(did))
-            QMessageBox.information(self, "Execution Submitted", "Execution submitted. Complete and submit the evaluation checklist next.")
+        if result == 2: QMessageBox.information(self,"Submitted","Drill execution submitted for evaluation and review.")
 
-    def manage_attachments(self, drill_id=None):
-        did = drill_id or self._selected_id(self.register_table)
+    def submit_evaluation(self):
+        did=self._selected_drill_from_combo(self.eval_drill_combo)
+        if not did: QMessageBox.warning(self,"Select Drill","Select a drill first."); return
+        self.save_evaluation()
+        prepared,ok=QInputDialog.getText(self,"Submit Evaluation","Prepared by (name):")
+        if not ok or not prepared.strip(): return
+        self.db.execute("UPDATE emergency_drills SET prepared_by=?,review_status='Pending Review',approval_status='Pending Review',submitted_at=?,status='Submitted',updated_at=? WHERE id=?",(prepared.strip(),datetime.now().isoformat(timespec="seconds"),datetime.now().isoformat(timespec="seconds"),did))
+        self.refresh_all(); QMessageBox.information(self,"Evaluation Submitted","Evaluation submitted for independent review and final approval.")
+
+    def manage_attachments(self, section="Drill Execution Evidence", combo=None):
+        did = self._selected_drill_from_combo(combo) if combo is not None else self._selected_id(self.register_table)
         if not did:
             QMessageBox.warning(self, "Select Drill", "Select a drill in the register.")
             return
         dlg = QDialog(self); dlg.setWindowTitle("Drill Evidence & Attachments"); dlg.resize(680, 430)
         outer = QVBoxLayout(dlg)
-        hint = QLabel("Attach photographs, attendance sheets, drill records and other supporting evidence.")
+        hint = QLabel("Add multiple files in a numbered sequence. Select the evidence category and enter a remark for each upload.")
         hint.setWordWrap(True); outer.addWidget(hint)
-        listing = QTableWidget(0, 5)
-        listing.setHorizontalHeaderLabels(["Seq.", "Evidence Type", "File Name", "Remark", "Uploaded"])
-        listing.setAlternatingRowColors(True); listing.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        listing.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        listing.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        outer.addWidget(listing, 1)
+        meta=QHBoxLayout(); category=QComboBox(); category.addItems(["Before Attendance","Attendance Sheet","Drill Equipment","Execution Photographs","Response Team","Communication Record","Training / Briefing","Area Restoration","Action Close-out","Other"]); remark=QLineEdit(); remark.setPlaceholderText("Evidence remark / description"); meta.addWidget(QLabel("Category:")); meta.addWidget(category); meta.addWidget(remark,1); outer.addLayout(meta)
+        listing = QListWidget(); outer.addWidget(listing, 1)
         def reload_files():
-            listing.setRowCount(0)
-            for item in self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY sequence_no,id", (did,)):
-                rr = listing.rowCount(); listing.insertRow(rr)
-                vals = [item["sequence_no"], item["attachment_type"], Path(safe(item["file_path"])).name, item["remark"], item["uploaded_at"]]
-                for cc, vv in enumerate(vals): listing.setItem(rr, cc, QTableWidgetItem(safe(vv)))
-                listing.item(rr, 0).setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+            listing.clear()
+            for item in self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? AND section=? ORDER BY sequence_no,id", (did, section)):
+                li = QListWidgetItem(Path(safe(item["file_path"])).name + "  |  " + safe(item["attachment_type"]))
+                li.setData(Qt.ItemDataRole.UserRole, int(item["id"]))
+                li.setToolTip(safe(item["file_path"]))
+                listing.addItem(li)
         def add_files():
             paths, _ = QFileDialog.getOpenFileNames(dlg, "Attach Drill Evidence", "", "All Files (*.*)")
-            if not paths: return
-            evidence_type, ok = QInputDialog.getItem(dlg, "Evidence Type", "Select evidence category:",
-                ["Execution Photograph", "Attendance Sheet", "Drill Record", "Equipment Evidence", "Other"], 0, False)
-            if not ok: return
-            remark, ok = QInputDialog.getMultiLineText(dlg, "Evidence Remark", "Enter a remark for these files:")
-            if not ok: return
-            seq = self.db.fetchone("SELECT COALESCE(MAX(sequence_no),0) AS n FROM emergency_drill_attachments WHERE drill_id=?", (did,))["n"]
             for path in paths:
                 try:
                     source = Path(path)
@@ -40511,28 +40587,28 @@ class EmergencyDrillModule(QWidget):
                         destination = ATTACH_DIR / f"EDR-{did}_{n}_{source.name}"
                         n += 1
                     shutil.copy2(source, destination)
-                    seq += 1
-                    self.db.execute("INSERT INTO emergency_drill_attachments(drill_id,file_path,attachment_type,remark,sequence_no,uploaded_by) VALUES(?,?,?,?,?,?)",
-                                    (did, str(destination), evidence_type, remark.strip(), seq, ""))
+                    seq = self.db.fetchone("SELECT COALESCE(MAX(sequence_no),0)+1 AS n FROM emergency_drill_attachments WHERE drill_id=? AND section=?", (did, section))["n"]
+                    self.db.execute("INSERT INTO emergency_drill_attachments(drill_id,file_path,attachment_type,remark,sequence_no,section) VALUES(?,?,?,?,?,?)",
+                                    (did, str(destination), category.currentText(), remark.text().strip(), seq, section))
                 except Exception:
                     logging.exception("Unable to attach emergency drill evidence")
                     QMessageBox.warning(dlg, "Attachment Error", f"Could not attach: {path}")
             reload_files()
         def open_file():
-            rr = listing.currentRow()
-            if rr < 0: return
+            item = listing.currentItem()
+            if not item: return
             rec = self.db.fetchone("SELECT file_path FROM emergency_drill_attachments WHERE id=?",
-                                   (listing.item(rr, 0).data(Qt.ItemDataRole.UserRole),))
+                                   (item.data(Qt.ItemDataRole.UserRole),))
             fp = resolve_attachment_path(rec["file_path"]) if rec else None
             if fp:
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(fp)))
             else:
                 QMessageBox.warning(dlg, "File Not Found", "The attachment file could not be located.")
         def remove_file():
-            rr = listing.currentRow()
-            if rr < 0: return
+            item = listing.currentItem()
+            if not item: return
             if QMessageBox.question(dlg, "Remove Attachment", "Remove this attachment from the drill record?") == QMessageBox.StandardButton.Yes:
-                self.db.execute("DELETE FROM emergency_drill_attachments WHERE id=?", (listing.item(rr, 0).data(Qt.ItemDataRole.UserRole),))
+                self.db.execute("DELETE FROM emergency_drill_attachments WHERE id=?", (item.data(Qt.ItemDataRole.UserRole),))
                 reload_files()
         buttons = QHBoxLayout()
         add = QPushButton("＋ Attach Files"); add.clicked.connect(add_files)
@@ -40567,6 +40643,15 @@ class EmergencyDrillModule(QWidget):
                         (number, datetime.now().isoformat(timespec="seconds"), aid))
         self.refresh_all()
         QMessageBox.information(self, "CAPA Created", f"CAPA {number} was created in the existing CAPA Tracking Register.")
+
+    def delete_template_item(self):
+        r=self.template_table.currentRow()
+        if r<0: QMessageBox.warning(self,"Select Item","Select a custom checklist item."); return
+        dtype=self.template_table.item(r,1).text(); value=self.template_table.item(r,2).text()
+        key="emergency_drill_checklist_"+dtype; current=json.loads(self.db.setting(key,"[]") or "[]")
+        if value not in current: QMessageBox.information(self,"Default Item","Default checklist criteria cannot be deleted from the master library."); return
+        if QMessageBox.question(self,"Delete Checklist Item",f"Delete '{value}' from the custom checklist library? Existing drill evaluations are not deleted.") == QMessageBox.StandardButton.Yes:
+            current.remove(value); self.db.set_setting(key,json.dumps(current,ensure_ascii=False)); self.refresh_templates()
 
     def add_template_item(self):
         item = self.template_item.text().strip()
@@ -40623,11 +40708,13 @@ class EmergencyDrillModule(QWidget):
             r=self.actions_table.rowCount(); self.actions_table.insertRow(r)
             vals=[row["id"],row["action_no"],row["drill_number"],row["finding"],row["severity"],row["corrective_action"],row["responsible"],row["target_date"],row["status"],row["capa_number"]]
             for c,val in enumerate(vals):
-                item=QTableWidgetItem(safe(val))
+                item=QTableWidgetItem(safe(val)); item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                if c in (3,5): item.setToolTip(safe(val))
                 if c==0: item.setData(Qt.ItemDataRole.UserRole,row["id"])
                 self.actions_table.setItem(r,c,item)
+        self.actions_table.resizeRowsToContents()
         self.refresh_plan(); self.refresh_register(); self.refresh_templates()
-        for combo in (self.eval_drill_combo, self.report_drill_combo):
+        for combo in (self.eval_drill_combo, self.report_drill_combo, self.evidence_drill_combo, self.closeout_drill_combo):
             current = combo.currentData()
             combo.blockSignals(True); combo.clear()
             for d in drills: combo.addItem(f"{d['number']} — {d['title']}", d["id"])
@@ -40635,30 +40722,48 @@ class EmergencyDrillModule(QWidget):
             if idx>=0: combo.setCurrentIndex(idx)
             combo.blockSignals(False)
         self.load_evaluation()
+        for target_table, fields in ((self.review_table, ["id","number","title","prepared_by","review_status","reviewed_by","approval_status"]), (self.approval_table, ["id","number","title","review_status","reviewed_by","approval_status","approved_by"])):
+            target_table.setRowCount(0)
+            for d in drills:
+                rr=target_table.rowCount(); target_table.insertRow(rr)
+                for c,key in enumerate(fields):
+                    it=QTableWidgetItem(safe(d[key]))
+                    if c==0: it.setData(Qt.ItemDataRole.UserRole,int(d["id"]))
+                    target_table.setItem(rr,c,it)
+        self._refresh_attachment_tables()
 
-    def export_pdf(self, drill_id=None):
-        did = drill_id or self._selected_drill_from_combo(self.report_drill_combo)
+    def export_pdf(self, did_override=None):
+        did = did_override or self._selected_drill_from_combo(self.report_drill_combo)
         if not did: QMessageBox.warning(self, "Select Drill", "Select a drill to report."); return
         row = self.db.fetchone("SELECT * FROM emergency_drills WHERE id=?", (did,))
         ev = self.db.fetchall("SELECT * FROM emergency_drill_evaluations WHERE drill_id=? ORDER BY item_no", (did,))
         acts = self.db.fetchall("SELECT * FROM emergency_drill_actions WHERE drill_id=? ORDER BY id", (did,))
-        evidence = self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY sequence_no,id", (did,))
         path, _ = QFileDialog.getSaveFileName(self, "Save Drill PDF Report", f"{row['number']}_Drill_Report.pdf", "PDF Files (*.pdf)")
         if not path: return
         try:
             doc = SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
             styles=getSampleStyleSheet(); story=[]
-            logo = report_logo_path()
-            if logo and Path(logo).is_file():
-                try: story.append(RLImage(str(logo), width=105, height=48, kind="proportional"))
-                except Exception: logging.exception("Unable to embed Settings logo in drill report")
-            story += [Paragraph("EMERGENCY DRILL REPORT", styles["Title"]), Spacer(1,10)]
+            company = safe(self.db.setting("company_name", ""))
+            logo_path = safe(self.db.setting("company_logo", ""))
+            report_no = f"{safe(self.db.setting('document_prefix','HSE'))}-EDR-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            header_cells=[[Paragraph(f"<b>{html.escape(company or 'COMPANY NAME')}</b><br/><font size='13'>EMERGENCY DRILL REPORT</font>",styles["Title"]), Paragraph(f"<b>Document No.:</b> {html.escape(report_no)}<br/><b>Date:</b> {date.today().strftime('%d-%b-%Y')}<br/><b>Revision:</b> 00",styles["BodyText"])]]
+            if logo_path and Path(logo_path).exists():
+                try:
+                    from reportlab.platypus import Image as RLImage
+                    logo=RLImage(logo_path,width=78,height=48,kind='proportional')
+                    header_cells=[[logo, header_cells[0][0], header_cells[0][1]]]
+                    ht=Table(header_cells,colWidths=[90,330,210])
+                except Exception:
+                    ht=Table(header_cells,colWidths=[330,300])
+            else:
+                ht=Table(header_cells,colWidths=[330,300])
+            ht.setStyle(TableStyle([("BOX",(0,0),(-1,-1),1,colors.HexColor('#17365D')),("INNERGRID",(0,0),(-1,-1),.5,colors.grey),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("ALIGN",(0,0),(-1,-1),"CENTER"),("PADDING",(0,0),(-1,-1),8)]))
+            story += [ht, Spacer(1,10)]
             info=[["Drill Number",row["number"],"Status",row["status"]],
                   ["Drill Title",row["title"],"Scenario",row["drill_type"]],
                   ["Location",row["location"],"Project",row["project"]],
                   ["Planned Date",row["planned_date"],"Actual Date",row["actual_date"]],
                   ["Coordinator",row["coordinator"],"Response Team",row["response_team"]],
-                  ["Report Prepared By",row["prepared_by"],"Department",row["department"]],
                   ["Expected Participants",str(row["expected_participants"]),"People Accounted",str(row["people_accounted"])],
                   ["Evacuated",str(row["people_evacuated"]),"Missing Persons",str(row["missing_persons"])],
                   ["Performance Score",f"{row['evaluation_score']}%","Start / Finish",f"{row['actual_start']} / {row['actual_finish']}"]]
@@ -40672,20 +40777,38 @@ class EmergencyDrillModule(QWidget):
             for x in acts: data.append([x["action_no"],html.escape(xml_safe(x["finding"])),x["severity"],html.escape(xml_safe(x["corrective_action"])),html.escape(xml_safe(x["responsible"])),x["target_date"],x["status"]])
             if len(data)==1: data.append(["—","No findings recorded","—","—","—","—","—"])
             t=Table(data,colWidths=[65,100,48,115,65,50,55],repeatRows=1); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),6.5),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),3)])); story.append(t)
-            if evidence:
-                story += [Spacer(1,12), Paragraph("Evidence & Photographic Record",styles["Heading2"])]
-                for item in evidence:
-                    fp = resolve_attachment_path(item["file_path"])
-                    caption = f"Evidence {item['sequence_no']}: {item['attachment_type']} — {item['remark']}"
-                    story.append(Paragraph(html.escape(xml_safe(caption)), styles["BodyText"]))
-                    if fp and fp.suffix.lower() in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff"):
-                        try:
-                            story.append(RLImage(str(fp), width=250, height=160, kind="proportional"))
-                            story.append(Spacer(1,6))
-                        except Exception: logging.exception("Unable to embed drill evidence image")
-                    else:
-                        story.append(Paragraph(html.escape(xml_safe(Path(safe(item['file_path'])).name)), styles["BodyText"]))
-            doc.build(story); QMessageBox.information(self,"Report Exported",f"PDF report saved:\\n{path}")
+            evidence=self.db.fetchall("SELECT * FROM emergency_drill_attachments WHERE drill_id=? ORDER BY section,sequence_no,id",(did,))
+            story += [Spacer(1,10),Paragraph("Evidence Register",styles["Heading2"])]
+            edata=[["Seq.","Section","Category","File / Attachment","Remarks"]]
+            for e in evidence: edata.append([str(e["sequence_no"]),safe(e["section"]),safe(e["attachment_type"]),html.escape(Path(safe(e["file_path"])).name),html.escape(safe(e["remark"]))])
+            if len(edata)==1: edata.append(["—","—","—","No evidence attached","—"])
+            et=Table(edata,colWidths=[30,90,100,190,220],repeatRows=1); et.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.35,colors.grey),("FONTSIZE",(0,0),(-1,-1),7),("VALIGN",(0,0),(-1,-1),"TOP"),("PADDING",(0,0),(-1,-1),4)])); story.append(et)
+            image_evidence=[]
+            for e in evidence:
+                fp=resolve_attachment_path(e["file_path"])
+                if fp and Path(fp).suffix.lower() in (".png",".jpg",".jpeg",".bmp",".gif"):
+                    try:
+                        from reportlab.platypus import Image as RLImage
+                        image_evidence.append((e,RLImage(str(fp),width=145,height=95,kind="proportional")))
+                    except Exception: logging.exception("Unable to embed drill evidence image")
+            if image_evidence:
+                story += [Spacer(1,10),Paragraph("Photographic Evidence",styles["Heading2"])]
+                for e,img in image_evidence:
+                    caption=Paragraph(f"<b>{html.escape(safe(e['section']))} — {html.escape(safe(e['attachment_type']))}</b><br/>{html.escape(safe(e['remark']))}",styles["BodyText"])
+                    et_img=Table([[img,caption]],colWidths=[165,450]); et_img.setStyle(TableStyle([("BOX",(0,0),(-1,-1),.5,colors.grey),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("PADDING",(0,0),(-1,-1),6)])); story.append(et_img); story.append(Spacer(1,5))
+            approval_data=[["Stage","Status","Responsible Person","Comments"],
+                           ["Prepared",safe(row["status"]),safe(row["prepared_by"]),""],
+                           ["Review",safe(row["review_status"]),safe(row["reviewed_by"]),html.escape(safe(row["review_comments"]))],
+                           ["Final Approval",safe(row["approval_status"]),safe(row["approved_by"]),html.escape(safe(row["approval_comments"]))]]
+            approval_table=Table(approval_data,colWidths=[85,105,130,310],repeatRows=1)
+            approval_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),7),("PADDING",(0,0),(-1,-1),5)]))
+            story += [Spacer(1,12),Paragraph("Review & Approval Record",styles["Heading2"]),approval_table]
+            sig=Table([["Prepared By", "Reviewed By", "Approved By"],[safe(row["prepared_by"]),safe(row["reviewed_by"]),safe(row["approved_by"])],["Signature: __________________", "Signature: __________________", "Signature: __________________"]],colWidths=[210,210,210])
+            sig.setStyle(TableStyle([("BOX",(0,0),(-1,-1),.8,colors.HexColor('#17365D')),("INNERGRID",(0,0),(-1,-1),.5,colors.grey),("BACKGROUND",(0,0),(-1,0),colors.HexColor('#E8EEF5')),("ALIGN",(0,0),(-1,-1),"CENTER"),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("PADDING",(0,0),(-1,-1),7)]))
+            story += [Spacer(1,12),Paragraph("Document Review & Approval",styles["Heading2"]),sig]
+            def _page_border(canvas, document):
+                canvas.saveState(); canvas.setStrokeColor(colors.HexColor('#17365D')); canvas.setLineWidth(.8); canvas.rect(14,14,landscape(A4)[0]-28,landscape(A4)[1]-28); canvas.restoreState()
+            doc.build(story,onFirstPage=_page_border,onLaterPages=_page_border); QMessageBox.information(self,"Report Exported",f"PDF report saved:\\n{path}")
         except Exception as exc:
             logging.exception("Emergency drill PDF export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
 
@@ -40694,10 +40817,10 @@ class EmergencyDrillModule(QWidget):
         if not path: return
         try:
             wb=Workbook(); ws=wb.active; ws.title="Drill Register"
-            headers=["Drill No.","Title","Type","Project","Location","Department","Planned Date","Planned Time","Actual Date","Coordinator","Report Prepared By","Expected Participants","Evacuated","Accounted","Missing","Score %","Status"]
+            headers=["Drill No.","Title","Type","Project","Location","Department","Planned Date","Planned Time","Actual Date","Coordinator","Expected Participants","Evacuated","Accounted","Missing","Score %","Status"]
             ws.append(headers)
             for r in self.db.fetchall("SELECT * FROM emergency_drills ORDER BY planned_date,id"):
-                ws.append([r["number"],r["title"],r["drill_type"],r["project"],r["location"],r["department"],r["planned_date"],r["planned_time"],r["actual_date"],r["coordinator"],r["prepared_by"],r["expected_participants"],r["people_evacuated"],r["people_accounted"],r["missing_persons"],r["evaluation_score"],r["status"]])
+                ws.append([r["number"],r["title"],r["drill_type"],r["project"],r["location"],r["department"],r["planned_date"],r["planned_time"],r["actual_date"],r["coordinator"],r["expected_participants"],r["people_evacuated"],r["people_accounted"],r["missing_persons"],r["evaluation_score"],r["status"]])
             for cell in ws[1]:
                 cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D"); cell.alignment=Alignment(horizontal="center")
             ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
@@ -40711,20 +40834,6 @@ class EmergencyDrillModule(QWidget):
                 cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D")
             wa.freeze_panes="A2"; wa.auto_filter.ref=wa.dimensions
             for col in wa.columns: wa.column_dimensions[col[0].column_letter].width=min(40,max(12,max(len(safe(c.value)) for c in col)+2))
-            we=wb.create_sheet("Evaluation Checklist")
-            we.append(["Drill No.","Item No.","Evaluation Criteria","Result","Comments","Severity"])
-            for r in self.db.fetchall("SELECT e.*,d.number AS drill_no FROM emergency_drill_evaluations e JOIN emergency_drills d ON d.id=e.drill_id ORDER BY d.planned_date,e.item_no"):
-                we.append([r["drill_no"],r["item_no"],r["checklist_item"],r["result"],r["comments"],r["severity"]])
-            wf=wb.create_sheet("Evidence Register")
-            wf.append(["Drill No.","Sequence","Evidence Type","File Path","Remark","Uploaded At"])
-            for r in self.db.fetchall("SELECT a.*,d.number AS drill_no FROM emergency_drill_attachments a JOIN emergency_drills d ON d.id=a.drill_id ORDER BY d.number,a.sequence_no"):
-                wf.append([r["drill_no"],r["sequence_no"],r["attachment_type"],r["file_path"],r["remark"],r["uploaded_at"]])
-            for sheet in (we,wf):
-                for cell in sheet[1]:
-                    cell.font=Font(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D"); cell.alignment=Alignment(horizontal="center")
-                sheet.freeze_panes="A2"; sheet.auto_filter.ref=sheet.dimensions
-                for col in sheet.columns:
-                    sheet.column_dimensions[col[0].column_letter].width=min(48,max(12,max(len(safe(c.value)) for c in col)+2))
             wb.save(path); QMessageBox.information(self,"Exported",f"Excel register saved:\\n{path}")
         except Exception as exc:
             logging.exception("Emergency drill Excel export failed"); QMessageBox.critical(self,"Export Failed",str(exc))
