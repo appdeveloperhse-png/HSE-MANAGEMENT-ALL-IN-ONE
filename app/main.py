@@ -3617,6 +3617,65 @@ class PieChartWidget(QWidget):
         painter.end()
 
 
+
+class BarChartWidget(QWidget):
+    """Simple vertical bar chart for Environmental / Waste dashboards."""
+    def __init__(self, values=None, parent=None, title=""):
+        super().__init__(parent)
+        self.values = values or {}
+        self.title = title or ""
+        self.setMinimumHeight(280)
+        self.setMinimumWidth(320)
+        self.setStyleSheet("background:#FFFFFF;border:1px solid #D6E2EE;border-radius:8px;")
+
+    def set_values(self, values):
+        self.values = values or {}
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#FFFFFF"))
+        if self.title:
+            painter.setPen(QPen(QColor("#17365D")))
+            painter.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            painter.drawText(12, 18, self.title)
+        items = [(str(k), max(0.0, float(v))) for k, v in (self.values or {}).items()]
+        if not items or sum(v for _, v in items) <= 0:
+            painter.setPen(QPen(QColor("#888888")))
+            painter.drawText(self.rect().adjusted(16, 30, -16, -16), Qt.AlignmentFlag.AlignCenter, "No data in selected filters")
+            painter.end()
+            return
+        margin_l, margin_r, margin_t, margin_b = 48, 16, 36 if self.title else 20, 48
+        chart = self.rect().adjusted(margin_l, margin_t, -margin_r, -margin_b)
+        max_v = max(v for _, v in items) or 1.0
+        n = len(items)
+        gap = 8
+        bar_w = max(12, (chart.width() - gap * (n + 1)) // max(n, 1))
+        palette = [
+            QColor("#1F4E79"), QColor("#2E86AB"), QColor("#28A745"), QColor("#F39C12"),
+            QColor("#E74C3C"), QColor("#8E44AD"), QColor("#16A085"), QColor("#7F8C8D"),
+        ]
+        painter.setPen(QPen(QColor("#C5D0DA")))
+        painter.drawLine(chart.left(), chart.bottom(), chart.right(), chart.bottom())
+        painter.drawLine(chart.left(), chart.top(), chart.left(), chart.bottom())
+        painter.setFont(QFont("Segoe UI", 8))
+        for i, (label, value) in enumerate(items):
+            x = chart.left() + gap + i * (bar_w + gap)
+            h = int(round((value / max_v) * chart.height()))
+            y = chart.bottom() - h
+            painter.setBrush(QBrush(palette[i % len(palette)]))
+            painter.setPen(QPen(QColor("#FFFFFF")))
+            painter.drawRoundedRect(x, y, bar_w, max(h, 1), 3, 3)
+            painter.setPen(QPen(QColor("#17365D")))
+            val_txt = f"{value:.0f}" if value >= 10 else f"{value:.1f}"
+            painter.drawText(x - 4, y - 4, bar_w + 8, 14, Qt.AlignmentFlag.AlignCenter, val_txt)
+            # rotated-ish short label
+            short = label if len(label) <= 8 else label[:7] + "…"
+            painter.drawText(x - 6, chart.bottom() + 4, bar_w + 12, 36, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, short)
+        painter.end()
+
+
 class BarChartWidget(QWidget):
     def __init__(self, values=None, parent=None, title=""):
         super().__init__(parent)
@@ -41449,15 +41508,16 @@ class EnvironmentalMonitoringModule(QWidget):
         self.waste_tabs = QTabWidget()
         self.waste_tabs.setDocumentMode(True)
         waste_layout.addWidget(self.waste_tabs)
-        self.waste_tabs.addTab(self._build_waste_entry_tab(), "Waste Entry")
-        self.waste_tabs.addTab(self._build_waste_register_tab(), "Waste Register")
-        self.waste_tabs.addTab(self._build_waste_dashboard_tab(), "Waste Dashboard")
+        self.waste_tabs.addTab(self._build_waste_dashboard_tab(), "Dashboard & Charts")
+        self.waste_tabs.addTab(self._build_waste_entry_tab(), "Data Entry")
+        self.waste_tabs.addTab(self._build_waste_register_tab(), "Transaction Register")
+        self.waste_tabs.addTab(self._build_waste_matrix_tab(), "Year Matrix")
         self.main_tabs.addTab(waste_page, "Waste Management")
 
     def refresh_all(self):
         for fn in (self.refresh_noise_register, self.refresh_noise_dashboard, self.refresh_noise_review_register,
                    self.refresh_air_register, self.refresh_water_register,
-                   self.refresh_waste_register, self.refresh_waste_dashboard):
+                   self.refresh_waste_register, self.refresh_waste_dashboard, self.refresh_waste_matrix):
             try:
                 fn()
             except Exception:
@@ -43078,7 +43138,7 @@ class EnvironmentalMonitoringModule(QWidget):
                  self.waste_generated_by.text().strip(), self.waste_disposal.text().strip(), self.waste_remarks.text().strip()))
             self.db.conn.commit(); self.refresh_waste_register(); self.refresh_waste_dashboard()
             QMessageBox.information(self, "Saved", f"Waste record {record_no} saved.")
-            self.clear_waste_form(); self.waste_tabs.setCurrentIndex(1)
+            self.clear_waste_form(); self.waste_tabs.setCurrentIndex(2)
         except Exception as exc:
             self.db.conn.rollback(); logging.exception("waste save"); QMessageBox.critical(self, "Save Failed", str(exc))
 
@@ -43181,56 +43241,409 @@ class EnvironmentalMonitoringModule(QWidget):
             logging.exception("waste export"); QMessageBox.critical(self, "Export Failed", str(exc))
 
     def _build_waste_dashboard_tab(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(12, 10, 12, 10)
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        # Filter bar
+        filt = QFrame()
+        filt.setStyleSheet("QFrame{background:#F4F8FB;border:1px solid #D5E0E8;border-radius:8px;}")
+        fl = QHBoxLayout(filt)
+        fl.setContentsMargins(10, 8, 10, 8)
+        fl.addWidget(QLabel("Year:"))
+        self.waste_chart_year = QSpinBox()
+        self.waste_chart_year.setRange(2020, 2100)
+        self.waste_chart_year.setValue(date.today().year)
+        self.waste_chart_year.setMinimumHeight(32)
+        fl.addWidget(self.waste_chart_year)
+        fl.addWidget(QLabel("Project:"))
+        self.waste_chart_project = QLineEdit()
+        self.waste_chart_project.setPlaceholderText("All projects")
+        self.waste_chart_project.setMinimumHeight(32)
+        fl.addWidget(self.waste_chart_project, 1)
+        fl.addWidget(QLabel("Location:"))
+        self.waste_chart_location = QLineEdit()
+        self.waste_chart_location.setPlaceholderText("All locations")
+        self.waste_chart_location.setMinimumHeight(32)
+        fl.addWidget(self.waste_chart_location, 1)
+        fl.addWidget(QLabel("Waste Type:"))
+        self.waste_chart_type = QComboBox()
+        self.waste_chart_type.addItem("All Types")
+        self.waste_chart_type.addItems(self.WASTE_TYPES)
+        self.waste_chart_type.setMinimumHeight(32)
+        fl.addWidget(self.waste_chart_type)
+        apply = QPushButton("Apply")
+        apply.setMinimumHeight(32)
+        apply.clicked.connect(self.refresh_waste_dashboard)
+        fl.addWidget(apply)
+        layout.addWidget(filt)
+
         self.waste_dash_summary = QLabel()
         self.waste_dash_summary.setWordWrap(True)
-        self.waste_dash_summary.setStyleSheet("font-size:14px;font-weight:600;padding:12px;background:#F3F7FA;border:1px solid #DCE5EC;border-radius:8px;")
+        self.waste_dash_summary.setStyleSheet(
+            "font-size:14px;font-weight:600;padding:12px;background:#F3F7FA;"
+            "border:1px solid #DCE5EC;border-radius:8px;"
+        )
         layout.addWidget(self.waste_dash_summary)
+
+        charts = QHBoxLayout()
+        self.waste_pie_type = PieChartWidget(title="Waste by Type")
+        self.waste_bar_month = BarChartWidget(title="Monthly Totals")
+        charts.addWidget(self.waste_pie_type, 1)
+        charts.addWidget(self.waste_bar_month, 1)
+        layout.addLayout(charts, 2)
+
         grid = QGridLayout()
-        type_box = QGroupBox("Waste by Type"); type_layout = QVBoxLayout(type_box)
-        self.waste_by_type_table = QTableWidget(0, 3); self.waste_by_type_table.setHorizontalHeaderLabels(["Waste Type", "Total Quantity", "Units"])
+        type_box = QGroupBox("Waste by Type")
+        type_layout = QVBoxLayout(type_box)
+        self.waste_by_type_table = QTableWidget(0, 3)
+        self.waste_by_type_table.setHorizontalHeaderLabels(["Waste Type", "Total Quantity", "Units"])
         self.waste_by_type_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.waste_by_type_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        type_layout.addWidget(self.waste_by_type_table); grid.addWidget(type_box, 0, 0)
-        month_box = QGroupBox("Waste by Month"); month_layout = QVBoxLayout(month_box)
-        self.waste_by_month_table = QTableWidget(0, 2); self.waste_by_month_table.setHorizontalHeaderLabels(["Month", "Total Quantity"])
+        type_layout.addWidget(self.waste_by_type_table)
+        grid.addWidget(type_box, 0, 0)
+
+        month_box = QGroupBox("Waste by Month")
+        month_layout = QVBoxLayout(month_box)
+        self.waste_by_month_table = QTableWidget(0, 2)
+        self.waste_by_month_table.setHorizontalHeaderLabels(["Month", "Total Quantity"])
         self.waste_by_month_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.waste_by_month_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        month_layout.addWidget(self.waste_by_month_table); grid.addWidget(month_box, 0, 1)
-        loc_box = QGroupBox("Waste by Location"); loc_layout = QVBoxLayout(loc_box)
-        self.waste_by_loc_table = QTableWidget(0, 2); self.waste_by_loc_table.setHorizontalHeaderLabels(["Location", "Total Quantity"])
+        month_layout.addWidget(self.waste_by_month_table)
+        grid.addWidget(month_box, 0, 1)
+
+        loc_box = QGroupBox("Waste by Location (Top 30)")
+        loc_layout = QVBoxLayout(loc_box)
+        self.waste_by_loc_table = QTableWidget(0, 2)
+        self.waste_by_loc_table.setHorizontalHeaderLabels(["Location", "Total Quantity"])
         self.waste_by_loc_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.waste_by_loc_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        loc_layout.addWidget(self.waste_by_loc_table); grid.addWidget(loc_box, 1, 0, 1, 2)
-        layout.addLayout(grid)
-        refresh = QPushButton("Refresh Dashboard"); refresh.clicked.connect(self.refresh_waste_dashboard)
-        layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignRight)
+        loc_layout.addWidget(self.waste_by_loc_table)
+        grid.addWidget(loc_box, 1, 0, 1, 2)
+        layout.addLayout(grid, 2)
         return page
 
+    def _waste_filter_sql(self, year=None, project="", location="", wtype=""):
+        """Build WHERE clause and params for waste analytics filters."""
+        clauses = []
+        params = []
+        if year:
+            clauses.append("substr(record_date,1,4)=?")
+            params.append(str(year))
+        if project:
+            clauses.append("lower(project) LIKE ?")
+            params.append(f"%{project.lower()}%")
+        if location:
+            clauses.append("lower(location) LIKE ?")
+            params.append(f"%{location.lower()}%")
+        if wtype and wtype != "All Types":
+            clauses.append("waste_type=?")
+            params.append(wtype)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
     def refresh_waste_dashboard(self):
-        if not hasattr(self, "waste_dash_summary"): return
-        total_rows = self.db.conn.execute("SELECT COUNT(*) AS n FROM env_waste_records").fetchone()["n"]
-        total_qty = self.db.conn.execute("SELECT COALESCE(SUM(quantity),0) AS q FROM env_waste_records").fetchone()["q"]
-        self.waste_dash_summary.setText(f"Total waste records: {total_rows}    |    Combined quantity (all units): {total_qty:.2f}")
-        type_rows = self.db.conn.execute("SELECT waste_type, SUM(quantity) AS qty, GROUP_CONCAT(DISTINCT unit) AS units FROM env_waste_records GROUP BY waste_type ORDER BY qty DESC").fetchall()
+        if not hasattr(self, "waste_dash_summary"):
+            return
+        year = self.waste_chart_year.value() if hasattr(self, "waste_chart_year") else date.today().year
+        project = self.waste_chart_project.text().strip() if hasattr(self, "waste_chart_project") else ""
+        location = self.waste_chart_location.text().strip() if hasattr(self, "waste_chart_location") else ""
+        wtype = self.waste_chart_type.currentText() if hasattr(self, "waste_chart_type") else "All Types"
+        where, params = self._waste_filter_sql(year, project, location, wtype)
+
+        total_rows = self.db.conn.execute(
+            f"SELECT COUNT(*) AS n FROM env_waste_records{where}", params
+        ).fetchone()["n"]
+        total_qty = self.db.conn.execute(
+            f"SELECT COALESCE(SUM(quantity),0) AS q FROM env_waste_records{where}", params
+        ).fetchone()["q"]
+        self.waste_dash_summary.setText(
+            f"Year {year}  |  Records: {total_rows}  |  Combined quantity: {total_qty:.2f}"
+            + (f"  |  Project filter: {project}" if project else "")
+            + (f"  |  Location filter: {location}" if location else "")
+            + (f"  |  Type: {wtype}" if wtype and wtype != "All Types" else "")
+        )
+
+        type_rows = self.db.conn.execute(
+            f"SELECT waste_type, SUM(quantity) AS qty, GROUP_CONCAT(DISTINCT unit) AS units "
+            f"FROM env_waste_records{where} GROUP BY waste_type ORDER BY qty DESC",
+            params,
+        ).fetchall()
         self.waste_by_type_table.setRowCount(0)
+        pie_vals = {}
         for rec in type_rows:
-            r = self.waste_by_type_table.rowCount(); self.waste_by_type_table.insertRow(r)
+            r = self.waste_by_type_table.rowCount()
+            self.waste_by_type_table.insertRow(r)
             self.waste_by_type_table.setItem(r, 0, QTableWidgetItem(safe(rec["waste_type"])))
             self.waste_by_type_table.setItem(r, 1, QTableWidgetItem(f"{rec['qty']:.2f}"))
             self.waste_by_type_table.setItem(r, 2, QTableWidgetItem(safe(rec["units"])))
-        month_rows = self.db.conn.execute("SELECT substr(record_date,1,7) AS ym, SUM(quantity) AS qty FROM env_waste_records GROUP BY ym ORDER BY ym DESC").fetchall()
+            pie_vals[safe(rec["waste_type"]) or "Other"] = float(rec["qty"] or 0)
+        if hasattr(self, "waste_pie_type"):
+            self.waste_pie_type.set_values(pie_vals)
+
+        month_rows = self.db.conn.execute(
+            f"SELECT substr(record_date,1,7) AS ym, SUM(quantity) AS qty "
+            f"FROM env_waste_records{where} GROUP BY ym ORDER BY ym",
+            params,
+        ).fetchall()
         self.waste_by_month_table.setRowCount(0)
+        bar_vals = {}
+        month_names = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         for rec in month_rows:
-            r = self.waste_by_month_table.rowCount(); self.waste_by_month_table.insertRow(r)
-            self.waste_by_month_table.setItem(r, 0, QTableWidgetItem(safe(rec["ym"])))
+            r = self.waste_by_month_table.rowCount()
+            self.waste_by_month_table.insertRow(r)
+            ym = safe(rec["ym"])
+            self.waste_by_month_table.setItem(r, 0, QTableWidgetItem(ym))
             self.waste_by_month_table.setItem(r, 1, QTableWidgetItem(f"{rec['qty']:.2f}"))
-        loc_rows = self.db.conn.execute("SELECT location, SUM(quantity) AS qty FROM env_waste_records GROUP BY location ORDER BY qty DESC LIMIT 30").fetchall()
+            try:
+                m = int(ym.split("-")[1])
+                label = month_names[m] if 1 <= m <= 12 else ym
+            except Exception:
+                label = ym
+            bar_vals[label] = float(rec["qty"] or 0)
+        if hasattr(self, "waste_bar_month"):
+            self.waste_bar_month.set_values(bar_vals)
+
+        loc_rows = self.db.conn.execute(
+            f"SELECT location, SUM(quantity) AS qty FROM env_waste_records{where} "
+            f"GROUP BY location ORDER BY qty DESC LIMIT 30",
+            params,
+        ).fetchall()
         self.waste_by_loc_table.setRowCount(0)
         for rec in loc_rows:
-            r = self.waste_by_loc_table.rowCount(); self.waste_by_loc_table.insertRow(r)
+            r = self.waste_by_loc_table.rowCount()
+            self.waste_by_loc_table.insertRow(r)
             self.waste_by_loc_table.setItem(r, 0, QTableWidgetItem(safe(rec["location"])))
             self.waste_by_loc_table.setItem(r, 1, QTableWidgetItem(f"{rec['qty']:.2f}"))
+
+    def _build_waste_matrix_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("Year Matrix — Monthly Waste by Location (Excel-style)")
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#17365D;")
+        layout.addWidget(title)
+        hint = QLabel(
+            "Full-year view: each row is a Location (optionally split by Waste Type). "
+            "Columns are months. Use filters, then Export Matrix to Excel for client reporting."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#526579;padding:4px 0 6px 0;")
+        layout.addWidget(hint)
+
+        filt = QFrame()
+        filt.setStyleSheet("QFrame{background:#F4F8FB;border:1px solid #D5E0E8;border-radius:8px;}")
+        fl = QHBoxLayout(filt)
+        fl.setContentsMargins(10, 8, 10, 8)
+        fl.addWidget(QLabel("Year:"))
+        self.waste_matrix_year = QSpinBox()
+        self.waste_matrix_year.setRange(2020, 2100)
+        self.waste_matrix_year.setValue(date.today().year)
+        self.waste_matrix_year.setMinimumHeight(32)
+        fl.addWidget(self.waste_matrix_year)
+        fl.addWidget(QLabel("Project:"))
+        self.waste_matrix_project = QLineEdit()
+        self.waste_matrix_project.setPlaceholderText("All projects")
+        self.waste_matrix_project.setMinimumHeight(32)
+        fl.addWidget(self.waste_matrix_project, 1)
+        fl.addWidget(QLabel("Waste Type:"))
+        self.waste_matrix_type = QComboBox()
+        self.waste_matrix_type.addItem("All Types")
+        self.waste_matrix_type.addItems(self.WASTE_TYPES)
+        self.waste_matrix_type.setMinimumHeight(32)
+        fl.addWidget(self.waste_matrix_type)
+        self.waste_matrix_split = QCheckBox("Split rows by Waste Type")
+        fl.addWidget(self.waste_matrix_split)
+        apply = QPushButton("Refresh Matrix")
+        apply.setMinimumHeight(32)
+        apply.clicked.connect(self.refresh_waste_matrix)
+        fl.addWidget(apply)
+        export = QPushButton("Export Matrix (Excel)")
+        export.setMinimumHeight(32)
+        export.setStyleSheet(
+            "QPushButton{background:#176B87;color:white;font-weight:700;border-radius:5px;padding:4px 12px;}"
+        )
+        export.clicked.connect(self.export_waste_matrix)
+        fl.addWidget(export)
+        layout.addWidget(filt)
+
+        self.waste_matrix_summary = QLabel()
+        self.waste_matrix_summary.setStyleSheet(
+            "font-size:13px;font-weight:600;padding:8px;background:#EEF4F8;border-radius:6px;"
+        )
+        layout.addWidget(self.waste_matrix_summary)
+
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        headers = ["Location", "Waste Type", "Project"] + months + ["Year Total"]
+        self.waste_matrix_table = QTableWidget(0, len(headers))
+        self.waste_matrix_table.setHorizontalHeaderLabels(headers)
+        self.waste_matrix_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.waste_matrix_table.setAlternatingRowColors(True)
+        self.waste_matrix_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        hdr = self.waste_matrix_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.waste_matrix_table.setColumnWidth(0, 160)
+        self.waste_matrix_table.setColumnWidth(1, 150)
+        self.waste_matrix_table.setColumnWidth(2, 120)
+        for c in range(3, 15):
+            self.waste_matrix_table.setColumnWidth(c, 70)
+        self.waste_matrix_table.setColumnWidth(15, 90)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.waste_matrix_table, 1)
+        return page
+
+    def refresh_waste_matrix(self):
+        if not hasattr(self, "waste_matrix_table"):
+            return
+        year = self.waste_matrix_year.value()
+        project = self.waste_matrix_project.text().strip()
+        wtype = self.waste_matrix_type.currentText()
+        split = self.waste_matrix_split.isChecked()
+        where, params = self._waste_filter_sql(year, project, "", wtype)
+
+        if split:
+            sql = (
+                f"SELECT COALESCE(NULLIF(trim(location),''),'(Unspecified)') AS loc, "
+                f"COALESCE(NULLIF(trim(waste_type),''),'Other') AS wtype, "
+                f"COALESCE(NULLIF(trim(project),''),'(All)') AS proj, "
+                f"CAST(substr(record_date,6,2) AS INTEGER) AS mon, "
+                f"SUM(quantity) AS qty "
+                f"FROM env_waste_records{where} "
+                f"GROUP BY loc, wtype, proj, mon ORDER BY loc, wtype, proj, mon"
+            )
+        else:
+            sql = (
+                f"SELECT COALESCE(NULLIF(trim(location),''),'(Unspecified)') AS loc, "
+                f"'' AS wtype, "
+                f"COALESCE(NULLIF(trim(project),''),'(All)') AS proj, "
+                f"CAST(substr(record_date,6,2) AS INTEGER) AS mon, "
+                f"SUM(quantity) AS qty "
+                f"FROM env_waste_records{where} "
+                f"GROUP BY loc, proj, mon ORDER BY loc, proj, mon"
+            )
+        rows = self.db.conn.execute(sql, params).fetchall()
+
+        # Build matrix: key -> {1: qty, ..., 12: qty}
+        matrix = {}
+        for rec in rows:
+            key = (safe(rec["loc"]), safe(rec["wtype"]), safe(rec["proj"]))
+            matrix.setdefault(key, {m: 0.0 for m in range(1, 13)})
+            mon = int(rec["mon"] or 0)
+            if 1 <= mon <= 12:
+                matrix[key][mon] += float(rec["qty"] or 0)
+
+        self.waste_matrix_table.setRowCount(0)
+        grand = 0.0
+        for (loc, wtype_v, proj), months in sorted(matrix.items()):
+            r = self.waste_matrix_table.rowCount()
+            self.waste_matrix_table.insertRow(r)
+            self.waste_matrix_table.setItem(r, 0, QTableWidgetItem(loc))
+            self.waste_matrix_table.setItem(r, 1, QTableWidgetItem(wtype_v or "—"))
+            self.waste_matrix_table.setItem(r, 2, QTableWidgetItem(proj))
+            row_total = 0.0
+            for m in range(1, 13):
+                val = months.get(m, 0.0)
+                row_total += val
+                cell = QTableWidgetItem(f"{val:.1f}" if val else "")
+                cell.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if val:
+                    cell.setBackground(QColor("#E8F4FC"))
+                self.waste_matrix_table.setItem(r, 2 + m, cell)
+            total_item = QTableWidgetItem(f"{row_total:.1f}")
+            total_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            total_item.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            self.waste_matrix_table.setItem(r, 15, total_item)
+            grand += row_total
+
+        self.waste_matrix_summary.setText(
+            f"Year {year}  |  Rows: {self.waste_matrix_table.rowCount()}  |  "
+            f"Combined quantity: {grand:.2f}"
+            + (f"  |  Project: {project}" if project else "")
+            + (f"  |  Type: {wtype}" if wtype != "All Types" else "")
+            + ("  |  Split by waste type" if split else "")
+        )
+
+    def export_waste_matrix(self):
+        if not hasattr(self, "waste_matrix_table") or self.waste_matrix_table.rowCount() == 0:
+            self.refresh_waste_matrix()
+        if self.waste_matrix_table.rowCount() == 0:
+            QMessageBox.information(self, "Export Matrix", "No data to export for the selected filters.")
+            return
+        year = self.waste_matrix_year.value()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Waste Year Matrix",
+            f"Waste_Matrix_{year}.xlsx", "Excel Files (*.xlsx)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = f"Matrix {year}"
+            company = company_name() or "COMPANY"
+            ws.merge_cells("A1:P1")
+            ws["A1"] = f"{company} — Waste Year Matrix {year}"
+            ws["A1"].font = Font(bold=True, size=14, color="17365D")
+            ws["A1"].alignment = Alignment(horizontal="center")
+            project = self.waste_matrix_project.text().strip()
+            wtype = self.waste_matrix_type.currentText()
+            ws.merge_cells("A2:P2")
+            ws["A2"] = (
+                f"Project: {project or 'All'}  |  Waste Type: {wtype}  |  "
+                f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            )
+            ws["A2"].font = Font(size=9, color="526477")
+
+            headers = [self.waste_matrix_table.horizontalHeaderItem(c).text()
+                       for c in range(self.waste_matrix_table.columnCount())]
+            for c, h in enumerate(headers, 1):
+                cell = ws.cell(4, c, h)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="17365D")
+                cell.alignment = Alignment(horizontal="center", wrap_text=True)
+                cell.border = Border(
+                    left=Side(style="thin", color="5A6A78"),
+                    right=Side(style="thin", color="5A6A78"),
+                    top=Side(style="thin", color="5A6A78"),
+                    bottom=Side(style="thin", color="5A6A78"),
+                )
+            thin = Border(
+                left=Side(style="thin", color="5A6A78"),
+                right=Side(style="thin", color="5A6A78"),
+                top=Side(style="thin", color="5A6A78"),
+                bottom=Side(style="thin", color="5A6A78"),
+            )
+            for r in range(self.waste_matrix_table.rowCount()):
+                for c in range(self.waste_matrix_table.columnCount()):
+                    item = self.waste_matrix_table.item(r, c)
+                    val = item.text() if item else ""
+                    cell = ws.cell(5 + r, c + 1, val)
+                    cell.border = thin
+                    if c >= 3:
+                        cell.alignment = Alignment(horizontal="right")
+            for col in ws.columns:
+                letter = col[0].column_letter
+                width = 12
+                if letter == "A":
+                    width = 22
+                elif letter in ("B", "C"):
+                    width = 16
+                elif letter == "P":
+                    width = 12
+                else:
+                    width = 9
+                ws.column_dimensions[letter].width = width
+            ws.freeze_panes = "D5"
+            wb.save(path)
+            QMessageBox.information(self, "Exported", f"Year matrix saved:\n{path}")
+        except Exception as exc:
+            logging.exception("waste matrix export")
+            QMessageBox.critical(self, "Export Failed", str(exc))
 
     def _export_simple_register(self, kind):
         if kind == "air":
