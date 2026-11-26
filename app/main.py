@@ -41216,8 +41216,8 @@ class EmergencyDrillModule(QWidget):
 
 # ============================================================
 # ENVIRONMENTAL MONITORING MODULE
-# Additive module: noise monitoring records are stored in their
-# own tables and do not modify existing HSE module data.
+# Additive module: noise / air / water / waste records are stored
+# in their own tables and do not modify existing HSE module data.
 # ============================================================
 
 class EnvironmentalMonitoringModule(QWidget):
@@ -41321,7 +41321,6 @@ class EnvironmentalMonitoringModule(QWidget):
         CREATE INDEX IF NOT EXISTS idx_env_waste_date ON env_waste_records(record_date);
         CREATE INDEX IF NOT EXISTS idx_env_waste_type ON env_waste_records(waste_type);
         """)
-        # Additive migrations for older noise installs
         for table, column, definition in (
             ('env_noise_sessions','reviewed_by',"TEXT DEFAULT ''"),
             ('env_noise_sessions','approved_by',"TEXT DEFAULT ''"),
@@ -41422,8 +41421,27 @@ class EnvironmentalMonitoringModule(QWidget):
         self.noise_tabs.addTab(self._build_noise_review_tab(), "Review & Approval")
         self.main_tabs.addTab(noise_page, "Noise")
 
-        self.main_tabs.addTab(self._build_air_tab(), "Air Quality")
-        self.main_tabs.addTab(self._build_water_tab(), "Water Quality")
+        # Air Quality — Entry + Register sub-tabs
+        air_page = QWidget()
+        air_layout = QVBoxLayout(air_page)
+        air_layout.setContentsMargins(6, 6, 6, 6)
+        self.air_tabs = QTabWidget()
+        self.air_tabs.setDocumentMode(True)
+        air_layout.addWidget(self.air_tabs)
+        self.air_tabs.addTab(self._build_air_entry_tab(), "Data Entry")
+        self.air_tabs.addTab(self._build_air_register_tab(), "Air Quality Register")
+        self.main_tabs.addTab(air_page, "Air Quality")
+
+        # Water Quality — Entry + Register sub-tabs
+        water_page = QWidget()
+        water_layout = QVBoxLayout(water_page)
+        water_layout.setContentsMargins(6, 6, 6, 6)
+        self.water_tabs = QTabWidget()
+        self.water_tabs.setDocumentMode(True)
+        water_layout.addWidget(self.water_tabs)
+        self.water_tabs.addTab(self._build_water_entry_tab(), "Data Entry")
+        self.water_tabs.addTab(self._build_water_register_tab(), "Water Quality Register")
+        self.main_tabs.addTab(water_page, "Water Quality")
 
         waste_page = QWidget()
         waste_layout = QVBoxLayout(waste_page)
@@ -41490,7 +41508,7 @@ class EnvironmentalMonitoringModule(QWidget):
         for i, (label, w) in enumerate(fields):
             r, col = divmod(i, 2)
             lab = QLabel(label); lab.setStyleSheet("font-size:12px;font-weight:650;color:#526477;")
-            w.setMinimumHeight(34); w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            w.setMinimumHeight(36); w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             grid.addWidget(lab, r * 2, col); grid.addWidget(w, r * 2 + 1, col)
         grid.setColumnStretch(0, 1); grid.setColumnStretch(1, 1)
         layout.addWidget(card)
@@ -41555,18 +41573,23 @@ class EnvironmentalMonitoringModule(QWidget):
         title = QLabel("Noise Monitoring — Review & Approval"); title.setStyleSheet("font-size:16px;font-weight:800;color:#17365D;")
         layout.addWidget(title)
         bar = QHBoxLayout()
-        open_btn = QPushButton("Open Review / Approval"); refresh = QPushButton("Refresh")
+        open_btn = QPushButton("Open / Review Selected")
+        approve_btn = QPushButton("Final Approve Selected")
+        refresh = QPushButton("Refresh")
         open_btn.clicked.connect(self.review_selected_noise_session)
+        approve_btn.clicked.connect(self.approve_selected_noise_session)
         refresh.clicked.connect(self.refresh_noise_review_register)
-        bar.addWidget(open_btn); bar.addStretch(1); bar.addWidget(refresh)
+        approve_btn.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:700;padding:6px 14px;border-radius:6px;}")
+        bar.addWidget(open_btn); bar.addWidget(approve_btn); bar.addStretch(1); bar.addWidget(refresh)
         layout.addLayout(bar)
-        self.review_table = QTableWidget(0, 7)
-        self.review_table.setHorizontalHeaderLabels(["ID", "Session No.", "Date", "Project / Site", "Locations", "Monitored By", "Status"])
+        self.review_table = QTableWidget(0, 8)
+        self.review_table.setHorizontalHeaderLabels(["ID", "Session No.", "Date", "Project / Site", "Locations", "Monitored By", "Status", "Reviewed / Approved By"])
         self.review_table.setColumnHidden(0, True)
         self.review_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.review_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.review_table.setAlternatingRowColors(True)
         self.review_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.review_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.review_table.doubleClicked.connect(self.review_selected_noise_session)
         layout.addWidget(self.review_table, 1)
         return page
@@ -41635,12 +41658,13 @@ class EnvironmentalMonitoringModule(QWidget):
         rows = self.db.conn.execute("""
             SELECT s.*, COUNT(l.id) location_count FROM env_noise_sessions s
             LEFT JOIN env_noise_locations l ON l.session_id=s.id
-            WHERE COALESCE(s.workflow_status,'Draft') IN ('Submitted for Review','Reviewed','Approved')
+            WHERE COALESCE(s.workflow_status,'Draft') IN ('Submitted for Review','Reviewed','Pending Approval','Approved','Returned')
             GROUP BY s.id ORDER BY s.id DESC""").fetchall()
         self.review_table.setRowCount(0)
         for rec in rows:
             r = self.review_table.rowCount(); self.review_table.insertRow(r)
-            for col, v in enumerate([rec["id"], rec["session_no"], rec["monitoring_date"], rec["project"], rec["location_count"], rec["monitored_by"], rec["workflow_status"]]):
+            by_txt = " / ".join(x for x in [safe(rec["reviewed_by"]), safe(rec["approved_by"])] if x) or "—"
+            for col, v in enumerate([rec["id"], rec["session_no"], rec["monitoring_date"], rec["project"], rec["location_count"], rec["monitored_by"], rec["workflow_status"], by_txt]):
                 self.review_table.setItem(r, col, QTableWidgetItem(str(v if v is not None else "")))
 
     def refresh_noise_dashboard(self):
@@ -41661,11 +41685,13 @@ class EnvironmentalMonitoringModule(QWidget):
                 if c == 4:
                     bg, fg = palette.get(rec["risk_level"], ("#EEE", "#333")); it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
 
-    def _selected_noise_session_id(self):
-        row = self.register_table.currentRow()
-        if row < 0 or not self.register_table.item(row, 0):
-            QMessageBox.information(self, "Noise Monitoring", "Select a monitoring session first."); return None
-        return int(self.register_table.item(row, 0).text())
+    def _selected_noise_session_id(self, from_review=False):
+        table = self.review_table if from_review else self.register_table
+        row = table.currentRow()
+        if row < 0 or not table.item(row, 0):
+            QMessageBox.information(self, "Noise Monitoring", "Select a monitoring session first.")
+            return None
+        return int(table.item(row, 0).text())
 
     def view_selected_noise_session(self, *_):
         sid = self._selected_noise_session_id()
@@ -41674,381 +41700,1066 @@ class EnvironmentalMonitoringModule(QWidget):
     def open_noise_session_details(self, sid):
         session = self.db.conn.execute("SELECT * FROM env_noise_sessions WHERE id=?", (sid,)).fetchone()
         if not session: return
-        dlg = QDialog(self); dlg.setWindowTitle(f"Session Details — {session['session_no']}"); dlg.resize(1200, 720)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Session Details — {session['session_no']}")
+        dlg.resize(1280, 760)
         root = QVBoxLayout(dlg)
-        summary = QLabel(f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp; <b>Date:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'] or '')}<br>"
-                         f"<b>Project:</b> {html.escape(session['project'])} &nbsp; <b>Activity:</b> {html.escape(session['activity'])}<br>"
-                         f"<b>Monitored By:</b> {html.escape(session['monitored_by'] or '')} &nbsp; <b>Status:</b> {html.escape(session['workflow_status'] or 'Draft')}")
-        summary.setWordWrap(True); summary.setStyleSheet("padding:12px;background:#EEF4F8;border:1px solid #D5E0E8;border-radius:7px;")
+        summary = QLabel(
+            f"<b>Session:</b> {html.escape(session['session_no'])} &nbsp; "
+            f"<b>Date:</b> {html.escape(session['monitoring_date'])} {html.escape(session['monitoring_time'] or '')}<br>"
+            f"<b>Project:</b> {html.escape(session['project'])} &nbsp; <b>Activity:</b> {html.escape(session['activity'])}<br>"
+            f"<b>Monitored By:</b> {html.escape(session['monitored_by'] or '')} &nbsp; "
+            f"<b>Status:</b> {html.escape(session['workflow_status'] or 'Draft')}"
+        )
+        summary.setWordWrap(True)
+        summary.setStyleSheet("padding:12px;background:#EEF4F8;border:1px solid #D5E0E8;border-radius:7px;")
         root.addWidget(summary)
+
         table = QTableWidget(0, 8)
-        table.setHorizontalHeaderLabels(["Location", "Source", "dB(A)", "Duration", "Status", "Recommended Controls", "Remarks", "Evidence"])
-        table.setAlternatingRowColors(True); table.setWordWrap(True)
+        table.setHorizontalHeaderLabels([
+            "Location", "Source", "dB(A)", "Duration (min)",
+            "Status", "Recommended Controls", "Remarks", "Evidence"
+        ])
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(True)
         table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        # Fixed professional column widths — Recommended Controls ~2 inches (≈ 200 px)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        table.setColumnWidth(0, 140)   # Location
+        table.setColumnWidth(1, 120)   # Source
+        table.setColumnWidth(2, 70)    # dB(A)
+        table.setColumnWidth(3, 90)    # Duration
+        table.setColumnWidth(4, 80)    # Status
+        table.setColumnWidth(5, 220)   # Recommended Controls ≈ 2 inches
+        table.setColumnWidth(6, 140)   # Remarks
+        table.setColumnWidth(7, 100)   # Evidence
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        table.verticalHeader().setDefaultSectionSize(48)
+
         for rec in self.db.conn.execute("SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id", (sid,)).fetchall():
             r = table.rowCount(); table.insertRow(r)
-            for c, v in enumerate([rec["location"], rec["noise_source"], str(rec["reading_dba"]), str(rec["duration_minutes"]),
-                                   rec["risk_level"], rec["recommended_controls"], rec["remarks"], ""]):
+            for c, v in enumerate([
+                rec["location"], rec["noise_source"], str(rec["reading_dba"]), str(rec["duration_minutes"]),
+                rec["risk_level"], rec["recommended_controls"], rec["remarks"], ""
+            ]):
                 it = QTableWidgetItem(str(v or ""))
-                if c not in (4, 5, 7): it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-                else: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c not in (4, 5, 7):
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+                else:
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(r, c, it)
             table.item(r, 0).setData(Qt.ItemDataRole.UserRole, int(rec["id"]))
             if rec["evidence_path"] and os.path.exists(rec["evidence_path"]):
                 table.item(r, 7).setData(Qt.ItemDataRole.UserRole, rec["evidence_path"])
-                b = QPushButton("View Photo"); b.clicked.connect(lambda checked=False, p=rec["evidence_path"]: self._show_evidence(p)); table.setCellWidget(r, 7, b)
+                b = QPushButton("View Photo")
+                b.clicked.connect(lambda checked=False, p=rec["evidence_path"]: self._show_evidence(p))
+                table.setCellWidget(r, 7, b)
             else:
-                b = QPushButton("Attach"); b.clicked.connect(lambda checked=False, rr=r: self._attach_dialog_evidence(table, rr)); table.setCellWidget(r, 7, b)
+                b = QPushButton("Attach")
+                b.clicked.connect(lambda checked=False, rr=r: self._attach_dialog_evidence(table, rr))
+                table.setCellWidget(r, 7, b)
         root.addWidget(table, 1)
 
         def add_row():
             r = table.rowCount(); table.insertRow(r)
             for c in range(8):
                 it = QTableWidgetItem("" if c not in (4, 5) else ("Awaiting" if c == 4 else "Enter reading"))
-                if c in (0, 1, 2, 3, 6): it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
-                else: it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c in (0, 1, 2, 3, 6):
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsEditable)
+                else:
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 table.setItem(r, c, it)
             table.item(r, 0).setData(Qt.ItemDataRole.UserRole, None)
-            b = QPushButton("Attach"); b.clicked.connect(lambda checked=False, rr=r: self._attach_dialog_evidence(table, rr)); table.setCellWidget(r, 7, b)
+            b = QPushButton("Attach")
+            b.clicked.connect(lambda checked=False, rr=r: self._attach_dialog_evidence(table, rr))
+            table.setCellWidget(r, 7, b)
 
         def persist(submit_now=False):
             entries = []
             for rr in range(table.rowCount()):
                 get = lambda cc: table.item(rr, cc).text().strip() if table.item(rr, cc) else ""
                 loc, source, reading_txt, duration_txt, remarks = get(0), get(1), get(2), get(3), get(6)
-                cell = table.item(rr, 7); evidence = cell.data(Qt.ItemDataRole.UserRole) if cell else ""
-                if not any((loc, source, reading_txt, duration_txt, remarks, evidence)): continue
+                cell = table.item(rr, 7)
+                evidence = cell.data(Qt.ItemDataRole.UserRole) if cell else ""
+                if not any((loc, source, reading_txt, duration_txt, remarks, evidence)):
+                    continue
                 if not loc or not reading_txt:
-                    QMessageBox.warning(dlg, "Incomplete", f"Row {rr+1}: location and reading required."); return False
+                    QMessageBox.warning(dlg, "Incomplete", f"Row {rr+1}: location and reading required.")
+                    return False
                 try:
-                    reading = float(reading_txt.replace(",", ".")); duration = float(duration_txt.replace(",", ".")) if duration_txt else 0
+                    reading = float(reading_txt.replace(",", "."))
+                    duration = float(duration_txt.replace(",", ".")) if duration_txt else 0
                 except ValueError:
-                    QMessageBox.warning(dlg, "Invalid", f"Row {rr+1}: numeric reading required."); return False
+                    QMessageBox.warning(dlg, "Invalid", f"Row {rr+1}: numeric reading required.")
+                    return False
                 level, controls = self._recommendation(reading)
                 entries.append((loc, source, reading, duration, level, controls, remarks, evidence or ""))
             if not entries:
-                QMessageBox.warning(dlg, "No Readings", "Add at least one location reading."); return False
+                QMessageBox.warning(dlg, "No Readings", "Add at least one location reading.")
+                return False
             try:
                 self.db.conn.execute("DELETE FROM env_noise_locations WHERE session_id=?", (sid,))
                 self.db.conn.executemany(
                     "INSERT INTO env_noise_locations(session_id,location,noise_source,reading_dba,duration_minutes,risk_level,recommended_controls,remarks,evidence_path) VALUES(?,?,?,?,?,?,?,?,?)",
                     [(sid,) + x for x in entries])
                 if submit_now:
-                    self.db.conn.execute("UPDATE env_noise_sessions SET workflow_status='Submitted for Review',submitted_at=? WHERE id=?",
-                                        (datetime.now().isoformat(timespec="seconds"), sid))
+                    self.db.conn.execute(
+                        "UPDATE env_noise_sessions SET workflow_status='Submitted for Review',submitted_at=? WHERE id=?",
+                        (datetime.now().isoformat(timespec="seconds"), sid))
                 self.db.conn.commit()
-                self.refresh_noise_register(); self.refresh_noise_dashboard(); self.refresh_noise_review_register()
+                self.refresh_noise_register()
+                self.refresh_noise_dashboard()
+                self.refresh_noise_review_register()
                 QMessageBox.information(dlg, "Saved", "Saved." if not submit_now else "Submitted for review.")
                 return True
             except Exception as exc:
-                self.db.conn.rollback(); QMessageBox.critical(dlg, "Save Failed", str(exc)); return False
+                self.db.conn.rollback()
+                QMessageBox.critical(dlg, "Save Failed", str(exc))
+                return False
 
         actions = QHBoxLayout()
         add = QPushButton("+ Add Location"); add.clicked.connect(add_row)
         save = QPushButton("Save"); save.clicked.connect(lambda: persist(False))
         submit = QPushButton("Submit for Review"); submit.clicked.connect(lambda: persist(True) and dlg.accept())
-        exp_pdf = QPushButton("Export PDF"); exp_pdf.clicked.connect(lambda: self._export_noise_session(sid, "pdf"))
-        exp_xlsx = QPushButton("Export Excel"); exp_xlsx.clicked.connect(lambda: self._export_noise_session(sid, "xlsx"))
+        exp_pdf = QPushButton("Export PDF")
+        exp_xlsx = QPushButton("Export Excel")
+        exp_docx = QPushButton("Export Word")
+        exp_pdf.clicked.connect(lambda: self._export_noise_session(sid, "pdf"))
+        exp_xlsx.clicked.connect(lambda: self._export_noise_session(sid, "xlsx"))
+        exp_docx.clicked.connect(lambda: self._export_noise_session(sid, "docx"))
         close = QPushButton("Close"); close.clicked.connect(dlg.accept)
-        for b in (add, save, submit, exp_pdf, exp_xlsx, close): actions.addWidget(b)
+        for b in (add, save, submit, exp_pdf, exp_xlsx, exp_docx, close):
+            actions.addWidget(b)
         root.addLayout(actions)
-        fit_dialog_to_desktop(dlg, 0.95, 0.9); dlg.exec()
+        fit_dialog_to_desktop(dlg, 0.95, 0.9)
+        dlg.exec()
 
     def _attach_dialog_evidence(self, table, row):
         path, _ = QFileDialog.getOpenFileName(self, "Attach Evidence", "", "Images (*.png *.jpg *.jpeg *.bmp *.webp)")
         if not path: return
         try:
-            folder = ATTACH_DIR / "noise_monitoring"; folder.mkdir(parents=True, exist_ok=True)
+            folder = ATTACH_DIR / "noise_monitoring"
+            folder.mkdir(parents=True, exist_ok=True)
             dest = folder / f"noise_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}{Path(path).suffix.lower() or '.jpg'}"
             shutil.copy2(path, dest)
-            if table.item(row, 7): table.item(row, 7).setData(Qt.ItemDataRole.UserRole, str(dest))
+            if table.item(row, 7):
+                table.item(row, 7).setData(Qt.ItemDataRole.UserRole, str(dest))
             btn = table.cellWidget(row, 7)
-            if btn: btn.setText("Photo ✓"); btn.setToolTip(str(dest))
+            if btn:
+                btn.setText("Photo ✓")
+                btn.setToolTip(str(dest))
         except Exception as exc:
             QMessageBox.warning(self, "Evidence", str(exc))
 
     def review_selected_noise_session(self, *_):
-        row = self.review_table.currentRow()
-        if row < 0 or not self.review_table.item(row, 0):
-            QMessageBox.information(self, "Review", "Select a submitted report first."); return
-        sid = int(self.review_table.item(row, 0).text())
+        sid = self._selected_noise_session_id(from_review=True)
+        if sid is None: return
         session = self.db.conn.execute("SELECT * FROM env_noise_sessions WHERE id=?", (sid,)).fetchone()
         if not session: return
+        status = safe(session["workflow_status"]).strip()
+        if status not in ("Submitted for Review", "Returned", "Reviewed", "Pending Approval"):
+            QMessageBox.information(self, "Review", f"Current status is '{status or 'Draft'}'. Only submitted sessions can be reviewed.")
+            return
         reviewer, ok = QInputDialog.getText(self, "Reviewer", "Reviewer name:")
         if not ok or not reviewer.strip(): return
-        decision, ok = QInputDialog.getItem(self, "Decision", "Decision:", ["Reviewed — Recommend Approval", "Returned for Correction"], 0, False)
+        decision, ok = QInputDialog.getItem(
+            self, "Review Decision", "Decision:",
+            ["Reviewed — Recommend Approval", "Returned for Correction"], 0, False)
         if not ok: return
-        status = "Reviewed" if decision.startswith("Reviewed") else "Returned"
-        self.db.conn.execute("UPDATE env_noise_sessions SET reviewed_by=?,review_status=?,workflow_status=?,reviewed_at=? WHERE id=?",
-                            (reviewer.strip(), status, "Pending Approval" if status == "Reviewed" else "Returned",
-                             datetime.now().isoformat(timespec="seconds"), sid))
-        self.db.conn.commit(); self.refresh_noise_review_register(); self.refresh_noise_register()
-        QMessageBox.information(self, "Saved", f"Review status: {status}")
+        comment, ok = QInputDialog.getMultiLineText(self, "Review Comments", "Enter review comments:")
+        if not ok: return
+        new_status = "Pending Approval" if decision.startswith("Reviewed") else "Returned"
+        self.db.conn.execute(
+            "UPDATE env_noise_sessions SET reviewed_by=?,review_comments=?,workflow_status=?,reviewed_at=? WHERE id=?",
+            (reviewer.strip(), comment, new_status, datetime.now().isoformat(timespec="seconds"), sid))
+        self.db.conn.commit()
+        self.refresh_noise_review_register()
+        self.refresh_noise_register()
+        QMessageBox.information(self, "Saved", f"Review status: {new_status}")
+
+    def approve_selected_noise_session(self, *_):
+        sid = self._selected_noise_session_id(from_review=True)
+        if sid is None: return
+        session = self.db.conn.execute("SELECT * FROM env_noise_sessions WHERE id=?", (sid,)).fetchone()
+        if not session: return
+        status = safe(session["workflow_status"]).strip()
+        if status not in ("Pending Approval", "Reviewed"):
+            QMessageBox.information(
+                self, "Approval",
+                f"Current status is '{status or 'Draft'}'. Session must be Reviewed / Pending Approval before final approval.")
+            return
+        approver, ok = QInputDialog.getText(self, "Approver", "Approver name:")
+        if not ok or not approver.strip(): return
+        decision, ok = QInputDialog.getItem(
+            self, "Approval Decision", "Decision:",
+            ["Approved", "Returned for Correction"], 0, False)
+        if not ok: return
+        comment, ok = QInputDialog.getMultiLineText(self, "Approval Comments", "Enter approval comments:")
+        if not ok: return
+        new_status = "Approved" if decision == "Approved" else "Returned"
+        self.db.conn.execute(
+            "UPDATE env_noise_sessions SET approved_by=?,approval_comments=?,workflow_status=?,approved_at=? WHERE id=?",
+            (approver.strip(), comment, new_status, datetime.now().isoformat(timespec="seconds"), sid))
+        self.db.conn.commit()
+        self.refresh_noise_review_register()
+        self.refresh_noise_register()
+        QMessageBox.information(self, "Saved", f"Session {new_status.lower()}.")
 
     def _show_evidence(self, path):
         if not os.path.exists(path):
             QMessageBox.warning(self, "Evidence", "File not found."); return
         dlg = QDialog(self); dlg.setWindowTitle("Evidence"); box = QVBoxLayout(dlg)
-        label = QLabel(); label.setPixmap(QPixmap(path).scaled(900, 650, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        box.addWidget(label); fit_dialog_to_desktop(dlg); dlg.exec()
+        label = QLabel()
+        label.setPixmap(QPixmap(path).scaled(900, 650, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        box.addWidget(label)
+        fit_dialog_to_desktop(dlg)
+        dlg.exec()
 
     def _export_noise_session(self, sid, kind):
         session = self.db.conn.execute("SELECT * FROM env_noise_sessions WHERE id=?", (sid,)).fetchone()
         rows = self.db.conn.execute("SELECT * FROM env_noise_locations WHERE session_id=? ORDER BY id", (sid,)).fetchall()
         if not session: return
-        ext = {"pdf": "PDF Files (*.pdf)", "xlsx": "Excel Workbook (*.xlsx)", "docx": "Word Documents (*.docx)"}.get(kind, "All (*.*)")
-        path, _ = QFileDialog.getSaveFileName(self, "Export Noise Report", f"{session['session_no']}_Noise.{kind}", ext)
+        ext_map = {"pdf": "PDF Files (*.pdf)", "xlsx": "Excel Workbook (*.xlsx)", "docx": "Word Documents (*.docx)"}
+        path, _ = QFileDialog.getSaveFileName(
+            self, f"Export Noise Report ({kind.upper()})",
+            f"{session['session_no']}_Noise_Monitoring.{kind}",
+            ext_map.get(kind, "All (*.*)"))
         if not path: return
-        if not path.lower().endswith("." + kind): path += "." + kind
+        if not path.lower().endswith("." + kind):
+            path += "." + kind
         try:
             if kind == "pdf":
-                styles = getSampleStyleSheet(); story = [Paragraph("ENVIRONMENTAL NOISE MONITORING REPORT", styles["Title"]), Spacer(1, 10)]
-                meta = [[f"Session: {session['session_no']}", f"Date: {session['monitoring_date']} {session['monitoring_time'] or ''}"],
-                        [f"Project: {session['project']}", f"Activity: {session['activity']}"],
-                        [f"Monitored By: {session['monitored_by'] or ''}", f"Status: {session['workflow_status'] or 'Draft'}"]]
-                mt = Table(meta, colWidths=[260, 260])
-                mt.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.8, colors.HexColor("#4A5C6A")),
-                                        ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#17365D")),
-                                        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF3F7")),
-                                        ("PADDING", (0, 0), (-1, -1), 6)]))
-                story += [mt, Spacer(1, 12)]
-                data = [["Location", "Source", "dB(A)", "Duration", "Status", "Recommended Controls", "Remarks", "Evidence"]]
-                for x in rows:
-                    data.append([x["location"], x["noise_source"], str(x["reading_dba"]), str(x["duration_minutes"]),
-                                 x["risk_level"], Paragraph(html.escape(x["recommended_controls"] or ""), styles["BodyText"]),
-                                 Paragraph(html.escape(x["remarks"] or ""), styles["BodyText"]),
-                                 Path(x["evidence_path"]).name if x["evidence_path"] else "—"])
-                tb = Table(data, colWidths=[70, 55, 36, 42, 48, 150, 70, 70], repeatRows=1)
-                tb.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("GRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#5A6A78")),
-                    ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#17365D")),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"), ("PADDING", (0, 0), (-1, -1), 4),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F9")]),
-                    ("FONTSIZE", (0, 0), (-1, -1), 7)]))
-                story.append(tb)
-                for x in rows:
-                    if x["evidence_path"] and os.path.exists(x["evidence_path"]):
-                        story.append(Spacer(1, 8))
-                        story.append(Paragraph(f"<b>Evidence — {html.escape(x['location'])} ({x['reading_dba']} dB(A))</b>", styles["Heading3"]))
-                        try: story.append(RLImage(x["evidence_path"], width=180, height=120, kind="proportional"))
-                        except Exception: pass
-                SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=24, bottomMargin=24).build(story)
-            else:
-                wb = Workbook(); ws = wb.active; ws.title = "Noise"
-                ws.append(["Session", session["session_no"], "Date", session["monitoring_date"], "Project", session["project"]])
-                ws.append([])
-                headers = ["Location", "Source", "dB(A)", "Duration", "Status", "Recommended Controls", "Remarks", "Evidence File"]
-                ws.append(headers)
-                for cell in ws[3]:
-                    cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
-                thin = Border(left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
-                              top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
-                for r, x in enumerate(rows, 4):
-                    vals = [x["location"], x["noise_source"], x["reading_dba"], x["duration_minutes"], x["risk_level"],
-                            x["recommended_controls"], x["remarks"], Path(x["evidence_path"]).name if x["evidence_path"] else "—"]
-                    for c, v in enumerate(vals, 1):
-                        cell = ws.cell(r, c, v or ""); cell.border = thin; cell.alignment = Alignment(wrap_text=True, vertical="top")
-                    if x["evidence_path"] and os.path.exists(x["evidence_path"]):
-                        try:
-                            img = XLImage(x["evidence_path"]); img.width = 100; img.height = 70
-                            ws.add_image(img, f"H{r}"); ws.row_dimensions[r].height = 55
-                        except Exception: pass
-                for c in range(1, 9): ws.cell(3, c).border = thin
-                for col in ws.columns:
-                    ws.column_dimensions[col[0].column_letter].width = min(40, max(12, max(len(safe(c.value)) for c in col) + 2))
-                wb.save(path)
+                self._export_noise_pdf(path, session, rows)
+            elif kind == "xlsx":
+                self._export_noise_xlsx(path, session, rows)
+            elif kind == "docx":
+                self._export_noise_docx(path, session, rows)
             QMessageBox.information(self, "Export Complete", f"Report saved:\n{path}")
         except Exception as exc:
-            logging.exception("noise export"); QMessageBox.critical(self, "Export Failed", str(exc))
+            logging.exception("noise export")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _noise_report_meta(self, session):
+        company = company_name() or "COMPANY NAME"
+        prefix = document_prefix() or "HSE"
+        report_no = f"{prefix}-NMS-{session['session_no']}-{datetime.now().strftime('%Y%m%d%H%M')}"
+        logo = report_logo_path()
+        return company, prefix, report_no, logo
+
+    def _export_noise_pdf(self, path, session, rows):
+        styles = getSampleStyleSheet()
+        story = []
+        company, prefix, report_no, logo = self._noise_report_meta(session)
+
+        # Header with logo + title + document number
+        header_data = []
+        left_cell = []
+        if logo and Path(logo).exists():
+            try:
+                left_cell.append(RLImage(str(logo), width=70, height=45, kind="proportional"))
+            except Exception:
+                left_cell.append(Paragraph(f"<b>{html.escape(company)}</b>", styles["Normal"]))
+        else:
+            left_cell.append(Paragraph(f"<b>{html.escape(company)}</b>", styles["Normal"]))
+        mid = Paragraph(
+            f"<b><font size='14'>ENVIRONMENTAL NOISE MONITORING REPORT</font></b><br/>"
+            f"<font size='9'>{html.escape(company)}</font>", styles["Normal"])
+        right = Paragraph(
+            f"<b>Document No.:</b> {html.escape(report_no)}<br/>"
+            f"<b>Session:</b> {html.escape(session['session_no'])}<br/>"
+            f"<b>Date:</b> {html.escape(session['monitoring_date'])}<br/>"
+            f"<b>Status:</b> {html.escape(session['workflow_status'] or 'Draft')}",
+            styles["Normal"])
+        ht = Table([[left_cell[0], mid, right]], colWidths=[90, 320, 220])
+        ht.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 1.4, colors.HexColor("#17365D")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.6, colors.HexColor("#8FA6BF")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (0, 0), (0, 0), "CENTER"),
+            ("ALIGN", (1, 0), (1, 0), "CENTER"),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF3F7")),
+            ("PADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story += [ht, Spacer(1, 12)]
+
+        # Meta block
+        meta = [
+            [f"Project / Site: {session['project']}", f"Activity: {session['activity']}"],
+            [f"Monitored By: {session['monitored_by'] or '—'}", f"Time: {session['monitoring_time'] or '—'}"],
+            [f"Instrument: {session['instrument'] or '—'}", f"Calibration: {session['calibration_ref'] or '—'}"],
+            [f"Reviewed By: {session['reviewed_by'] or '—'}", f"Approved By: {session['approved_by'] or '—'}"],
+        ]
+        mt = Table(meta, colWidths=[315, 315])
+        mt.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 1.0, colors.HexColor("#17365D")),
+            ("INNERGRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#7B8794")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F7FAFC")),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("PADDING", (0, 0), (-1, -1), 5),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+        story += [mt, Spacer(1, 10)]
+
+        # Readings table — evidence image embedded in same row
+        body_style = styles["BodyText"]
+        body_style.fontSize = 7
+        body_style.leading = 9
+        data = [[
+            Paragraph("<b>Location</b>", body_style),
+            Paragraph("<b>Source</b>", body_style),
+            Paragraph("<b>dB(A)</b>", body_style),
+            Paragraph("<b>Duration</b>", body_style),
+            Paragraph("<b>Status</b>", body_style),
+            Paragraph("<b>Recommended Controls</b>", body_style),
+            Paragraph("<b>Remarks</b>", body_style),
+            Paragraph("<b>Evidence</b>", body_style),
+        ]]
+        for x in rows:
+            evidence_cell = Paragraph("—", body_style)
+            if x["evidence_path"] and os.path.exists(x["evidence_path"]):
+                try:
+                    evidence_cell = RLImage(x["evidence_path"], width=55, height=40, kind="proportional")
+                except Exception:
+                    evidence_cell = Paragraph(html.escape(Path(x["evidence_path"]).name), body_style)
+            data.append([
+                Paragraph(html.escape(safe(x["location"])), body_style),
+                Paragraph(html.escape(safe(x["noise_source"])), body_style),
+                Paragraph(str(x["reading_dba"]), body_style),
+                Paragraph(str(x["duration_minutes"]), body_style),
+                Paragraph(html.escape(safe(x["risk_level"])), body_style),
+                Paragraph(html.escape(safe(x["recommended_controls"])), body_style),
+                Paragraph(html.escape(safe(x["remarks"])), body_style),
+                evidence_cell,
+            ])
+        tb = Table(data, colWidths=[70, 55, 38, 42, 48, 155, 70, 62], repeatRows=1)
+        tb.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#5A6A78")),
+            ("BOX", (0, 0), (-1, -1), 1.3, colors.HexColor("#17365D")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 4),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F9")]),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+        ]))
+        story.append(tb)
+        if session["notes"]:
+            story += [Spacer(1, 8), Paragraph(f"<b>Notes:</b> {html.escape(session['notes'])}", styles["Normal"])]
+
+        def _page_border(canvas, document):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor("#17365D"))
+            canvas.setLineWidth(0.9)
+            canvas.rect(14, 14, landscape(A4)[0] - 28, landscape(A4)[1] - 28)
+            canvas.restoreState()
+
+        SimpleDocTemplate(
+            path, pagesize=landscape(A4),
+            rightMargin=22, leftMargin=22, topMargin=24, bottomMargin=24
+        ).build(story, onFirstPage=_page_border, onLaterPages=_page_border)
+
+    def _export_noise_xlsx(self, path, session, rows):
+        company, prefix, report_no, logo = self._noise_report_meta(session)
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Noise Monitoring"
+        # Title block
+        ws.merge_cells("A1:H1")
+        ws["A1"] = f"{company} — ENVIRONMENTAL NOISE MONITORING REPORT"
+        ws["A1"].font = Font(bold=True, size=14, color="17365D")
+        ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 22
+        ws.merge_cells("A2:H2")
+        ws["A2"] = f"Document No.: {report_no}  |  Session: {session['session_no']}  |  Date: {session['monitoring_date']}  |  Status: {session['workflow_status'] or 'Draft'}"
+        ws["A2"].font = Font(size=9, color="526477")
+        ws["A2"].alignment = Alignment(horizontal="center")
+        meta_row = 3
+        ws[f"A{meta_row}"] = f"Project: {session['project']}"
+        ws[f"C{meta_row}"] = f"Activity: {session['activity']}"
+        ws[f"E{meta_row}"] = f"Monitored By: {session['monitored_by'] or '—'}"
+        ws[f"G{meta_row}"] = f"Instrument: {session['instrument'] or '—'}"
+        headers = ["Location", "Source", "dB(A)", "Duration (min)", "Status", "Recommended Controls", "Remarks", "Evidence File"]
+        header_row = 5
+        for c, h in enumerate(headers, 1):
+            cell = ws.cell(header_row, c, h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="17365D")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            cell.border = Border(
+                left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
+                top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
+        thin = Border(
+            left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
+            top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
+        for r, x in enumerate(rows, header_row + 1):
+            vals = [
+                x["location"], x["noise_source"], x["reading_dba"], x["duration_minutes"],
+                x["risk_level"], x["recommended_controls"], x["remarks"],
+                Path(x["evidence_path"]).name if x["evidence_path"] else "—"
+            ]
+            for c, v in enumerate(vals, 1):
+                cell = ws.cell(r, c, v or "")
+                cell.border = thin
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+            # Embed image in the Evidence column (same row)
+            if x["evidence_path"] and os.path.exists(x["evidence_path"]):
+                try:
+                    img = XLImage(x["evidence_path"])
+                    img.width = 90
+                    img.height = 60
+                    ws.add_image(img, f"H{r}")
+                    ws.row_dimensions[r].height = 50
+                except Exception:
+                    pass
+        widths = [18, 14, 10, 12, 12, 42, 18, 22]
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[ws.cell(1, i).column_letter].width = w
+        ws.freeze_panes = "A6"
+        wb.save(path)
+
+    def _export_noise_docx(self, path, session, rows):
+        company, prefix, report_no, logo = self._noise_report_meta(session)
+        doc = Document()
+        section = doc.sections[0]
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
+        section.left_margin = Inches(0.45)
+        section.right_margin = Inches(0.45)
+        section.top_margin = Inches(0.45)
+        section.bottom_margin = Inches(0.45)
+
+        # Header table: logo | title | document number
+        header = doc.add_table(rows=1, cols=3)
+        header.autofit = False
+        widths = [Inches(1.35), Inches(6.0), Inches(2.6)]
+        for cell, w in zip(header.rows[0].cells, widths):
+            cell.width = w
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        left, mid, right = header.rows[0].cells
+        if logo and Path(logo).exists():
+            try:
+                stream = attachment_image_stream(str(logo))
+                if stream:
+                    left.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    left.paragraphs[0].add_run().add_picture(stream, width=Inches(1.05))
+                else:
+                    left.paragraphs[0].add_run(xml_safe(company)).bold = True
+            except Exception:
+                left.paragraphs[0].add_run(xml_safe(company)).bold = True
+        else:
+            left.paragraphs[0].add_run(xml_safe(company)).bold = True
+        mp = mid.paragraphs[0]
+        mp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        r = mp.add_run("ENVIRONMENTAL NOISE MONITORING REPORT")
+        r.bold = True
+        r.font.size = Pt(13)
+        r2 = mp.add_run("\n" + xml_safe(company))
+        r2.bold = True
+        r2.font.size = Pt(9)
+        rp = right.paragraphs[0]
+        for label, val in [
+            ("Document No.", report_no),
+            ("Session", session["session_no"]),
+            ("Date", session["monitoring_date"]),
+            ("Status", session["workflow_status"] or "Draft"),
+        ]:
+            rr = rp.add_run(f"{label}: {xml_safe(val)}\n")
+            rr.font.size = Pt(8)
+            if label == "Document No.":
+                rr.bold = True
+        for cell in header.rows[0].cells:
+            set_docx_cell_borders(
+                cell,
+                top={"val": "single", "sz": 10, "color": "17365D"},
+                bottom={"val": "single", "sz": 10, "color": "17365D"},
+                left={"val": "single", "sz": 10, "color": "17365D"},
+                right={"val": "single", "sz": 10, "color": "17365D"},
+            )
+            add_docx_cell_shading(cell, "EEF3F7")
+
+        doc.add_paragraph()
+        # Meta key-value table
+        meta_pairs = [
+            ("Project / Site", session["project"]),
+            ("Activity / Work Scope", session["activity"]),
+            ("Monitored By", session["monitored_by"] or "—"),
+            ("Time", session["monitoring_time"] or "—"),
+            ("Instrument", session["instrument"] or "—"),
+            ("Calibration Ref.", session["calibration_ref"] or "—"),
+            ("Reviewed By", session["reviewed_by"] or "—"),
+            ("Approved By", session["approved_by"] or "—"),
+        ]
+        meta = doc.add_table(rows=0, cols=4)
+        for i in range(0, len(meta_pairs), 2):
+            cells = meta.add_row().cells
+            cells[0].text = xml_safe(meta_pairs[i][0])
+            cells[1].text = xml_safe(meta_pairs[i][1])
+            if i + 1 < len(meta_pairs):
+                cells[2].text = xml_safe(meta_pairs[i + 1][0])
+                cells[3].text = xml_safe(meta_pairs[i + 1][1])
+            for c in (0, 2):
+                for p in cells[c].paragraphs:
+                    for run in p.runs:
+                        run.bold = True
+                        run.font.size = Pt(8)
+            for c in (1, 3):
+                for p in cells[c].paragraphs:
+                    for run in p.runs:
+                        run.font.size = Pt(8)
+        style_docx_table(meta, header=False, font_size=8)
+
+        doc.add_paragraph()
+        # Readings table — evidence image in same row
+        headers = ["Location", "Source", "dB(A)", "Duration", "Status", "Recommended Controls", "Remarks", "Evidence"]
+        table = doc.add_table(rows=1, cols=8)
+        for i, h in enumerate(headers):
+            table.rows[0].cells[i].text = h
+        col_widths = [Inches(1.1), Inches(0.95), Inches(0.6), Inches(0.7), Inches(0.7), Inches(2.1), Inches(1.1), Inches(1.15)]
+        for row in table.rows:
+            for i, w in enumerate(col_widths):
+                row.cells[i].width = w
+        for x in rows:
+            cells = table.add_row().cells
+            vals = [
+                x["location"], x["noise_source"], str(x["reading_dba"]),
+                str(x["duration_minutes"]), x["risk_level"],
+                x["recommended_controls"], x["remarks"]
+            ]
+            for i, v in enumerate(vals):
+                cells[i].text = xml_safe(v)
+                for p in cells[i].paragraphs:
+                    for run in p.runs:
+                        run.font.size = Pt(7)
+            # Evidence in same row
+            cells[7].text = ""
+            if x["evidence_path"] and os.path.exists(x["evidence_path"]):
+                try:
+                    stream = attachment_image_stream(x["evidence_path"])
+                    if stream:
+                        p = cells[7].paragraphs[0]
+                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        p.add_run().add_picture(stream, width=Inches(0.95))
+                    else:
+                        cells[7].text = Path(x["evidence_path"]).name
+                except Exception:
+                    cells[7].text = Path(x["evidence_path"]).name
+            else:
+                cells[7].text = "—"
+            for i, w in enumerate(col_widths):
+                cells[i].width = w
+        style_docx_table(table, header=True, font_size=7)
+
+        if session["notes"]:
+            doc.add_paragraph()
+            p = doc.add_paragraph()
+            r = p.add_run("Notes: ")
+            r.bold = True
+            p.add_run(xml_safe(session["notes"]))
+
+        # Signature strip
+        doc.add_paragraph()
+        sig = doc.add_table(rows=2, cols=3)
+        for i, label in enumerate(["Prepared / Monitored By", "Reviewed By", "Approved By"]):
+            sig.cell(0, i).text = label
+            name = [session["monitored_by"], session["reviewed_by"], session["approved_by"]][i] or ""
+            sig.cell(1, i).text = (safe(name) or "________________") + "\nSignature: ________________\nDate: ________________"
+        style_docx_table(sig, header=True, font_size=8)
+
+        save_docx_validated(doc, path)
 
     def delete_selected_noise_session(self):
         sid = self._selected_noise_session_id()
         if sid is None: return
-        if QMessageBox.question(self, "Delete", "Delete this noise session and its readings?",
-                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(
+            self, "Delete", "Delete this noise session and its readings?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
             return
         try:
-            self.db.conn.execute("DELETE FROM env_noise_sessions WHERE id=?", (sid,)); self.db.conn.commit()
-            self.refresh_noise_register(); self.refresh_noise_dashboard()
+            self.db.conn.execute("DELETE FROM env_noise_sessions WHERE id=?", (sid,))
+            self.db.conn.commit()
+            self.refresh_noise_register()
+            self.refresh_noise_dashboard()
+            self.refresh_noise_review_register()
         except Exception as exc:
-            self.db.conn.rollback(); QMessageBox.critical(self, "Delete Failed", str(exc))
+            self.db.conn.rollback()
+            QMessageBox.critical(self, "Delete Failed", str(exc))
 
     # -------------------- AIR QUALITY --------------------
-    def _build_air_tab(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(12, 10, 12, 10)
-        intro = QLabel("Record workplace air monitoring. Select parameter, enter reading — status and recommendations are generated automatically.")
-        intro.setWordWrap(True); intro.setStyleSheet("padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;")
+    def _styled_line_edit(self, placeholder=""):
+        w = QLineEdit()
+        w.setPlaceholderText(placeholder)
+        w.setMinimumHeight(38)
+        w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        w.setStyleSheet("QLineEdit{padding:6px 10px;font-size:13px;border:1px solid #C5D3DE;border-radius:5px;}")
+        return w
+
+    def _styled_combo(self):
+        w = QComboBox()
+        w.setMinimumHeight(38)
+        w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        w.setStyleSheet("QComboBox{padding:4px 8px;font-size:13px;border:1px solid #C5D3DE;border-radius:5px;}")
+        return w
+
+    def _styled_spin(self, decimals=2, minimum=0, maximum=100000):
+        w = QDoubleSpinBox()
+        w.setRange(minimum, maximum)
+        w.setDecimals(decimals)
+        w.setMinimumHeight(38)
+        w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        w.setStyleSheet("QDoubleSpinBox{padding:4px 8px;font-size:13px;border:1px solid #C5D3DE;border-radius:5px;}")
+        return w
+
+    def _build_air_entry_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(12)
+        intro = QLabel(
+            "Record workplace air monitoring. Select parameter, enter reading — status and recommendations are generated automatically."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:12px 14px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;font-size:13px;")
         layout.addWidget(intro)
-        form_box = QGroupBox("New Air Sample"); form = QFormLayout(form_box)
-        self.air_date = QDateEdit(QDate.currentDate()); self.air_date.setCalendarPopup(True); self.air_date.setDisplayFormat("dd-MMM-yyyy")
-        self.air_time = QLineEdit(datetime.now().strftime("%H:%M"))
-        self.air_project = QLineEdit(); self.air_location = QLineEdit(); self.air_activity = QLineEdit(); self.air_sampled_by = QLineEdit()
-        self.air_parameter = QComboBox()
+
+        form_box = QGroupBox("New Air Sample")
+        form_box.setStyleSheet("QGroupBox{font-weight:700;font-size:14px;color:#17365D;}")
+        form = QFormLayout(form_box)
+        form.setContentsMargins(16, 20, 16, 16)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.air_date = QDateEdit(QDate.currentDate())
+        self.air_date.setCalendarPopup(True)
+        self.air_date.setDisplayFormat("dd-MMM-yyyy")
+        self.air_date.setMinimumHeight(38)
+        self.air_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.air_time = self._styled_line_edit()
+        self.air_time.setText(datetime.now().strftime("%H:%M"))
+        self.air_project = self._styled_line_edit("Project / Site")
+        self.air_location = self._styled_line_edit("Specific monitoring location")
+        self.air_activity = self._styled_line_edit("Activity / work scope")
+        self.air_sampled_by = self._styled_line_edit("Name of person who took the sample")
+        self.air_parameter = self._styled_combo()
         for name, unit, limit in self.AIR_PARAMETERS:
             self.air_parameter.addItem(f"{name} ({unit})" if unit else name, (name, unit, limit))
-        self.air_reading = QDoubleSpinBox(); self.air_reading.setRange(0, 100000); self.air_reading.setDecimals(2)
-        self.air_unit = QLineEdit(); self.air_limit = QDoubleSpinBox(); self.air_limit.setRange(0, 100000); self.air_limit.setDecimals(2)
-        self.air_remarks = QLineEdit()
-        form.addRow("Sample Date *", self.air_date); form.addRow("Time", self.air_time)
-        form.addRow("Project / Site *", self.air_project); form.addRow("Specific Location *", self.air_location)
-        form.addRow("Activity", self.air_activity); form.addRow("Sampled By", self.air_sampled_by)
-        form.addRow("Parameter *", self.air_parameter); form.addRow("Reading *", self.air_reading)
-        form.addRow("Unit", self.air_unit); form.addRow("Limit / OEL", self.air_limit); form.addRow("Remarks", self.air_remarks)
-        self.air_parameter.currentIndexChanged.connect(self._air_param_changed); self._air_param_changed()
+        self.air_reading = self._styled_spin()
+        self.air_unit = self._styled_line_edit()
+        self.air_limit = self._styled_spin()
+        self.air_remarks = self._styled_line_edit("Optional remarks")
+
+        form.addRow("Sample Date *", self.air_date)
+        form.addRow("Time", self.air_time)
+        form.addRow("Project / Site *", self.air_project)
+        form.addRow("Specific Location *", self.air_location)
+        form.addRow("Activity", self.air_activity)
+        form.addRow("Sampled By", self.air_sampled_by)
+        form.addRow("Parameter *", self.air_parameter)
+        form.addRow("Reading *", self.air_reading)
+        form.addRow("Unit", self.air_unit)
+        form.addRow("Limit / OEL", self.air_limit)
+        form.addRow("Remarks", self.air_remarks)
+
+        self.air_parameter.currentIndexChanged.connect(self._air_param_changed)
+        self._air_param_changed()
         layout.addWidget(form_box)
+
         btn_row = QHBoxLayout()
-        save_air = QPushButton("Save Air Sample"); save_air.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 16px;}")
+        save_air = QPushButton("Save Air Sample")
+        save_air.setMinimumHeight(40)
+        save_air.setMinimumWidth(160)
+        save_air.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 18px;font-size:13px;}")
         save_air.clicked.connect(self.save_air_sample)
-        export_air = QPushButton("Export Air Register (Excel)"); export_air.clicked.connect(lambda: self._export_simple_register("air"))
-        btn_row.addWidget(save_air); btn_row.addStretch(1); btn_row.addWidget(export_air); layout.addLayout(btn_row)
-        self.air_table = QTableWidget(0, 11)
-        self.air_table.setHorizontalHeaderLabels(["ID", "Sample No.", "Date", "Project", "Location", "Parameter", "Reading", "Unit", "Status", "Recommendation", "Remarks"])
-        self.air_table.setColumnHidden(0, True); self.air_table.setAlternatingRowColors(True)
+        clear_air = QPushButton("Clear Form")
+        clear_air.setMinimumHeight(40)
+        clear_air.clicked.connect(self._clear_air_form)
+        btn_row.addWidget(save_air)
+        btn_row.addWidget(clear_air)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+        return page
+
+    def _build_air_register_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel("Air Quality Monitoring Register")
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#17365D;")
+        layout.addWidget(title)
+
+        btn_row = QHBoxLayout()
+        export_air = QPushButton("Export Register (Excel)")
+        export_air.clicked.connect(lambda: self._export_simple_register("air"))
+        del_btn = QPushButton("Delete Selected")
+        del_btn.clicked.connect(self.delete_air_sample)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_air_register)
+        btn_row.addWidget(export_air)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(refresh)
+        layout.addLayout(btn_row)
+
+        self.air_table = QTableWidget(0, 12)
+        self.air_table.setHorizontalHeaderLabels([
+            "ID", "Sample No.", "Date", "Time", "Project / Site", "Location",
+            "Parameter", "Reading", "Unit", "Status", "Recommendation", "Remarks"
+        ])
+        self.air_table.setColumnHidden(0, True)
+        self.air_table.setAlternatingRowColors(True)
         self.air_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.air_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.air_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.air_table.horizontalHeader().setSectionResizeMode(9, QHeaderView.ResizeMode.Stretch)
+        self.air_table.setWordWrap(True)
+        self.air_table.verticalHeader().setDefaultSectionSize(42)
+        hdr = self.air_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.air_table.setColumnWidth(1, 110)
+        self.air_table.setColumnWidth(2, 95)
+        self.air_table.setColumnWidth(3, 60)
+        self.air_table.setColumnWidth(4, 130)
+        self.air_table.setColumnWidth(5, 130)
+        self.air_table.setColumnWidth(6, 180)
+        self.air_table.setColumnWidth(7, 75)
+        self.air_table.setColumnWidth(8, 60)
+        self.air_table.setColumnWidth(9, 90)
+        self.air_table.setColumnWidth(10, 280)
+        self.air_table.setColumnWidth(11, 140)
+        hdr.setSectionResizeMode(10, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.air_table, 1)
-        del_btn = QPushButton("Delete Selected"); del_btn.clicked.connect(self.delete_air_sample); layout.addWidget(del_btn, alignment=Qt.AlignmentFlag.AlignLeft)
         return page
+
+    def _clear_air_form(self):
+        self.air_date.setDate(QDate.currentDate())
+        self.air_time.setText(datetime.now().strftime("%H:%M"))
+        self.air_project.clear()
+        self.air_location.clear()
+        self.air_activity.clear()
+        self.air_sampled_by.clear()
+        self.air_reading.setValue(0)
+        self.air_remarks.clear()
+        self._air_param_changed()
 
     def _air_param_changed(self):
         data = self.air_parameter.currentData()
         if data:
-            name, unit, limit = data; self.air_unit.setText(unit); self.air_limit.setValue(float(limit or 0))
+            name, unit, limit = data
+            self.air_unit.setText(unit)
+            self.air_limit.setValue(float(limit or 0))
 
     def save_air_sample(self):
         if not self.air_project.text().strip() or not self.air_location.text().strip():
-            QMessageBox.warning(self, "Required", "Project / Site and Location are mandatory."); return
+            QMessageBox.warning(self, "Required", "Project / Site and Location are mandatory.")
+            return
         data = self.air_parameter.currentData()
-        if not data: return
+        if not data:
+            return
         name, unit, _ = data
-        reading = float(self.air_reading.value()); limit = float(self.air_limit.value())
+        reading = float(self.air_reading.value())
+        limit = float(self.air_limit.value())
         status, recommendation = self._air_recommendation(name, reading, limit)
         try:
-            next_id = self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_air_samples'),0)+1").fetchone()[0]
+            next_id = self.db.conn.execute(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_air_samples'),0)+1"
+            ).fetchone()[0]
             sample_no = f"AIR-{datetime.now().year}-{int(next_id):04d}"
             self.db.conn.execute(
                 "INSERT INTO env_air_samples(sample_no,sample_date,sample_time,project,location,activity,sampled_by,parameter,reading,unit,limit_value,status,recommendation,remarks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sample_no, self.air_date.date().toString("yyyy-MM-dd"), self.air_time.text().strip(),
                  self.air_project.text().strip(), self.air_location.text().strip(), self.air_activity.text().strip(),
-                 self.air_sampled_by.text().strip(), name, reading, self.air_unit.text().strip() or unit, limit, status, recommendation, self.air_remarks.text().strip()))
-            self.db.conn.commit(); self.refresh_air_register()
+                 self.air_sampled_by.text().strip(), name, reading, self.air_unit.text().strip() or unit, limit,
+                 status, recommendation, self.air_remarks.text().strip()))
+            self.db.conn.commit()
+            self.refresh_air_register()
             QMessageBox.information(self, "Saved", f"Air sample {sample_no} recorded.\nStatus: {status}")
-            self.air_reading.setValue(0); self.air_remarks.clear()
+            self.air_reading.setValue(0)
+            self.air_remarks.clear()
+            self.air_tabs.setCurrentIndex(1)
         except Exception as exc:
-            self.db.conn.rollback(); logging.exception("air save"); QMessageBox.critical(self, "Save Failed", str(exc))
+            self.db.conn.rollback()
+            logging.exception("air save")
+            QMessageBox.critical(self, "Save Failed", str(exc))
 
     def refresh_air_register(self):
-        if not hasattr(self, "air_table"): return
-        rows = self.db.conn.execute("SELECT * FROM env_air_samples ORDER BY sample_date DESC, id DESC").fetchall()
+        if not hasattr(self, "air_table"):
+            return
+        rows = self.db.conn.execute(
+            "SELECT * FROM env_air_samples ORDER BY sample_date DESC, id DESC"
+        ).fetchall()
         self.air_table.setRowCount(0)
-        palette = {"Acceptable": ("#E2F4E8", "#176B36"), "Moderate": ("#FFF3CD", "#805B00"), "High": ("#FFE1C2", "#9A4300"), "Critical": ("#F9D7DA", "#8A1C27")}
+        palette = {
+            "Acceptable": ("#E2F4E8", "#176B36"),
+            "Moderate": ("#FFF3CD", "#805B00"),
+            "High": ("#FFE1C2", "#9A4300"),
+            "Critical": ("#F9D7DA", "#8A1C27"),
+        }
         for rec in rows:
-            r = self.air_table.rowCount(); self.air_table.insertRow(r)
-            for c, v in enumerate([rec["id"], rec["sample_no"], rec["sample_date"], rec["project"], rec["location"], rec["parameter"],
-                                   f"{rec['reading']:.2f}", rec["unit"], rec["status"], rec["recommendation"], rec["remarks"]]):
-                it = QTableWidgetItem(str(v or "")); self.air_table.setItem(r, c, it)
-                if c == 8:
-                    bg, fg = palette.get(rec["status"], ("#EEE", "#333")); it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
+            r = self.air_table.rowCount()
+            self.air_table.insertRow(r)
+            vals = [
+                rec["id"], rec["sample_no"], rec["sample_date"], rec["sample_time"],
+                rec["project"], rec["location"], rec["parameter"],
+                f"{rec['reading']:.2f}", rec["unit"], rec["status"],
+                rec["recommendation"], rec["remarks"]
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(str(v or ""))
+                self.air_table.setItem(r, c, it)
+                if c == 9:
+                    bg, fg = palette.get(rec["status"], ("#EEE", "#333"))
+                    it.setBackground(QColor(bg))
+                    it.setForeground(QColor(fg))
 
     def delete_air_sample(self):
         row = self.air_table.currentRow()
-        if row < 0 or not self.air_table.item(row, 0): QMessageBox.information(self, "Air", "Select a sample first."); return
-        if QMessageBox.question(self, "Delete", "Delete selected air sample?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
-        self.db.conn.execute("DELETE FROM env_air_samples WHERE id=?", (int(self.air_table.item(row, 0).text()),)); self.db.conn.commit(); self.refresh_air_register()
+        if row < 0 or not self.air_table.item(row, 0):
+            QMessageBox.information(self, "Air", "Select a sample first.")
+            return
+        if QMessageBox.question(
+            self, "Delete", "Delete selected air sample?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.conn.execute(
+            "DELETE FROM env_air_samples WHERE id=?",
+            (int(self.air_table.item(row, 0).text()),)
+        )
+        self.db.conn.commit()
+        self.refresh_air_register()
 
     # -------------------- WATER QUALITY --------------------
-    def _build_water_tab(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(12, 10, 12, 10)
-        intro = QLabel("Record water / effluent samples. Parameters include pH, TDS, Oil & Grease, BOD, COD etc. Status and recommendations are auto-generated.")
-        intro.setWordWrap(True); intro.setStyleSheet("padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;")
+    def _build_water_entry_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 14, 18, 14)
+        layout.setSpacing(12)
+        intro = QLabel(
+            "Record water / effluent samples. Parameters include pH, TDS, Oil & Grease, BOD, COD etc. "
+            "Status and recommendations are auto-generated."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:12px 14px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;font-size:13px;")
         layout.addWidget(intro)
-        form_box = QGroupBox("New Water Sample"); form = QFormLayout(form_box)
-        self.water_date = QDateEdit(QDate.currentDate()); self.water_date.setCalendarPopup(True); self.water_date.setDisplayFormat("dd-MMM-yyyy")
-        self.water_time = QLineEdit(datetime.now().strftime("%H:%M"))
-        self.water_project = QLineEdit(); self.water_location = QLineEdit(); self.water_point = QLineEdit(); self.water_sampled_by = QLineEdit()
-        self.water_parameter = QComboBox()
+
+        form_box = QGroupBox("New Water Sample")
+        form_box.setStyleSheet("QGroupBox{font-weight:700;font-size:14px;color:#17365D;}")
+        form = QFormLayout(form_box)
+        form.setContentsMargins(16, 20, 16, 16)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.water_date = QDateEdit(QDate.currentDate())
+        self.water_date.setCalendarPopup(True)
+        self.water_date.setDisplayFormat("dd-MMM-yyyy")
+        self.water_date.setMinimumHeight(38)
+        self.water_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.water_time = self._styled_line_edit()
+        self.water_time.setText(datetime.now().strftime("%H:%M"))
+        self.water_project = self._styled_line_edit("Project / Site")
+        self.water_location = self._styled_line_edit("Location")
+        self.water_point = self._styled_line_edit("Sample point / outfall")
+        self.water_sampled_by = self._styled_line_edit("Name of person who took the sample")
+        self.water_parameter = self._styled_combo()
         for name, unit, min_l, max_l in self.WATER_PARAMETERS:
             self.water_parameter.addItem(f"{name} ({unit})" if unit else name, (name, unit, min_l, max_l))
-        self.water_reading = QDoubleSpinBox(); self.water_reading.setRange(-50, 100000); self.water_reading.setDecimals(2)
-        self.water_unit = QLineEdit()
-        self.water_min = QDoubleSpinBox(); self.water_min.setRange(-50, 100000); self.water_min.setDecimals(2)
-        self.water_max = QDoubleSpinBox(); self.water_max.setRange(0, 100000); self.water_max.setDecimals(2)
-        self.water_remarks = QLineEdit()
-        form.addRow("Sample Date *", self.water_date); form.addRow("Time", self.water_time)
-        form.addRow("Project / Site *", self.water_project); form.addRow("Location *", self.water_location)
-        form.addRow("Sample Point", self.water_point); form.addRow("Sampled By", self.water_sampled_by)
-        form.addRow("Parameter *", self.water_parameter); form.addRow("Reading *", self.water_reading)
-        form.addRow("Unit", self.water_unit); form.addRow("Min Limit", self.water_min); form.addRow("Max Limit", self.water_max)
+        self.water_reading = self._styled_spin(minimum=-50)
+        self.water_unit = self._styled_line_edit()
+        self.water_min = self._styled_spin(minimum=-50)
+        self.water_max = self._styled_spin()
+        self.water_remarks = self._styled_line_edit("Optional remarks")
+
+        form.addRow("Sample Date *", self.water_date)
+        form.addRow("Time", self.water_time)
+        form.addRow("Project / Site *", self.water_project)
+        form.addRow("Location *", self.water_location)
+        form.addRow("Sample Point", self.water_point)
+        form.addRow("Sampled By", self.water_sampled_by)
+        form.addRow("Parameter *", self.water_parameter)
+        form.addRow("Reading *", self.water_reading)
+        form.addRow("Unit", self.water_unit)
+        form.addRow("Min Limit", self.water_min)
+        form.addRow("Max Limit", self.water_max)
         form.addRow("Remarks", self.water_remarks)
-        self.water_parameter.currentIndexChanged.connect(self._water_param_changed); self._water_param_changed()
+
+        self.water_parameter.currentIndexChanged.connect(self._water_param_changed)
+        self._water_param_changed()
         layout.addWidget(form_box)
+
         btn_row = QHBoxLayout()
-        save_w = QPushButton("Save Water Sample"); save_w.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 16px;}")
+        save_w = QPushButton("Save Water Sample")
+        save_w.setMinimumHeight(40)
+        save_w.setMinimumWidth(160)
+        save_w.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 18px;font-size:13px;}")
         save_w.clicked.connect(self.save_water_sample)
-        export_w = QPushButton("Export Water Register (Excel)"); export_w.clicked.connect(lambda: self._export_simple_register("water"))
-        btn_row.addWidget(save_w); btn_row.addStretch(1); btn_row.addWidget(export_w); layout.addLayout(btn_row)
-        self.water_table = QTableWidget(0, 12)
-        self.water_table.setHorizontalHeaderLabels(["ID", "Sample No.", "Date", "Project", "Location", "Parameter", "Reading", "Unit", "Min", "Max", "Status", "Recommendation"])
-        self.water_table.setColumnHidden(0, True); self.water_table.setAlternatingRowColors(True)
+        clear_w = QPushButton("Clear Form")
+        clear_w.setMinimumHeight(40)
+        clear_w.clicked.connect(self._clear_water_form)
+        btn_row.addWidget(save_w)
+        btn_row.addWidget(clear_w)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+        layout.addStretch(1)
+        return page
+
+    def _build_water_register_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        title = QLabel("Water Quality Monitoring Register")
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#17365D;")
+        layout.addWidget(title)
+
+        btn_row = QHBoxLayout()
+        export_w = QPushButton("Export Register (Excel)")
+        export_w.clicked.connect(lambda: self._export_simple_register("water"))
+        del_btn = QPushButton("Delete Selected")
+        del_btn.clicked.connect(self.delete_water_sample)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_water_register)
+        btn_row.addWidget(export_w)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(refresh)
+        layout.addLayout(btn_row)
+
+        self.water_table = QTableWidget(0, 13)
+        self.water_table.setHorizontalHeaderLabels([
+            "ID", "Sample No.", "Date", "Time", "Project / Site", "Location",
+            "Parameter", "Reading", "Unit", "Min", "Max", "Status", "Recommendation"
+        ])
+        self.water_table.setColumnHidden(0, True)
+        self.water_table.setAlternatingRowColors(True)
         self.water_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.water_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.water_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        self.water_table.horizontalHeader().setSectionResizeMode(11, QHeaderView.ResizeMode.Stretch)
+        self.water_table.setWordWrap(True)
+        self.water_table.verticalHeader().setDefaultSectionSize(42)
+        hdr = self.water_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.water_table.setColumnWidth(1, 110)
+        self.water_table.setColumnWidth(2, 95)
+        self.water_table.setColumnWidth(3, 60)
+        self.water_table.setColumnWidth(4, 120)
+        self.water_table.setColumnWidth(5, 120)
+        self.water_table.setColumnWidth(6, 170)
+        self.water_table.setColumnWidth(7, 70)
+        self.water_table.setColumnWidth(8, 55)
+        self.water_table.setColumnWidth(9, 55)
+        self.water_table.setColumnWidth(10, 55)
+        self.water_table.setColumnWidth(11, 90)
+        self.water_table.setColumnWidth(12, 280)
+        hdr.setSectionResizeMode(12, QHeaderView.ResizeMode.Stretch)
         layout.addWidget(self.water_table, 1)
-        del_btn = QPushButton("Delete Selected"); del_btn.clicked.connect(self.delete_water_sample); layout.addWidget(del_btn, alignment=Qt.AlignmentFlag.AlignLeft)
         return page
+
+    def _clear_water_form(self):
+        self.water_date.setDate(QDate.currentDate())
+        self.water_time.setText(datetime.now().strftime("%H:%M"))
+        self.water_project.clear()
+        self.water_location.clear()
+        self.water_point.clear()
+        self.water_sampled_by.clear()
+        self.water_reading.setValue(0)
+        self.water_remarks.clear()
+        self._water_param_changed()
 
     def _water_param_changed(self):
         data = self.water_parameter.currentData()
         if data:
-            name, unit, min_l, max_l = data; self.water_unit.setText(unit); self.water_min.setValue(float(min_l or 0)); self.water_max.setValue(float(max_l or 0))
+            name, unit, min_l, max_l = data
+            self.water_unit.setText(unit)
+            self.water_min.setValue(float(min_l or 0))
+            self.water_max.setValue(float(max_l or 0))
 
     def save_water_sample(self):
         if not self.water_project.text().strip() or not self.water_location.text().strip():
-            QMessageBox.warning(self, "Required", "Project / Site and Location are mandatory."); return
+            QMessageBox.warning(self, "Required", "Project / Site and Location are mandatory.")
+            return
         data = self.water_parameter.currentData()
-        if not data: return
+        if not data:
+            return
         name, unit, _, _ = data
-        reading = float(self.water_reading.value()); min_l = float(self.water_min.value()); max_l = float(self.water_max.value())
+        reading = float(self.water_reading.value())
+        min_l = float(self.water_min.value())
+        max_l = float(self.water_max.value())
         status, recommendation = self._water_recommendation(name, reading, min_l, max_l)
         try:
-            next_id = self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_water_samples'),0)+1").fetchone()[0]
+            next_id = self.db.conn.execute(
+                "SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_water_samples'),0)+1"
+            ).fetchone()[0]
             sample_no = f"WTR-{datetime.now().year}-{int(next_id):04d}"
             self.db.conn.execute(
                 "INSERT INTO env_water_samples(sample_no,sample_date,sample_time,project,location,sample_point,sampled_by,parameter,reading,unit,min_limit,max_limit,status,recommendation,remarks) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sample_no, self.water_date.date().toString("yyyy-MM-dd"), self.water_time.text().strip(),
                  self.water_project.text().strip(), self.water_location.text().strip(), self.water_point.text().strip(),
-                 self.water_sampled_by.text().strip(), name, reading, self.water_unit.text().strip() or unit, min_l, max_l, status, recommendation, self.water_remarks.text().strip()))
-            self.db.conn.commit(); self.refresh_water_register()
+                 self.water_sampled_by.text().strip(), name, reading, self.water_unit.text().strip() or unit,
+                 min_l, max_l, status, recommendation, self.water_remarks.text().strip()))
+            self.db.conn.commit()
+            self.refresh_water_register()
             QMessageBox.information(self, "Saved", f"Water sample {sample_no} recorded.\nStatus: {status}")
-            self.water_reading.setValue(0); self.water_remarks.clear()
+            self.water_reading.setValue(0)
+            self.water_remarks.clear()
+            self.water_tabs.setCurrentIndex(1)
         except Exception as exc:
-            self.db.conn.rollback(); logging.exception("water save"); QMessageBox.critical(self, "Save Failed", str(exc))
+            self.db.conn.rollback()
+            logging.exception("water save")
+            QMessageBox.critical(self, "Save Failed", str(exc))
 
     def refresh_water_register(self):
-        if not hasattr(self, "water_table"): return
-        rows = self.db.conn.execute("SELECT * FROM env_water_samples ORDER BY sample_date DESC, id DESC").fetchall()
+        if not hasattr(self, "water_table"):
+            return
+        rows = self.db.conn.execute(
+            "SELECT * FROM env_water_samples ORDER BY sample_date DESC, id DESC"
+        ).fetchall()
         self.water_table.setRowCount(0)
-        palette = {"Acceptable": ("#E2F4E8", "#176B36"), "Moderate": ("#FFF3CD", "#805B00"), "High": ("#FFE1C2", "#9A4300"), "Critical": ("#F9D7DA", "#8A1C27")}
+        palette = {
+            "Acceptable": ("#E2F4E8", "#176B36"),
+            "Moderate": ("#FFF3CD", "#805B00"),
+            "High": ("#FFE1C2", "#9A4300"),
+            "Critical": ("#F9D7DA", "#8A1C27"),
+        }
         for rec in rows:
-            r = self.water_table.rowCount(); self.water_table.insertRow(r)
-            for c, v in enumerate([rec["id"], rec["sample_no"], rec["sample_date"], rec["project"], rec["location"], rec["parameter"],
-                                   f"{rec['reading']:.2f}", rec["unit"], f"{rec['min_limit']:.2f}", f"{rec['max_limit']:.2f}",
-                                   rec["status"], rec["recommendation"]]):
-                it = QTableWidgetItem(str(v or "")); self.water_table.setItem(r, c, it)
-                if c == 10:
-                    bg, fg = palette.get(rec["status"], ("#EEE", "#333")); it.setBackground(QColor(bg)); it.setForeground(QColor(fg))
+            r = self.water_table.rowCount()
+            self.water_table.insertRow(r)
+            vals = [
+                rec["id"], rec["sample_no"], rec["sample_date"], rec["sample_time"],
+                rec["project"], rec["location"], rec["parameter"],
+                f"{rec['reading']:.2f}", rec["unit"],
+                f"{rec['min_limit']:.2f}", f"{rec['max_limit']:.2f}",
+                rec["status"], rec["recommendation"]
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(str(v or ""))
+                self.water_table.setItem(r, c, it)
+                if c == 11:
+                    bg, fg = palette.get(rec["status"], ("#EEE", "#333"))
+                    it.setBackground(QColor(bg))
+                    it.setForeground(QColor(fg))
 
     def delete_water_sample(self):
         row = self.water_table.currentRow()
-        if row < 0 or not self.water_table.item(row, 0): QMessageBox.information(self, "Water", "Select a sample first."); return
-        if QMessageBox.question(self, "Delete", "Delete selected water sample?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
-        self.db.conn.execute("DELETE FROM env_water_samples WHERE id=?", (int(self.water_table.item(row, 0).text()),)); self.db.conn.commit(); self.refresh_water_register()
+        if row < 0 or not self.water_table.item(row, 0):
+            QMessageBox.information(self, "Water", "Select a sample first.")
+            return
+        if QMessageBox.question(
+            self, "Delete", "Delete selected water sample?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        self.db.conn.execute(
+            "DELETE FROM env_water_samples WHERE id=?",
+            (int(self.water_table.item(row, 0).text()),)
+        )
+        self.db.conn.commit()
+        self.refresh_water_register()
 
-    # -------------------- WASTE MANAGEMENT --------------------
+    # -------------------- WASTE MANAGEMENT (unchanged structure) --------------------
     def _build_waste_entry_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(16, 14, 16, 14)
         intro = QLabel("Record waste generated on site. Saved records appear in the Waste Register immediately.")
@@ -42276,6 +42987,8 @@ class EnvironmentalMonitoringModule(QWidget):
             QMessageBox.information(self, "Exported", f"Register exported:\n{path}")
         except Exception as exc:
             logging.exception("%s export", kind); QMessageBox.critical(self, "Export Failed", str(exc))
+
+
 
 
 # ============================================================
