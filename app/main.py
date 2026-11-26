@@ -42047,6 +42047,40 @@ class EnvironmentalMonitoringModule(QWidget):
         if session["notes"]:
             story += [Spacer(1, 8), Paragraph(f"<b>Notes:</b> {html.escape(session['notes'])}", styles["Normal"])]
 
+        # Approval table with Performed / Reviewed / Approved names
+        story.append(Spacer(1, 12))
+        story.append(Paragraph("<b>Review and Approval</b>", styles["Heading2"]))
+        appr_data = [
+            [Paragraph("<b>Role</b>", styles["Normal"]),
+             Paragraph("<b>Name</b>", styles["Normal"]),
+             Paragraph("<b>Signature</b>", styles["Normal"]),
+             Paragraph("<b>Date</b>", styles["Normal"])],
+            [Paragraph("Performed / Monitored By", styles["Normal"]),
+             Paragraph(html.escape(safe(session["monitored_by"]) or "____________________"), styles["Normal"]),
+             Paragraph("____________________", styles["Normal"]),
+             Paragraph(html.escape(safe(session["monitoring_date"]) or "____________"), styles["Normal"])],
+            [Paragraph("Reviewed By", styles["Normal"]),
+             Paragraph(html.escape(safe(session["reviewed_by"]) or "____________________"), styles["Normal"]),
+             Paragraph("____________________", styles["Normal"]),
+             Paragraph(html.escape((safe(session["reviewed_at"]) or "")[:10] or "____________"), styles["Normal"])],
+            [Paragraph("Approved By", styles["Normal"]),
+             Paragraph(html.escape(safe(session["approved_by"]) or "____________________"), styles["Normal"]),
+             Paragraph("____________________", styles["Normal"]),
+             Paragraph(html.escape((safe(session["approved_at"]) or "")[:10] or "____________"), styles["Normal"])],
+        ]
+        appr_t = Table(appr_data, colWidths=[150, 180, 160, 120])
+        appr_t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.7, colors.HexColor("#5A6A78")),
+            ("BOX", (0, 0), (-1, -1), 1.2, colors.HexColor("#17365D")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 6),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F2F6F9")]),
+        ]))
+        story.append(appr_t)
+
         def _page_border(canvas, document):
             canvas.saveState()
             canvas.setStrokeColor(colors.HexColor("#17365D"))
@@ -42116,6 +42150,27 @@ class EnvironmentalMonitoringModule(QWidget):
         for i, w in enumerate(widths, 1):
             ws.column_dimensions[ws.cell(1, i).column_letter].width = w
         ws.freeze_panes = "A6"
+
+        # Review and Approval section with names
+        last = header_row + 1 + len(rows) + 2
+        ws.cell(last, 1, "Review and Approval")
+        ws.cell(last, 1).font = Font(bold=True, size=12, color="17365D")
+        last += 1
+        for c, h in enumerate(["Role", "Name", "Signature", "Date"], 1):
+            cell = ws.cell(last, c, h)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="17365D")
+            cell.border = thin
+        appr_rows = [
+            ("Performed / Monitored By", session["monitored_by"] or "", session["monitoring_date"] or ""),
+            ("Reviewed By", session["reviewed_by"] or "", (safe(session["reviewed_at"]) or "")[:10]),
+            ("Approved By", session["approved_by"] or "", (safe(session["approved_at"]) or "")[:10]),
+        ]
+        for i, (role, name, dt) in enumerate(appr_rows, 1):
+            for c, v in enumerate([role, name or "____________________", "____________________", dt or "____________"], 1):
+                cell = ws.cell(last + i, c, v)
+                cell.border = thin
+                cell.alignment = Alignment(vertical="center")
         wb.save(path)
 
     def _export_noise_docx(self, path, session, rows):
@@ -42257,13 +42312,46 @@ class EnvironmentalMonitoringModule(QWidget):
             r.bold = True
             p.add_run(xml_safe(session["notes"]))
 
-        # Signature strip
+        # Approval / Performed / Reviewed / Approved table with names
         doc.add_paragraph()
-        sig = doc.add_table(rows=2, cols=3)
-        for i, label in enumerate(["Prepared / Monitored By", "Reviewed By", "Approved By"]):
+        doc.add_heading("Review and Approval", level=2)
+        sig = doc.add_table(rows=3, cols=3)
+        sig.autofit = False
+        labels = ["Performed / Monitored By", "Reviewed By", "Approved By"]
+        names = [
+            safe(session["monitored_by"]) or "",
+            safe(session["reviewed_by"]) or "",
+            safe(session["approved_by"]) or "",
+        ]
+        dates = [
+            safe(session["monitoring_date"]) or "",
+            safe(session["reviewed_at"])[:10] if safe(session["reviewed_at"]) else "",
+            safe(session["approved_at"])[:10] if safe(session["approved_at"]) else "",
+        ]
+        for i, label in enumerate(labels):
             sig.cell(0, i).text = label
-            name = [session["monitored_by"], session["reviewed_by"], session["approved_by"]][i] or ""
-            sig.cell(1, i).text = (safe(name) or "________________") + "\nSignature: ________________\nDate: ________________"
+            for p in sig.cell(0, i).paragraphs:
+                for run in p.runs:
+                    run.bold = True
+                    run.font.size = Pt(8)
+            name_text = names[i] if names[i] else "________________________"
+            sig.cell(1, i).text = f"Name: {name_text}"
+            for p in sig.cell(1, i).paragraphs:
+                for run in p.runs:
+                    run.font.size = Pt(9)
+                    if names[i]:
+                        run.bold = True
+            date_text = dates[i] if dates[i] else "____________"
+            sig.cell(2, i).text = (
+                f"Signature: ____________________\n"
+                f"Date: {date_text}\n"
+                f"Comments: ____________________"
+            )
+            for p in sig.cell(2, i).paragraphs:
+                for run in p.runs:
+                    run.font.size = Pt(8)
+            for r in range(3):
+                sig.cell(r, i).width = Inches(3.3)
         style_docx_table(sig, header=True, font_size=8)
 
         save_docx_validated(doc, path)
@@ -42313,75 +42401,124 @@ class EnvironmentalMonitoringModule(QWidget):
 
     def _build_air_entry_tab(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(12)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+
         intro = QLabel(
-            "Record workplace air monitoring. Select parameter, enter reading — status and recommendations are generated automatically."
+            "Record workplace air monitoring. Select parameter and enter reading — "
+            "status and recommendations are generated automatically."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("padding:12px 14px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;font-size:13px;")
-        layout.addWidget(intro)
+        intro.setStyleSheet(
+            "padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;"
+            "border-radius:8px;font-size:13px;color:#24445D;"
+        )
+        outer.addWidget(intro)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        form_host = QWidget()
+        form_host.setMinimumWidth(520)
+        form_layout = QVBoxLayout(form_host)
+        form_layout.setContentsMargins(4, 4, 4, 4)
 
         form_box = QGroupBox("New Air Sample")
-        form_box.setStyleSheet("QGroupBox{font-weight:700;font-size:14px;color:#17365D;}")
+        form_box.setStyleSheet(
+            "QGroupBox{font-weight:700;font-size:14px;color:#17365D;"
+            "border:1px solid #D0DCE6;border-radius:8px;margin-top:10px;padding-top:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
+        )
         form = QFormLayout(form_box)
-        form.setContentsMargins(16, 20, 16, 16)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
+        form.setContentsMargins(20, 22, 20, 18)
+        form.setHorizontalSpacing(20)
+        form.setVerticalSpacing(14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+
+        def _lab(text):
+            lab = QLabel(text)
+            lab.setStyleSheet("font-size:13px;font-weight:600;color:#3A5166;min-width:140px;")
+            lab.setMinimumWidth(140)
+            return lab
 
         self.air_date = QDateEdit(QDate.currentDate())
         self.air_date.setCalendarPopup(True)
         self.air_date.setDisplayFormat("dd-MMM-yyyy")
-        self.air_date.setMinimumHeight(38)
+        self.air_date.setMinimumHeight(40)
+        self.air_date.setMinimumWidth(280)
         self.air_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.air_time = self._styled_line_edit()
+        self.air_time = self._styled_line_edit("HH:MM")
         self.air_time.setText(datetime.now().strftime("%H:%M"))
+        self.air_time.setMinimumWidth(280)
         self.air_project = self._styled_line_edit("Project / Site")
+        self.air_project.setMinimumWidth(280)
         self.air_location = self._styled_line_edit("Specific monitoring location")
+        self.air_location.setMinimumWidth(280)
         self.air_activity = self._styled_line_edit("Activity / work scope")
+        self.air_activity.setMinimumWidth(280)
         self.air_sampled_by = self._styled_line_edit("Name of person who took the sample")
+        self.air_sampled_by.setMinimumWidth(280)
         self.air_parameter = self._styled_combo()
+        self.air_parameter.setMinimumWidth(280)
         for name, unit, limit in self.AIR_PARAMETERS:
             self.air_parameter.addItem(f"{name} ({unit})" if unit else name, (name, unit, limit))
         self.air_reading = self._styled_spin()
+        self.air_reading.setMinimumWidth(280)
         self.air_unit = self._styled_line_edit()
+        self.air_unit.setMinimumWidth(280)
         self.air_limit = self._styled_spin()
+        self.air_limit.setMinimumWidth(280)
         self.air_remarks = self._styled_line_edit("Optional remarks")
+        self.air_remarks.setMinimumWidth(280)
 
-        form.addRow("Sample Date *", self.air_date)
-        form.addRow("Time", self.air_time)
-        form.addRow("Project / Site *", self.air_project)
-        form.addRow("Specific Location *", self.air_location)
-        form.addRow("Activity", self.air_activity)
-        form.addRow("Sampled By", self.air_sampled_by)
-        form.addRow("Parameter *", self.air_parameter)
-        form.addRow("Reading *", self.air_reading)
-        form.addRow("Unit", self.air_unit)
-        form.addRow("Limit / OEL", self.air_limit)
-        form.addRow("Remarks", self.air_remarks)
+        form.addRow(_lab("Sample Date *"), self.air_date)
+        form.addRow(_lab("Time"), self.air_time)
+        form.addRow(_lab("Project / Site *"), self.air_project)
+        form.addRow(_lab("Specific Location *"), self.air_location)
+        form.addRow(_lab("Activity"), self.air_activity)
+        form.addRow(_lab("Sampled By"), self.air_sampled_by)
+        form.addRow(_lab("Parameter *"), self.air_parameter)
+        form.addRow(_lab("Reading *"), self.air_reading)
+        form.addRow(_lab("Unit"), self.air_unit)
+        form.addRow(_lab("Limit / OEL"), self.air_limit)
+        form.addRow(_lab("Remarks"), self.air_remarks)
 
         self.air_parameter.currentIndexChanged.connect(self._air_param_changed)
         self._air_param_changed()
-        layout.addWidget(form_box)
+        form_layout.addWidget(form_box)
+        form_layout.addStretch(1)
+        scroll.setWidget(form_host)
+        outer.addWidget(scroll, 1)
 
-        btn_row = QHBoxLayout()
+        # Fixed button bar — never goes off-screen
+        btn_bar = QFrame()
+        btn_bar.setStyleSheet("QFrame{background:#F4F8FB;border:1px solid #D5E0E8;border-radius:8px;}")
+        btn_row = QHBoxLayout(btn_bar)
+        btn_row.setContentsMargins(12, 10, 12, 10)
         save_air = QPushButton("Save Air Sample")
-        save_air.setMinimumHeight(40)
+        save_air.setMinimumHeight(42)
         save_air.setMinimumWidth(160)
-        save_air.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 18px;font-size:13px;}")
+        save_air.setStyleSheet(
+            "QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;"
+            "padding:8px 18px;font-size:13px;}"
+            "QPushButton:hover{background:#12586F;}"
+        )
         save_air.clicked.connect(self.save_air_sample)
         clear_air = QPushButton("Clear Form")
-        clear_air.setMinimumHeight(40)
+        clear_air.setMinimumHeight(42)
+        clear_air.setMinimumWidth(120)
         clear_air.clicked.connect(self._clear_air_form)
         btn_row.addWidget(save_air)
         btn_row.addWidget(clear_air)
         btn_row.addStretch(1)
-        layout.addLayout(btn_row)
-        layout.addStretch(1)
+        outer.addWidget(btn_bar)
         return page
 
     def _build_air_register_tab(self):
@@ -42534,78 +42671,126 @@ class EnvironmentalMonitoringModule(QWidget):
     # -------------------- WATER QUALITY --------------------
     def _build_water_entry_tab(self):
         page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 14, 18, 14)
-        layout.setSpacing(12)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+
         intro = QLabel(
-            "Record water / effluent samples. Parameters include pH, TDS, Oil & Grease, BOD, COD etc. "
-            "Status and recommendations are auto-generated."
+            "Record water / effluent samples (pH, TDS, Oil & Grease, BOD, COD, etc.). "
+            "Status and recommendations are generated automatically."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("padding:12px 14px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;font-size:13px;")
-        layout.addWidget(intro)
+        intro.setStyleSheet(
+            "padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;"
+            "border-radius:8px;font-size:13px;color:#24445D;"
+        )
+        outer.addWidget(intro)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        form_host = QWidget()
+        form_host.setMinimumWidth(520)
+        form_layout = QVBoxLayout(form_host)
+        form_layout.setContentsMargins(4, 4, 4, 4)
 
         form_box = QGroupBox("New Water Sample")
-        form_box.setStyleSheet("QGroupBox{font-weight:700;font-size:14px;color:#17365D;}")
+        form_box.setStyleSheet(
+            "QGroupBox{font-weight:700;font-size:14px;color:#17365D;"
+            "border:1px solid #D0DCE6;border-radius:8px;margin-top:10px;padding-top:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
+        )
         form = QFormLayout(form_box)
-        form.setContentsMargins(16, 20, 16, 16)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
+        form.setContentsMargins(20, 22, 20, 18)
+        form.setHorizontalSpacing(20)
+        form.setVerticalSpacing(14)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+
+        def _lab(text):
+            lab = QLabel(text)
+            lab.setStyleSheet("font-size:13px;font-weight:600;color:#3A5166;min-width:140px;")
+            lab.setMinimumWidth(140)
+            return lab
 
         self.water_date = QDateEdit(QDate.currentDate())
         self.water_date.setCalendarPopup(True)
         self.water_date.setDisplayFormat("dd-MMM-yyyy")
-        self.water_date.setMinimumHeight(38)
+        self.water_date.setMinimumHeight(40)
+        self.water_date.setMinimumWidth(280)
         self.water_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-        self.water_time = self._styled_line_edit()
+        self.water_time = self._styled_line_edit("HH:MM")
         self.water_time.setText(datetime.now().strftime("%H:%M"))
+        self.water_time.setMinimumWidth(280)
         self.water_project = self._styled_line_edit("Project / Site")
+        self.water_project.setMinimumWidth(280)
         self.water_location = self._styled_line_edit("Location")
+        self.water_location.setMinimumWidth(280)
         self.water_point = self._styled_line_edit("Sample point / outfall")
+        self.water_point.setMinimumWidth(280)
         self.water_sampled_by = self._styled_line_edit("Name of person who took the sample")
+        self.water_sampled_by.setMinimumWidth(280)
         self.water_parameter = self._styled_combo()
+        self.water_parameter.setMinimumWidth(280)
         for name, unit, min_l, max_l in self.WATER_PARAMETERS:
             self.water_parameter.addItem(f"{name} ({unit})" if unit else name, (name, unit, min_l, max_l))
         self.water_reading = self._styled_spin(minimum=-50)
+        self.water_reading.setMinimumWidth(280)
         self.water_unit = self._styled_line_edit()
+        self.water_unit.setMinimumWidth(280)
         self.water_min = self._styled_spin(minimum=-50)
+        self.water_min.setMinimumWidth(280)
         self.water_max = self._styled_spin()
+        self.water_max.setMinimumWidth(280)
         self.water_remarks = self._styled_line_edit("Optional remarks")
+        self.water_remarks.setMinimumWidth(280)
 
-        form.addRow("Sample Date *", self.water_date)
-        form.addRow("Time", self.water_time)
-        form.addRow("Project / Site *", self.water_project)
-        form.addRow("Location *", self.water_location)
-        form.addRow("Sample Point", self.water_point)
-        form.addRow("Sampled By", self.water_sampled_by)
-        form.addRow("Parameter *", self.water_parameter)
-        form.addRow("Reading *", self.water_reading)
-        form.addRow("Unit", self.water_unit)
-        form.addRow("Min Limit", self.water_min)
-        form.addRow("Max Limit", self.water_max)
-        form.addRow("Remarks", self.water_remarks)
+        form.addRow(_lab("Sample Date *"), self.water_date)
+        form.addRow(_lab("Time"), self.water_time)
+        form.addRow(_lab("Project / Site *"), self.water_project)
+        form.addRow(_lab("Location *"), self.water_location)
+        form.addRow(_lab("Sample Point"), self.water_point)
+        form.addRow(_lab("Sampled By"), self.water_sampled_by)
+        form.addRow(_lab("Parameter *"), self.water_parameter)
+        form.addRow(_lab("Reading *"), self.water_reading)
+        form.addRow(_lab("Unit"), self.water_unit)
+        form.addRow(_lab("Min Limit"), self.water_min)
+        form.addRow(_lab("Max Limit"), self.water_max)
+        form.addRow(_lab("Remarks"), self.water_remarks)
 
         self.water_parameter.currentIndexChanged.connect(self._water_param_changed)
         self._water_param_changed()
-        layout.addWidget(form_box)
+        form_layout.addWidget(form_box)
+        form_layout.addStretch(1)
+        scroll.setWidget(form_host)
+        outer.addWidget(scroll, 1)
 
-        btn_row = QHBoxLayout()
+        btn_bar = QFrame()
+        btn_bar.setStyleSheet("QFrame{background:#F4F8FB;border:1px solid #D5E0E8;border-radius:8px;}")
+        btn_row = QHBoxLayout(btn_bar)
+        btn_row.setContentsMargins(12, 10, 12, 10)
         save_w = QPushButton("Save Water Sample")
-        save_w.setMinimumHeight(40)
+        save_w.setMinimumHeight(42)
         save_w.setMinimumWidth(160)
-        save_w.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;padding:8px 18px;font-size:13px;}")
+        save_w.setStyleSheet(
+            "QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;"
+            "padding:8px 18px;font-size:13px;}"
+            "QPushButton:hover{background:#12586F;}"
+        )
         save_w.clicked.connect(self.save_water_sample)
         clear_w = QPushButton("Clear Form")
-        clear_w.setMinimumHeight(40)
+        clear_w.setMinimumHeight(42)
+        clear_w.setMinimumWidth(120)
         clear_w.clicked.connect(self._clear_water_form)
         btn_row.addWidget(save_w)
         btn_row.addWidget(clear_w)
         btn_row.addStretch(1)
-        layout.addLayout(btn_row)
-        layout.addStretch(1)
+        outer.addWidget(btn_bar)
         return page
 
     def _build_water_register_tab(self):
@@ -42761,31 +42946,114 @@ class EnvironmentalMonitoringModule(QWidget):
 
     # -------------------- WASTE MANAGEMENT (unchanged structure) --------------------
     def _build_waste_entry_tab(self):
-        page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(16, 14, 16, 14)
-        intro = QLabel("Record waste generated on site. Saved records appear in the Waste Register immediately.")
-        intro.setWordWrap(True); intro.setStyleSheet("padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;")
-        layout.addWidget(intro)
-        card = QGroupBox("Waste Entry"); form = QFormLayout(card)
-        self.waste_date = QDateEdit(QDate.currentDate()); self.waste_date.setCalendarPopup(True); self.waste_date.setDisplayFormat("dd-MMM-yyyy")
-        self.waste_project = QLineEdit(); self.waste_location = QLineEdit()
-        self.waste_type = QComboBox(); self.waste_type.addItems(self.WASTE_TYPES)
-        self.waste_name = QLineEdit(); self.waste_name.setPlaceholderText("e.g. Contaminated rags, Spent solvent…")
-        self.waste_qty = QDoubleSpinBox(); self.waste_qty.setRange(0, 1000000); self.waste_qty.setDecimals(2)
-        self.waste_unit = QComboBox(); self.waste_unit.addItems(self.WASTE_UNITS)
-        self.waste_generated_by = QLineEdit(); self.waste_disposal = QLineEdit()
-        self.waste_remarks = QLineEdit()
-        form.addRow("Date *", self.waste_date); form.addRow("Project / Site *", self.waste_project)
-        form.addRow("Location / Area *", self.waste_location); form.addRow("Waste Type *", self.waste_type)
-        form.addRow("Waste Name / Description *", self.waste_name); form.addRow("Quantity *", self.waste_qty)
-        form.addRow("Unit", self.waste_unit); form.addRow("Generated By", self.waste_generated_by)
-        form.addRow("Disposal / Handling Method", self.waste_disposal); form.addRow("Remarks", self.waste_remarks)
-        layout.addWidget(card)
-        btn_row = QHBoxLayout(); btn_row.addStretch(1)
-        clear = QPushButton("Clear"); clear.clicked.connect(self.clear_waste_form)
-        save = QPushButton("Save Waste Record"); save.setMinimumHeight(38)
-        save.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:7px;padding:8px 18px;}")
+        page = QWidget()
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(12, 10, 12, 10)
+        outer.setSpacing(8)
+
+        intro = QLabel(
+            "Record waste generated on site. Saved records appear immediately in the Waste Register."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet(
+            "padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;"
+            "border-radius:8px;font-size:13px;color:#24445D;"
+        )
+        outer.addWidget(intro)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        form_host = QWidget()
+        form_host.setMinimumWidth(520)
+        form_layout = QVBoxLayout(form_host)
+        form_layout.setContentsMargins(4, 4, 4, 4)
+
+        card = QGroupBox("Waste Entry")
+        card.setStyleSheet(
+            "QGroupBox{font-weight:700;font-size:14px;color:#17365D;"
+            "border:1px solid #D0DCE6;border-radius:8px;margin-top:10px;padding-top:8px;}"
+            "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
+        )
+        form = QFormLayout(card)
+        form.setContentsMargins(20, 22, 20, 18)
+        form.setHorizontalSpacing(20)
+        form.setVerticalSpacing(14)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        def _lab(text):
+            lab = QLabel(text)
+            lab.setStyleSheet("font-size:13px;font-weight:600;color:#3A5166;min-width:160px;")
+            lab.setMinimumWidth(160)
+            return lab
+
+        self.waste_date = QDateEdit(QDate.currentDate())
+        self.waste_date.setCalendarPopup(True)
+        self.waste_date.setDisplayFormat("dd-MMM-yyyy")
+        self.waste_date.setMinimumHeight(40)
+        self.waste_date.setMinimumWidth(280)
+        self.waste_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.waste_project = self._styled_line_edit("Project / Site")
+        self.waste_project.setMinimumWidth(280)
+        self.waste_location = self._styled_line_edit("Location / Area")
+        self.waste_location.setMinimumWidth(280)
+        self.waste_type = self._styled_combo()
+        self.waste_type.addItems(self.WASTE_TYPES)
+        self.waste_type.setMinimumWidth(280)
+        self.waste_name = self._styled_line_edit("e.g. Contaminated rags, Spent solvent…")
+        self.waste_name.setMinimumWidth(280)
+        self.waste_qty = self._styled_spin(maximum=1000000)
+        self.waste_qty.setMinimumWidth(280)
+        self.waste_unit = self._styled_combo()
+        self.waste_unit.addItems(self.WASTE_UNITS)
+        self.waste_unit.setMinimumWidth(280)
+        self.waste_generated_by = self._styled_line_edit("Generated by (person / contractor)")
+        self.waste_generated_by.setMinimumWidth(280)
+        self.waste_disposal = self._styled_line_edit("Disposal / handling method")
+        self.waste_disposal.setMinimumWidth(280)
+        self.waste_remarks = self._styled_line_edit("Optional remarks")
+        self.waste_remarks.setMinimumWidth(280)
+
+        form.addRow(_lab("Date *"), self.waste_date)
+        form.addRow(_lab("Project / Site *"), self.waste_project)
+        form.addRow(_lab("Location / Area *"), self.waste_location)
+        form.addRow(_lab("Waste Type *"), self.waste_type)
+        form.addRow(_lab("Waste Name / Description *"), self.waste_name)
+        form.addRow(_lab("Quantity *"), self.waste_qty)
+        form.addRow(_lab("Unit"), self.waste_unit)
+        form.addRow(_lab("Generated By"), self.waste_generated_by)
+        form.addRow(_lab("Disposal / Handling Method"), self.waste_disposal)
+        form.addRow(_lab("Remarks"), self.waste_remarks)
+
+        form_layout.addWidget(card)
+        form_layout.addStretch(1)
+        scroll.setWidget(form_host)
+        outer.addWidget(scroll, 1)
+
+        btn_bar = QFrame()
+        btn_bar.setStyleSheet("QFrame{background:#F4F8FB;border:1px solid #D5E0E8;border-radius:8px;}")
+        btn_row = QHBoxLayout(btn_bar)
+        btn_row.setContentsMargins(12, 10, 12, 10)
+        clear = QPushButton("Clear Form")
+        clear.setMinimumHeight(42)
+        clear.setMinimumWidth(120)
+        clear.clicked.connect(self.clear_waste_form)
+        save = QPushButton("Save Waste Record")
+        save.setMinimumHeight(42)
+        save.setMinimumWidth(160)
+        save.setStyleSheet(
+            "QPushButton{background:#176B87;color:white;font-weight:800;border-radius:6px;"
+            "padding:8px 18px;font-size:13px;}"
+            "QPushButton:hover{background:#12586F;}"
+        )
         save.clicked.connect(self.save_waste_record)
-        btn_row.addWidget(clear); btn_row.addWidget(save); layout.addLayout(btn_row); layout.addStretch(1)
+        btn_row.addWidget(save)
+        btn_row.addWidget(clear)
+        btn_row.addStretch(1)
+        outer.addWidget(btn_bar)
         return page
 
     def clear_waste_form(self):
@@ -42816,7 +43084,12 @@ class EnvironmentalMonitoringModule(QWidget):
 
     def _build_waste_register_tab(self):
         page = QWidget(); layout = QVBoxLayout(page); layout.setContentsMargins(12, 10, 12, 10)
-        filter_box = QGroupBox("Filters"); filter_layout = QHBoxLayout(filter_box)
+        title = QLabel("Waste Management Register")
+        title.setStyleSheet("font-size:16px;font-weight:800;color:#17365D;padding:2px 0 6px 0;")
+        layout.addWidget(title)
+        filter_box = QGroupBox("Filters")
+        filter_box.setStyleSheet("QGroupBox{font-weight:700;color:#17365D;border:1px solid #D0DCE6;border-radius:8px;margin-top:8px;padding-top:6px;}")
+        filter_layout = QHBoxLayout(filter_box)
         self.waste_filter_from = QDateEdit(QDate.currentDate().addMonths(-3)); self.waste_filter_from.setCalendarPopup(True); self.waste_filter_from.setDisplayFormat("dd-MMM-yyyy")
         self.waste_filter_to = QDateEdit(QDate.currentDate()); self.waste_filter_to.setCalendarPopup(True); self.waste_filter_to.setDisplayFormat("dd-MMM-yyyy")
         self.waste_filter_project = QLineEdit(); self.waste_filter_project.setPlaceholderText("Project / Site")
