@@ -4923,7 +4923,8 @@ class MainWindow(QMainWindow):
             "Reports",
             "Master Data",
             "Settings",
-            "Cloud Sync"
+            "Cloud Sync",
+            "Digital Lifting Plan"
         ]
 
         self.nav.addItems(modules)
@@ -5053,6 +5054,9 @@ class MainWindow(QMainWindow):
                 self.settings_page()
             elif row == 16:
                 self.cloud_sync_page()
+            elif row == 17:
+                w, layout = self.page("Digital Lifting Plan")
+                layout.addWidget(DigitalLiftingPlanModule(self, db), 1)
 
             # page() records the exact top-level page built by this module.
             # Explicitly select and cache it, rather than whichever widget may
@@ -42687,6 +42691,342 @@ class EnvironmentalMonitoringModule(QWidget):
         except Exception as exc:
             logging.exception("%s export", kind); QMessageBox.critical(self, "Export Failed", str(exc))
 
+
+
+# ============================================================
+# DIGITAL LIFTING PLAN - PHASES 1, 2 & 3
+# Additive-only module: register, engineering checks and schematic views.
+# No existing HSE module tables or workflows are modified.
+# ============================================================
+
+class _LiftingDrawingWidget(QWidget):
+    """Schematic drawing preview. Deliberately marked NOT TO SCALE."""
+    def __init__(self, data=None, view='side', parent=None):
+        super().__init__(parent)
+        self.data = data or {}
+        self.view = view
+        self.setMinimumSize(620, 360)
+
+    def set_data(self, data):
+        self.data = data or {}
+        self.update()
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QPen, QBrush, QFont
+        from PySide6.QtCore import QPointF, QRectF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor('#FFFFFF'))
+        p.setPen(QPen(QColor('#263746'), 1.5))
+        p.setFont(QFont('Arial', 10, QFont.Weight.Bold))
+        title = 'LIFTING ARRANGEMENT - SIDE ELEVATION' if self.view == 'side' else 'LIFTING ARRANGEMENT - PLAN VIEW'
+        p.drawText(18, 26, title)
+        p.setFont(QFont('Arial', 8))
+        p.setPen(QColor('#B42318'))
+        p.drawText(18, 45, 'SCHEMATIC ONLY - NOT TO SCALE - VERIFY AGAINST APPROVED LIFT DRAWING')
+        w, h = self.width(), self.height()
+        ground = int(h * .78)
+        p.setPen(QPen(QColor('#64748B'), 2))
+        p.drawLine(24, ground, w-24, ground)
+        if self.view == 'side':
+            # crane base / carrier
+            bx, by = int(w*.17), ground-42
+            p.setPen(QPen(QColor('#334155'), 2)); p.setBrush(QBrush(QColor('#CBD5E1')))
+            p.drawRoundedRect(bx, by, 130, 38, 6, 6)
+            p.setBrush(QBrush(QColor('#64748B')))
+            p.drawEllipse(bx+16, ground-10, 22, 22); p.drawEllipse(bx+92, ground-10, 22, 22)
+            # boom and hook
+            tipx, tipy = int(w*.63), int(h*.20)
+            p.setPen(QPen(QColor('#D97706'), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(bx+90, by+4, tipx, tipy)
+            p.setPen(QPen(QColor('#334155'), 2)); p.drawLine(tipx, tipy, tipx, int(h*.48))
+            p.drawArc(tipx-9, int(h*.45), 18, 20, 0, 180*16)
+            # slings and load
+            load_y = int(h*.61); load_x = int(w*.59)
+            p.setPen(QPen(QColor('#0F766E'), 3))
+            p.drawLine(tipx, int(h*.49), load_x-48, load_y)
+            p.drawLine(tipx, int(h*.49), load_x+48, load_y)
+            p.setPen(QPen(QColor('#334155'), 2)); p.setBrush(QBrush(QColor('#FDE68A')))
+            p.drawRect(load_x-58, load_y, 116, 48)
+            p.setFont(QFont('Arial', 9, QFont.Weight.Bold)); p.setPen(QColor('#334155'))
+            p.drawText(load_x-50, load_y+28, 'SUSPENDED LOAD')
+            p.setFont(QFont('Arial', 8)); p.drawText(bx, ground+25, 'CRANE'); p.drawText(load_x-32, ground+25, 'LOAD POSITION')
+            p.setPen(QPen(QColor('#2563EB'), 1, Qt.PenStyle.DashLine)); p.drawLine(bx+90, ground+42, tipx, ground+42)
+            p.drawText((bx+tipx)//2, ground+57, f"Working radius: {self.data.get('working_radius_m', '—')} m")
+            p.drawText(18, h-12, f"Boom length: {self.data.get('boom_length_m', '—')} m    Lift height: {self.data.get('lifting_height_m', '—')} m")
+        else:
+            # top view crane footprint, outriggers, lift point, exclusion boundary
+            cx, cy = int(w*.28), int(h*.48)
+            p.setPen(QPen(QColor('#64748B'), 2, Qt.PenStyle.DashLine)); p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(int(w*.07), int(h*.17), int(w*.78), int(h*.64), 18, 18)
+            p.setPen(QPen(QColor('#334155'), 2)); p.setBrush(QBrush(QColor('#CBD5E1')))
+            p.drawRoundedRect(cx-55, cy-32, 110, 64, 7, 7)
+            p.setBrush(QBrush(QColor('#94A3B8')))
+            for ox, oy in [(-82,-58),(82,-58),(-82,58),(82,58)]:
+                p.drawRect(cx+ox-16, cy+oy-8, 32, 16)
+            lx, ly = int(w*.67), int(h*.49)
+            p.setPen(QPen(QColor('#D97706'), 2)); p.drawLine(cx+55, cy, lx-22, ly)
+            p.setBrush(QBrush(QColor('#FDE68A'))); p.setPen(QPen(QColor('#334155'), 2)); p.drawRect(lx-24,ly-18,48,36)
+            p.setPen(QColor('#334155')); p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
+            p.drawText(cx-35, cy+5, 'CRANE'); p.drawText(lx-22, ly+4, 'LOAD')
+            p.setFont(QFont('Arial', 8)); p.drawText(18, h-12, 'Dashed boundary represents the proposed exclusion zone; confirm dimensions and access controls on site.')
+        p.end()
+
+
+class DigitalLiftingPlanModule(QWidget):
+    """Digital lifting plan: Phase 1 register, Phase 2 engineering checks, Phase 3 drawings."""
+    def __init__(self, parent_window=None, database=None):
+        super().__init__(parent_window)
+        self.host = parent_window
+        self.db = database or db
+        self.selected_plan_id = None
+        self._ensure_schema()
+        self._build_ui()
+        self.refresh_register()
+
+    def _ensure_schema(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS digital_lifting_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_number TEXT NOT NULL UNIQUE,
+            project TEXT DEFAULT '', location TEXT DEFAULT '', lifting_date TEXT DEFAULT '',
+            load_description TEXT DEFAULT '', load_weight_kg REAL DEFAULT 0,
+            workflow_status TEXT NOT NULL DEFAULT 'Draft', payload_json TEXT NOT NULL DEFAULT '{}',
+            created_by TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS digital_lifting_plan_attachments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, plan_id INTEGER NOT NULL,
+            file_path TEXT NOT NULL, file_name TEXT DEFAULT '',
+            attachment_category TEXT DEFAULT 'Supporting Document', added_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(plan_id) REFERENCES digital_lifting_plans(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_dlp_date ON digital_lifting_plans(lifting_date);
+        CREATE INDEX IF NOT EXISTS idx_dlp_status ON digital_lifting_plans(workflow_status);
+        CREATE INDEX IF NOT EXISTS idx_dlp_attach_plan ON digital_lifting_plan_attachments(plan_id);
+        """)
+        self.db.conn.commit()
+
+    def _build_ui(self):
+        root=QVBoxLayout(self); root.setContentsMargins(14,12,14,12)
+        head=QHBoxLayout(); title=QLabel('Digital Lifting Plan')
+        title.setStyleSheet('font-size:22px;font-weight:700;color:#17365D;')
+        sub=QLabel('Register • Engineering checks • Lifting arrangement drawings'); sub.setStyleSheet('color:#64748B;')
+        left=QVBoxLayout(); left.addWidget(title); left.addWidget(sub); head.addLayout(left); head.addStretch(1)
+        new=QPushButton('+ New Lifting Plan'); new.clicked.connect(self.new_plan); head.addWidget(new); root.addLayout(head)
+        stats=QHBoxLayout(); self.stat_labels=[]
+        for label in ('Total Plans: 0','Draft: 0','Under Review: 0','Approved: 0'):
+            w=QLabel(label); w.setStyleSheet('background:white;border:1px solid #D7DEE7;border-radius:6px;padding:9px 12px;font-weight:600;')
+            stats.addWidget(w); self.stat_labels.append(w)
+        root.addLayout(stats)
+        tools=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText('Search plan no., project, location or load...'); self.search.textChanged.connect(self.refresh_register)
+        self.status=QComboBox(); self.status.addItems(['All Statuses','Draft','Under Review','Approved','Rejected','Closed']); self.status.currentTextChanged.connect(self.refresh_register)
+        tools.addWidget(self.search,1); tools.addWidget(self.status); root.addLayout(tools)
+        self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(['Plan No.','Project','Location','Date','Load Description','Load (kg)','Status'])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self.table.doubleClicked.connect(self.open_selected); root.addWidget(self.table,1)
+        actions=QHBoxLayout()
+        for label,fn in [('Open / View',self.open_selected),('Edit Draft',self.edit_selected),('Refresh',self.refresh_register)]:
+            b=QPushButton(label); b.clicked.connect(fn); actions.addWidget(b)
+        actions.addStretch(1); root.addLayout(actions)
+
+    def _next_number(self):
+        year=datetime.now().strftime('%Y'); prefix=f'LP-{year}-'
+        row=self.db.conn.execute('SELECT plan_number FROM digital_lifting_plans WHERE plan_number LIKE ? ORDER BY id DESC LIMIT 1',(prefix+'%',)).fetchone()
+        seq=1
+        if row:
+            try: seq=int(str(row[0]).rsplit('-',1)[-1])+1
+            except Exception: pass
+        return f'{prefix}{seq:04d}'
+
+    def refresh_register(self,*_):
+        term=self.search.text().strip(); status=self.status.currentText()
+        sql='SELECT id,plan_number,project,location,lifting_date,load_description,load_weight_kg,workflow_status FROM digital_lifting_plans WHERE 1=1'; args=[]
+        if term:
+            like=f'%{term}%'; sql+=' AND (plan_number LIKE ? OR project LIKE ? OR location LIKE ? OR load_description LIKE ?)'; args += [like]*4
+        if status!='All Statuses': sql+=' AND workflow_status=?'; args.append(status)
+        sql+=' ORDER BY id DESC'; rows=self.db.conn.execute(sql,args).fetchall()
+        self.table.setRowCount(len(rows))
+        for r,row in enumerate(rows):
+            values=[row[1],row[2],row[3],row[4],row[5],f'{float(row[6] or 0):,.2f}',row[7]]
+            for c,val in enumerate(values): self.table.setItem(r,c,QTableWidgetItem(str(val or '')))
+            self.table.item(r,0).setData(Qt.ItemDataRole.UserRole,int(row[0]))
+        counts=dict(self.db.conn.execute('SELECT workflow_status,COUNT(*) FROM digital_lifting_plans GROUP BY workflow_status').fetchall())
+        total=sum(counts.values())
+        for w,label in zip(self.stat_labels,[f'Total Plans: {total}',f"Draft: {counts.get('Draft',0)}",f"Under Review: {counts.get('Under Review',0)}",f"Approved: {counts.get('Approved',0)}"]): w.setText(label)
+
+    def _selected_id(self):
+        r=self.table.currentRow(); item=self.table.item(r,0) if r>=0 else None
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def new_plan(self): self._editor()
+    def edit_selected(self):
+        pid=self._selected_id()
+        if not pid: QMessageBox.information(self,'Select Plan','Please select a lifting plan.'); return
+        row=self.db.conn.execute('SELECT workflow_status FROM digital_lifting_plans WHERE id=?',(pid,)).fetchone()
+        if not row or row[0]!='Draft': QMessageBox.warning(self,'Editing Restricted','Only Draft plans can be edited.'); return
+        self._editor(pid)
+    def open_selected(self):
+        pid=self._selected_id()
+        if not pid: QMessageBox.information(self,'Select Plan','Please select a lifting plan.'); return
+        self._editor(pid,read_only=True)
+
+    def _editor(self,plan_id=None,read_only=False):
+        row=self.db.conn.execute('SELECT plan_number,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?',(plan_id,)).fetchone() if plan_id else None
+        number=row[0] if row else self._next_number()
+        try: data=json.loads(row[1] or '{}') if row else {}
+        except Exception: data={}
+        status=row[2] if row else 'Draft'
+        dlg=QDialog(self); dlg.setWindowTitle(f'Digital Lifting Plan - {number}'); dlg.resize(1120,820)
+        outer=QVBoxLayout(dlg); banner=QLabel(f'Plan: {number}     Status: {status}     |     Phase 1 + 2 + 3')
+        banner.setStyleSheet('font-weight:700;color:#17365D;background:#EAF0F6;padding:9px;border-radius:5px;'); outer.addWidget(banner)
+        tabs=QTabWidget(); outer.addWidget(tabs,1); fields={}
+        definitions={
+          'General Information':[
+            ('project','Project / Contract','text'),('location','Lifting Location','text'),('lifting_date','Planned Lifting Date','date'),('activity','Lifting Activity','text'),('load_description','Load Description','text'),('plan_prepared_by','Plan Prepared By','text'),('appointed_person','Appointed Person','text'),('lifting_supervisor','Lifting Supervisor','text'),('hse_representative','HSE Representative','text'),('operator','Crane Operator','text'),('rigger','Rigger','text'),('banksman','Banksman / Signal Person','text')],
+          'Load & Rigging':[
+            ('load_weight_kg','Load Weight (kg)','num'),('dynamic_factor','Dynamic / impact factor (competent-person input; minimum 1.0)','num'),('hook_block_weight_kg','Hook Block Weight (kg)','num'),('sling_weight_kg','Total Sling Weight (kg)','num'),('shackle_weight_kg','Total Shackle Weight (kg)','num'),('spreader_weight_kg','Spreader / Lifting Beam Weight (kg)','num'),('other_rigging_weight_kg','Other Rigging Weight (kg)','num'),('load_length_m','Load Length (m)','num'),('load_width_m','Load Width (m)','num'),('load_height_m','Load Height (m)','num'),('lifting_height_m','Required Lifting Height (m)','num'),('working_radius_m','Working Radius (m)','num'),('load_travel_distance_m','Load Travel Distance (m)','num'),('sling_legs','Number of Load-Sharing Sling Legs','int'),('sling_angle_deg','Sling Angle from Horizontal (degrees)','num'),('sling_wll_kg','Sling WLL per Leg (kg)','num'),('centre_of_gravity','Centre of Gravity / Load Distribution Notes','memo'),('lifting_points','Lifting Points / Arrangement','memo')],
+          'Crane & Load Chart':[
+            ('crane_type','Crane Type','combo:Mobile Crane;Crawler Crane;Tower Crane;Loader Crane;Tower Crane;Overhead Crane;Other'),('crane_make_model','Crane Make / Model','text'),('crane_serial_no','Crane Serial Number','text'),('crane_capacity_t','Crane Rated Capacity (t) - reference only','num'),('chart_capacity_kg','Verified net capacity available for suspended load after applicable deductions (kg)','num'),('boom_length_m','Boom Length (m)','num'),('jib_length_m','Jib Length (m)','num'),('counterweight_t','Counterweight (t)','num'),('outrigger_configuration','Outrigger Configuration','text'),('load_chart_reference','Load Chart Page / Revision / Source','text'),('chart_configuration_verified','Load chart configuration verified?','combo:Not verified;Yes;No'),('crane_level_verified','Crane level within manufacturer limits?','combo:Not verified;Yes;No')],
+          'Ground & Outriggers':[
+            ('max_outrigger_reaction_kn','Maximum Outrigger Reaction (kN) - verified input','num'),('mat_length_m','Mat / Pad Length (m)','num'),('mat_width_m','Mat / Pad Width (m)','num'),('verified_gbc_kpa','Verified Ground Bearing Capacity (kPa)','num'),('ground_assessment_ref','Ground assessment / geotechnical reference','text'),('ground_condition','Ground Condition / Underground Services','memo'),('mat_design_verified','Mat / pad design verified by competent person?','combo:Not verified;Yes;No')],
+          'Method, Weather & Controls':[
+            ('wind_speed_ms','Forecast / Measured Wind Speed (m/s)','num'),('approved_wind_limit_ms','Manufacturer / lift-plan Wind Limit (m/s)','num'),('weather_limits','Other Weather / Visibility Limits','text'),('lifting_method','Lifting Method / Sequence','memo'),('exclusion_zone','Exclusion Zone / Barricading','memo'),('obstacles','Overhead / Underground / Nearby Obstacles','memo'),('emergency_arrangements','Emergency / Recovery Arrangements','memo'),('additional_notes','Additional Notes','memo')]
+        }
+        for group,items in definitions.items():
+            page=QWidget(); v=QVBoxLayout(page); scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            for key,label,kind in items:
+                val=data.get(key,'')
+                if kind=='text': w=QLineEdit(str(val or ''))
+                elif kind=='memo': w=QTextEdit(); w.setPlainText(str(val or '')); w.setMinimumHeight(65)
+                elif kind=='date':
+                    w=QDateEdit(); w.setCalendarPopup(True); w.setDisplayFormat('dd-MMM-yyyy'); d=QDate.fromString(str(val),'yyyy-MM-dd') if val else QDate.currentDate(); w.setDate(d if d.isValid() else QDate.currentDate())
+                elif kind=='int': w=QSpinBox(); w.setRange(1,20); w.setValue(int(val or 2))
+                elif kind=='num': w=QDoubleSpinBox(); w.setRange(1.0 if key=='dynamic_factor' else 0,1_000_000_000); w.setDecimals(3); w.setSingleStep(0.1); w.setValue(float(val if val not in ('', None) else (1.0 if key=='dynamic_factor' else 0)))
+                elif kind.startswith('combo:'): w=QComboBox(); w.addItems(kind.split(':',1)[1].split(';')); w.setCurrentText(str(val or w.itemText(0)))
+                w.setEnabled(not read_only); fields[key]=(w,kind); form.addRow(label,w)
+            scroll.setWidget(content); v.addWidget(scroll); tabs.addTab(page,group)
+
+        # Phase 2: calculation output and explicitly sourced engineering inputs.
+        calc_page=QWidget(); cv=QVBoxLayout(calc_page)
+        warning=QLabel('Engineering decision support only. Use manufacturer load charts and verified engineering inputs. This module does not infer crane capacity or calculate structural outrigger reactions.')
+        warning.setWordWrap(True); warning.setStyleSheet('color:#9A3412;background:#FFF7ED;padding:9px;border:1px solid #FED7AA;border-radius:5px;'); cv.addWidget(warning)
+        self._calc_output=QTextEdit(); self._calc_output.setReadOnly(True); self._calc_output.setMinimumHeight(300); cv.addWidget(self._calc_output,1)
+        recalc=QPushButton('Calculate / Refresh Engineering Checks'); cv.addWidget(recalc); tabs.addTab(calc_page,'Engineering Calculations')
+
+        # Phase 3: both views; schematic labels remain visible and are not a construction drawing.
+        draw_page=QWidget(); dv=QVBoxLayout(draw_page); draw_tabs=QTabWidget()
+        side=_LiftingDrawingWidget(data,'side'); plan=_LiftingDrawingWidget(data,'plan'); draw_tabs.addTab(side,'Side Elevation'); draw_tabs.addTab(plan,'Plan View'); dv.addWidget(draw_tabs,1)
+        draw_note=QLabel('Drawing is a schematic preview generated from entered dimensions. It is not to scale and must not replace an approved engineered lift drawing or site-specific lift study.')
+        draw_note.setWordWrap(True); draw_note.setStyleSheet('color:#9A3412;padding:6px;'); dv.addWidget(draw_note); tabs.addTab(draw_page,'Lifting Drawings')
+
+        # Attachments register
+        attach_page=QWidget(); av=QVBoxLayout(attach_page); av.addWidget(QLabel('Attach crane certificates, approved load chart, sling/shackle certificates, ground assessment, mat design and approved lifting drawings.'))
+        at=QTableWidget(0,3); at.setHorizontalHeaderLabels(['File Name','Category','Stored Path']); at.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); at.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); av.addWidget(at,1)
+        pending=[]
+        if plan_id:
+            for a in self.db.conn.execute('SELECT file_name,attachment_category,file_path FROM digital_lifting_plan_attachments WHERE plan_id=? ORDER BY id',(plan_id,)).fetchall(): pending.append({'file_name':a[0],'category':a[1],'path':a[2],'existing':True})
+        def refresh_attach():
+            at.setRowCount(len(pending))
+            for i,a in enumerate(pending):
+                for c,val in enumerate((a['file_name'],a['category'],a['path'])): at.setItem(i,c,QTableWidgetItem(str(val)))
+        def add_files():
+            paths,_=QFileDialog.getOpenFileNames(dlg,'Select lifting plan documents')
+            cats=['Crane Certificate','Manufacturer Load Chart','Rigging Certificate','Ground Assessment','Mat / Pad Design','Lifting Drawing','Method Statement','Other']
+            for path in paths:
+                cat,ok=QInputDialog.getItem(dlg,'Attachment Category','Select category:',cats,0,False)
+                if ok: pending.append({'file_name':os.path.basename(path),'category':cat,'path':path,'existing':False})
+            refresh_attach()
+        def remove_file():
+            r=at.currentRow()
+            if r>=0: pending.pop(r); refresh_attach()
+        ab=QHBoxLayout(); add=QPushButton('Add Attachment'); rem=QPushButton('Remove Selected'); add.clicked.connect(add_files); rem.clicked.connect(remove_file); ab.addWidget(add); ab.addWidget(rem); ab.addStretch(1); av.addLayout(ab)
+        add.setEnabled(not read_only); rem.setEnabled(not read_only); refresh_attach(); tabs.addTab(attach_page,'Attachments')
+
+        def collect():
+            out={}
+            for key,(w,kind) in fields.items():
+                if kind=='memo': value=w.toPlainText().strip()
+                elif kind=='date': value=w.date().toString('yyyy-MM-dd')
+                elif kind in ('num','int'): value=float(w.value())
+                elif kind.startswith('combo:'): value=w.currentText()
+                else: value=w.text().strip()
+                out[key]=value
+            return out
+        def engineering_report(d=None):
+            d=d or collect(); rigging=sum(float(d.get(k,0) or 0) for k in ('hook_block_weight_kg','sling_weight_kg','shackle_weight_kg','spreader_weight_kg','other_rigging_weight_kg'))
+            load=float(d.get('load_weight_kg',0) or 0); total=load+rigging
+            dyn=float(d.get('dynamic_factor',1.0) or 1.0); design_load=total*dyn
+            lines=['ENGINEERING CHECK SUMMARY','='*58,f'Load weight: {load:,.2f} kg',f'Entered rigging / hook block weight: {rigging:,.2f} kg',f'Total static suspended load (entered components): {total:,.2f} kg',f'Entered dynamic / impact factor: {dyn:.3f}',f'Design suspended load used for checks: {design_load:,.2f} kg','']
+            cap=float(d.get('chart_capacity_kg',0) or 0)
+            if cap>0:
+                util=design_load/cap*100; lines += [f'Verified net capacity entered: {cap:,.2f} kg',f'Capacity utilisation (design load): {util:.2f}%',f'Remaining net capacity: {cap-design_load:,.2f} kg',('RESULT: DESIGN LOAD EXCEEDS ENTERED NET CHART CAPACITY' if design_load>cap else 'RESULT: Within entered net chart capacity only; competent-person approval still required')]
+            else: lines.append('CRANE CAPACITY: NOT VERIFIED - enter net capacity available for the suspended load from the correct manufacturer load chart at actual radius/configuration, after all required deductions.')
+            legs=max(1,int(d.get('sling_legs',2) or 2)); angle=float(d.get('sling_angle_deg',0) or 0); wll=float(d.get('sling_wll_kg',0) or 0)
+            if 0<angle<=90 and legs>0:
+                import math
+                tension=design_load/(legs*math.sin(math.radians(angle)))
+                lines += ['',f'Simplified equal-share sling-leg tension: {tension:,.2f} kg per leg (angle from horizontal: {angle:.2f}°)']
+                if wll>0: lines += [f'Entered sling WLL per leg: {wll:,.2f} kg',('WARNING: calculated leg tension exceeds entered WLL' if tension>wll else 'Calculated leg tension is within entered WLL; verify actual rigging geometry and manufacturer limits')]
+                else: lines.append('SLING WLL: NOT ENTERED - capacity comparison unavailable.')
+                lines.append('LIMITATION: assumes equal load sharing and ideal symmetric geometry; not valid for unequal load distribution, multi-leg sling effects, eccentric COG or complex rigging without engineering analysis. Dynamic factor selection must be justified by the appointed person / applicable standard.')
+            else: lines += ['', 'SLING TENSION: NOT CALCULATED - enter a sling angle greater than 0° and not more than 90° from horizontal.']
+            reaction=float(d.get('max_outrigger_reaction_kn',0) or 0); ml=float(d.get('mat_length_m',0) or 0); mw=float(d.get('mat_width_m',0) or 0); gbc=float(d.get('verified_gbc_kpa',0) or 0)
+            if reaction>0 and ml>0 and mw>0:
+                area=ml*mw; pressure=reaction/area
+                lines += ['',f'Entered maximum outrigger reaction: {reaction:,.2f} kN',f'Entered mat contact area: {area:,.3f} m²',f'Average bearing pressure (simplified): {pressure:,.2f} kPa']
+                if gbc>0: lines += [f'Verified ground bearing capacity: {gbc:,.2f} kPa',('WARNING: average pressure exceeds entered ground capacity' if pressure>gbc else 'Average pressure is within entered ground capacity; mat design and local effects still require verification')]
+                else: lines.append('GROUND CAPACITY: NOT ENTERED - comparison unavailable.')
+                lines.append('LIMITATION: average pressure only; does not model mat stiffness, soil layers, edge effects, eccentric loading, settlement or peak contact pressure.')
+            else: lines += ['', 'GROUND / OUTRIGGER CHECK: enter a verified maximum outrigger reaction and mat dimensions. Reaction must come from the crane manufacturer or competent lift engineer; this software does not calculate it.']
+            wind=float(d.get('wind_speed_ms',0) or 0); windlim=float(d.get('approved_wind_limit_ms',0) or 0)
+            if windlim>0: lines += ['',f'Wind entered: {wind:.2f} m/s; approved limit entered: {windlim:.2f} m/s',('WARNING: entered wind exceeds entered limit' if wind>windlim else 'Entered wind is within entered limit; verify gusts, load sail area and manufacturer limits')]
+            else: lines += ['', 'WIND CHECK: no approved wind limit entered; verify manufacturer and lift-specific limits.']
+            checks=[('chart_configuration_verified','Load chart configuration'),('crane_level_verified','Crane level'),('mat_design_verified','Mat / pad design')]
+            lines += ['', 'MANDATORY VERIFICATION INPUTS']
+            for key,label in checks: lines.append(f'{label}: {d.get(key,"Not verified")}')
+            if any(d.get(k)!='Yes' for k,_ in checks): lines.append('STATUS: HOLD - one or more verification items are not confirmed.')
+            lines += ['', 'This calculation summary is decision support only, not a lift authorization. Confirm all load data, dynamic effects, deductions, rigging geometry, crane chart conditions, ground and outrigger design with the appointed person / competent engineer.']
+            return '\n'.join(lines)
+        def update_drawings():
+            d=collect(); side.set_data(d); plan.set_data(d)
+        def recalc_now(): self._calc_output.setPlainText(engineering_report()); update_drawings()
+        recalc.clicked.connect(recalc_now)
+        # Refresh calculations and drawings when entering those tabs.
+        tabs.currentChanged.connect(lambda idx: recalc_now() if tabs.tabText(idx) in ('Engineering Calculations','Lifting Drawings') else None)
+        recalc_now()
+
+        buttons=QDialogButtonBox()
+        if not read_only:
+            save=buttons.addButton('Save Draft',QDialogButtonBox.ButtonRole.AcceptRole)
+            close=buttons.addButton('Cancel',QDialogButtonBox.ButtonRole.RejectRole)
+        else: close=buttons.addButton('Close',QDialogButtonBox.ButtonRole.RejectRole)
+        close.clicked.connect(dlg.reject)
+        def save_plan():
+            d=collect(); missing=[label for key,label in [('project','Project / Contract'),('location','Lifting Location'),('lifting_date','Planned Lifting Date'),('load_description','Load Description')] if not str(d.get(key,'')).strip()]
+            if float(d.get('load_weight_kg',0) or 0)<=0: missing.append('Load Weight must be greater than zero')
+            if missing: QMessageBox.warning(dlg,'Required Information','Please complete:\n• '+'\n• '.join(missing)); return
+            d['_engineering_summary']=engineering_report(d)
+            payload=json.dumps(d,ensure_ascii=False)
+            try:
+                if plan_id:
+                    self.db.conn.execute("UPDATE digital_lifting_plans SET project=?,location=?,lifting_date=?,load_description=?,load_weight_kg=?,payload_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workflow_status='Draft'",(d['project'],d['location'],d['lifting_date'],d['load_description'],d['load_weight_kg'],payload,plan_id)); saved=plan_id
+                    self.db.conn.execute('DELETE FROM digital_lifting_plan_attachments WHERE plan_id=?',(saved,))
+                else:
+                    cur=self.db.conn.execute('INSERT INTO digital_lifting_plans(plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,created_by) VALUES(?,?,?,?,?,?,?,?)',(number,d['project'],d['location'],d['lifting_date'],d['load_description'],d['load_weight_kg'],payload,d.get('plan_prepared_by',''))); saved=cur.lastrowid
+                folder=ATTACH_DIR/'digital_lifting_plans'/str(saved); folder.mkdir(parents=True,exist_ok=True)
+                for item in pending:
+                    src=item['path']
+                    if not item.get('existing'):
+                        dest=folder/(uuid.uuid4().hex[:8]+'_'+os.path.basename(src)); shutil.copy2(src,dest); stored=str(dest)
+                    else: stored=src
+                    self.db.conn.execute('INSERT INTO digital_lifting_plan_attachments(plan_id,file_path,file_name,attachment_category) VALUES(?,?,?,?)',(saved,stored,item['file_name'],item['category']))
+                self.db.conn.commit(); dlg.accept(); self.refresh_register()
+            except Exception as exc:
+                self.db.conn.rollback(); logging.exception('Unable to save digital lifting plan'); QMessageBox.critical(dlg,'Save Failed',f'The lifting plan was not saved.\n\n{exc}')
+        if not read_only: save.clicked.connect(save_plan)
+        outer.addWidget(buttons); fit_dialog_to_desktop(dlg,0.96,0.94); dlg.exec()
 
 
 # ============================================================
