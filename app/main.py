@@ -56,7 +56,27 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.25"
+APP_VERSION = "1.4.27-DEMO"
+# Evaluation / demo build: every operational register is capped so the
+# recipient can exercise all features without a full production dataset.
+DEMO_MODE = True
+DEMO_RECORD_LIMIT = 3
+DEMO_LIMITED_TABLES = {
+    "observations", "observation_attachments", "observation_closeout_evidence",
+    "incidents", "incident_attachments",
+    "noi_register", "noi_attachments",
+    "audits", "audit_findings", "audit_attachments", "audit_schedule",
+    "audit_checklist_responses", "audit_procedure_records", "audit_notifications",
+    "audit_history", "audit_finding_history",
+    "aud_findings", "aud_notifications", "aud_finding_attachments",
+    "capa", "capa_attachments",
+    "employees", "companies", "projects", "categories", "manpower_records",
+    "training_courses", "training_records", "training_assignments",
+    "training_matrix_cells", "training_record_history",
+    "env_noise_sessions", "env_noise_locations",
+    "env_air_samples", "env_water_samples", "env_waste_records",
+    "emergency_drills", "emergency_drill_actions",
+}
 
 
 def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
@@ -104,6 +124,52 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.create_tables()
+        self._install_demo_connection_guard()
+
+    def _install_demo_connection_guard(self):
+        """Wrap the raw sqlite connection so modules that call db.conn.execute still hit the limit."""
+        if not DEMO_MODE:
+            return
+        if getattr(self.conn, "_demo_guard_installed", False):
+            return
+        original_execute = self.conn.execute
+        original_executemany = self.conn.executemany
+
+        def guarded_execute(sql, parameters=()):
+            self._enforce_demo_limit(sql)
+            return original_execute(sql, parameters)
+
+        def guarded_executemany(sql, seq_of_parameters):
+            self._enforce_demo_limit(sql)
+            # For bulk insert, also ensure final count would not exceed limit.
+            try:
+                text_sql = (sql or "").strip()
+                upper = text_sql.upper()
+                if upper.startswith("INSERT"):
+                    m = re.search(
+                        r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
+                        text_sql,
+                        flags=re.IGNORECASE,
+                    )
+                    if m:
+                        table = m.group(1).lower()
+                        if table in DEMO_LIMITED_TABLES:
+                            count = original_execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()[0]
+                            incoming = len(list(seq_of_parameters)) if seq_of_parameters is not None else 0
+                            if int(count or 0) + incoming > DEMO_RECORD_LIMIT:
+                                raise RuntimeError(
+                                    f"DEMO LIMIT: '{table}' allows at most {DEMO_RECORD_LIMIT} record(s) "
+                                    f"in this evaluation build (currently {count}, trying to add {incoming})."
+                                )
+            except RuntimeError:
+                raise
+            except Exception:
+                logging.exception("Demo executemany limit check failed")
+            return original_executemany(sql, seq_of_parameters)
+
+        self.conn.execute = guarded_execute
+        self.conn.executemany = guarded_executemany
+        self.conn._demo_guard_installed = True
 
     def create_tables(self):
 
@@ -847,10 +913,43 @@ class Database:
         self.conn.commit()
 
     def execute(self, sql, params=()):
+        self._enforce_demo_limit(sql)
         cur = self.conn.cursor()
         cur.execute(sql, params)
         self.conn.commit()
         return cur
+
+    def _enforce_demo_limit(self, sql):
+        """Block INSERT when a demo-limited table already has DEMO_RECORD_LIMIT rows."""
+        if not DEMO_MODE:
+            return
+        try:
+            text_sql = (sql or "").strip()
+            upper = text_sql.upper()
+            if not upper.startswith("INSERT"):
+                return
+            # INSERT [OR ...] INTO table
+            m = re.search(
+                r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
+                text_sql,
+                flags=re.IGNORECASE,
+            )
+            if not m:
+                return
+            table = m.group(1).lower()
+            if table not in DEMO_LIMITED_TABLES:
+                return
+            count = self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()[0]
+            if int(count or 0) >= DEMO_RECORD_LIMIT:
+                raise RuntimeError(
+                    f"DEMO LIMIT: '{table}' already has {DEMO_RECORD_LIMIT} record(s). "
+                    f"This evaluation build allows a maximum of {DEMO_RECORD_LIMIT} entries "
+                    f"per register. Delete an existing record to add another, or use the full licence."
+                )
+        except RuntimeError:
+            raise
+        except Exception:
+            logging.exception("Demo limit check failed")
 
     def fetchall(self, sql, params=()):
         return self.conn.execute(sql, params).fetchall()
@@ -4823,7 +4922,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(
-            f"{APP_NAME} - {APP_VERSION}"
+            f"{APP_NAME} - {APP_VERSION}" + ("  [EVALUATION — max 3 records per register]" if DEMO_MODE else "")
         )
 
         self.resize(1400, 850)
@@ -16688,7 +16787,7 @@ class MainWindow(QMainWindow):
         backup=QPushButton("Backup Complete Application Data"); layout.addWidget(backup); backup.clicked.connect(self.backup)
         restore=QPushButton("Restore Application Backup"); layout.addWidget(restore); restore.clicked.connect(self.restore)
         about=QPushButton("About"); layout.addWidget(about)
-        about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System"))
+        about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System" + ("\n\nEVALUATION BUILD\nMaximum {0} records per register.".format(DEMO_RECORD_LIMIT) if DEMO_MODE else "")))
 
     def _supabase_config(self):
         project_url = safe(db.setting("supabase_project_url", "")).strip().rstrip("/")
@@ -41356,11 +41455,20 @@ class EnvironmentalMonitoringModule(QWidget):
             project TEXT DEFAULT '', location TEXT DEFAULT '', waste_type TEXT DEFAULT '',
             waste_name TEXT DEFAULT '', quantity REAL DEFAULT 0, unit TEXT DEFAULT 'kg',
             generated_by TEXT DEFAULT '', disposal_method TEXT DEFAULT '', remarks TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            disposed_quantity REAL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_env_waste_date ON env_waste_records(record_date);
         CREATE INDEX IF NOT EXISTS idx_env_waste_type ON env_waste_records(waste_type);
         """)
+        # Additive column for existing installs (disposed quantity tracking).
+        try:
+            _wcols = [r[1] for r in self.db.conn.execute("PRAGMA table_info(env_waste_records)").fetchall()]
+            if "disposed_quantity" not in _wcols:
+                self.db.conn.execute("ALTER TABLE env_waste_records ADD COLUMN disposed_quantity REAL DEFAULT 0")
+                self.db.conn.commit()
+        except Exception:
+            pass
         # Additive migrations for older noise installs
         for table, column, definition in (
             ('env_noise_sessions','reviewed_by',"TEXT DEFAULT ''"),
@@ -42101,13 +42209,16 @@ class EnvironmentalMonitoringModule(QWidget):
         self.waste_type = QComboBox(); self.waste_type.addItems(self.WASTE_TYPES)
         self.waste_name = QLineEdit(); self.waste_name.setPlaceholderText("e.g. Contaminated rags, Spent solvent…")
         self.waste_qty = QDoubleSpinBox(); self.waste_qty.setRange(0, 1000000); self.waste_qty.setDecimals(2)
+        self.waste_disposed_qty = QDoubleSpinBox(); self.waste_disposed_qty.setRange(0, 1000000); self.waste_disposed_qty.setDecimals(2)
+        self.waste_disposed_qty.setToolTip("Quantity actually disposed / removed (same unit as generated quantity)")
         self.waste_unit = QComboBox(); self.waste_unit.addItems(self.WASTE_UNITS)
         self.waste_generated_by = QLineEdit(); self.waste_disposal = QLineEdit()
         self.waste_remarks = QLineEdit()
         form.addRow("Date *", self.waste_date); form.addRow("Project / Site *", self.waste_project)
         form.addRow("Location / Area *", self.waste_location); form.addRow("Waste Type *", self.waste_type)
-        form.addRow("Waste Name / Description *", self.waste_name); form.addRow("Quantity *", self.waste_qty)
-        form.addRow("Unit", self.waste_unit); form.addRow("Generated By", self.waste_generated_by)
+        form.addRow("Waste Name / Description *", self.waste_name); form.addRow("Quantity Generated *", self.waste_qty)
+        form.addRow("Quantity Disposed", self.waste_disposed_qty); form.addRow("Unit", self.waste_unit)
+        form.addRow("Generated By", self.waste_generated_by)
         form.addRow("Disposal / Handling Method", self.waste_disposal); form.addRow("Remarks", self.waste_remarks)
         layout.addWidget(card)
         btn_row = QHBoxLayout(); btn_row.addStretch(1)
@@ -42121,6 +42232,7 @@ class EnvironmentalMonitoringModule(QWidget):
     def clear_waste_form(self):
         self.waste_date.setDate(QDate.currentDate()); self.waste_project.clear(); self.waste_location.clear()
         self.waste_type.setCurrentIndex(0); self.waste_name.clear(); self.waste_qty.setValue(0)
+        self.waste_disposed_qty.setValue(0)
         self.waste_unit.setCurrentIndex(0); self.waste_generated_by.clear(); self.waste_disposal.clear(); self.waste_remarks.clear()
 
     def save_waste_record(self):
@@ -42134,10 +42246,11 @@ class EnvironmentalMonitoringModule(QWidget):
             next_id = self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_waste_records'),0)+1").fetchone()[0]
             record_no = f"WST-{datetime.now().year}-{int(next_id):04d}"
             self.db.conn.execute(
-                "INSERT INTO env_waste_records(record_no,record_date,project,location,waste_type,waste_name,quantity,unit,generated_by,disposal_method,remarks) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO env_waste_records(record_no,record_date,project,location,waste_type,waste_name,quantity,unit,generated_by,disposal_method,remarks,disposed_quantity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (record_no, self.waste_date.date().toString("yyyy-MM-dd"), self.waste_project.text().strip(), self.waste_location.text().strip(),
                  self.waste_type.currentText(), self.waste_name.text().strip(), float(self.waste_qty.value()), self.waste_unit.currentText(),
-                 self.waste_generated_by.text().strip(), self.waste_disposal.text().strip(), self.waste_remarks.text().strip()))
+                 self.waste_generated_by.text().strip(), self.waste_disposal.text().strip(), self.waste_remarks.text().strip(),
+                 float(self.waste_disposed_qty.value())))
             self.db.conn.commit(); self.refresh_waste_register(); self.refresh_waste_matrix(); self.refresh_waste_dashboard()
             QMessageBox.information(self, "Saved", f"Waste record {record_no} saved.")
             self.clear_waste_form(); self.waste_tabs.setCurrentIndex(1)
@@ -42173,8 +42286,8 @@ class EnvironmentalMonitoringModule(QWidget):
         hint = QLabel("Tip: hold Ctrl (or Cmd) to select multiple rows, or Shift for a range, then use Export Selected Rows.")
         hint.setStyleSheet("color:#526477;font-size:12px;padding:2px 0;")
         layout.addWidget(hint)
-        self.waste_table = QTableWidget(0, 11)
-        self.waste_table.setHorizontalHeaderLabels(["ID", "Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method"])
+        self.waste_table = QTableWidget(0, 12)
+        self.waste_table.setHorizontalHeaderLabels(["ID", "Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method"])
         self.waste_table.setColumnHidden(0, True); self.waste_table.setAlternatingRowColors(True)
         self.waste_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.waste_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -42204,8 +42317,13 @@ class EnvironmentalMonitoringModule(QWidget):
         self.waste_table.setRowCount(0)
         for rec in rows:
             r = self.waste_table.rowCount(); self.waste_table.insertRow(r)
+            disposed = 0.0
+            try:
+                disposed = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
+            except Exception:
+                disposed = 0.0
             for c, v in enumerate([rec["id"], rec["record_no"], rec["record_date"], rec["project"], rec["location"],
-                                   rec["waste_type"], rec["waste_name"], f"{rec['quantity']:.2f}", rec["unit"],
+                                   rec["waste_type"], rec["waste_name"], f"{rec['quantity']:.2f}", f"{disposed:.2f}", rec["unit"],
                                    rec["generated_by"], rec["disposal_method"]]):
                 self.waste_table.setItem(r, c, QTableWidgetItem(str(v or "")))
 
@@ -42230,15 +42348,20 @@ class EnvironmentalMonitoringModule(QWidget):
             sql += " ORDER BY record_date DESC, id DESC"
             rows = self.db.conn.execute(sql, params).fetchall()
             wb = Workbook(); ws = wb.active; ws.title = "Waste Register"
-            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method", "Remarks"]
+            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method", "Remarks"]
             ws.append(headers)
             for cell in ws[1]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
             for rec in rows:
+                disposed = 0.0
+                try:
+                    disposed = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
+                except Exception:
+                    disposed = 0.0
                 ws.append([rec["record_no"], rec["record_date"], rec["project"], rec["location"], rec["waste_type"],
-                           rec["waste_name"], rec["quantity"], rec["unit"], rec["generated_by"], rec["disposal_method"], rec["remarks"]])
+                           rec["waste_name"], rec["quantity"], disposed, rec["unit"], rec["generated_by"], rec["disposal_method"], rec["remarks"]])
             thin = Border(left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
                           top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
-            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=11):
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=12):
                 for cell in row: cell.border = thin
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = min(36, max(12, max(len(safe(c.value)) for c in col) + 2))
@@ -42252,9 +42375,17 @@ class EnvironmentalMonitoringModule(QWidget):
         """Compact filter dialog: year / month / date range, project, location — applies to register."""
         dlg = QDialog(self)
         dlg.setWindowTitle("Waste Quick Filter")
-        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
-        dlg.resize(420, 280)
-        fit_dialog_to_desktop(dlg, 0.45, 0.45)
+        dlg.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        dlg.resize(400, 300)
+        dlg.setMinimumSize(360, 260)
+        fit_dialog_to_desktop(dlg, 0.42, 0.42)
         form = QFormLayout(dlg)
         form.setContentsMargins(14, 14, 14, 10)
         form.setSpacing(8)
@@ -42340,20 +42471,20 @@ class EnvironmentalMonitoringModule(QWidget):
             path += ".xlsx"
         try:
             wb = Workbook(); ws = wb.active; ws.title = "Selected Waste"
-            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method"]
+            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method"]
             ws.append(headers)
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
                 cell.alignment = Alignment(horizontal="center", wrap_text=True)
             for r in selected_rows:
                 vals = []
-                for c in range(1, 11):
+                for c in range(1, 12):
                     item = self.waste_table.item(r, c)
                     vals.append(item.text() if item else "")
                 ws.append(vals)
             thin = Border(left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
                           top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
-            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=10):
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=11):
                 for cell in row:
                     cell.border = thin
                     cell.alignment = Alignment(vertical="center", wrap_text=True)
@@ -42366,22 +42497,29 @@ class EnvironmentalMonitoringModule(QWidget):
             sm.append(["Exported on", datetime.now().strftime("%Y-%m-%d %H:%M")])
             sm.append(["Rows selected", len(selected_rows)])
             sm.append([])
-            sm.append(["Record No.", "Quantity", "Unit", "Waste Type"])
+            sm.append(["Record No.", "Qty Generated", "Qty Disposed", "Unit", "Waste Type"])
             for cell in sm[5]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="176B87")
             total_qty = 0.0
+            total_disp = 0.0
             for r in selected_rows:
                 no = self.waste_table.item(r, 1).text() if self.waste_table.item(r, 1) else ""
                 qty_txt = self.waste_table.item(r, 7).text() if self.waste_table.item(r, 7) else "0"
-                unit = self.waste_table.item(r, 8).text() if self.waste_table.item(r, 8) else ""
+                disp_txt = self.waste_table.item(r, 8).text() if self.waste_table.item(r, 8) else "0"
+                unit = self.waste_table.item(r, 9).text() if self.waste_table.item(r, 9) else ""
                 wtype = self.waste_table.item(r, 5).text() if self.waste_table.item(r, 5) else ""
                 try:
                     total_qty += float(qty_txt.replace(",", "") or 0)
                 except Exception:
                     pass
-                sm.append([no, qty_txt, unit, wtype])
+                try:
+                    total_disp += float(disp_txt.replace(",", "") or 0)
+                except Exception:
+                    pass
+                sm.append([no, qty_txt, disp_txt, unit, wtype])
             sm.append([])
-            sm.append(["Combined quantity (mixed units)", f"{total_qty:.2f}"])
+            sm.append(["Combined generated qty (mixed units)", f"{total_qty:.2f}"])
+            sm.append(["Combined disposed qty (mixed units)", f"{total_disp:.2f}"])
             sm["A" + str(sm.max_row)].font = Font(bold=True)
             for col in sm.columns:
                 sm.column_dimensions[col[0].column_letter].width = min(32, max(12, max(len(safe(c.value)) for c in col) + 2))
@@ -42433,7 +42571,7 @@ class EnvironmentalMonitoringModule(QWidget):
         year = int(self.matrix_year.value())
         project = self.matrix_project.text().strip().lower()
         location = self.matrix_location.text().strip().lower()
-        sql = "SELECT record_date, waste_type, quantity, unit, disposal_method FROM env_waste_records WHERE substr(record_date,1,4)=?"
+        sql = "SELECT record_date, waste_type, quantity, unit, disposal_method, COALESCE(disposed_quantity,0) AS disposed_quantity FROM env_waste_records WHERE substr(record_date,1,4)=?"
         params = [str(year)]
         if project:
             sql += " AND lower(project) LIKE ?"; params.append(f"%{project}%")
@@ -42475,10 +42613,12 @@ class EnvironmentalMonitoringModule(QWidget):
             except Exception:
                 q = 0.0
             matrix[m][wt] += q
-            # Count as "disposed tracking" when a disposal method is recorded
-            if safe(rec["disposal_method"]).strip():
-                disposed_by_month[m] += q
-        headers = ["Month"] + active_types + ["Month Total (Generated)", "With Disposal Method"]
+            try:
+                dq = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
+            except Exception:
+                dq = 0.0
+            disposed_by_month[m] += dq
+        headers = ["Month"] + active_types + ["Month Total (Generated)", "Month Total (Disposed)"]
         self.waste_matrix_table.setColumnCount(len(headers))
         self.waste_matrix_table.setHorizontalHeaderLabels(headers)
         self.waste_matrix_table.setRowCount(0)
@@ -42540,7 +42680,7 @@ class EnvironmentalMonitoringModule(QWidget):
             filt_bits.append(f"Location contains '{self.matrix_location.text().strip()}'")
         self.matrix_summary.setText(
             f"Filters: {' | '.join(filt_bits)}    ·    Records: {len(rows)}    ·    "
-            f"Generated qty (all units): {year_gen:.2f}    ·    With disposal method noted: {year_disp:.2f}"
+            f"Generated qty (all units): {year_gen:.2f}    ·    Disposed qty (all units): {year_disp:.2f}"
         )
 
     def export_waste_matrix(self):
@@ -42581,11 +42721,15 @@ class EnvironmentalMonitoringModule(QWidget):
             ws.freeze_panes = "B2"
             # Detail sheet with underlying records
             det = wb.create_sheet("Detail Records")
-            det.append(["Record Date", "Waste Type", "Quantity", "Unit", "Disposal Method"])
+            det.append(["Record Date", "Waste Type", "Qty Generated", "Qty Disposed", "Unit", "Disposal Method"])
             for cell in det[1]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="176B87")
             for rec in self._waste_matrix_query_rows():
-                det.append([rec["record_date"], rec["waste_type"], rec["quantity"], rec["unit"], rec["disposal_method"]])
+                try:
+                    dq = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
+                except Exception:
+                    dq = 0.0
+                det.append([rec["record_date"], rec["waste_type"], rec["quantity"], dq, rec["unit"], rec["disposal_method"]])
             for col in det.columns:
                 det.column_dimensions[col[0].column_letter].width = min(28, max(12, max(len(safe(c.value)) for c in col) + 2))
             det.auto_filter.ref = det.dimensions; det.freeze_panes = "A2"
