@@ -43404,9 +43404,37 @@ class _LiftingDrawingWidget(QWidget):
             p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
             p.drawText(margin + 20, ground - 8, '⚠ BLIND LIFT — BANKSMAN / SIGNAL REQUIRED')
 
+        # Tandem / Multiple crane — second crane on opposite side sharing the load
+        if any(t in ('Tandem Lift', 'Multiple Crane') or 'Tandem' in t for t in lift_types):
+            bx2 = int(w * 0.78)
+            by2 = ground - 48
+            p.setPen(QPen(QColor('#1D4ED8'), 2))
+            p.setBrush(QBrush(QColor('#BFDBFE')))
+            p.drawRoundedRect(bx2 - 40, by2, 120, 40, 6, 6)
+            p.setBrush(QBrush(QColor('#3B82F6')))
+            p.drawEllipse(bx2 - 28, ground - 12, 22, 22)
+            p.drawEllipse(bx2 + 40, ground - 12, 22, 22)
+            tipx2 = load_x + 20
+            tipy2 = int(h * 0.22)
+            p.setPen(QPen(QColor('#1D4ED8'), 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(bx2 + 10, by2 + 4, tipx2, tipy2)
+            p.setPen(QPen(QColor('#1E3A8A'), 2))
+            p.drawLine(tipx2, tipy2, tipx2, int(h * 0.46))
+            p.setBrush(QBrush(QColor('#1D4ED8')))
+            p.drawRect(tipx2 - 8, int(h * 0.44), 16, 12)
+            # second crane sling to load
+            p.setPen(QPen(QColor('#1D4ED8'), 2.4))
+            p.drawLine(tipx2, int(h * 0.48), load_x + 20, load_y)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
+            p.setPen(QColor('#1E40AF'))
+            p.drawText(bx2 - 30, ground + 48, 'CRANE 2 (TANDEM)')
+            p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
+            p.setPen(QColor('#1D4ED8'))
+            p.drawText(int(w * 0.42), margin + 70, 'TANDEM LIFT — TWO CRANES')
+
         p.setFont(QFont('Arial', 8))
         p.setPen(QColor('#334155'))
-        p.drawText(bx, ground + 48, crane_type.upper())
+        p.drawText(bx, ground + 48, ('CRANE 1' if any('Tandem' in t or t == 'Multiple Crane' for t in lift_types) else crane_type.upper()))
         p.drawText(load_x - 30, ground + 48, 'LOAD POSITION')
 
     def _paint_plan(self, p, w, h, margin, crane_type, load_type, radius, lift_types):
@@ -43449,12 +43477,24 @@ class _LiftingDrawingWidget(QWidget):
         p.drawLine(cx + 55, cy, lx - 30, ly)
         self._paint_load_shape(p, load_type, lx, ly - 20, 70, 36)
 
-        if any('Tandem' in t for t in lift_types):
+        if any('Tandem' in t or t == 'Multiple Crane' for t in lift_types):
+            cx2, cy2 = int(w * 0.72), int(h * 0.28)
             p.setBrush(QBrush(QColor('#BFDBFE')))
             p.setPen(QPen(QColor('#1D4ED8'), 2))
-            p.drawRoundedRect(cx - 55, cy + 90, 110, 40, 6, 6)
-            p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
-            p.drawText(cx - 40, cy + 114, '2nd CRANE (TANDEM)')
+            p.drawRoundedRect(cx2 - 50, cy2 - 28, 100, 56, 7, 7)
+            p.setBrush(QBrush(QColor('#60A5FA')))
+            for ox, oy in [(-70, -48), (70, -48), (-70, 48), (70, 48)]:
+                p.drawRect(cx2 + ox - 14, cy2 + oy - 6, 28, 12)
+            p.setPen(QPen(QColor('#1D4ED8'), 2))
+            p.drawLine(cx2 - 50, cy2, lx + 10, ly)
+            p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
+            p.setPen(QColor('#1E40AF'))
+            p.drawText(cx2 - 42, cy2 + 5, 'CRANE 2')
+            p.drawText(int(w * 0.40), int(h * 0.18), 'TANDEM / MULTIPLE CRANE LIFT')
+            # relabel first crane
+            p.setPen(QColor('#334155'))
+            p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
+            p.drawText(cx - 32, cy + 5, 'CRANE 1')
 
         p.setFont(QFont('Arial', 8))
         p.setPen(QColor('#334155'))
@@ -43594,82 +43634,162 @@ class DigitalLiftingPlanModule(QWidget):
         self._export_plan(pid)
 
     def _render_drawing_image(self, data, view='side', width=1200, height=700):
-        """Render engineering drawing to a PNG QImage / temp file for export."""
+        """Paint engineering drawing off-screen for export (no on-screen window required)."""
         from PySide6.QtGui import QImage, QPainter
-        img = QImage(width, height, QImage.Format.Format_ARGB32)
-        img.fill(QColor('#FFFFFF'))
-        widget = _LiftingDrawingWidget(data, view)
-        widget.resize(width, height)
-        painter = QPainter(img)
-        widget.render(painter)
-        painter.end()
-        folder = ATTACH_DIR / 'digital_lifting_plans' / '_export'
+        from PySide6.QtCore import QSize, QEvent
+        folder = Path(ATTACH_DIR) / 'digital_lifting_plans' / '_export'
         folder.mkdir(parents=True, exist_ok=True)
         out = folder / f"lift_draw_{view}_{uuid.uuid4().hex[:8]}.png"
-        img.save(str(out), 'PNG')
-        return out
+        try:
+            widget = _LiftingDrawingWidget(data, view)
+            widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            widget.setFixedSize(width, height)
+            widget.show()  # required for some platforms so paint engine is ready
+            widget.repaint()
+            img = QImage(QSize(width, height), QImage.Format.Format_ARGB32)
+            img.fill(QColor('#FFFFFF'))
+            painter = QPainter(img)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            widget.render(painter)
+            painter.end()
+            widget.hide()
+            widget.deleteLater()
+            if not img.save(str(out), 'PNG') or not out.is_file() or out.stat().st_size < 100:
+                raise RuntimeError('PNG write failed')
+            return out
+        except Exception:
+            logging.exception('drawing render')
+            # Minimal fallback image so Word/PDF export never crashes
+            img = QImage(QSize(width, height), QImage.Format.Format_ARGB32)
+            img.fill(QColor('#FFFFFF'))
+            p = QPainter(img)
+            p.setPen(QColor('#17365D'))
+            p.setFont(QFont('Arial', 14, QFont.Weight.Bold))
+            title = 'SIDE ELEVATION' if view == 'side' else 'PLAN VIEW'
+            p.drawText(40, 50, f'Lifting Arrangement — {title}')
+            p.setFont(QFont('Arial', 10))
+            p.drawText(40, 80, f"Crane: {data.get('crane_type', '—')}  |  Load: {data.get('load_type', '—')}")
+            p.drawText(40, 100, f"Radius: {data.get('working_radius_m', '—')} m  |  Boom: {data.get('boom_length_m', '—')} m")
+            p.drawText(40, 120, f"Lift types: {', '.join(data.get('lift_types') or []) or '—'}")
+            p.drawText(40, 150, 'Open the plan drawings tab in the application for the full schematic.')
+            p.end()
+            img.save(str(out), 'PNG')
+            return out
 
     def _export_plan(self, plan_id):
-        row = self.db.conn.execute('SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?', (plan_id,)).fetchone()
+        row = self.db.conn.execute(
+            'SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?',
+            (plan_id,)
+        ).fetchone()
         if not row:
+            QMessageBox.warning(self, 'Export', 'Plan not found.')
             return
         try:
-            data = json.loads(row[6] or '{}')
+            data = json.loads(row['payload_json'] or '{}')
         except Exception:
             data = {}
-        number = row[0]
-        path, _ = QFileDialog.getSaveFileName(self, 'Export Lifting Plan', f'{number}_Lifting_Plan.docx', 'Word Documents (*.docx);;PDF Files (*.pdf)')
+        number = row['plan_number']
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, 'Export Lifting Plan', f'{number}_Lifting_Plan.docx',
+            'Word Documents (*.docx);;PDF Files (*.pdf)'
+        )
         if not path:
             return
-        fmt = 'pdf' if path.lower().endswith('.pdf') else 'docx'
-        if fmt == 'docx' and not path.lower().endswith('.docx'):
-            path += '.docx'
-        if fmt == 'pdf' and not path.lower().endswith('.pdf'):
-            path += '.pdf'
+        # Honour filter when extension omitted
+        if path.lower().endswith('.pdf') or (selected_filter and 'PDF' in selected_filter and not path.lower().endswith('.docx')):
+            fmt = 'pdf'
+            if not path.lower().endswith('.pdf'):
+                path += '.pdf'
+        else:
+            fmt = 'docx'
+            if not path.lower().endswith('.docx'):
+                path += '.docx'
         try:
             side_img = self._render_drawing_image(data, 'side')
             plan_img = self._render_drawing_image(data, 'plan')
             report_no = f"{document_prefix()}-LP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
             company = company_name()
+            unit = data.get('load_unit') or 'kg'
+            load_kg = float(row['load_weight_kg'] or 0)
+            if unit in ('t', 'ton', 'tonne', 'tonnes'):
+                load_disp = f"{load_kg / 1000.0:,.3f} t"
+            else:
+                load_disp = f"{load_kg:,.2f} kg"
+            pairs = [
+                ('Plan Number', number), ('Status', row['workflow_status']),
+                ('Project', row['project']), ('Location', row['location']),
+                ('Lifting Date', row['lifting_date']), ('Load Description', row['load_description']),
+                ('Load Weight', load_disp),
+                ('Lift Types', ', '.join(data.get('lift_types') or []) or data.get('lift_type', '')),
+                ('Load Type', data.get('load_type', '')),
+                ('Crane Type', data.get('crane_type', '')),
+                ('Crane Make / Model', data.get('crane_make_model', '')),
+                ('Crane Serial No.', data.get('crane_serial_no', '')),
+                ('Crane Capacity (t)', data.get('crane_capacity_t', '')),
+                ('Working Radius (m)', data.get('working_radius_m', '')),
+                ('Boom Length (m)', data.get('boom_length_m', '')),
+                ('Sling Legs', data.get('sling_legs', '')),
+                ('Sling Angle (°)', data.get('sling_angle_deg', '')),
+                ('Chart Capacity (kg)', data.get('chart_capacity_kg', '')),
+                ('Appointed Person', data.get('appointed_person', '')),
+                ('Lifting Supervisor', data.get('lifting_supervisor', '')),
+            ]
             if fmt == 'docx':
                 doc = Document()
-                set_docx_landscape(doc)
-                add_docx_report_header(doc, 'DIGITAL LIFTING PLAN', 'LP', number)
-                pairs = [
-                    ('Plan Number', number), ('Status', row[7]),
-                    ('Project', row[1]), ('Location', row[2]),
-                    ('Lifting Date', row[3]), ('Load Description', row[4]),
-                    ('Load Weight (kg)', f'{float(row[5] or 0):,.2f}'),
-                    ('Lift Types', ', '.join(data.get('lift_types') or []) or data.get('lift_type', '')),
-                    ('Load Type', data.get('load_type', '')),
-                    ('Crane Type', data.get('crane_type', '')),
-                    ('Crane Make / Model', data.get('crane_make_model', '')),
-                    ('Working Radius (m)', data.get('working_radius_m', '')),
-                    ('Boom Length (m)', data.get('boom_length_m', '')),
-                    ('Sling Legs', data.get('sling_legs', '')),
-                    ('Sling Angle (°)', data.get('sling_angle_deg', '')),
-                    ('Chart Capacity (kg)', data.get('chart_capacity_kg', '')),
-                    ('Appointed Person', data.get('appointed_person', '')),
-                    ('Lifting Supervisor', data.get('lifting_supervisor', '')),
-                ]
-                add_docx_kv_table(doc, pairs)
-                if data.get('_engineering_summary'):
-                    add_docx_boxed_section(doc, 'Engineering Check Summary', data.get('_engineering_summary'), 8)
+                try:
+                    set_docx_landscape(doc)
+                except Exception:
+                    pass
+                try:
+                    add_docx_report_header(doc, 'DIGITAL LIFTING PLAN', 'LP', number)
+                except Exception:
+                    doc.add_heading('DIGITAL LIFTING PLAN', 0)
+                    doc.add_paragraph(f'Plan: {number}  |  {company}')
+                try:
+                    add_docx_kv_table(doc, pairs)
+                except Exception:
+                    for k, v in pairs:
+                        doc.add_paragraph(f'{k}: {v}')
+                summary = data.get('_engineering_summary') or ''
+                if summary:
+                    try:
+                        add_docx_boxed_section(doc, 'Engineering Check Summary', summary, 8)
+                    except Exception:
+                        doc.add_heading('Engineering Check Summary', level=2)
+                        doc.add_paragraph(summary)
                 doc.add_heading('Engineering Drawing — Side Elevation', level=2)
-                doc.add_picture(str(side_img), width=Inches(9.2))
+                if Path(side_img).is_file():
+                    try:
+                        doc.add_picture(str(side_img), width=Inches(9.0))
+                    except Exception:
+                        doc.add_paragraph(f'[Drawing file: {side_img}]')
                 doc.add_heading('Engineering Drawing — Plan View', level=2)
-                doc.add_picture(str(plan_img), width=Inches(9.2))
-                add_docx_footer(doc)
-                save_docx_validated(doc, path)
+                if Path(plan_img).is_file():
+                    try:
+                        doc.add_picture(str(plan_img), width=Inches(9.0))
+                    except Exception:
+                        doc.add_paragraph(f'[Drawing file: {plan_img}]')
+                try:
+                    add_docx_footer(doc)
+                except Exception:
+                    pass
+                try:
+                    save_docx_validated(doc, path)
+                except Exception:
+                    doc.save(path)
             else:
                 styles = getSampleStyleSheet()
-                story = [Paragraph(f"<b>{html.escape(company)}</b> — DIGITAL LIFTING PLAN", styles['Title']),
-                         Paragraph(f"Plan: {html.escape(number)} | Document: {html.escape(report_no)}", styles['Normal']),
-                         Spacer(1, 8)]
-                meta = [[f"Project: {row[1]}", f"Location: {row[2]}"],
-                        [f"Date: {row[3]}", f"Load: {row[4]} ({float(row[5] or 0):,.0f} kg)"],
-                        [f"Lift types: {', '.join(data.get('lift_types') or [])}", f"Load type: {data.get('load_type', '')}"],
-                        [f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}", f"Radius: {data.get('working_radius_m', '')} m"]]
+                story = [
+                    Paragraph(f"<b>{html.escape(str(company))}</b> — DIGITAL LIFTING PLAN", styles['Title']),
+                    Paragraph(f"Plan: {html.escape(str(number))} | Document: {html.escape(report_no)}", styles['Normal']),
+                    Spacer(1, 8),
+                ]
+                meta = [
+                    [f"Project: {row['project']}", f"Location: {row['location']}"],
+                    [f"Date: {row['lifting_date']}", f"Load: {row['load_description']} ({load_disp})"],
+                    [f"Lift types: {', '.join(data.get('lift_types') or [])}", f"Load type: {data.get('load_type', '')}"],
+                    [f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}", f"Radius: {data.get('working_radius_m', '')} m"],
+                ]
                 mt = Table(meta, colWidths=[320, 320])
                 mt.setStyle(TableStyle([
                     ('GRID', (0, 0), (-1, -1), 0.6, colors.HexColor('#4A5C6A')),
@@ -43679,114 +43799,334 @@ class DigitalLiftingPlanModule(QWidget):
                 story += [mt, Spacer(1, 10)]
                 if data.get('_engineering_summary'):
                     story.append(Paragraph('<b>Engineering Check Summary</b>', styles['Heading2']))
-                    for line in str(data.get('_engineering_summary')).splitlines()[:40]:
+                    for line in str(data.get('_engineering_summary')).splitlines()[:50]:
                         story.append(Paragraph(html.escape(line), styles['Normal']))
                     story.append(Spacer(1, 8))
                 story.append(Paragraph('<b>Side Elevation</b>', styles['Heading2']))
-                story.append(RLImage(str(side_img), width=500, height=290, kind='proportional'))
+                if Path(side_img).is_file():
+                    story.append(RLImage(str(side_img), width=500, height=290, kind='proportional'))
                 story.append(Spacer(1, 8))
                 story.append(Paragraph('<b>Plan View</b>', styles['Heading2']))
-                story.append(RLImage(str(plan_img), width=500, height=290, kind='proportional'))
+                if Path(plan_img).is_file():
+                    story.append(RLImage(str(plan_img), width=500, height=290, kind='proportional'))
                 SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22).build(story)
             QMessageBox.information(self, 'Exported', f'Lifting plan exported:\n{path}')
         except Exception as exc:
             logging.exception('lifting plan export')
-            QMessageBox.critical(self, 'Export Failed', str(exc))
+            QMessageBox.critical(self, 'Export Failed', f'Could not export the lifting plan.\n\n{type(exc).__name__}: {exc}')
 
-    def _import_equipment_file(self, fields, parent_dlg):
-        """Import crane/equipment details from PDF text or image attachment; autofill where patterns match."""
+    def _parse_crane_spec_text(self, extracted):
+        """Parse crane / load-chart / certificate text and return field->value map."""
+        if not extracted:
+            return {}, []
+        text = extracted.replace('\u00a0', ' ')
+        text = re.sub(r'[ \t]+', ' ', text)
+        filled_notes = []
+        out = {}
+
+        def find_all(patterns, src=None):
+            src = src if src is not None else text
+            hits = []
+            for pat in patterns:
+                for m in re.finditer(pat, src, re.I | re.M):
+                    hits.append(m)
+            return hits
+
+        def first_num(patterns, src=None):
+            for m in find_all(patterns, src):
+                try:
+                    raw = m.group(1).replace(',', '').replace(' ', '')
+                    return float(raw)
+                except Exception:
+                    continue
+            return None
+
+        def first_text(patterns, src=None):
+            for m in find_all(patterns, src):
+                val = (m.group(1) or '').strip(' \t\r\n:.-')
+                if val and len(val) > 1:
+                    return val
+            return None
+
+        # --- Make / Model ---
+        model = first_text([
+            r'(?:make\s*/\s*model|model\s*(?:no|number|#)?|crane\s*model|type\s*/\s*model)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 \-/\.]{2,40})',
+            r'\b((?:LTM|LGM|ATC|AC|GR|RT|GMK|CC|LR|QUY|XCMG|SANY|TADANO|LIEBHERR|GROVE|MANITOWOC|TEREX|KATO|ZOOM\s*LION)[\w\-/\.]{2,20})\b',
+        ])
+        if model:
+            out['crane_make_model'] = model[:60]
+            filled_notes.append(f'Make/Model: {model[:60]}')
+
+        serial = first_text([
+            r'(?:serial\s*(?:no|number|#)|s/?n|chassis\s*no)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]{3,30})',
+        ])
+        if serial:
+            out['crane_serial_no'] = serial[:40]
+            filled_notes.append(f'Serial: {serial[:40]}')
+
+        # --- Capacity in tonnes ---
+        cap_t = first_num([
+            r'(?:rated\s*capacity|max(?:imum)?\s*capacity|lifting\s*capacity|capacity)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes|mt)\b',
+            r'(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes|mt)\s*(?:capacity|crane|rated)',
+            r'capacity\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*t\b',
+        ])
+        if cap_t is not None and 1 <= cap_t <= 5000:
+            out['crane_capacity_t'] = cap_t
+            filled_notes.append(f'Capacity: {cap_t} t')
+
+        # --- Boom length ---
+        boom = first_num([
+            r'(?:main\s*)?boom\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
+            r'(?:boom\s*length)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)',
+            r'(\d+(?:[.,]\d+)?)\s*m\s*(?:boom|main\s*boom)',
+        ])
+        if boom is not None and 3 <= boom <= 200:
+            out['boom_length_m'] = boom
+            filled_notes.append(f'Boom: {boom} m')
+
+        # --- Jib ---
+        jib = first_num([
+            r'(?:jib|fly\s*jib)\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
+        ])
+        if jib is not None and 1 <= jib <= 100:
+            out['jib_length_m'] = jib
+            filled_notes.append(f'Jib: {jib} m')
+
+        # --- Radius / outreach ---
+        radius = first_num([
+            r'(?:working\s*)?(?:radius|outreach)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
+            r'(\d+(?:[.,]\d+)?)\s*m\s*(?:radius|outreach)',
+            r'(?:at\s+)?(?:radius|r)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
+        ])
+        if radius is not None and 1 <= radius <= 150:
+            out['working_radius_m'] = radius
+            filled_notes.append(f'Radius: {radius} m')
+
+        # --- Counterweight ---
+        cw = first_num([
+            r'(?:counter\s*weight|counterweight|ballast)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)?',
+        ])
+        if cw is not None and 0 < cw <= 500:
+            out['counterweight_t'] = cw
+            filled_notes.append(f'Counterweight: {cw} t')
+
+        # --- Chart capacity at a radius (kg or t) ---
+        chart_t = first_num([
+            r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|permissible\s*load)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)\b',
+            r'(?:at\s+\d+(?:[.,]\d+)?\s*m)[^\n]{0,40}?(\d+(?:[.,]\d+)?)\s*(?:t|ton)\b',
+        ])
+        chart_kg = first_num([
+            r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|swl)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
+            r'(\d{3,7}(?:[.,]\d+)?)\s*kg\s*(?:capacity|swl|allowable)',
+        ])
+        if chart_t is not None and 0.1 <= chart_t <= 2000:
+            out['chart_capacity_kg'] = chart_t * 1000.0
+            filled_notes.append(f'Chart capacity: {chart_t} t ({chart_t * 1000:.0f} kg)')
+        elif chart_kg is not None and 100 <= chart_kg <= 2_000_000:
+            out['chart_capacity_kg'] = chart_kg
+            filled_notes.append(f'Chart capacity: {chart_kg} kg')
+
+        # --- Load weight ---
+        load_t = first_num([
+            r'(?:load\s*weight|load\s*mass|gross\s*weight|cargo\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes)\b',
+        ])
+        load_kg = first_num([
+            r'(?:load\s*weight|load\s*mass|gross\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
+            r'(?:weight)\s*[:\-]?\s*(\d{2,7}(?:[.,]\d+)?)\s*kg\b',
+        ])
+        if load_t is not None and 0.01 <= load_t <= 5000:
+            out['load_weight_kg'] = load_t * 1000.0
+            out['load_unit'] = 't'
+            filled_notes.append(f'Load weight: {load_t} t')
+        elif load_kg is not None and 1 <= load_kg <= 5_000_000:
+            out['load_weight_kg'] = load_kg
+            out['load_unit'] = 'kg'
+            filled_notes.append(f'Load weight: {load_kg} kg')
+
+        # --- Crane type keywords ---
+        low = text.lower()
+        if 'crawler' in low:
+            out['crane_type'] = 'Crawler Crane'; filled_notes.append('Crane type: Crawler Crane')
+        elif 'tower crane' in low or re.search(r'\btower\b', low):
+            out['crane_type'] = 'Tower Crane'; filled_notes.append('Crane type: Tower Crane')
+        elif 'loader' in low or 'knuckle' in low:
+            out['crane_type'] = 'Loader Crane'; filled_notes.append('Crane type: Loader Crane')
+        elif 'overhead' in low or 'gantry' in low:
+            out['crane_type'] = 'Overhead Crane'; filled_notes.append('Crane type: Overhead Crane')
+        elif 'mobile' in low or 'all terrain' in low or 'rough terrain' in low or 'truck crane' in low:
+            out['crane_type'] = 'Mobile Crane'; filled_notes.append('Crane type: Mobile Crane')
+
+        # --- Outrigger ---
+        outr = first_text([
+            r'(?:outrigger\s*(?:config(?:uration)?|spread|set-?up))\s*[:\-]?\s*([^\n]{5,60})',
+        ])
+        if outr:
+            out['outrigger_configuration'] = outr[:80]
+            filled_notes.append(f'Outriggers: {outr[:40]}')
+
+        # --- Load chart reference ---
+        chart_ref = first_text([
+            r'(?:load\s*chart|chart\s*(?:no|number|rev|revision|page))\s*[:\-]?\s*([^\n]{3,50})',
+        ])
+        if chart_ref:
+            out['load_chart_reference'] = chart_ref[:80]
+            filled_notes.append(f'Chart ref: {chart_ref[:40]}')
+
+        # Hook block
+        hook = first_num([
+            r'(?:hook\s*block|hook\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
+            r'(?:hook\s*block)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton)\b',
+        ])
+        if hook is not None:
+            # if small number with ton context already handled by pattern; assume kg if > 20 else could be t
+            if hook <= 20 and re.search(r'hook\s*block[^\n]{0,20}\d+(?:[.,]\d+)?\s*(?:t|ton)', text, re.I):
+                hook *= 1000
+            if 10 <= hook <= 50000:
+                out['hook_block_weight_kg'] = hook
+                filled_notes.append(f'Hook block: {hook} kg')
+
+        return out, filled_notes
+
+    def _import_equipment_file(self, fields, parent_dlg, load_unit_combo=None):
+        """Import crane / load-chart PDF or image and autofill every field that can be read."""
         path, _ = QFileDialog.getOpenFileName(
-            parent_dlg, 'Import Equipment Details (PDF / Image)', '',
-            'Documents / Images (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All Files (*.*)'
+            parent_dlg, 'Import Crane / Equipment Specification (PDF / Image)', '',
+            'PDF / Images (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;PDF Files (*.pdf);;Images (*.png *.jpg *.jpeg);;All Files (*.*)'
         )
         if not path:
             return
         extracted = ''
         suffix = Path(path).suffix.lower()
+        extract_errors = []
         try:
             if suffix == '.pdf':
                 try:
-                    import fitz
-                    pdf = fitz.open(path)
-                    for page in pdf:
-                        extracted += page.get_text() + '\n'
-                    pdf.close()
-                except Exception:
-                    try:
-                        from pypdf import PdfReader
-                        reader = PdfReader(path)
-                        for page in reader.pages:
-                            extracted += (page.extract_text() or '') + '\n'
-                    except Exception:
-                        extracted = ''
+                    extracted = chem_file_text(path) or ''
+                except Exception as exc:
+                    extract_errors.append(str(exc))
+                    extracted = ''
+                    # direct fallbacks
+                    for reader_name, reader_fn in (
+                        ('pypdf', lambda p: __import__('pypdf', fromlist=['PdfReader']).PdfReader(p)),
+                    ):
+                        try:
+                            from pypdf import PdfReader
+                            r = PdfReader(str(path), strict=False)
+                            extracted = '\n'.join((pg.extract_text() or '') for pg in r.pages)
+                            if extracted.strip():
+                                break
+                        except Exception as e2:
+                            extract_errors.append(f'{reader_name}: {e2}')
+                    if not extracted.strip():
+                        try:
+                            import fitz
+                            with fitz.open(str(path)) as pdf:
+                                extracted = '\n'.join((page.get_text('text') or '') for page in pdf)
+                        except Exception as e3:
+                            extract_errors.append(f'fitz: {e3}')
             else:
-                # Image: store path; OCR is optional if pytesseract exists
+                # OCR for images
                 try:
                     import pytesseract
                     from PIL import Image as _PIL
-                    extracted = pytesseract.image_to_string(_PIL.open(path))
-                except Exception:
+                    extracted = pytesseract.image_to_string(_PIL.open(path)) or ''
+                except Exception as e:
+                    extract_errors.append(f'OCR: {e}')
                     extracted = ''
-        except Exception:
+        except Exception as exc:
             logging.exception('import equipment extract')
-            extracted = ''
+            extract_errors.append(str(exc))
 
-        filled = []
-        text_l = extracted.lower() if extracted else ''
-        # Heuristic patterns
-        import re as _re
-        def _find_num(patterns):
-            for pat in patterns:
-                m = _re.search(pat, extracted or '', _re.I)
-                if m:
-                    try:
-                        return float(m.group(1).replace(',', ''))
-                    except Exception:
-                        continue
-            return None
+        parsed, filled_notes = self._parse_crane_spec_text(extracted)
 
-        weight = _find_num([r'(?:load\s*weight|weight|swl|capacity)[^\d]{0,20}(\d+(?:[.,]\d+)?)\s*(?:kg|t\b)',
-                            r'(\d+(?:[.,]\d+)?)\s*kg'])
-        if weight and 'load_weight_kg' in fields:
-            # if value looks like tonnes and small, convert
-            val = weight
-            if val < 500 and 't' in text_l:
-                val = val * 1000
-            fields['load_weight_kg'][0].setValue(val)
-            filled.append(f'Load weight ≈ {val}')
-        radius = _find_num([r'(?:radius|outreach)[^\d]{0,16}(\d+(?:[.,]\d+)?)', r'(\d+(?:[.,]\d+)?)\s*m\s*(?:radius|outreach)'])
-        if radius is not None and 'working_radius_m' in fields:
-            fields['working_radius_m'][0].setValue(radius); filled.append(f'Radius ≈ {radius} m')
-        boom = _find_num([r'(?:boom\s*length|boom)[^\d]{0,16}(\d+(?:[.,]\d+)?)'])
-        if boom is not None and 'boom_length_m' in fields:
-            fields['boom_length_m'][0].setValue(boom); filled.append(f'Boom ≈ {boom} m')
-        cap_t = _find_num([r'(?:rated\s*capacity|capacity)[^\d]{0,16}(\d+(?:[.,]\d+)?)\s*t\b'])
-        if cap_t is not None and 'crane_capacity_t' in fields:
-            fields['crane_capacity_t'][0].setValue(cap_t); filled.append(f'Capacity ≈ {cap_t} t')
+        # Apply parsed values into form widgets
+        applied = []
+        for key, val in parsed.items():
+            if key == 'load_unit':
+                if load_unit_combo is not None:
+                    idx = load_unit_combo.findText(str(val))
+                    if idx < 0 and str(val) in ('t', 'ton', 'tonne', 'tonnes'):
+                        idx = load_unit_combo.findText('t')
+                    if idx >= 0:
+                        load_unit_combo.setCurrentIndex(idx)
+                        applied.append(f'Load unit = {load_unit_combo.currentText()}')
+                continue
+            if key not in fields:
+                continue
+            widget, kind = fields[key]
+            try:
+                if kind == 'num':
+                    widget.setValue(float(val))
+                elif kind == 'int':
+                    widget.setValue(int(float(val)))
+                elif kind.startswith('combo:'):
+                    # try exact, else partial match
+                    i = widget.findText(str(val))
+                    if i < 0:
+                        for j in range(widget.count()):
+                            if str(val).lower() in widget.itemText(j).lower() or widget.itemText(j).lower() in str(val).lower():
+                                i = j; break
+                    if i >= 0:
+                        widget.setCurrentIndex(i)
+                elif kind == 'text':
+                    widget.setText(str(val))
+                elif kind == 'memo':
+                    prev = widget.toPlainText().strip()
+                    widget.setPlainText((prev + '\n' + str(val)).strip() if prev else str(val))
+                applied.append(f'{key} = {val}')
+            except Exception:
+                logging.exception('apply field %s', key)
 
-        # Always keep the source file as an attachment note in load description / notes
+        # Notes: keep source + short extract preview
         if 'additional_notes' in fields:
             note = fields['additional_notes'][0]
             prev = note.toPlainText().strip()
-            add = f"Imported equipment file: {Path(path).name}"
-            note.setPlainText((prev + '\n' + add).strip() if prev else add)
+            preview = (extracted or '')[:1200].strip()
+            add_lines = [f"Imported file: {Path(path).name}"]
+            if filled_notes:
+                add_lines.append('Autofill summary: ' + '; '.join(filled_notes))
+            if preview:
+                add_lines.append('--- Extracted text preview ---')
+                add_lines.append(preview)
+            block = '\n'.join(add_lines)
+            note.setPlainText((prev + '\n\n' + block).strip() if prev else block)
 
-        # Copy into attachments folder for the plan session
+        # If unit is tonnes, show load weight in the spinbox as tonnes (collect() converts back to kg)
         try:
-            dest_dir = ATTACH_DIR / 'digital_lifting_plans' / '_import'
+            unit = 'kg'
+            if load_unit_combo is not None:
+                unit = load_unit_combo.currentText()
+            if unit == 't' and 'load_weight_kg' in fields and 'load_weight_kg' in parsed:
+                kg = float(parsed['load_weight_kg'])
+                fields['load_weight_kg'][0].setValue(kg / 1000.0)
+        except Exception:
+            pass
+
+        # Copy file for attachments
+        try:
+            dest_dir = Path(ATTACH_DIR) / 'digital_lifting_plans' / '_import'
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest = dest_dir / f"{uuid.uuid4().hex[:8]}_{Path(path).name}"
             shutil.copy2(path, dest)
         except Exception:
             logging.exception('import copy')
 
-        if filled:
-            QMessageBox.information(parent_dlg, 'Import', 'Autofilled from file:\n• ' + '\n• '.join(filled) +
-                                    '\n\nPlease review all values against the manufacturer load chart / certificate.\nSource file kept for the attachments list when you save.')
+        if applied or filled_notes:
+            QMessageBox.information(
+                parent_dlg, 'Import Complete',
+                'Fields autofilled from the file:\n• ' + '\n• '.join(filled_notes or applied) +
+                '\n\nPlease review every value against the manufacturer certificate / load chart before approval.'
+            )
         else:
-            QMessageBox.information(parent_dlg, 'Import',
-                                    'File attached for reference.\nNo automatic numeric fields could be read confidently from this file.\n'
-                                    'Enter values manually and verify against the certificate / load chart.')
+            msg = 'No crane specification numbers could be read automatically from this file.'
+            if not (extracted or '').strip():
+                msg += '\n\nThe file appears to have no selectable text (scanned/image-only PDF).'
+                if extract_errors:
+                    msg += '\nDetails: ' + '; '.join(extract_errors[:3])
+                msg += '\n\nTip: use a text-based PDF certificate, or an image with OCR (Tesseract) installed.'
+            else:
+                msg += '\n\nSome text was read but no matching crane fields were found. Check Additional Notes for the extract preview and fill fields manually.'
+            QMessageBox.warning(parent_dlg, 'Import — limited autofill', msg)
 
     def _editor(self, plan_id=None, read_only=False):
         row = self.db.conn.execute('SELECT plan_number,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?', (plan_id,)).fetchone() if plan_id else None
@@ -43844,9 +44184,19 @@ class DigitalLiftingPlanModule(QWidget):
         load_type_combo.addItems(self.LOAD_TYPES)
         load_type_combo.setCurrentText(str(data.get('load_type') or 'General Package'))
         load_type_combo.setEnabled(not read_only)
+        load_unit_combo = QComboBox()
+        load_unit_combo.addItems(['kg', 't'])
+        load_unit_combo.setCurrentText(str(data.get('load_unit') or 'kg'))
+        load_unit_combo.setEnabled(not read_only)
+        load_unit_combo.setToolTip('Load weight unit. Values are stored in kg internally (1 t = 1000 kg).')
         lt_form = QFormLayout()
         lt_form.addRow('Load type (drawing geometry)', load_type_combo)
+        lt_form.addRow('Load weight unit', load_unit_combo)
+        unit_hint = QLabel('Enter load weight on the Load & Rigging tab. If unit is t, the value is converted to kg for calculations and the register.')
+        unit_hint.setWordWrap(True)
+        unit_hint.setStyleSheet('color:#526579;font-size:12px;')
         lt_layout.addLayout(lt_form)
+        lt_layout.addWidget(unit_hint)
         lt_layout.addStretch(1)
         tabs.addTab(lt_page, 'Lift & Load Type')
 
@@ -43859,7 +44209,7 @@ class DigitalLiftingPlanModule(QWidget):
             ('hse_representative', 'HSE Representative', 'text'), ('operator', 'Crane Operator', 'text'),
             ('rigger', 'Rigger', 'text'), ('banksman', 'Banksman / Signal Person', 'text')],
           'Load & Rigging': [
-            ('load_weight_kg', 'Load Weight (kg)', 'num'),
+            ('load_weight_kg', 'Load Weight (value — unit set on Lift & Load Type tab)', 'num'),
             ('dynamic_factor', 'Dynamic / impact factor (competent-person input; minimum 1.0)', 'num'),
             ('hook_block_weight_kg', 'Hook Block Weight (kg)', 'num'),
             ('sling_weight_kg', 'Total Sling Weight (kg)', 'num'),
@@ -43954,6 +44304,17 @@ class DigitalLiftingPlanModule(QWidget):
 
         preset.currentTextChanged.connect(lambda n: apply_preset(n) if not read_only else None)
 
+        # If plan stored unit as tonnes, show the spinbox in tonnes for editing
+        try:
+            if str(data.get('load_unit') or 'kg') == 't' and 'load_weight_kg' in fields:
+                kg_val = float(data.get('load_weight_kg') or 0)
+                entered = data.get('_load_weight_entered')
+                show = float(entered) if entered not in (None, '') else (kg_val / 1000.0 if kg_val else 0)
+                fields['load_weight_kg'][0].setValue(show)
+        except Exception:
+            pass
+
+
         # Phase 2 calculations
         calc_page = QWidget(); cv = QVBoxLayout(calc_page)
         warning = QLabel('Engineering decision support only. Use manufacturer load charts and verified engineering inputs. Presets are typical class averages, not a substitute for the certified chart.')
@@ -44038,6 +44399,20 @@ class DigitalLiftingPlanModule(QWidget):
                 out[key] = value
             out['lift_types'] = [n for n, cb in lift_checks.items() if cb.isChecked()]
             out['load_type'] = load_type_combo.currentText()
+            out['load_unit'] = load_unit_combo.currentText()
+            # Normalize load weight to kg for storage / engineering checks
+            try:
+                raw = float(out.get('load_weight_kg', 0) or 0)
+                if out['load_unit'] == 't':
+                    # User entered tonnes in the same spinbox — convert to kg
+                    out['load_weight_kg'] = raw * 1000.0
+                    out['_load_weight_entered'] = raw
+                    out['_load_weight_entered_unit'] = 't'
+                else:
+                    out['_load_weight_entered'] = raw
+                    out['_load_weight_entered_unit'] = 'kg'
+            except Exception:
+                pass
             return out
 
         def engineering_report(d=None):
@@ -44135,7 +44510,7 @@ class DigitalLiftingPlanModule(QWidget):
                 elif kind.startswith('combo:'):
                     w.currentTextChanged.connect(lambda *_: update_drawings())
         tabs.currentChanged.connect(lambda idx: recalc_now() if tabs.tabText(idx) in ('Engineering Calculations', 'Lifting Drawings') else None)
-        import_btn.clicked.connect(lambda: self._import_equipment_file(fields, dlg))
+        import_btn.clicked.connect(lambda: self._import_equipment_file(fields, dlg, load_unit_combo))
         recalc_now()
 
         buttons = QDialogButtonBox()
