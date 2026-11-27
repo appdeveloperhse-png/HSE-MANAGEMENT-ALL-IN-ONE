@@ -43103,11 +43103,8 @@ class EnvironmentalMonitoringModule(QWidget):
 # ============================================================
 
 class _LiftingDrawingWidget(QWidget):
-    """Engineering-style lifting arrangement drawing (schematic, not to scale).
+    """Professional engineering-style lifting arrangement schematic (not to scale)."""
 
-    Responds to lift type, load type, sling legs, radius, boom length and
-    crane configuration so the preview matches the selected plan inputs.
-    """
     def __init__(self, data=None, view='side', parent=None):
         super().__init__(parent)
         self.data = data or {}
@@ -43135,20 +43132,23 @@ class _LiftingDrawingWidget(QWidget):
         return [x.strip() for x in str(raw).replace(';', ',').split(',') if x.strip()]
 
     def paintEvent(self, event):
-        from PySide6.QtGui import QPainter, QPen, QBrush, QFont, QPolygonF
-        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPainter
         p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor('#FFFFFF'))
-        w, h = self.width(), self.height()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.draw_on(p, self.width(), self.height())
+        p.end()
+
+    def draw_on(self, p, w, h):
+        """Shared paint path used by on-screen widget and export image."""
+        from PySide6.QtGui import QPen, QBrush, QFont, QPolygonF
+        from PySide6.QtCore import QPointF, QRectF
+        p.fillRect(0, 0, w, h, QColor('#FFFFFF'))
         margin = 14
-        # Outer engineering border
         p.setPen(QPen(QColor('#17365D'), 2.2))
         p.drawRect(margin, margin, w - 2 * margin, h - 2 * margin)
         p.setPen(QPen(QColor('#17365D'), 0.8))
         p.drawRect(margin + 4, margin + 4, w - 2 * margin - 8, h - 2 * margin - 8)
 
-        # Title block
         p.setFont(QFont('Arial', 11, QFont.Weight.Bold))
         p.setPen(QColor('#17365D'))
         title = 'LIFTING ARRANGEMENT — SIDE ELEVATION' if self.view == 'side' else 'LIFTING ARRANGEMENT — PLAN VIEW'
@@ -43166,7 +43166,6 @@ class _LiftingDrawingWidget(QWidget):
         crane_type = self._str('crane_type', 'Mobile Crane')
         angle = self._num('sling_angle_deg', 60)
 
-        # Lift-type badges
         badge_x = margin + 12
         badge_y = margin + 48
         p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
@@ -43175,8 +43174,10 @@ class _LiftingDrawingWidget(QWidget):
             if 'Night' in lt: color = '#1E3A5F'
             if 'Blind' in lt: color = '#7C2D12'
             if 'Overhead' in lt or 'Critical' in lt: color = '#9A3412'
-            if 'Tandem' in lt: color = '#1D4ED8'
+            if 'Tandem' in lt or 'Multiple' in lt: color = '#1D4ED8'
             if 'Water' in lt: color = '#0E7490'
+            if 'Fragile' in lt: color = '#A21CAF'
+            if 'COG' in lt or 'Difficult' in lt: color = '#C2410C'
             p.setPen(QPen(QColor(color), 1))
             p.setBrush(QBrush(QColor(color)))
             tw = max(70, len(lt) * 6 + 12)
@@ -43193,8 +43194,7 @@ class _LiftingDrawingWidget(QWidget):
         else:
             self._paint_plan(p, w, h, margin, crane_type, load_type, radius, lift_types)
 
-        # Title block bottom-right
-        tb_w, tb_h = 210, 72
+        tb_w, tb_h = 220, 78
         tb_x, tb_y = w - margin - tb_w - 6, h - margin - tb_h - 6
         p.setPen(QPen(QColor('#17365D'), 1.2))
         p.setBrush(QBrush(QColor('#F8FAFC')))
@@ -43207,11 +43207,11 @@ class _LiftingDrawingWidget(QWidget):
         p.drawText(tb_x + 6, tb_y + 40, f"Load: {load_type[:28]}")
         p.drawText(tb_x + 6, tb_y + 52, f"Slings: {sling_legs} leg(s)  |  Angle: {angle:.0f}°")
         p.drawText(tb_x + 6, tb_y + 64, f"Radius: {radius or '—'} m  |  Boom: {boom or '—'} m")
-        p.end()
+        # approval line in title block
+        p.drawText(tb_x + 6, tb_y + 74, f"Status: {self._str('workflow_status', self._str('_status', 'Draft'))[:18]}")
 
     def _paint_load_shape(self, p, load_type, cx, cy, lw, lh):
-        """Draw load geometry based on selected load type."""
-        from PySide6.QtGui import QPolygonF
+        from PySide6.QtGui import QPen, QBrush, QFont, QPolygonF
         from PySide6.QtCore import QPointF
         p.setPen(QPen(QColor('#334155'), 2))
         lt = (load_type or '').lower()
@@ -43222,9 +43222,8 @@ class _LiftingDrawingWidget(QWidget):
             p.drawEllipse(cx - lw // 2 + 8, cy + 6, max(10, lw - 16), max(10, lh - 12))
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#1E293B'))
             p.drawText(cx - 18, cy + lh // 2 + 4, 'PIPE')
-        elif 'beam' in lt or 'steel' in lt or 'structural' in lt:
+        elif 'beam' in lt or 'structural steel' in lt:
             p.setBrush(QBrush(QColor('#F59E0B')))
-            # I-beam approximation
             flange = max(8, lh // 5)
             p.drawRect(cx - lw // 2, cy, lw, flange)
             p.drawRect(cx - max(6, lw // 10), cy, max(12, lw // 5), lh)
@@ -43232,15 +43231,38 @@ class _LiftingDrawingWidget(QWidget):
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#1E293B'))
             p.drawText(cx - 16, cy + lh // 2 + 4, 'BEAM')
         elif 'rebar' in lt:
-            p.setBrush(QBrush(QColor('#A8A29E')))
-            p.drawRoundedRect(cx - lw // 2, cy, lw, lh, 4, 4)
+            # Bundle of horizontal steel rods with end ties
+            p.setBrush(QBrush(QColor('#D6D3D1')))
             p.setPen(QPen(QColor('#57534E'), 1.5))
-            for i in range(5):
-                x = cx - lw // 2 + 8 + i * max(8, lw // 6)
-                p.drawLine(x, cy + 4, x, cy + lh - 4)
+            p.drawRoundedRect(cx - lw // 2 - 4, cy - 2, lw + 8, lh + 4, 3, 3)
+            p.setPen(QPen(QColor('#44403C'), 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            n_rods = 6
+            for i in range(n_rods):
+                yy = cy + 6 + i * max(4, (lh - 12) // max(n_rods - 1, 1))
+                p.drawLine(cx - lw // 2 + 4, yy, cx + lw // 2 - 4, yy)
+            # tie wires
+            p.setPen(QPen(QColor('#78716C'), 1.4))
+            for tx in (cx - lw // 3, cx, cx + lw // 3):
+                p.drawLine(tx, cy + 4, tx, cy + lh - 4)
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#1E293B'))
-            p.drawText(cx - 20, cy + lh // 2 + 4, 'REBAR')
-        elif 'panel' in lt or 'precast' in lt:
+            p.drawText(cx - 28, cy + lh // 2 + 4, 'REBAR RODS')
+        elif 'fragile' in lt:
+            p.setBrush(QBrush(QColor('#F5D0FE')))
+            p.drawRect(cx - lw // 2, cy, lw, lh)
+            p.setPen(QPen(QColor('#A21CAF'), 2))
+            p.drawLine(cx - 12, cy + 8, cx + 12, cy + lh - 8)
+            p.drawLine(cx + 12, cy + 8, cx - 12, cy + lh - 8)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#86198F'))
+            p.drawText(cx - 28, cy + lh // 2 + 4, 'FRAGILE')
+        elif 'cog' in lt or 'difficult' in lt:
+            p.setBrush(QBrush(QColor('#FED7AA')))
+            p.drawRect(cx - lw // 2, cy, lw, lh)
+            # offset COG mark
+            p.setBrush(QBrush(QColor('#C2410C')))
+            p.drawEllipse(cx + lw // 5 - 6, cy + lh // 3 - 6, 12, 12)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#9A3412'))
+            p.drawText(cx - 30, cy + lh // 2 + 10, 'COG OFFSET')
+        elif 'panel' in lt or 'precast' in lt or 'formwork' in lt:
             p.setBrush(QBrush(QColor('#D6D3D1')))
             p.drawRect(cx - lw // 2, cy, lw, lh)
             p.setPen(QPen(QColor('#78716C'), 1, Qt.PenStyle.DashLine))
@@ -43259,13 +43281,44 @@ class _LiftingDrawingWidget(QWidget):
             p.drawRoundedRect(cx - lw // 2, cy, lw, lh, lh // 2, lh // 2)
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#0E7490'))
             p.drawText(cx - 16, cy + lh // 2 + 4, 'TANK')
-        elif 'skid' in lt or 'equipment' in lt:
+        elif 'skid' in lt or 'equipment' in lt or 'machinery' in lt:
             p.setBrush(QBrush(QColor('#A78BFA')))
             p.drawRect(cx - lw // 2, cy, lw, lh)
             p.setBrush(QBrush(QColor('#6D28D9')))
             p.drawRect(cx - lw // 2 + 10, cy + 6, max(20, lw - 20), max(14, lh // 2))
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#FFFFFF'))
             p.drawText(cx - 16, cy + lh // 2 + 10, 'SKID')
+        elif 'scaffold' in lt or 'basket' in lt or 'man' in lt:
+            p.setBrush(QBrush(QColor('#FEF3C7')))
+            p.drawRect(cx - lw // 2, cy, lw, lh)
+            p.setPen(QPen(QColor('#B45309'), 1.5))
+            for i in range(3):
+                p.drawLine(cx - lw // 2 + 8, cy + 8 + i * 10, cx + lw // 2 - 8, cy + 8 + i * 10)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#92400E'))
+            p.drawText(cx - 24, cy + lh // 2 + 4, 'BASKET')
+        elif 'concrete' in lt or 'block' in lt or 'masonry' in lt:
+            p.setBrush(QBrush(QColor('#A8A29E')))
+            p.drawRect(cx - lw // 2, cy, lw, lh)
+            p.setPen(QPen(QColor('#57534E'), 1))
+            p.drawLine(cx, cy, cx, cy + lh)
+            p.drawLine(cx - lw // 2, cy + lh // 2, cx + lw // 2, cy + lh // 2)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#1E293B'))
+            p.drawText(cx - 22, cy + lh // 2 - 4, 'CONCRETE')
+        elif 'timber' in lt or 'lumber' in lt or 'wood' in lt:
+            p.setBrush(QBrush(QColor('#D6A56A')))
+            p.drawRect(cx - lw // 2, cy, lw, lh)
+            p.setPen(QPen(QColor('#92400E'), 1))
+            for i in range(4):
+                p.drawLine(cx - lw // 2 + 6, cy + 6 + i * 8, cx + lw // 2 - 6, cy + 6 + i * 8)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#78350F'))
+            p.drawText(cx - 22, cy + lh // 2 + 4, 'TIMBER')
+        elif 'cable' in lt or 'drum' in lt or 'reel' in lt:
+            p.setBrush(QBrush(QColor('#64748B')))
+            p.drawEllipse(cx - lw // 2, cy, lw, lh)
+            p.setBrush(QBrush(QColor('#94A3B8')))
+            p.drawEllipse(cx - 10, cy + lh // 2 - 10, 20, 20)
+            p.setFont(QFont('Arial', 7, QFont.Weight.Bold)); p.setPen(QColor('#FFFFFF'))
+            p.drawText(cx - 18, cy + lh // 2 + 4, 'DRUM')
         else:
             p.setBrush(QBrush(QColor('#FDE68A')))
             p.drawRect(cx - lw // 2, cy, lw, lh)
@@ -43273,174 +43326,232 @@ class _LiftingDrawingWidget(QWidget):
             p.drawText(cx - 18, cy + lh // 2 + 4, 'LOAD')
 
     def _paint_side(self, p, w, h, margin, ground, crane_type, load_type, sling_legs, radius, boom, lift_h, angle, lift_types):
-        from PySide6.QtGui import QPen, QBrush, QFont
-        # Ground line + hatching
+        from PySide6.QtGui import QPen, QBrush, QFont, QPolygonF
+        from PySide6.QtCore import QPointF
+        # Ground
         p.setPen(QPen(QColor('#64748B'), 2))
         p.drawLine(margin + 20, ground, w - margin - 20, ground)
         p.setPen(QPen(QColor('#94A3B8'), 1))
         for i in range(margin + 30, w - margin - 20, 18):
             p.drawLine(i, ground, i - 10, ground + 10)
 
-        # Night lift dim overlay cue
         if any('Night' in t for t in lift_types):
-            p.fillRect(margin + 6, margin + 70, w - 2 * margin - 12, ground - margin - 70, QColor(15, 23, 42, 30))
+            p.fillRect(margin + 6, margin + 70, w - 2 * margin - 12, ground - margin - 70, QColor(15, 23, 42, 28))
             p.setPen(QColor('#FBBF24')); p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
             p.drawText(w // 2 - 40, margin + 90, '☾  NIGHT LIFT')
 
-        # Crane carrier
-        bx = int(w * 0.16)
-        by = ground - 48
-        p.setPen(QPen(QColor('#334155'), 2))
-        p.setBrush(QBrush(QColor('#CBD5E1')))
-        if 'Crawler' in crane_type:
-            p.drawRoundedRect(bx - 10, by + 10, 160, 32, 4, 4)
-            p.setBrush(QBrush(QColor('#475569')))
-            p.drawRect(bx - 5, ground - 14, 50, 12)
-            p.drawRect(bx + 95, ground - 14, 50, 12)
-        elif 'Tower' in crane_type:
-            p.setBrush(QBrush(QColor('#94A3B8')))
-            p.drawRect(bx + 40, int(h * 0.22), 18, ground - int(h * 0.22))
-            for yy in range(int(h * 0.22), ground, 22):
-                p.drawLine(bx + 40, yy, bx + 58, yy + 11)
-                p.drawLine(bx + 58, yy, bx + 40, yy + 11)
-        else:
-            p.drawRoundedRect(bx, by, 140, 40, 6, 6)
-            p.setBrush(QBrush(QColor('#64748B')))
-            p.drawEllipse(bx + 14, ground - 12, 24, 24)
-            p.drawEllipse(bx + 100, ground - 12, 24, 24)
-            # cabin
-            p.setBrush(QBrush(QColor('#E2E8F0')))
-            p.drawRect(bx + 8, by - 22, 36, 22)
+        # --- Crane body (connected assembly) ---
+        bx = int(w * 0.15)
+        body_h = 44
+        by = ground - body_h - 6
+        pivot_x = bx + 100
+        pivot_y = by + 8
 
-        # Boom
-        tipx = int(w * 0.62)
-        tipy = int(h * 0.18)
-        if boom > 0 and radius > 0:
-            # proportion tip from radius hint
-            tipx = min(w - margin - 80, bx + 90 + int(min(radius, 40) * 12))
-            tipy = max(margin + 100, ground - 40 - int(min(boom, 50) * 6))
-        p.setPen(QPen(QColor('#D97706'), 11, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        p.drawLine(bx + 90, by + 2, tipx, tipy)
-        # boom lattice hint
-        p.setPen(QPen(QColor('#B45309'), 1.2))
-        steps = 8
+        p.setPen(QPen(QColor('#334155'), 2))
+        if 'Crawler' in crane_type:
+            p.setBrush(QBrush(QColor('#475569')))
+            p.drawRect(bx - 8, ground - 16, 55, 14)
+            p.drawRect(bx + 90, ground - 16, 55, 14)
+            p.setBrush(QBrush(QColor('#CBD5E1')))
+            p.drawRoundedRect(bx, by + 8, 150, 34, 4, 4)
+            pivot_x = bx + 95
+            pivot_y = by + 12
+        elif 'Tower' in crane_type:
+            mast_x = bx + 50
+            p.setBrush(QBrush(QColor('#94A3B8')))
+            p.drawRect(mast_x, int(h * 0.20), 16, ground - int(h * 0.20))
+            for yy in range(int(h * 0.20), ground, 20):
+                p.drawLine(mast_x, yy, mast_x + 16, yy + 10)
+                p.drawLine(mast_x + 16, yy, mast_x, yy + 10)
+            pivot_x = mast_x + 8
+            pivot_y = int(h * 0.20) + 8
+            p.setBrush(QBrush(QColor('#CBD5E1')))
+            p.drawRect(mast_x - 20, pivot_y - 10, 56, 18)
+        else:
+            # Mobile carrier
+            p.setBrush(QBrush(QColor('#64748B')))
+            p.drawEllipse(bx + 12, ground - 14, 26, 26)
+            p.drawEllipse(bx + 100, ground - 14, 26, 26)
+            p.setBrush(QBrush(QColor('#CBD5E1')))
+            p.drawRoundedRect(bx, by, 150, body_h, 6, 6)
+            # cabin (connected to carrier)
+            p.setBrush(QBrush(QColor('#E2E8F0')))
+            p.drawRect(bx + 8, by - 26, 42, 26)
+            p.setPen(QPen(QColor('#64748B'), 1))
+            p.drawRect(bx + 14, by - 20, 14, 12)  # window
+            p.setPen(QPen(QColor('#334155'), 2))
+            # superstructure turret connected to carrier
+            p.setBrush(QBrush(QColor('#94A3B8')))
+            p.drawEllipse(pivot_x - 14, pivot_y - 10, 28, 24)
+            p.setBrush(QBrush(QColor('#64748B')))
+            p.drawEllipse(pivot_x - 6, pivot_y - 2, 12, 12)
+
+        # Boom length / radius geometry — boom ALWAYS starts at pivot
+        tipx = int(w * 0.60)
+        tipy = int(h * 0.22)
+        if radius > 0:
+            tipx = min(w - margin - 90, pivot_x + int(max(8.0, min(radius, 45.0)) * 11))
+        if boom > 0:
+            tipy = max(margin + 95, pivot_y - int(max(8.0, min(boom, 55.0)) * 5.5))
+        # ensure boom is visibly angled upward from pivot
+        if tipy >= pivot_y - 20:
+            tipy = pivot_y - 80
+
+        # Boom tube (thick) from pivot centre to tip — continuous connection
+        p.setPen(QPen(QColor('#B45309'), 14, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(pivot_x, pivot_y, tipx, tipy)
+        p.setPen(QPen(QColor('#F59E0B'), 8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawLine(pivot_x, pivot_y, tipx, tipy)
+        # lattice chords
+        p.setPen(QPen(QColor('#92400E'), 1.3))
+        steps = 10
         for i in range(1, steps):
             t = i / steps
-            x = int(bx + 90 + (tipx - bx - 90) * t)
-            y = int(by + 2 + (tipy - by - 2) * t)
-            p.drawLine(x - 4, y - 5, x + 4, y + 5)
+            x = int(pivot_x + (tipx - pivot_x) * t)
+            y = int(pivot_y + (tipy - pivot_y) * t)
+            p.drawLine(x - 5, y - 6, x + 5, y + 6)
+            p.drawLine(x - 5, y + 6, x + 5, y - 6)
+        # pivot pin visible
+        p.setBrush(QBrush(QColor('#1E293B')))
+        p.setPen(QPen(QColor('#0F172A'), 1))
+        p.drawEllipse(pivot_x - 5, pivot_y - 5, 10, 10)
 
-        # Hook block
-        p.setPen(QPen(QColor('#334155'), 2))
-        p.drawLine(tipx, tipy, tipx, int(h * 0.46))
-        p.setBrush(QBrush(QColor('#475569')))
-        p.drawRect(tipx - 10, int(h * 0.44), 20, 14)
-        p.drawArc(tipx - 9, int(h * 0.46), 18, 18, 0, 180 * 16)
+        # Boom tip sheave
+        p.setBrush(QBrush(QColor('#334155')))
+        p.setPen(QPen(QColor('#0F172A'), 1.5))
+        p.drawEllipse(tipx - 8, tipy - 8, 16, 16)
+        p.setBrush(QBrush(QColor('#94A3B8')))
+        p.drawEllipse(tipx - 3, tipy - 3, 6, 6)
 
-        # Slings + shackles
+        # Hoist rope from tip sheave down to hook
+        hook_y = int(h * 0.46)
+        p.setPen(QPen(QColor('#475569'), 2.2))
+        p.drawLine(tipx, tipy + 8, tipx, hook_y)
+
+        # Hook block (clearly visible)
+        p.setBrush(QBrush(QColor('#1E293B')))
+        p.setPen(QPen(QColor('#0F172A'), 1.5))
+        p.drawRect(tipx - 12, hook_y, 24, 16)
+        p.setBrush(QBrush(QColor('#F8FAFC')))
+        p.drawRect(tipx - 8, hook_y + 3, 7, 10)
+        p.drawRect(tipx + 1, hook_y + 3, 7, 10)
+        # Hook curve
+        p.setPen(QPen(QColor('#0F172A'), 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(tipx - 10, hook_y + 12, 20, 22, 0, 180 * 16)
+        p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
+        p.setPen(QColor('#1E293B'))
+        p.drawText(tipx + 16, hook_y + 12, 'HOOK BLOCK')
+
+        # Slings + shackles from hook to load
         load_y = int(h * 0.58)
         load_x = tipx
-        spread = 28 + sling_legs * 10
-        p.setPen(QPen(QColor('#0F766E'), 2.8))
+        spread = 30 + sling_legs * 12
         for i in range(sling_legs):
             if sling_legs == 1:
                 ox = 0
             else:
                 ox = int(-spread / 2 + i * (spread / max(sling_legs - 1, 1)))
-            p.drawLine(tipx, int(h * 0.48), load_x + ox, load_y)
-            # shackle mark
-            p.setBrush(QBrush(QColor('#F97316')))
-            p.setPen(QPen(QColor('#9A3412'), 1.5))
-            p.drawEllipse(load_x + ox - 5, load_y - 5, 10, 10)
+            # sling line
             p.setPen(QPen(QColor('#0F766E'), 2.8))
+            p.drawLine(tipx, hook_y + 30, load_x + ox, load_y)
+            # SHACKLE at load connection (visible ring + pin)
+            sx, sy = load_x + ox, load_y
+            p.setPen(QPen(QColor('#EA580C'), 2.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(sx - 7, sy - 9, 14, 14)
+            p.setPen(QPen(QColor('#9A3412'), 2))
+            p.drawLine(sx - 6, sy - 2, sx + 6, sy - 2)
+            p.setBrush(QBrush(QColor('#FB923C')))
+            p.drawEllipse(sx - 3, sy - 5, 6, 6)
         p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
         p.setPen(QColor('#0F766E'))
-        p.drawText(tipx + 14, int(h * 0.50), f'{sling_legs} SLING(S) + SHACKLE(S)')
+        p.drawText(tipx + 18, hook_y + 36, f'{sling_legs} SLING LEG(S)')
+        p.setPen(QColor('#C2410C'))
+        p.drawText(tipx + 18, hook_y + 48, 'SHACKLES')
 
-        # Load
-        lw, lh = 100, 44
-        if 'pipe' in load_type.lower():
-            lw, lh = 110, 40
-        if 'beam' in load_type.lower():
-            lw, lh = 120, 36
-        if 'panel' in load_type.lower():
-            lw, lh = 90, 55
+        # Load shape
+        lw, lh = 110, 46
+        low = load_type.lower()
+        if 'pipe' in low: lw, lh = 120, 42
+        if 'beam' in low: lw, lh = 130, 38
+        if 'rebar' in low: lw, lh = 120, 48
+        if 'panel' in low or 'formwork' in low: lw, lh = 95, 56
+        if 'fragile' in low: lw, lh = 100, 48
         self._paint_load_shape(p, load_type, load_x, load_y, lw, lh)
 
-        # Dimension: working radius
+        # Radius dimension
         p.setPen(QPen(QColor('#2563EB'), 1.2, Qt.PenStyle.DashLine))
-        p.drawLine(bx + 90, ground + 18, tipx, ground + 18)
-        p.drawLine(bx + 90, ground + 12, bx + 90, ground + 24)
+        p.drawLine(pivot_x, ground + 18, tipx, ground + 18)
+        p.drawLine(pivot_x, ground + 12, pivot_x, ground + 24)
         p.drawLine(tipx, ground + 12, tipx, ground + 24)
         p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
         p.setPen(QColor('#1D4ED8'))
-        p.drawText((bx + 90 + tipx) // 2 - 40, ground + 34, f'R = {radius or "—"} m  (WORKING RADIUS)')
+        p.drawText((pivot_x + tipx) // 2 - 50, ground + 34, f'R = {radius or "—"} m  (WORKING RADIUS)')
 
-        # Boom length label along boom
         p.setPen(QColor('#B45309'))
-        p.drawText((bx + 90 + tipx) // 2 - 20, (by + tipy) // 2 - 8, f'BOOM {boom or "—"} m')
+        p.drawText((pivot_x + tipx) // 2 - 24, (pivot_y + tipy) // 2 - 10, f'BOOM {boom or "—"} m')
 
-        # Lift height dimension
         p.setPen(QPen(QColor('#059669'), 1.2, Qt.PenStyle.DotLine))
-        p.drawLine(tipx + 40, tipy, tipx + 40, load_y)
+        p.drawLine(tipx + 36, tipy, tipx + 36, load_y)
         p.setPen(QColor('#047857'))
-        p.drawText(tipx + 46, (tipy + load_y) // 2, f'H = {lift_h or "—"} m')
+        p.drawText(tipx + 42, (tipy + load_y) // 2, f'H = {lift_h or "—"} m')
 
-        # Near overhead obstacle
-        if any('Overhead' in t or 'Near Overhead' in t for t in lift_types):
+        if any('Overhead' in t for t in lift_types):
             p.setPen(QPen(QColor('#DC2626'), 2))
             p.setBrush(QBrush(QColor('#FECACA')))
-            ox = tipx - 30
-            p.drawRect(ox, margin + 100, 90, 18)
+            ox = tipx - 40
+            p.drawRect(ox, margin + 100, 100, 18)
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
             p.setPen(QColor('#991B1B'))
             p.drawText(ox + 6, margin + 113, 'OVERHEAD OBSTACLE')
             p.setPen(QPen(QColor('#DC2626'), 1, Qt.PenStyle.DashLine))
-            p.drawLine(ox, margin + 118, ox, tipy)
+            p.drawLine(ox + 50, margin + 118, ox + 50, tipy)
 
-        # Blind lift cue
         if any('Blind' in t for t in lift_types):
             p.setPen(QColor('#9A3412'))
             p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
             p.drawText(margin + 20, ground - 8, '⚠ BLIND LIFT — BANKSMAN / SIGNAL REQUIRED')
 
-        # Tandem / Multiple crane — second crane on opposite side sharing the load
-        if any(t in ('Tandem Lift', 'Multiple Crane') or 'Tandem' in t for t in lift_types):
-            bx2 = int(w * 0.78)
-            by2 = ground - 48
+        # Tandem second crane — fully connected boom/hook
+        if any('Tandem' in t or t == 'Multiple Crane' for t in lift_types):
+            bx2 = int(w * 0.82)
+            by2 = ground - body_h - 6
+            pivot2_x = bx2 + 20
+            pivot2_y = by2 + 8
             p.setPen(QPen(QColor('#1D4ED8'), 2))
             p.setBrush(QBrush(QColor('#BFDBFE')))
-            p.drawRoundedRect(bx2 - 40, by2, 120, 40, 6, 6)
+            p.drawRoundedRect(bx2 - 30, by2, 110, body_h, 6, 6)
             p.setBrush(QBrush(QColor('#3B82F6')))
-            p.drawEllipse(bx2 - 28, ground - 12, 22, 22)
-            p.drawEllipse(bx2 + 40, ground - 12, 22, 22)
-            tipx2 = load_x + 20
-            tipy2 = int(h * 0.22)
-            p.setPen(QPen(QColor('#1D4ED8'), 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-            p.drawLine(bx2 + 10, by2 + 4, tipx2, tipy2)
+            p.drawEllipse(bx2 - 20, ground - 14, 24, 24)
+            p.drawEllipse(bx2 + 50, ground - 14, 24, 24)
+            tip2x = load_x + 24
+            tip2y = int(h * 0.24)
+            p.setPen(QPen(QColor('#1D4ED8'), 10, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(pivot2_x, pivot2_y, tip2x, tip2y)
             p.setPen(QPen(QColor('#1E3A8A'), 2))
-            p.drawLine(tipx2, tipy2, tipx2, int(h * 0.46))
+            p.drawLine(tip2x, tip2y, tip2x, hook_y)
             p.setBrush(QBrush(QColor('#1D4ED8')))
-            p.drawRect(tipx2 - 8, int(h * 0.44), 16, 12)
-            # second crane sling to load
-            p.setPen(QPen(QColor('#1D4ED8'), 2.4))
-            p.drawLine(tipx2, int(h * 0.48), load_x + 20, load_y)
+            p.drawRect(tip2x - 10, hook_y, 20, 14)
+            p.setPen(QPen(QColor('#1D4ED8'), 2.5))
+            p.drawLine(tip2x, hook_y + 14, load_x + 20, load_y)
             p.setFont(QFont('Arial', 7, QFont.Weight.Bold))
             p.setPen(QColor('#1E40AF'))
-            p.drawText(bx2 - 30, ground + 48, 'CRANE 2 (TANDEM)')
+            p.drawText(bx2 - 24, ground + 48, 'CRANE 2 (TANDEM)')
             p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
-            p.setPen(QColor('#1D4ED8'))
-            p.drawText(int(w * 0.42), margin + 70, 'TANDEM LIFT — TWO CRANES')
-
-        p.setFont(QFont('Arial', 8))
-        p.setPen(QColor('#334155'))
-        p.drawText(bx, ground + 48, ('CRANE 1' if any('Tandem' in t or t == 'Multiple Crane' for t in lift_types) else crane_type.upper()))
+            p.drawText(int(w * 0.40), margin + 70, 'TANDEM LIFT — TWO CRANES')
+            p.setFont(QFont('Arial', 8))
+            p.setPen(QColor('#334155'))
+            p.drawText(bx, ground + 48, 'CRANE 1')
+        else:
+            p.setFont(QFont('Arial', 8))
+            p.setPen(QColor('#334155'))
+            p.drawText(bx, ground + 48, crane_type.upper())
         p.drawText(load_x - 30, ground + 48, 'LOAD POSITION')
 
     def _paint_plan(self, p, w, h, margin, crane_type, load_type, radius, lift_types):
         from PySide6.QtGui import QPen, QBrush, QFont
         cx, cy = int(w * 0.30), int(h * 0.52)
-        # Exclusion zone
         p.setPen(QPen(QColor('#64748B'), 2, Qt.PenStyle.DashLine))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(int(w * 0.08), int(h * 0.20), int(w * 0.78), int(h * 0.60), 16, 16)
@@ -43448,7 +43559,6 @@ class _LiftingDrawingWidget(QWidget):
         p.setPen(QColor('#64748B'))
         p.drawText(int(w * 0.08) + 8, int(h * 0.20) + 14, 'EXCLUSION / BARRICADE ZONE')
 
-        # Crane body + outriggers
         p.setPen(QPen(QColor('#334155'), 2))
         p.setBrush(QBrush(QColor('#CBD5E1')))
         p.drawRoundedRect(cx - 55, cy - 32, 110, 64, 7, 7)
@@ -43460,9 +43570,8 @@ class _LiftingDrawingWidget(QWidget):
             p.setPen(QPen(QColor('#334155'), 2))
         p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
         p.setPen(QColor('#334155'))
-        p.drawText(cx - 28, cy + 5, 'CRANE')
+        p.drawText(cx - 28, cy + 5, 'CRANE 1' if any('Tandem' in t or t == 'Multiple Crane' for t in lift_types) else 'CRANE')
 
-        # Swing radius arc
         if radius > 0:
             rr = int(min(w * 0.35, 40 + radius * 8))
             p.setPen(QPen(QColor('#2563EB'), 1.4, Qt.PenStyle.DashLine))
@@ -43471,7 +43580,6 @@ class _LiftingDrawingWidget(QWidget):
             p.setPen(QColor('#1D4ED8'))
             p.drawText(cx + rr - 50, cy - 6, f'R={radius} m')
 
-        # Load position
         lx, ly = int(w * 0.68), int(h * 0.52)
         p.setPen(QPen(QColor('#D97706'), 2))
         p.drawLine(cx + 55, cy, lx - 30, ly)
@@ -43490,11 +43598,7 @@ class _LiftingDrawingWidget(QWidget):
             p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
             p.setPen(QColor('#1E40AF'))
             p.drawText(cx2 - 42, cy2 + 5, 'CRANE 2')
-            p.drawText(int(w * 0.40), int(h * 0.18), 'TANDEM / MULTIPLE CRANE LIFT')
-            # relabel first crane
-            p.setPen(QColor('#334155'))
-            p.setFont(QFont('Arial', 8, QFont.Weight.Bold))
-            p.drawText(cx - 32, cy + 5, 'CRANE 1')
+            p.drawText(int(w * 0.38), int(h * 0.18), 'TANDEM / MULTIPLE CRANE LIFT')
 
         p.setFont(QFont('Arial', 8))
         p.setPen(QColor('#334155'))
@@ -43502,18 +43606,19 @@ class _LiftingDrawingWidget(QWidget):
 
 
 class DigitalLiftingPlanModule(QWidget):
-    """Digital lifting plan: register, engineering checks, drawings, import and export."""
+    """Digital lifting plan: register, engineering checks, drawings, review/approval, import and export."""
 
     LIFT_TYPES = [
         "Standard Day Lift", "Blind Lift", "Night Lift", "Near Overhead",
         "Confined Area", "Tandem Lift", "Critical Lift", "Over Water",
-        "Pick & Carry", "Multiple Crane"
+        "Pick & Carry", "Multiple Crane", "Fragile Load", "COG Difficult Load"
     ]
     LOAD_TYPES = [
-        "General Package", "Rebar Bundle", "Pipe / Tubular", "Structural Beam / Steel",
-        "Precast Panel", "Equipment Skid", "Container", "Tank / Vessel", "Other"
+        "General Package", "Rebar Bundle (Steel Rods)", "Pipe / Tubular", "Structural Beam / Steel",
+        "Precast Panel", "Formwork", "Equipment Skid / Machinery", "Container", "Tank / Vessel",
+        "Concrete Blocks / Masonry", "Timber / Lumber", "Cable Drum / Reel",
+        "Scaffold / Man Basket", "Fragile Load", "COG Difficult Load", "Other"
     ]
-    # Typical reference values for common mobile/crawler crane classes (user must verify against actual chart).
     CRANE_PRESETS = {
         "— Select crane class / typical range —": {},
         "Mobile 25 t (typical)": {"crane_type": "Mobile Crane", "crane_make_model": "Mobile 25 t class", "crane_capacity_t": 25, "boom_length_m": 32, "chart_capacity_kg": 8000, "working_radius_m": 8, "counterweight_t": 5.5},
@@ -43562,132 +43667,165 @@ class DigitalLiftingPlanModule(QWidget):
         self.db.conn.commit()
 
     def _build_ui(self):
-        root=QVBoxLayout(self); root.setContentsMargins(14,12,14,12)
-        head=QHBoxLayout(); title=QLabel('Digital Lifting Plan')
+        root = QVBoxLayout(self); root.setContentsMargins(14, 12, 14, 12)
+        head = QHBoxLayout(); title = QLabel('Digital Lifting Plan')
         title.setStyleSheet('font-size:22px;font-weight:700;color:#17365D;')
-        sub=QLabel('Register • Engineering checks • Engineering drawings • Import equipment data • Export'); sub.setStyleSheet('color:#64748B;')
-        left=QVBoxLayout(); left.addWidget(title); left.addWidget(sub); head.addLayout(left); head.addStretch(1)
-        new=QPushButton('+ New Lifting Plan'); new.clicked.connect(self.new_plan); head.addWidget(new); root.addLayout(head)
-        stats=QHBoxLayout(); self.stat_labels=[]
-        for label in ('Total Plans: 0','Draft: 0','Under Review: 0','Approved: 0'):
-            w=QLabel(label); w.setStyleSheet('background:white;border:1px solid #D7DEE7;border-radius:6px;padding:9px 12px;font-weight:600;')
+        sub = QLabel('Register • Engineering checks • Drawings • Review & Approval • Import • Export')
+        sub.setStyleSheet('color:#64748B;')
+        left = QVBoxLayout(); left.addWidget(title); left.addWidget(sub); head.addLayout(left); head.addStretch(1)
+        new = QPushButton('+ New Lifting Plan'); new.clicked.connect(self.new_plan); head.addWidget(new)
+        root.addLayout(head)
+        stats = QHBoxLayout(); self.stat_labels = []
+        for label in ('Total Plans: 0', 'Draft: 0', 'Under Review: 0', 'Approved: 0'):
+            w = QLabel(label); w.setStyleSheet('background:white;border:1px solid #D7DEE7;border-radius:6px;padding:9px 12px;font-weight:600;')
             stats.addWidget(w); self.stat_labels.append(w)
         root.addLayout(stats)
-        tools=QHBoxLayout(); self.search=QLineEdit(); self.search.setPlaceholderText('Search plan no., project, location or load...'); self.search.textChanged.connect(self.refresh_register)
-        self.status=QComboBox(); self.status.addItems(['All Statuses','Draft','Under Review','Approved','Rejected','Closed']); self.status.currentTextChanged.connect(self.refresh_register)
-        tools.addWidget(self.search,1); tools.addWidget(self.status); root.addLayout(tools)
-        self.table=QTableWidget(0,7); self.table.setHorizontalHeaderLabels(['Plan No.','Project','Location','Date','Load Description','Load (kg)','Status'])
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); self.table.setAlternatingRowColors(True)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self.table.doubleClicked.connect(self.open_selected); root.addWidget(self.table,1)
-        actions=QHBoxLayout()
-        for label,fn in [('Open / View',self.open_selected),('Edit Draft',self.edit_selected),('Export Plan',self.export_selected),('Refresh',self.refresh_register)]:
-            b=QPushButton(label); b.clicked.connect(fn); actions.addWidget(b)
+        tools = QHBoxLayout()
+        self.search = QLineEdit(); self.search.setPlaceholderText('Search plan no., project, location or load...')
+        self.search.textChanged.connect(self.refresh_register)
+        self.status = QComboBox(); self.status.addItems(['All Statuses', 'Draft', 'Under Review', 'Approved', 'Rejected', 'Closed'])
+        self.status.currentTextChanged.connect(self.refresh_register)
+        tools.addWidget(self.search, 1); tools.addWidget(self.status); root.addLayout(tools)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(['Plan No.', 'Project', 'Location', 'Date', 'Load Description', 'Load (kg)', 'Status'])
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.doubleClicked.connect(self.open_selected)
+        root.addWidget(self.table, 1)
+        actions = QHBoxLayout()
+        for label, fn in [
+            ('Open / View', self.open_selected),
+            ('Edit Draft', self.edit_selected),
+            ('Export Plan', self.export_selected),
+            ('Delete', self.delete_selected),
+            ('Refresh', self.refresh_register),
+        ]:
+            b = QPushButton(label); b.clicked.connect(fn); actions.addWidget(b)
         actions.addStretch(1); root.addLayout(actions)
 
     def _next_number(self):
-        year=datetime.now().strftime('%Y'); prefix=f'LP-{year}-'
-        row=self.db.conn.execute('SELECT plan_number FROM digital_lifting_plans WHERE plan_number LIKE ? ORDER BY id DESC LIMIT 1',(prefix+'%',)).fetchone()
-        seq=1
+        year = datetime.now().strftime('%Y'); prefix = f'LP-{year}-'
+        row = self.db.conn.execute('SELECT plan_number FROM digital_lifting_plans WHERE plan_number LIKE ? ORDER BY id DESC LIMIT 1', (prefix + '%',)).fetchone()
+        seq = 1
         if row:
-            try: seq=int(str(row[0]).rsplit('-',1)[-1])+1
+            try: seq = int(str(row[0]).rsplit('-', 1)[-1]) + 1
             except Exception: pass
         return f'{prefix}{seq:04d}'
 
-    def refresh_register(self,*_):
-        term=self.search.text().strip(); status=self.status.currentText()
-        sql='SELECT id,plan_number,project,location,lifting_date,load_description,load_weight_kg,workflow_status FROM digital_lifting_plans WHERE 1=1'; args=[]
+    def refresh_register(self, *_):
+        term = self.search.text().strip(); status = self.status.currentText()
+        sql = 'SELECT id,plan_number,project,location,lifting_date,load_description,load_weight_kg,workflow_status FROM digital_lifting_plans WHERE 1=1'; args = []
         if term:
-            like=f'%{term}%'; sql+=' AND (plan_number LIKE ? OR project LIKE ? OR location LIKE ? OR load_description LIKE ?)'; args += [like]*4
-        if status!='All Statuses': sql+=' AND workflow_status=?'; args.append(status)
-        sql+=' ORDER BY id DESC'; rows=self.db.conn.execute(sql,args).fetchall()
+            like = f'%{term}%'; sql += ' AND (plan_number LIKE ? OR project LIKE ? OR location LIKE ? OR load_description LIKE ?)'; args += [like] * 4
+        if status != 'All Statuses':
+            sql += ' AND workflow_status=?'; args.append(status)
+        sql += ' ORDER BY id DESC'
+        rows = self.db.conn.execute(sql, args).fetchall()
         self.table.setRowCount(len(rows))
-        for r,row in enumerate(rows):
-            values=[row[1],row[2],row[3],row[4],row[5],f'{float(row[6] or 0):,.2f}',row[7]]
-            for c,val in enumerate(values): self.table.setItem(r,c,QTableWidgetItem(str(val or '')))
-            self.table.item(r,0).setData(Qt.ItemDataRole.UserRole,int(row[0]))
-        counts=dict(self.db.conn.execute('SELECT workflow_status,COUNT(*) FROM digital_lifting_plans GROUP BY workflow_status').fetchall())
-        total=sum(counts.values())
-        for w,label in zip(self.stat_labels,[f'Total Plans: {total}',f"Draft: {counts.get('Draft',0)}",f"Under Review: {counts.get('Under Review',0)}",f"Approved: {counts.get('Approved',0)}"]): w.setText(label)
+        for r, row in enumerate(rows):
+            values = [row[1], row[2], row[3], row[4], row[5], f'{float(row[6] or 0):,.2f}', row[7]]
+            for c, val in enumerate(values):
+                self.table.setItem(r, c, QTableWidgetItem(str(val or '')))
+            self.table.item(r, 0).setData(Qt.ItemDataRole.UserRole, int(row[0]))
+        counts = dict(self.db.conn.execute('SELECT workflow_status,COUNT(*) FROM digital_lifting_plans GROUP BY workflow_status').fetchall())
+        total = sum(counts.values())
+        for w, label in zip(self.stat_labels, [f'Total Plans: {total}', f"Draft: {counts.get('Draft', 0)}", f"Under Review: {counts.get('Under Review', 0)}", f"Approved: {counts.get('Approved', 0)}"]):
+            w.setText(label)
 
     def _selected_id(self):
-        r=self.table.currentRow(); item=self.table.item(r,0) if r>=0 else None
+        r = self.table.currentRow(); item = self.table.item(r, 0) if r >= 0 else None
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
-    def new_plan(self): self._editor()
+    def new_plan(self):
+        self._editor()
+
     def edit_selected(self):
-        pid=self._selected_id()
-        if not pid: QMessageBox.information(self,'Select Plan','Please select a lifting plan.'); return
-        row=self.db.conn.execute('SELECT workflow_status FROM digital_lifting_plans WHERE id=?',(pid,)).fetchone()
-        if not row or row[0]!='Draft': QMessageBox.warning(self,'Editing Restricted','Only Draft plans can be edited.'); return
+        pid = self._selected_id()
+        if not pid:
+            QMessageBox.information(self, 'Select Plan', 'Please select a lifting plan.'); return
+        row = self.db.conn.execute('SELECT workflow_status FROM digital_lifting_plans WHERE id=?', (pid,)).fetchone()
+        if not row or row[0] not in ('Draft', 'Rejected'):
+            QMessageBox.warning(self, 'Editing Restricted', 'Only Draft or Rejected plans can be edited.'); return
         self._editor(pid)
+
     def open_selected(self):
-        pid=self._selected_id()
-        if not pid: QMessageBox.information(self,'Select Plan','Please select a lifting plan.'); return
-        self._editor(pid,read_only=True)
+        pid = self._selected_id()
+        if not pid:
+            QMessageBox.information(self, 'Select Plan', 'Please select a lifting plan.'); return
+        self._editor(pid, read_only=True)
+
+    def delete_selected(self):
+        pid = self._selected_id()
+        if not pid:
+            QMessageBox.information(self, 'Select Plan', 'Please select a lifting plan to delete.'); return
+        row = self.db.conn.execute('SELECT plan_number,workflow_status FROM digital_lifting_plans WHERE id=?', (pid,)).fetchone()
+        if not row:
+            return
+        if QMessageBox.question(self, 'Delete Plan', f"Delete lifting plan {row[0]} ({row[1]})?\nThis cannot be undone.",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.db.conn.execute('DELETE FROM digital_lifting_plan_attachments WHERE plan_id=?', (pid,))
+            self.db.conn.execute('DELETE FROM digital_lifting_plans WHERE id=?', (pid,))
+            self.db.conn.commit()
+            self.refresh_register()
+            QMessageBox.information(self, 'Deleted', f'Plan {row[0]} was deleted.')
+        except Exception as exc:
+            self.db.conn.rollback()
+            QMessageBox.critical(self, 'Delete Failed', str(exc))
 
     def export_selected(self):
-        pid=self._selected_id()
+        pid = self._selected_id()
         if not pid:
-            QMessageBox.information(self,'Select Plan','Please select a lifting plan to export.')
-            return
-        self._export_plan(pid)
+            QMessageBox.information(self, 'Select Plan', 'Please select a lifting plan to export.'); return
+        try:
+            self._export_plan(pid)
+        except Exception as exc:
+            logging.exception('export_selected')
+            QMessageBox.critical(self, 'Export Failed', f'{type(exc).__name__}: {exc}')
 
-    def _render_drawing_image(self, data, view='side', width=1200, height=700):
-        """Paint engineering drawing off-screen for export (no on-screen window required)."""
+    def _render_drawing_image(self, data, view='side', width=1400, height=800):
+        """Paint drawing directly to QImage — no on-screen widget required (export-safe)."""
         from PySide6.QtGui import QImage, QPainter
-        from PySide6.QtCore import QSize, QEvent
+        from PySide6.QtCore import QSize
         folder = Path(ATTACH_DIR) / 'digital_lifting_plans' / '_export'
         folder.mkdir(parents=True, exist_ok=True)
-        out = folder / f"lift_draw_{view}_{uuid.uuid4().hex[:8]}.png"
+        out = folder / f"lift_draw_{view}_{uuid.uuid4().hex[:10]}.png"
+        img = QImage(QSize(int(width), int(height)), QImage.Format.Format_ARGB32)
+        img.fill(QColor('#FFFFFF'))
+        painter = QPainter(img)
         try:
-            widget = _LiftingDrawingWidget(data, view)
-            widget.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-            widget.setFixedSize(width, height)
-            widget.show()  # required for some platforms so paint engine is ready
-            widget.repaint()
-            img = QImage(QSize(width, height), QImage.Format.Format_ARGB32)
-            img.fill(QColor('#FFFFFF'))
-            painter = QPainter(img)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-            widget.render(painter)
-            painter.end()
-            widget.hide()
-            widget.deleteLater()
-            if not img.save(str(out), 'PNG') or not out.is_file() or out.stat().st_size < 100:
-                raise RuntimeError('PNG write failed')
-            return out
+            widget = _LiftingDrawingWidget(data, view)
+            widget.draw_on(painter, int(width), int(height))
         except Exception:
-            logging.exception('drawing render')
-            # Minimal fallback image so Word/PDF export never crashes
-            img = QImage(QSize(width, height), QImage.Format.Format_ARGB32)
-            img.fill(QColor('#FFFFFF'))
-            p = QPainter(img)
-            p.setPen(QColor('#17365D'))
-            p.setFont(QFont('Arial', 14, QFont.Weight.Bold))
-            title = 'SIDE ELEVATION' if view == 'side' else 'PLAN VIEW'
-            p.drawText(40, 50, f'Lifting Arrangement — {title}')
-            p.setFont(QFont('Arial', 10))
-            p.drawText(40, 80, f"Crane: {data.get('crane_type', '—')}  |  Load: {data.get('load_type', '—')}")
-            p.drawText(40, 100, f"Radius: {data.get('working_radius_m', '—')} m  |  Boom: {data.get('boom_length_m', '—')} m")
-            p.drawText(40, 120, f"Lift types: {', '.join(data.get('lift_types') or []) or '—'}")
-            p.drawText(40, 150, 'Open the plan drawings tab in the application for the full schematic.')
-            p.end()
-            img.save(str(out), 'PNG')
-            return out
+            logging.exception('draw_on export')
+            painter.setPen(QColor('#17365D'))
+            painter.drawText(40, 50, f'Lifting arrangement ({view})')
+            painter.drawText(40, 80, 'Open Drawings tab in the application for the full schematic.')
+        finally:
+            if painter.isActive():
+                painter.end()
+        img.save(str(out), 'PNG')
+        return out
+
+
 
     def _export_plan(self, plan_id):
         row = self.db.conn.execute(
-            'SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?',
+            'SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status,created_by FROM digital_lifting_plans WHERE id=?',
             (plan_id,)
         ).fetchone()
         if not row:
-            QMessageBox.warning(self, 'Export', 'Plan not found.')
-            return
+            QMessageBox.warning(self, 'Export', 'Plan not found.'); return
         try:
             data = json.loads(row['payload_json'] or '{}')
         except Exception:
             data = {}
+        data['workflow_status'] = row['workflow_status']
         number = row['plan_number']
         path, selected_filter = QFileDialog.getSaveFileName(
             self, 'Export Lifting Plan', f'{number}_Lifting_Plan.docx',
@@ -43695,8 +43833,7 @@ class DigitalLiftingPlanModule(QWidget):
         )
         if not path:
             return
-        # Honour filter when extension omitted
-        if path.lower().endswith('.pdf') or (selected_filter and 'PDF' in selected_filter and not path.lower().endswith('.docx')):
+        if path.lower().endswith('.pdf') or ('PDF' in (selected_filter or '') and not path.lower().endswith('.docx')):
             fmt = 'pdf'
             if not path.lower().endswith('.pdf'):
                 path += '.pdf'
@@ -43711,16 +43848,19 @@ class DigitalLiftingPlanModule(QWidget):
             company = company_name()
             unit = data.get('load_unit') or 'kg'
             load_kg = float(row['load_weight_kg'] or 0)
-            if unit in ('t', 'ton', 'tonne', 'tonnes'):
-                load_disp = f"{load_kg / 1000.0:,.3f} t"
-            else:
-                load_disp = f"{load_kg:,.2f} kg"
+            load_disp = f"{load_kg / 1000.0:,.3f} t" if unit in ('t', 'ton', 'tonne', 'tonnes') else f"{load_kg:,.2f} kg"
+            prepared = data.get('plan_prepared_by') or row['created_by'] or ''
+            reviewed = data.get('reviewed_by') or ''
+            approved = data.get('approved_by') or ''
+            review_date = data.get('review_date') or ''
+            approve_date = data.get('approve_date') or ''
+            review_comments = data.get('review_comments') or ''
             pairs = [
                 ('Plan Number', number), ('Status', row['workflow_status']),
                 ('Project', row['project']), ('Location', row['location']),
                 ('Lifting Date', row['lifting_date']), ('Load Description', row['load_description']),
                 ('Load Weight', load_disp),
-                ('Lift Types', ', '.join(data.get('lift_types') or []) or data.get('lift_type', '')),
+                ('Lift Types', ', '.join(data.get('lift_types') or [])),
                 ('Load Type', data.get('load_type', '')),
                 ('Crane Type', data.get('crane_type', '')),
                 ('Crane Make / Model', data.get('crane_make_model', '')),
@@ -43729,10 +43869,10 @@ class DigitalLiftingPlanModule(QWidget):
                 ('Working Radius (m)', data.get('working_radius_m', '')),
                 ('Boom Length (m)', data.get('boom_length_m', '')),
                 ('Sling Legs', data.get('sling_legs', '')),
-                ('Sling Angle (°)', data.get('sling_angle_deg', '')),
                 ('Chart Capacity (kg)', data.get('chart_capacity_kg', '')),
-                ('Appointed Person', data.get('appointed_person', '')),
-                ('Lifting Supervisor', data.get('lifting_supervisor', '')),
+                ('Prepared By', prepared),
+                ('Reviewed By', reviewed), ('Review Date', review_date),
+                ('Approved By', approved), ('Approval Date', approve_date),
             ]
             if fmt == 'docx':
                 doc = Document()
@@ -43743,32 +43883,57 @@ class DigitalLiftingPlanModule(QWidget):
                 try:
                     add_docx_report_header(doc, 'DIGITAL LIFTING PLAN', 'LP', number)
                 except Exception:
-                    doc.add_heading('DIGITAL LIFTING PLAN', 0)
-                    doc.add_paragraph(f'Plan: {number}  |  {company}')
+                    # manual header with logo from settings
+                    logo = None
+                    try:
+                        logo = report_logo_path()
+                    except Exception:
+                        logo = None
+                    table = doc.add_table(rows=1, cols=2)
+                    if logo and Path(logo).is_file():
+                        try:
+                            table.rows[0].cells[0].paragraphs[0].add_run().add_picture(str(logo), width=Inches(1.1))
+                        except Exception:
+                            pass
+                    table.rows[0].cells[1].paragraphs[0].add_run(f'{company}\nDIGITAL LIFTING PLAN\n{number}').bold = True
                 try:
                     add_docx_kv_table(doc, pairs)
                 except Exception:
                     for k, v in pairs:
                         doc.add_paragraph(f'{k}: {v}')
-                summary = data.get('_engineering_summary') or ''
-                if summary:
+                if data.get('_engineering_summary'):
                     try:
-                        add_docx_boxed_section(doc, 'Engineering Check Summary', summary, 8)
+                        add_docx_boxed_section(doc, 'Engineering Check Summary & Suggestions', data.get('_engineering_summary'), 8)
                     except Exception:
-                        doc.add_heading('Engineering Check Summary', level=2)
-                        doc.add_paragraph(summary)
+                        doc.add_heading('Engineering Check Summary & Suggestions', level=2)
+                        doc.add_paragraph(str(data.get('_engineering_summary')))
+                if review_comments:
+                    doc.add_heading('Review Comments', level=2)
+                    doc.add_paragraph(review_comments)
+                # Signatures
+                doc.add_heading('Authorisation', level=2)
+                sig = doc.add_table(rows=2, cols=3)
+                sig.rows[0].cells[0].text = f'Prepared by:\n{prepared}\nSignature: _______________\nDate: ________'
+                sig.rows[0].cells[1].text = f'Reviewed by:\n{reviewed}\nSignature: _______________\nDate: {review_date or "________"}'
+                sig.rows[0].cells[2].text = f'Approved by:\n{approved}\nSignature: _______________\nDate: {approve_date or "________"}'
                 doc.add_heading('Engineering Drawing — Side Elevation', level=2)
-                if Path(side_img).is_file():
+                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
                     try:
-                        doc.add_picture(str(side_img), width=Inches(9.0))
-                    except Exception:
-                        doc.add_paragraph(f'[Drawing file: {side_img}]')
+                        doc.add_picture(str(side_img), width=Inches(9.2))
+                    except Exception as pic_exc:
+                        logging.exception('side pic')
+                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
+                else:
+                    doc.add_paragraph('[Side elevation drawing was not generated]')
                 doc.add_heading('Engineering Drawing — Plan View', level=2)
-                if Path(plan_img).is_file():
+                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
                     try:
-                        doc.add_picture(str(plan_img), width=Inches(9.0))
-                    except Exception:
-                        doc.add_paragraph(f'[Drawing file: {plan_img}]')
+                        doc.add_picture(str(plan_img), width=Inches(9.2))
+                    except Exception as pic_exc:
+                        logging.exception('plan pic')
+                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
+                else:
+                    doc.add_paragraph('[Plan view drawing was not generated]')
                 try:
                     add_docx_footer(doc)
                 except Exception:
@@ -43781,14 +43946,14 @@ class DigitalLiftingPlanModule(QWidget):
                 styles = getSampleStyleSheet()
                 story = [
                     Paragraph(f"<b>{html.escape(str(company))}</b> — DIGITAL LIFTING PLAN", styles['Title']),
-                    Paragraph(f"Plan: {html.escape(str(number))} | Document: {html.escape(report_no)}", styles['Normal']),
+                    Paragraph(f"Plan: {html.escape(str(number))} | Doc: {html.escape(report_no)} | Status: {html.escape(str(row['workflow_status']))}", styles['Normal']),
                     Spacer(1, 8),
                 ]
                 meta = [
                     [f"Project: {row['project']}", f"Location: {row['location']}"],
                     [f"Date: {row['lifting_date']}", f"Load: {row['load_description']} ({load_disp})"],
-                    [f"Lift types: {', '.join(data.get('lift_types') or [])}", f"Load type: {data.get('load_type', '')}"],
-                    [f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}", f"Radius: {data.get('working_radius_m', '')} m"],
+                    [f"Prepared: {prepared}", f"Reviewed: {reviewed} ({review_date})"],
+                    [f"Approved: {approved} ({approve_date})", f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}"],
                 ]
                 mt = Table(meta, colWidths=[320, 320])
                 mt.setStyle(TableStyle([
@@ -43798,25 +43963,24 @@ class DigitalLiftingPlanModule(QWidget):
                 ]))
                 story += [mt, Spacer(1, 10)]
                 if data.get('_engineering_summary'):
-                    story.append(Paragraph('<b>Engineering Check Summary</b>', styles['Heading2']))
-                    for line in str(data.get('_engineering_summary')).splitlines()[:50]:
+                    story.append(Paragraph('<b>Engineering Check Summary & Suggestions</b>', styles['Heading2']))
+                    for line in str(data.get('_engineering_summary')).splitlines()[:55]:
                         story.append(Paragraph(html.escape(line), styles['Normal']))
                     story.append(Spacer(1, 8))
                 story.append(Paragraph('<b>Side Elevation</b>', styles['Heading2']))
-                if Path(side_img).is_file():
-                    story.append(RLImage(str(side_img), width=500, height=290, kind='proportional'))
+                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
+                    story.append(RLImage(str(side_img), width=520, height=300, kind='proportional'))
                 story.append(Spacer(1, 8))
                 story.append(Paragraph('<b>Plan View</b>', styles['Heading2']))
-                if Path(plan_img).is_file():
-                    story.append(RLImage(str(plan_img), width=500, height=290, kind='proportional'))
+                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
+                    story.append(RLImage(str(plan_img), width=520, height=300, kind='proportional'))
                 SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22).build(story)
-            QMessageBox.information(self, 'Exported', f'Lifting plan exported:\n{path}')
+            QMessageBox.information(self, 'Exported', f'Lifting plan exported with drawings:\n{path}')
         except Exception as exc:
             logging.exception('lifting plan export')
             QMessageBox.critical(self, 'Export Failed', f'Could not export the lifting plan.\n\n{type(exc).__name__}: {exc}')
 
     def _parse_crane_spec_text(self, extracted):
-        """Parse crane / load-chart / certificate text and return field->value map."""
         if not extracted:
             return {}, []
         text = extracted.replace('\u00a0', ' ')
@@ -43824,232 +43988,119 @@ class DigitalLiftingPlanModule(QWidget):
         filled_notes = []
         out = {}
 
-        def find_all(patterns, src=None):
-            src = src if src is not None else text
-            hits = []
-            for pat in patterns:
-                for m in re.finditer(pat, src, re.I | re.M):
-                    hits.append(m)
-            return hits
-
         def first_num(patterns, src=None):
-            for m in find_all(patterns, src):
-                try:
-                    raw = m.group(1).replace(',', '').replace(' ', '')
-                    return float(raw)
-                except Exception:
-                    continue
+            src = src if src is not None else text
+            for pat in patterns:
+                m = re.search(pat, src, re.I | re.M)
+                if m:
+                    try:
+                        return float(m.group(1).replace(',', '').replace(' ', ''))
+                    except Exception:
+                        continue
             return None
 
         def first_text(patterns, src=None):
-            for m in find_all(patterns, src):
-                val = (m.group(1) or '').strip(' \t\r\n:.-')
-                if val and len(val) > 1:
-                    return val
+            src = src if src is not None else text
+            for pat in patterns:
+                m = re.search(pat, src, re.I | re.M)
+                if m:
+                    val = (m.group(1) or '').strip(' \t\r\n:.-')
+                    if val and len(val) > 1:
+                        return val
             return None
 
-        # --- Make / Model ---
         model = first_text([
-            r'(?:make\s*/\s*model|model\s*(?:no|number|#)?|crane\s*model|type\s*/\s*model)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 \-/\.]{2,40})',
-            r'\b((?:LTM|LGM|ATC|AC|GR|RT|GMK|CC|LR|QUY|XCMG|SANY|TADANO|LIEBHERR|GROVE|MANITOWOC|TEREX|KATO|ZOOM\s*LION)[\w\-/\.]{2,20})\b',
+            r'(?:make\s*/\s*model|model\s*(?:no|number|#)?|crane\s*model)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9 \-/\.]{2,40})',
+            r'\b((?:LTM|LGM|ATC|AC|GR|RT|GMK|CC|LR|QUY|XCMG|SANY|TADANO|LIEBHERR|GROVE|MANITOWOC|TEREX|KATO)[\w\-/\.]{2,20})\b',
         ])
         if model:
-            out['crane_make_model'] = model[:60]
-            filled_notes.append(f'Make/Model: {model[:60]}')
-
-        serial = first_text([
-            r'(?:serial\s*(?:no|number|#)|s/?n|chassis\s*no)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]{3,30})',
-        ])
+            out['crane_make_model'] = model[:60]; filled_notes.append(f'Make/Model: {model[:60]}')
+        serial = first_text([r'(?:serial\s*(?:no|number|#)|s/?n|chassis\s*no)\s*[:\-]?\s*([A-Za-z0-9][A-Za-z0-9\-/]{3,30})'])
         if serial:
-            out['crane_serial_no'] = serial[:40]
-            filled_notes.append(f'Serial: {serial[:40]}')
-
-        # --- Capacity in tonnes ---
+            out['crane_serial_no'] = serial[:40]; filled_notes.append(f'Serial: {serial[:40]}')
         cap_t = first_num([
             r'(?:rated\s*capacity|max(?:imum)?\s*capacity|lifting\s*capacity|capacity)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes|mt)\b',
             r'(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes|mt)\s*(?:capacity|crane|rated)',
-            r'capacity\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*t\b',
         ])
         if cap_t is not None and 1 <= cap_t <= 5000:
-            out['crane_capacity_t'] = cap_t
-            filled_notes.append(f'Capacity: {cap_t} t')
-
-        # --- Boom length ---
-        boom = first_num([
-            r'(?:main\s*)?boom\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
-            r'(?:boom\s*length)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)',
-            r'(\d+(?:[.,]\d+)?)\s*m\s*(?:boom|main\s*boom)',
-        ])
+            out['crane_capacity_t'] = cap_t; filled_notes.append(f'Capacity: {cap_t} t')
+        boom = first_num([r'(?:main\s*)?boom\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b', r'(?:boom\s*length)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)'])
         if boom is not None and 3 <= boom <= 200:
-            out['boom_length_m'] = boom
-            filled_notes.append(f'Boom: {boom} m')
-
-        # --- Jib ---
-        jib = first_num([
-            r'(?:jib|fly\s*jib)\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
-        ])
+            out['boom_length_m'] = boom; filled_notes.append(f'Boom: {boom} m')
+        jib = first_num([r'(?:jib|fly\s*jib)\s*(?:length)?\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b'])
         if jib is not None and 1 <= jib <= 100:
-            out['jib_length_m'] = jib
-            filled_notes.append(f'Jib: {jib} m')
-
-        # --- Radius / outreach ---
-        radius = first_num([
-            r'(?:working\s*)?(?:radius|outreach)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
-            r'(\d+(?:[.,]\d+)?)\s*m\s*(?:radius|outreach)',
-            r'(?:at\s+)?(?:radius|r)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b',
-        ])
+            out['jib_length_m'] = jib; filled_notes.append(f'Jib: {jib} m')
+        radius = first_num([r'(?:working\s*)?(?:radius|outreach)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*m\b', r'(\d+(?:[.,]\d+)?)\s*m\s*(?:radius|outreach)'])
         if radius is not None and 1 <= radius <= 150:
-            out['working_radius_m'] = radius
-            filled_notes.append(f'Radius: {radius} m')
-
-        # --- Counterweight ---
-        cw = first_num([
-            r'(?:counter\s*weight|counterweight|ballast)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)?',
-        ])
+            out['working_radius_m'] = radius; filled_notes.append(f'Radius: {radius} m')
+        cw = first_num([r'(?:counter\s*weight|counterweight|ballast)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)?'])
         if cw is not None and 0 < cw <= 500:
-            out['counterweight_t'] = cw
-            filled_notes.append(f'Counterweight: {cw} t')
-
-        # --- Chart capacity at a radius (kg or t) ---
-        chart_t = first_num([
-            r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|permissible\s*load)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)\b',
-            r'(?:at\s+\d+(?:[.,]\d+)?\s*m)[^\n]{0,40}?(\d+(?:[.,]\d+)?)\s*(?:t|ton)\b',
-        ])
-        chart_kg = first_num([
-            r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|swl)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
-            r'(\d{3,7}(?:[.,]\d+)?)\s*kg\s*(?:capacity|swl|allowable)',
-        ])
+            out['counterweight_t'] = cw; filled_notes.append(f'Counterweight: {cw} t')
+        chart_t = first_num([r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|permissible\s*load)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne)\b'])
+        chart_kg = first_num([r'(?:chart\s*capacity|net\s*capacity|allowable\s*load|swl)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b'])
         if chart_t is not None and 0.1 <= chart_t <= 2000:
-            out['chart_capacity_kg'] = chart_t * 1000.0
-            filled_notes.append(f'Chart capacity: {chart_t} t ({chart_t * 1000:.0f} kg)')
+            out['chart_capacity_kg'] = chart_t * 1000.0; filled_notes.append(f'Chart capacity: {chart_t} t')
         elif chart_kg is not None and 100 <= chart_kg <= 2_000_000:
-            out['chart_capacity_kg'] = chart_kg
-            filled_notes.append(f'Chart capacity: {chart_kg} kg')
-
-        # --- Load weight ---
-        load_t = first_num([
-            r'(?:load\s*weight|load\s*mass|gross\s*weight|cargo\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes)\b',
-        ])
-        load_kg = first_num([
-            r'(?:load\s*weight|load\s*mass|gross\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
-            r'(?:weight)\s*[:\-]?\s*(\d{2,7}(?:[.,]\d+)?)\s*kg\b',
-        ])
+            out['chart_capacity_kg'] = chart_kg; filled_notes.append(f'Chart capacity: {chart_kg} kg')
+        load_t = first_num([r'(?:load\s*weight|load\s*mass|gross\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton|tonne|tonnes)\b'])
+        load_kg = first_num([r'(?:load\s*weight|load\s*mass|gross\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b'])
         if load_t is not None and 0.01 <= load_t <= 5000:
-            out['load_weight_kg'] = load_t * 1000.0
-            out['load_unit'] = 't'
-            filled_notes.append(f'Load weight: {load_t} t')
+            out['load_weight_kg'] = load_t * 1000.0; out['load_unit'] = 't'; filled_notes.append(f'Load weight: {load_t} t')
         elif load_kg is not None and 1 <= load_kg <= 5_000_000:
-            out['load_weight_kg'] = load_kg
-            out['load_unit'] = 'kg'
-            filled_notes.append(f'Load weight: {load_kg} kg')
-
-        # --- Crane type keywords ---
+            out['load_weight_kg'] = load_kg; out['load_unit'] = 'kg'; filled_notes.append(f'Load weight: {load_kg} kg')
         low = text.lower()
-        if 'crawler' in low:
-            out['crane_type'] = 'Crawler Crane'; filled_notes.append('Crane type: Crawler Crane')
-        elif 'tower crane' in low or re.search(r'\btower\b', low):
-            out['crane_type'] = 'Tower Crane'; filled_notes.append('Crane type: Tower Crane')
-        elif 'loader' in low or 'knuckle' in low:
-            out['crane_type'] = 'Loader Crane'; filled_notes.append('Crane type: Loader Crane')
-        elif 'overhead' in low or 'gantry' in low:
-            out['crane_type'] = 'Overhead Crane'; filled_notes.append('Crane type: Overhead Crane')
-        elif 'mobile' in low or 'all terrain' in low or 'rough terrain' in low or 'truck crane' in low:
-            out['crane_type'] = 'Mobile Crane'; filled_notes.append('Crane type: Mobile Crane')
-
-        # --- Outrigger ---
-        outr = first_text([
-            r'(?:outrigger\s*(?:config(?:uration)?|spread|set-?up))\s*[:\-]?\s*([^\n]{5,60})',
-        ])
-        if outr:
-            out['outrigger_configuration'] = outr[:80]
-            filled_notes.append(f'Outriggers: {outr[:40]}')
-
-        # --- Load chart reference ---
-        chart_ref = first_text([
-            r'(?:load\s*chart|chart\s*(?:no|number|rev|revision|page))\s*[:\-]?\s*([^\n]{3,50})',
-        ])
-        if chart_ref:
-            out['load_chart_reference'] = chart_ref[:80]
-            filled_notes.append(f'Chart ref: {chart_ref[:40]}')
-
-        # Hook block
-        hook = first_num([
-            r'(?:hook\s*block|hook\s*weight)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*kg\b',
-            r'(?:hook\s*block)\s*[:\-]?\s*(\d+(?:[.,]\d+)?)\s*(?:t|ton)\b',
-        ])
-        if hook is not None:
-            # if small number with ton context already handled by pattern; assume kg if > 20 else could be t
-            if hook <= 20 and re.search(r'hook\s*block[^\n]{0,20}\d+(?:[.,]\d+)?\s*(?:t|ton)', text, re.I):
-                hook *= 1000
-            if 10 <= hook <= 50000:
-                out['hook_block_weight_kg'] = hook
-                filled_notes.append(f'Hook block: {hook} kg')
-
+        if 'crawler' in low: out['crane_type'] = 'Crawler Crane'; filled_notes.append('Crane type: Crawler')
+        elif 'tower crane' in low: out['crane_type'] = 'Tower Crane'; filled_notes.append('Crane type: Tower')
+        elif 'loader' in low: out['crane_type'] = 'Loader Crane'; filled_notes.append('Crane type: Loader')
+        elif 'overhead' in low or 'gantry' in low: out['crane_type'] = 'Overhead Crane'; filled_notes.append('Crane type: Overhead')
+        elif 'mobile' in low or 'all terrain' in low or 'rough terrain' in low: out['crane_type'] = 'Mobile Crane'; filled_notes.append('Crane type: Mobile')
         return out, filled_notes
 
     def _import_equipment_file(self, fields, parent_dlg, load_unit_combo=None):
-        """Import crane / load-chart PDF or image and autofill every field that can be read."""
         path, _ = QFileDialog.getOpenFileName(
             parent_dlg, 'Import Crane / Equipment Specification (PDF / Image)', '',
-            'PDF / Images (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;PDF Files (*.pdf);;Images (*.png *.jpg *.jpeg);;All Files (*.*)'
+            'PDF / Images (*.pdf *.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp);;All Files (*.*)'
         )
         if not path:
             return
         extracted = ''
-        suffix = Path(path).suffix.lower()
         extract_errors = []
         try:
-            if suffix == '.pdf':
+            if Path(path).suffix.lower() == '.pdf':
                 try:
                     extracted = chem_file_text(path) or ''
                 except Exception as exc:
                     extract_errors.append(str(exc))
-                    extracted = ''
-                    # direct fallbacks
-                    for reader_name, reader_fn in (
-                        ('pypdf', lambda p: __import__('pypdf', fromlist=['PdfReader']).PdfReader(p)),
-                    ):
-                        try:
-                            from pypdf import PdfReader
-                            r = PdfReader(str(path), strict=False)
-                            extracted = '\n'.join((pg.extract_text() or '') for pg in r.pages)
-                            if extracted.strip():
-                                break
-                        except Exception as e2:
-                            extract_errors.append(f'{reader_name}: {e2}')
-                    if not extracted.strip():
+                    try:
+                        from pypdf import PdfReader
+                        r = PdfReader(str(path), strict=False)
+                        extracted = '\n'.join((pg.extract_text() or '') for pg in r.pages)
+                    except Exception as e2:
+                        extract_errors.append(str(e2))
                         try:
                             import fitz
                             with fitz.open(str(path)) as pdf:
                                 extracted = '\n'.join((page.get_text('text') or '') for page in pdf)
                         except Exception as e3:
-                            extract_errors.append(f'fitz: {e3}')
+                            extract_errors.append(str(e3))
             else:
-                # OCR for images
                 try:
                     import pytesseract
                     from PIL import Image as _PIL
                     extracted = pytesseract.image_to_string(_PIL.open(path)) or ''
                 except Exception as e:
                     extract_errors.append(f'OCR: {e}')
-                    extracted = ''
         except Exception as exc:
-            logging.exception('import equipment extract')
-            extract_errors.append(str(exc))
+            logging.exception('import extract'); extract_errors.append(str(exc))
 
         parsed, filled_notes = self._parse_crane_spec_text(extracted)
-
-        # Apply parsed values into form widgets
         applied = []
         for key, val in parsed.items():
             if key == 'load_unit':
                 if load_unit_combo is not None:
-                    idx = load_unit_combo.findText(str(val))
-                    if idx < 0 and str(val) in ('t', 'ton', 'tonne', 'tonnes'):
-                        idx = load_unit_combo.findText('t')
+                    idx = load_unit_combo.findText('t' if str(val) in ('t', 'ton', 'tonne', 'tonnes') else str(val))
                     if idx >= 0:
                         load_unit_combo.setCurrentIndex(idx)
-                        applied.append(f'Load unit = {load_unit_combo.currentText()}')
                 continue
             if key not in fields:
                 continue
@@ -44060,73 +44111,50 @@ class DigitalLiftingPlanModule(QWidget):
                 elif kind == 'int':
                     widget.setValue(int(float(val)))
                 elif kind.startswith('combo:'):
-                    # try exact, else partial match
                     i = widget.findText(str(val))
                     if i < 0:
                         for j in range(widget.count()):
-                            if str(val).lower() in widget.itemText(j).lower() or widget.itemText(j).lower() in str(val).lower():
+                            if str(val).lower() in widget.itemText(j).lower():
                                 i = j; break
                     if i >= 0:
                         widget.setCurrentIndex(i)
                 elif kind == 'text':
                     widget.setText(str(val))
-                elif kind == 'memo':
-                    prev = widget.toPlainText().strip()
-                    widget.setPlainText((prev + '\n' + str(val)).strip() if prev else str(val))
-                applied.append(f'{key} = {val}')
+                applied.append(f'{key}={val}')
             except Exception:
-                logging.exception('apply field %s', key)
-
-        # Notes: keep source + short extract preview
+                logging.exception('apply %s', key)
+        try:
+            unit = load_unit_combo.currentText() if load_unit_combo is not None else 'kg'
+            if unit == 't' and 'load_weight_kg' in fields and 'load_weight_kg' in parsed:
+                fields['load_weight_kg'][0].setValue(float(parsed['load_weight_kg']) / 1000.0)
+        except Exception:
+            pass
         if 'additional_notes' in fields:
             note = fields['additional_notes'][0]
             prev = note.toPlainText().strip()
             preview = (extracted or '')[:1200].strip()
-            add_lines = [f"Imported file: {Path(path).name}"]
-            if filled_notes:
-                add_lines.append('Autofill summary: ' + '; '.join(filled_notes))
+            block = f"Imported file: {Path(path).name}\n" + ('Autofill: ' + '; '.join(filled_notes) if filled_notes else '')
             if preview:
-                add_lines.append('--- Extracted text preview ---')
-                add_lines.append(preview)
-            block = '\n'.join(add_lines)
+                block += '\n--- Extracted text preview ---\n' + preview
             note.setPlainText((prev + '\n\n' + block).strip() if prev else block)
-
-        # If unit is tonnes, show load weight in the spinbox as tonnes (collect() converts back to kg)
-        try:
-            unit = 'kg'
-            if load_unit_combo is not None:
-                unit = load_unit_combo.currentText()
-            if unit == 't' and 'load_weight_kg' in fields and 'load_weight_kg' in parsed:
-                kg = float(parsed['load_weight_kg'])
-                fields['load_weight_kg'][0].setValue(kg / 1000.0)
-        except Exception:
-            pass
-
-        # Copy file for attachments
         try:
             dest_dir = Path(ATTACH_DIR) / 'digital_lifting_plans' / '_import'
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f"{uuid.uuid4().hex[:8]}_{Path(path).name}"
-            shutil.copy2(path, dest)
+            shutil.copy2(path, dest_dir / f"{uuid.uuid4().hex[:8]}_{Path(path).name}")
         except Exception:
             logging.exception('import copy')
-
-        if applied or filled_notes:
-            QMessageBox.information(
-                parent_dlg, 'Import Complete',
-                'Fields autofilled from the file:\n• ' + '\n• '.join(filled_notes or applied) +
-                '\n\nPlease review every value against the manufacturer certificate / load chart before approval.'
-            )
+        if filled_notes or applied:
+            QMessageBox.information(parent_dlg, 'Import Complete', 'Autofilled:\n• ' + '\n• '.join(filled_notes or applied) +
+                                    '\n\nReview all values against the certificate / load chart.')
         else:
-            msg = 'No crane specification numbers could be read automatically from this file.'
+            msg = 'No crane specification numbers could be read automatically.'
             if not (extracted or '').strip():
-                msg += '\n\nThe file appears to have no selectable text (scanned/image-only PDF).'
+                msg += '\nFile may be scanned/image-only.'
                 if extract_errors:
-                    msg += '\nDetails: ' + '; '.join(extract_errors[:3])
-                msg += '\n\nTip: use a text-based PDF certificate, or an image with OCR (Tesseract) installed.'
-            else:
-                msg += '\n\nSome text was read but no matching crane fields were found. Check Additional Notes for the extract preview and fill fields manually.'
+                    msg += '\n' + '; '.join(extract_errors[:3])
             QMessageBox.warning(parent_dlg, 'Import — limited autofill', msg)
+
+
 
     def _editor(self, plan_id=None, read_only=False):
         row = self.db.conn.execute('SELECT plan_number,payload_json,workflow_status FROM digital_lifting_plans WHERE id=?', (plan_id,)).fetchone() if plan_id else None
@@ -44138,36 +44166,24 @@ class DigitalLiftingPlanModule(QWidget):
         status = row[2] if row else 'Draft'
         dlg = QDialog(self)
         dlg.setWindowTitle(f'Digital Lifting Plan - {number}')
-        dlg.resize(1180, 860)
+        dlg.resize(1200, 880)
         outer = QVBoxLayout(dlg)
-        banner = QLabel(f'Plan: {number}     Status: {status}     |     Engineering drawing updates with lift type, load type & crane inputs')
+        banner = QLabel(f'Plan: {number}     Status: {status}')
         banner.setStyleSheet('font-weight:700;color:#17365D;background:#EAF0F6;padding:9px;border-radius:5px;')
         outer.addWidget(banner)
 
-        # Quick actions: import + crane preset
         top_bar = QHBoxLayout()
-        import_btn = QPushButton('Import Equipment (PDF / Image)')
-        import_btn.setEnabled(not read_only)
-        import_btn.setToolTip('Import a certificate or equipment sheet. Readable numbers are autofilled; always verify.')
-        preset_lbl = QLabel('Crane class preset:')
-        preset = QComboBox()
-        preset.addItems(list(self.CRANE_PRESETS.keys()))
-        preset.setEnabled(not read_only)
-        preset.setMinimumWidth(240)
-        top_bar.addWidget(import_btn)
-        top_bar.addStretch(1)
-        top_bar.addWidget(preset_lbl)
-        top_bar.addWidget(preset)
+        import_btn = QPushButton('Import Equipment (PDF / Image)'); import_btn.setEnabled(not read_only)
+        preset = QComboBox(); preset.addItems(list(self.CRANE_PRESETS.keys())); preset.setEnabled(not read_only); preset.setMinimumWidth(240)
+        top_bar.addWidget(import_btn); top_bar.addStretch(1); top_bar.addWidget(QLabel('Crane class preset:')); top_bar.addWidget(preset)
         outer.addLayout(top_bar)
 
-        tabs = QTabWidget()
-        outer.addWidget(tabs, 1)
+        tabs = QTabWidget(); outer.addWidget(tabs, 1)
         fields = {}
 
-        # --- Lift types multi-select page ---
-        lt_page = QWidget()
-        lt_layout = QVBoxLayout(lt_page)
-        lt_layout.addWidget(QLabel('Select all applicable lift types (multiple selection). The engineering drawing reflects these choices.'))
+        # Lift & Load Type
+        lt_page = QWidget(); lt_layout = QVBoxLayout(lt_page)
+        lt_layout.addWidget(QLabel('Select all applicable lift types (multiple). Drawing updates after Refresh Drawing.'))
         lift_checks = {}
         selected_types = data.get('lift_types') or []
         if isinstance(selected_types, str):
@@ -44176,28 +44192,17 @@ class DigitalLiftingPlanModule(QWidget):
         for i, name in enumerate(self.LIFT_TYPES):
             cb = QCheckBox(name)
             cb.setChecked(name in selected_types or (not selected_types and name == 'Standard Day Lift' and not plan_id))
-            cb.setEnabled(not read_only)
-            lift_checks[name] = cb
+            cb.setEnabled(not read_only); lift_checks[name] = cb
             grid.addWidget(cb, i // 3, i % 3)
         lt_layout.addLayout(grid)
-        load_type_combo = QComboBox()
-        load_type_combo.addItems(self.LOAD_TYPES)
-        load_type_combo.setCurrentText(str(data.get('load_type') or 'General Package'))
-        load_type_combo.setEnabled(not read_only)
-        load_unit_combo = QComboBox()
-        load_unit_combo.addItems(['kg', 't'])
-        load_unit_combo.setCurrentText(str(data.get('load_unit') or 'kg'))
-        load_unit_combo.setEnabled(not read_only)
-        load_unit_combo.setToolTip('Load weight unit. Values are stored in kg internally (1 t = 1000 kg).')
+        load_type_combo = QComboBox(); load_type_combo.addItems(self.LOAD_TYPES)
+        load_type_combo.setCurrentText(str(data.get('load_type') or 'General Package')); load_type_combo.setEnabled(not read_only)
+        load_unit_combo = QComboBox(); load_unit_combo.addItems(['kg', 't'])
+        load_unit_combo.setCurrentText(str(data.get('load_unit') or 'kg')); load_unit_combo.setEnabled(not read_only)
         lt_form = QFormLayout()
         lt_form.addRow('Load type (drawing geometry)', load_type_combo)
         lt_form.addRow('Load weight unit', load_unit_combo)
-        unit_hint = QLabel('Enter load weight on the Load & Rigging tab. If unit is t, the value is converted to kg for calculations and the register.')
-        unit_hint.setWordWrap(True)
-        unit_hint.setStyleSheet('color:#526579;font-size:12px;')
-        lt_layout.addLayout(lt_form)
-        lt_layout.addWidget(unit_hint)
-        lt_layout.addStretch(1)
+        lt_layout.addLayout(lt_form); lt_layout.addStretch(1)
         tabs.addTab(lt_page, 'Lift & Load Type')
 
         definitions = {
@@ -44209,8 +44214,8 @@ class DigitalLiftingPlanModule(QWidget):
             ('hse_representative', 'HSE Representative', 'text'), ('operator', 'Crane Operator', 'text'),
             ('rigger', 'Rigger', 'text'), ('banksman', 'Banksman / Signal Person', 'text')],
           'Load & Rigging': [
-            ('load_weight_kg', 'Load Weight (value — unit set on Lift & Load Type tab)', 'num'),
-            ('dynamic_factor', 'Dynamic / impact factor (competent-person input; minimum 1.0)', 'num'),
+            ('load_weight_kg', 'Load Weight (value — unit on Lift & Load Type tab)', 'num'),
+            ('dynamic_factor', 'Dynamic / impact factor (min 1.0)', 'num'),
             ('hook_block_weight_kg', 'Hook Block Weight (kg)', 'num'),
             ('sling_weight_kg', 'Total Sling Weight (kg)', 'num'),
             ('shackle_weight_kg', 'Total Shackle Weight (kg)', 'num'),
@@ -44228,22 +44233,22 @@ class DigitalLiftingPlanModule(QWidget):
             ('crane_type', 'Crane Type', 'combo:Mobile Crane;Crawler Crane;Tower Crane;Loader Crane;Overhead Crane;Other'),
             ('crane_make_model', 'Crane Make / Model', 'text'), ('crane_serial_no', 'Crane Serial Number', 'text'),
             ('crane_capacity_t', 'Crane Rated Capacity (t) - reference only', 'num'),
-            ('chart_capacity_kg', 'Verified net capacity available for suspended load after applicable deductions (kg)', 'num'),
+            ('chart_capacity_kg', 'Verified net capacity available for suspended load (kg)', 'num'),
             ('boom_length_m', 'Boom Length (m)', 'num'), ('jib_length_m', 'Jib Length (m)', 'num'),
             ('counterweight_t', 'Counterweight (t)', 'num'), ('outrigger_configuration', 'Outrigger Configuration', 'text'),
             ('load_chart_reference', 'Load Chart Page / Revision / Source', 'text'),
             ('chart_configuration_verified', 'Load chart configuration verified?', 'combo:Not verified;Yes;No'),
             ('crane_level_verified', 'Crane level within manufacturer limits?', 'combo:Not verified;Yes;No')],
           'Ground & Outriggers': [
-            ('max_outrigger_reaction_kn', 'Maximum Outrigger Reaction (kN) - verified input', 'num'),
+            ('max_outrigger_reaction_kn', 'Maximum Outrigger Reaction (kN)', 'num'),
             ('mat_length_m', 'Mat / Pad Length (m)', 'num'), ('mat_width_m', 'Mat / Pad Width (m)', 'num'),
             ('verified_gbc_kpa', 'Verified Ground Bearing Capacity (kPa)', 'num'),
-            ('ground_assessment_ref', 'Ground assessment / geotechnical reference', 'text'),
+            ('ground_assessment_ref', 'Ground assessment reference', 'text'),
             ('ground_condition', 'Ground Condition / Underground Services', 'memo'),
-            ('mat_design_verified', 'Mat / pad design verified by competent person?', 'combo:Not verified;Yes;No')],
+            ('mat_design_verified', 'Mat / pad design verified?', 'combo:Not verified;Yes;No')],
           'Method, Weather & Controls': [
             ('wind_speed_ms', 'Forecast / Measured Wind Speed (m/s)', 'num'),
-            ('approved_wind_limit_ms', 'Manufacturer / lift-plan Wind Limit (m/s)', 'num'),
+            ('approved_wind_limit_ms', 'Approved Wind Limit (m/s)', 'num'),
             ('weather_limits', 'Other Weather / Visibility Limits', 'text'),
             ('lifting_method', 'Lifting Method / Sequence', 'memo'),
             ('exclusion_zone', 'Exclusion Zone / Barricading', 'memo'),
@@ -44252,13 +44257,9 @@ class DigitalLiftingPlanModule(QWidget):
             ('additional_notes', 'Additional Notes', 'memo')]
         }
         for group, items in definitions.items():
-            page = QWidget()
-            v = QVBoxLayout(page)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            content = QWidget()
-            form = QFormLayout(content)
-            form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            page = QWidget(); v = QVBoxLayout(page)
+            scroll = QScrollArea(); scroll.setWidgetResizable(True); content = QWidget()
+            form = QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
             for key, label, kind in items:
                 val = data.get(key, '')
                 if kind == 'text':
@@ -44278,33 +44279,21 @@ class DigitalLiftingPlanModule(QWidget):
                 elif kind.startswith('combo:'):
                     w = QComboBox(); w.addItems(kind.split(':', 1)[1].split(';'))
                     w.setCurrentText(str(val or w.itemText(0)))
-                w.setEnabled(not read_only)
-                fields[key] = (w, kind)
-                form.addRow(label, w)
-            scroll.setWidget(content)
-            v.addWidget(scroll)
-            tabs.addTab(page, group)
+                w.setEnabled(not read_only); fields[key] = (w, kind); form.addRow(label, w)
+            scroll.setWidget(content); v.addWidget(scroll); tabs.addTab(page, group)
 
         def apply_preset(name):
-            preset_data = self.CRANE_PRESETS.get(name) or {}
-            if not preset_data:
-                return
-            for k, v in preset_data.items():
-                if k not in fields:
-                    continue
+            pd = self.CRANE_PRESETS.get(name) or {}
+            if not pd: return
+            for k, v in pd.items():
+                if k not in fields: continue
                 widget, kind = fields[k]
-                if kind == 'num':
-                    widget.setValue(float(v))
-                elif kind.startswith('combo:'):
-                    widget.setCurrentText(str(v))
-                elif kind == 'text':
-                    widget.setText(str(v))
-            QMessageBox.information(dlg, 'Preset Applied',
-                                    f'Typical values for "{name}" were applied.\nThese are average reference figures only — replace with the actual crane certificate and load-chart values before approval.')
+                if kind == 'num': widget.setValue(float(v))
+                elif kind.startswith('combo:'): widget.setCurrentText(str(v))
+                elif kind == 'text': widget.setText(str(v))
+            QMessageBox.information(dlg, 'Preset Applied', f'Typical values for "{name}" applied. Verify against actual certificate and load chart.')
 
         preset.currentTextChanged.connect(lambda n: apply_preset(n) if not read_only else None)
-
-        # If plan stored unit as tonnes, show the spinbox in tonnes for editing
         try:
             if str(data.get('load_unit') or 'kg') == 't' and 'load_weight_kg' in fields:
                 kg_val = float(data.get('load_weight_kg') or 0)
@@ -44314,42 +44303,58 @@ class DigitalLiftingPlanModule(QWidget):
         except Exception:
             pass
 
-
-        # Phase 2 calculations
+        # Engineering calculations + suggestions
         calc_page = QWidget(); cv = QVBoxLayout(calc_page)
-        warning = QLabel('Engineering decision support only. Use manufacturer load charts and verified engineering inputs. Presets are typical class averages, not a substitute for the certified chart.')
-        warning.setWordWrap(True)
-        warning.setStyleSheet('color:#9A3412;background:#FFF7ED;padding:9px;border:1px solid #FED7AA;border-radius:5px;')
+        warning = QLabel('Decision support only. Use manufacturer load charts. Suggestions are guidance based on entered numbers.')
+        warning.setWordWrap(True); warning.setStyleSheet('color:#9A3412;background:#FFF7ED;padding:9px;border:1px solid #FED7AA;border-radius:5px;')
         cv.addWidget(warning)
-        self._calc_output = QTextEdit(); self._calc_output.setReadOnly(True); self._calc_output.setMinimumHeight(300)
+        self._calc_output = QTextEdit(); self._calc_output.setReadOnly(True); self._calc_output.setMinimumHeight(320)
         cv.addWidget(self._calc_output, 1)
-        recalc = QPushButton('Calculate / Refresh Engineering Checks'); cv.addWidget(recalc)
+        recalc = QPushButton('Calculate / Refresh Engineering Checks & Suggestions'); cv.addWidget(recalc)
         tabs.addTab(calc_page, 'Engineering Calculations')
 
-        # Phase 3 drawings
+        # Drawings with Refresh
         draw_page = QWidget(); dv = QVBoxLayout(draw_page)
-        draw_hint = QLabel('Drawing updates from Lift & Load Type, sling legs, radius, boom length and crane type. Zoom the window for more detail on crane, slings and shackles.')
-        draw_hint.setWordWrap(True); draw_hint.setStyleSheet('color:#526579;')
-        dv.addWidget(draw_hint)
+        draw_row = QHBoxLayout()
+        draw_row.addWidget(QLabel('Update fields, then press Refresh Drawing so the schematic matches current inputs.'))
+        refresh_draw = QPushButton('Refresh Drawing')
+        refresh_draw.setStyleSheet('QPushButton{background:#176B87;color:white;font-weight:700;padding:6px 14px;border-radius:6px;}')
+        draw_row.addWidget(refresh_draw); dv.addLayout(draw_row)
         draw_tabs = QTabWidget()
-        side = _LiftingDrawingWidget(data, 'side')
-        plan = _LiftingDrawingWidget(data, 'plan')
-        draw_tabs.addTab(side, 'Side Elevation')
-        draw_tabs.addTab(plan, 'Plan View')
+        side = _LiftingDrawingWidget(data, 'side'); plan = _LiftingDrawingWidget(data, 'plan')
+        draw_tabs.addTab(side, 'Side Elevation'); draw_tabs.addTab(plan, 'Plan View')
         dv.addWidget(draw_tabs, 1)
-        draw_note = QLabel('Engineering schematic generated from entered data. Not to scale. Must not replace an approved engineered lift drawing or site-specific lift study.')
-        draw_note.setWordWrap(True); draw_note.setStyleSheet('color:#9A3412;padding:6px;')
-        dv.addWidget(draw_note)
+        dv.addWidget(QLabel('Schematic only — not to scale. Does not replace an approved engineered lift drawing.'))
         tabs.addTab(draw_page, 'Lifting Drawings')
+
+        # Review & Approval
+        rev_page = QWidget(); rv = QVBoxLayout(rev_page)
+        rv.addWidget(QLabel('Reviewer and approver complete this section. Names and status appear on the exported report with signature blocks.'))
+        rev_form = QFormLayout()
+        rev_by = QLineEdit(str(data.get('reviewed_by') or '')); rev_by.setEnabled(True)
+        rev_date = QDateEdit(); rev_date.setCalendarPopup(True); rev_date.setDisplayFormat('dd-MMM-yyyy')
+        rd = QDate.fromString(str(data.get('review_date') or ''), 'yyyy-MM-dd')
+        rev_date.setDate(rd if rd.isValid() else QDate.currentDate())
+        rev_comments = QTextEdit(); rev_comments.setPlainText(str(data.get('review_comments') or '')); rev_comments.setMinimumHeight(70)
+        appr_by = QLineEdit(str(data.get('approved_by') or ''))
+        appr_date = QDateEdit(); appr_date.setCalendarPopup(True); appr_date.setDisplayFormat('dd-MMM-yyyy')
+        ad = QDate.fromString(str(data.get('approve_date') or ''), 'yyyy-MM-dd')
+        appr_date.setDate(ad if ad.isValid() else QDate.currentDate())
+        wf_status = QComboBox(); wf_status.addItems(['Draft', 'Under Review', 'Approved', 'Rejected', 'Closed'])
+        wf_status.setCurrentText(status if status in [wf_status.itemText(i) for i in range(wf_status.count())] else 'Draft')
+        for lab, w in [('Reviewed By', rev_by), ('Review Date', rev_date), ('Review Comments', rev_comments),
+                       ('Approved By', appr_by), ('Approval Date', appr_date), ('Workflow Status', wf_status)]:
+            rev_form.addRow(lab, w)
+        rv.addLayout(rev_form)
+        rv.addStretch(1)
+        tabs.addTab(rev_page, 'Review & Approval')
 
         # Attachments
         attach_page = QWidget(); av = QVBoxLayout(attach_page)
-        av.addWidget(QLabel('Attach crane certificates, approved load chart, sling/shackle certificates, ground assessment, mat design and approved lifting drawings.'))
-        at = QTableWidget(0, 3)
-        at.setHorizontalHeaderLabels(['File Name', 'Category', 'Stored Path'])
+        av.addWidget(QLabel('Attach certificates, load chart, ground assessment, drawings.'))
+        at = QTableWidget(0, 3); at.setHorizontalHeaderLabels(['File Name', 'Category', 'Stored Path'])
         at.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        at.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        av.addWidget(at, 1)
+        at.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); av.addWidget(at, 1)
         pending = []
         if plan_id:
             for a in self.db.conn.execute('SELECT file_name,attachment_category,file_path FROM digital_lifting_plan_attachments WHERE plan_id=? ORDER BY id', (plan_id,)).fetchall():
@@ -44362,12 +44367,12 @@ class DigitalLiftingPlanModule(QWidget):
                     at.setItem(i, c, QTableWidgetItem(str(val)))
 
         def add_files():
-            paths, _ = QFileDialog.getOpenFileNames(dlg, 'Select lifting plan documents')
+            paths, _ = QFileDialog.getOpenFileNames(dlg, 'Select documents')
             cats = ['Crane Certificate', 'Manufacturer Load Chart', 'Rigging Certificate', 'Ground Assessment', 'Mat / Pad Design', 'Lifting Drawing', 'Method Statement', 'Imported Equipment File', 'Other']
-            for path in paths:
-                cat, ok = QInputDialog.getItem(dlg, 'Attachment Category', 'Select category:', cats, 0, False)
+            for pth in paths:
+                cat, ok = QInputDialog.getItem(dlg, 'Category', 'Select category:', cats, 0, False)
                 if ok:
-                    pending.append({'file_name': os.path.basename(path), 'category': cat, 'path': path, 'existing': False})
+                    pending.append({'file_name': os.path.basename(pth), 'category': cat, 'path': pth, 'existing': False})
             refresh_attach()
 
         def remove_file():
@@ -44375,36 +44380,33 @@ class DigitalLiftingPlanModule(QWidget):
             if r >= 0:
                 pending.pop(r); refresh_attach()
 
-        ab = QHBoxLayout()
-        add = QPushButton('Add Attachment'); rem = QPushButton('Remove Selected')
+        ab = QHBoxLayout(); add = QPushButton('Add Attachment'); rem = QPushButton('Remove Selected')
         add.clicked.connect(add_files); rem.clicked.connect(remove_file)
         ab.addWidget(add); ab.addWidget(rem); ab.addStretch(1); av.addLayout(ab)
         add.setEnabled(not read_only); rem.setEnabled(not read_only)
-        refresh_attach()
-        tabs.addTab(attach_page, 'Attachments')
+        refresh_attach(); tabs.addTab(attach_page, 'Attachments')
 
         def collect():
             out = {}
             for key, (w, kind) in fields.items():
-                if kind == 'memo':
-                    value = w.toPlainText().strip()
-                elif kind == 'date':
-                    value = w.date().toString('yyyy-MM-dd')
-                elif kind in ('num', 'int'):
-                    value = float(w.value())
-                elif kind.startswith('combo:'):
-                    value = w.currentText()
-                else:
-                    value = w.text().strip()
+                if kind == 'memo': value = w.toPlainText().strip()
+                elif kind == 'date': value = w.date().toString('yyyy-MM-dd')
+                elif kind in ('num', 'int'): value = float(w.value())
+                elif kind.startswith('combo:'): value = w.currentText()
+                else: value = w.text().strip()
                 out[key] = value
             out['lift_types'] = [n for n, cb in lift_checks.items() if cb.isChecked()]
             out['load_type'] = load_type_combo.currentText()
             out['load_unit'] = load_unit_combo.currentText()
-            # Normalize load weight to kg for storage / engineering checks
+            out['reviewed_by'] = rev_by.text().strip()
+            out['review_date'] = rev_date.date().toString('yyyy-MM-dd')
+            out['review_comments'] = rev_comments.toPlainText().strip()
+            out['approved_by'] = appr_by.text().strip()
+            out['approve_date'] = appr_date.date().toString('yyyy-MM-dd')
+            out['workflow_status'] = wf_status.currentText()
             try:
                 raw = float(out.get('load_weight_kg', 0) or 0)
                 if out['load_unit'] == 't':
-                    # User entered tonnes in the same spinbox — convert to kg
                     out['load_weight_kg'] = raw * 1000.0
                     out['_load_weight_entered'] = raw
                     out['_load_weight_entered_unit'] = 't'
@@ -44417,133 +44419,144 @@ class DigitalLiftingPlanModule(QWidget):
 
         def engineering_report(d=None):
             d = d or collect()
+            import math
             rigging = sum(float(d.get(k, 0) or 0) for k in ('hook_block_weight_kg', 'sling_weight_kg', 'shackle_weight_kg', 'spreader_weight_kg', 'other_rigging_weight_kg'))
             load = float(d.get('load_weight_kg', 0) or 0)
             total = load + rigging
-            dyn = float(d.get('dynamic_factor', 1.0) or 1.0)
+            dyn = max(1.0, float(d.get('dynamic_factor', 1.0) or 1.0))
             design_load = total * dyn
             lines = [
-                'ENGINEERING CHECK SUMMARY', '=' * 58,
+                'ENGINEERING CHECK SUMMARY & SUGGESTIONS', '=' * 58,
                 f"Lift types: {', '.join(d.get('lift_types') or []) or '—'}",
                 f"Load type: {d.get('load_type', '—')}",
-                f'Load weight: {load:,.2f} kg',
-                f'Entered rigging / hook block weight: {rigging:,.2f} kg',
-                f'Total static suspended load (entered components): {total:,.2f} kg',
-                f'Entered dynamic / impact factor: {dyn:.3f}',
-                f'Design suspended load used for checks: {design_load:,.2f} kg', ''
+                f'Load weight (kg): {load:,.2f}',
+                f'Rigging / hook block (kg): {rigging:,.2f}',
+                f'Total static suspended load (kg): {total:,.2f}',
+                f'Dynamic factor: {dyn:.3f}',
+                f'Design suspended load (kg): {design_load:,.2f}', ''
             ]
+            suggestions = []
             cap = float(d.get('chart_capacity_kg', 0) or 0)
             if cap > 0:
                 util = design_load / cap * 100
-                lines += [f'Verified net capacity entered: {cap:,.2f} kg', f'Capacity utilisation (design load): {util:.2f}%',
-                          f'Remaining net capacity: {cap - design_load:,.2f} kg',
-                          ('RESULT: DESIGN LOAD EXCEEDS ENTERED NET CHART CAPACITY' if design_load > cap else 'RESULT: Within entered net chart capacity only; competent-person approval still required')]
+                lines += [f'Verified net chart capacity (kg): {cap:,.2f}', f'Utilisation: {util:.1f}%', f'Remaining capacity (kg): {cap - design_load:,.2f}']
+                if design_load > cap:
+                    lines.append('RESULT: DESIGN LOAD EXCEEDS ENTERED NET CHART CAPACITY')
+                    suggestions.append('Reduce load, reduce radius, increase boom capacity configuration, or select a higher-capacity crane. Do not lift until chart capacity is confirmed adequate.')
+                elif util > 90:
+                    suggestions.append('Utilisation > 90%. Prefer a configuration with more spare capacity or re-check deductions (hook, jib, fly).')
+                elif util > 75:
+                    suggestions.append('Utilisation > 75%. Confirm wind, outrigger set-up and chart configuration carefully before lift.')
+                else:
+                    lines.append('RESULT: Within entered net chart capacity (competent-person approval still required).')
             else:
-                lines.append('CRANE CAPACITY: NOT VERIFIED - enter net capacity from the correct manufacturer load chart.')
+                lines.append('CRANE CAPACITY: NOT ENTERED — enter net capacity from the manufacturer load chart.')
+                suggestions.append('Enter verified net chart capacity at the planned radius and boom length before approval.')
+
             legs = max(1, int(d.get('sling_legs', 2) or 2))
             angle = float(d.get('sling_angle_deg', 0) or 0)
             wll = float(d.get('sling_wll_kg', 0) or 0)
             if 0 < angle <= 90 and legs > 0:
-                import math
                 tension = design_load / (legs * math.sin(math.radians(angle)))
-                lines += ['', f'Simplified equal-share sling-leg tension: {tension:,.2f} kg per leg (angle from horizontal: {angle:.2f}°)']
+                lines += ['', f'Simplified equal-share sling tension: {tension:,.2f} kg/leg (angle {angle:.1f}° from horizontal)']
+                if angle < 45:
+                    suggestions.append('Sling angle from horizontal is below 45°. Tension rises sharply — increase angle or add legs / use a lifting beam.')
                 if wll > 0:
-                    lines += [f'Entered sling WLL per leg: {wll:,.2f} kg',
-                              ('WARNING: calculated leg tension exceeds entered WLL' if tension > wll else 'Calculated leg tension is within entered WLL')]
+                    lines += [f'Sling WLL per leg: {wll:,.2f} kg',
+                              ('WARNING: leg tension exceeds WLL' if tension > wll else 'Leg tension within entered WLL')]
+                    if tension > wll:
+                        suggestions.append('Increase number of legs, use higher WLL slings, or reduce design load.')
                 else:
-                    lines.append('SLING WLL: NOT ENTERED - capacity comparison unavailable.')
-                lines.append('LIMITATION: assumes equal load sharing and ideal symmetric geometry.')
+                    suggestions.append('Enter sling WLL per leg to verify against calculated tension.')
             else:
-                lines += ['', 'SLING TENSION: NOT CALCULATED - enter sling angle 0–90° from horizontal.']
+                lines += ['', 'SLING TENSION: enter angle 0–90° from horizontal to calculate.']
+                suggestions.append('Enter sling angle and number of legs for a basic tension check.')
+
             reaction = float(d.get('max_outrigger_reaction_kn', 0) or 0)
-            ml = float(d.get('mat_length_m', 0) or 0)
-            mw = float(d.get('mat_width_m', 0) or 0)
+            ml = float(d.get('mat_length_m', 0) or 0); mw = float(d.get('mat_width_m', 0) or 0)
             gbc = float(d.get('verified_gbc_kpa', 0) or 0)
             if reaction > 0 and ml > 0 and mw > 0:
-                area = ml * mw
-                pressure = reaction / area
-                lines += ['', f'Entered maximum outrigger reaction: {reaction:,.2f} kN', f'Entered mat contact area: {area:,.3f} m²',
-                          f'Average bearing pressure (simplified): {pressure:,.2f} kPa']
+                pressure = reaction / (ml * mw)
+                lines += ['', f'Outrigger reaction: {reaction:,.2f} kN', f'Mat area: {ml * mw:,.3f} m²', f'Average bearing pressure: {pressure:,.2f} kPa']
                 if gbc > 0:
-                    lines += [f'Verified ground bearing capacity: {gbc:,.2f} kPa',
-                              ('WARNING: average pressure exceeds entered ground capacity' if pressure > gbc else 'Average pressure is within entered ground capacity')]
+                    lines.append('Ground capacity OK vs entered value' if pressure <= gbc else 'WARNING: pressure exceeds ground capacity')
+                    if pressure > gbc:
+                        suggestions.append('Increase mat size, reduce reaction (reposition crane), or improve ground bearing capacity.')
                 else:
-                    lines.append('GROUND CAPACITY: NOT ENTERED - comparison unavailable.')
+                    suggestions.append('Enter verified ground bearing capacity for comparison.')
             else:
-                lines += ['', 'GROUND / OUTRIGGER CHECK: enter verified reaction and mat dimensions.']
-            wind = float(d.get('wind_speed_ms', 0) or 0)
-            windlim = float(d.get('approved_wind_limit_ms', 0) or 0)
+                suggestions.append('Enter maximum outrigger reaction and mat dimensions for ground bearing check.')
+
+            wind = float(d.get('wind_speed_ms', 0) or 0); windlim = float(d.get('approved_wind_limit_ms', 0) or 0)
             if windlim > 0:
-                lines += ['', f'Wind entered: {wind:.2f} m/s; approved limit entered: {windlim:.2f} m/s',
-                          ('WARNING: entered wind exceeds entered limit' if wind > windlim else 'Entered wind is within entered limit')]
+                lines += ['', f'Wind: {wind:.2f} m/s vs limit {windlim:.2f} m/s']
+                if wind > windlim:
+                    suggestions.append('Entered wind exceeds limit — postpone lift or apply manufacturer wind derating.')
             else:
-                lines += ['', 'WIND CHECK: no approved wind limit entered.']
-            if any(t in (d.get('lift_types') or []) for t in ('Blind Lift', 'Night Lift', 'Critical Lift', 'Near Overhead', 'Tandem Lift')):
-                lines += ['', 'SPECIAL LIFT TYPE CONTROLS REQUIRED: confirm banksman/radio, lighting, tandem procedure, overhead clearance and critical-lift authorisation as applicable.']
+                suggestions.append('Enter approved wind limit from the crane manual / lift plan.')
+
+            if any(t in (d.get('lift_types') or []) for t in ('Blind Lift', 'Night Lift', 'Critical Lift', 'Near Overhead', 'Tandem Lift', 'Fragile Load', 'COG Difficult Load')):
+                suggestions.append('Special lift type selected — confirm dedicated banksman/radio, lighting, tandem procedure, tag lines, COG control and critical-lift authorisation.')
+
             checks = [('chart_configuration_verified', 'Load chart configuration'), ('crane_level_verified', 'Crane level'), ('mat_design_verified', 'Mat / pad design')]
             lines += ['', 'MANDATORY VERIFICATION INPUTS']
             for key, label in checks:
                 lines.append(f'{label}: {d.get(key, "Not verified")}')
             if any(d.get(k) != 'Yes' for k, _ in checks):
-                lines.append('STATUS: HOLD - one or more verification items are not confirmed.')
-            lines += ['', 'This calculation summary is decision support only, not a lift authorization.']
+                lines.append('STATUS: HOLD — verification items not all confirmed.')
+                suggestions.append('Set all verification items to Yes only after competent-person confirmation.')
+
+            lines += ['', 'SUGGESTIONS']
+            if suggestions:
+                for i, s in enumerate(suggestions, 1):
+                    lines.append(f'{i}. {s}')
+            else:
+                lines.append('1. No critical issues flagged from entered data — still obtain competent-person approval.')
+            lines += ['', 'This summary is decision support only, not a lift authorisation.']
             return '\n'.join(lines)
 
         def update_drawings():
             d = collect()
-            side.set_data(d)
-            plan.set_data(d)
+            d['workflow_status'] = wf_status.currentText()
+            side.set_data(d); plan.set_data(d)
 
         def recalc_now():
             self._calc_output.setPlainText(engineering_report())
             update_drawings()
 
         recalc.clicked.connect(recalc_now)
-        for cb in lift_checks.values():
-            cb.stateChanged.connect(lambda *_: update_drawings())
-        load_type_combo.currentTextChanged.connect(lambda *_: update_drawings())
-        for key in ('sling_legs', 'working_radius_m', 'boom_length_m', 'lifting_height_m', 'sling_angle_deg', 'crane_type'):
-            if key in fields:
-                w, kind = fields[key]
-                if kind in ('num', 'int'):
-                    w.valueChanged.connect(lambda *_: update_drawings())
-                elif kind.startswith('combo:'):
-                    w.currentTextChanged.connect(lambda *_: update_drawings())
-        tabs.currentChanged.connect(lambda idx: recalc_now() if tabs.tabText(idx) in ('Engineering Calculations', 'Lifting Drawings') else None)
+        refresh_draw.clicked.connect(update_drawings)
         import_btn.clicked.connect(lambda: self._import_equipment_file(fields, dlg, load_unit_combo))
         recalc_now()
 
         buttons = QDialogButtonBox()
         if not read_only:
-            save = buttons.addButton('Save Draft', QDialogButtonBox.ButtonRole.AcceptRole)
-            export_btn = buttons.addButton('Export Plan', QDialogButtonBox.ButtonRole.ActionRole)
-            close = buttons.addButton('Cancel', QDialogButtonBox.ButtonRole.RejectRole)
-        else:
-            export_btn = buttons.addButton('Export Plan', QDialogButtonBox.ButtonRole.ActionRole)
-            close = buttons.addButton('Close', QDialogButtonBox.ButtonRole.RejectRole)
+            save = buttons.addButton('Save', QDialogButtonBox.ButtonRole.AcceptRole)
+        export_btn = buttons.addButton('Export Plan', QDialogButtonBox.ButtonRole.ActionRole)
+        close = buttons.addButton('Close' if read_only else 'Cancel', QDialogButtonBox.ButtonRole.RejectRole)
         close.clicked.connect(dlg.reject)
 
         def save_plan():
             d = collect()
-            missing = [label for key, label in [('project', 'Project / Contract'), ('location', 'Lifting Location'), ('lifting_date', 'Planned Lifting Date'), ('load_description', 'Load Description')] if not str(d.get(key, '')).strip()]
+            missing = [label for key, label in [('project', 'Project'), ('location', 'Location'), ('lifting_date', 'Date'), ('load_description', 'Load Description')] if not str(d.get(key, '')).strip()]
             if float(d.get('load_weight_kg', 0) or 0) <= 0:
                 missing.append('Load Weight must be greater than zero')
             if missing:
-                QMessageBox.warning(dlg, 'Required Information', 'Please complete:\n• ' + '\n• '.join(missing))
-                return
+                QMessageBox.warning(dlg, 'Required', 'Complete:\n• ' + '\n• '.join(missing)); return
             d['_engineering_summary'] = engineering_report(d)
             payload = json.dumps(d, ensure_ascii=False)
+            new_status = d.get('workflow_status') or 'Draft'
             try:
                 if plan_id:
                     self.db.conn.execute(
-                        "UPDATE digital_lifting_plans SET project=?,location=?,lifting_date=?,load_description=?,load_weight_kg=?,payload_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND workflow_status='Draft'",
-                        (d['project'], d['location'], d['lifting_date'], d['load_description'], d['load_weight_kg'], payload, plan_id))
+                        "UPDATE digital_lifting_plans SET project=?,location=?,lifting_date=?,load_description=?,load_weight_kg=?,payload_json=?,workflow_status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                        (d['project'], d['location'], d['lifting_date'], d['load_description'], d['load_weight_kg'], payload, new_status, plan_id))
                     saved = plan_id
                     self.db.conn.execute('DELETE FROM digital_lifting_plan_attachments WHERE plan_id=?', (saved,))
                 else:
                     cur = self.db.conn.execute(
-                        'INSERT INTO digital_lifting_plans(plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,created_by) VALUES(?,?,?,?,?,?,?,?)',
-                        (number, d['project'], d['location'], d['lifting_date'], d['load_description'], d['load_weight_kg'], payload, d.get('plan_prepared_by', '')))
+                        'INSERT INTO digital_lifting_plans(plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status,created_by) VALUES(?,?,?,?,?,?,?,?,?)',
+                        (number, d['project'], d['location'], d['lifting_date'], d['load_description'], d['load_weight_kg'], payload, new_status, d.get('plan_prepared_by', '')))
                     saved = cur.lastrowid
                 folder = ATTACH_DIR / 'digital_lifting_plans' / str(saved)
                 folder.mkdir(parents=True, exist_ok=True)
@@ -44551,41 +44564,46 @@ class DigitalLiftingPlanModule(QWidget):
                     src = item['path']
                     if not item.get('existing'):
                         dest = folder / (uuid.uuid4().hex[:8] + '_' + os.path.basename(src))
-                        shutil.copy2(src, dest)
-                        stored = str(dest)
+                        shutil.copy2(src, dest); stored = str(dest)
                     else:
                         stored = src
                     self.db.conn.execute(
                         'INSERT INTO digital_lifting_plan_attachments(plan_id,file_path,file_name,attachment_category) VALUES(?,?,?,?)',
                         (saved, stored, item['file_name'], item['category']))
-                self.db.conn.commit()
-                dlg.accept()
-                self.refresh_register()
+                self.db.conn.commit(); dlg.accept(); self.refresh_register()
             except Exception as exc:
-                self.db.conn.rollback()
-                logging.exception('Unable to save digital lifting plan')
-                QMessageBox.critical(dlg, 'Save Failed', f'The lifting plan was not saved.\n\n{exc}')
+                self.db.conn.rollback(); logging.exception('save dlp')
+                QMessageBox.critical(dlg, 'Save Failed', str(exc))
 
         def do_export():
-            # Save payload snapshot into temp export even if not yet saved
             d = collect()
             d['_engineering_summary'] = engineering_report(d)
             if plan_id:
                 try:
-                    self.db.conn.execute('UPDATE digital_lifting_plans SET payload_json=? WHERE id=?', (json.dumps(d, ensure_ascii=False), plan_id))
+                    self.db.conn.execute('UPDATE digital_lifting_plans SET payload_json=?,workflow_status=? WHERE id=?',
+                                        (json.dumps(d, ensure_ascii=False), d.get('workflow_status') or status, plan_id))
                     self.db.conn.commit()
                 except Exception:
-                    pass
-                self._export_plan(plan_id)
+                    logging.exception('export prep save')
+                try:
+                    self._export_plan(plan_id)
+                except Exception as exc:
+                    logging.exception('export from editor')
+                    QMessageBox.critical(dlg, 'Export Failed', f'{type(exc).__name__}: {exc}')
             else:
-                QMessageBox.information(dlg, 'Export', 'Save the plan first, then use Export Plan from the register (or Save Draft and reopen).')
+                QMessageBox.information(dlg, 'Export', 'Save the plan first, then export from the register or reopen and export.')
 
         if not read_only:
             save.clicked.connect(save_plan)
         export_btn.clicked.connect(do_export)
         outer.addWidget(buttons)
-        fit_dialog_to_desktop(dlg, 0.96, 0.94)
+        try:
+            fit_dialog_to_desktop(dlg, 0.96, 0.94)
+        except Exception:
+            pass
         dlg.exec()
+
+
 
 
 # ============================================================
