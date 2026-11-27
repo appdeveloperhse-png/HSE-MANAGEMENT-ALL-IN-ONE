@@ -56,27 +56,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.27-DEMO"
-# Evaluation / demo build: every operational register is capped so the
-# recipient can exercise all features without a full production dataset.
-DEMO_MODE = True
-DEMO_RECORD_LIMIT = 3
-DEMO_LIMITED_TABLES = {
-    "observations", "observation_attachments", "observation_closeout_evidence",
-    "incidents", "incident_attachments",
-    "noi_register", "noi_attachments",
-    "audits", "audit_findings", "audit_attachments", "audit_schedule",
-    "audit_checklist_responses", "audit_procedure_records", "audit_notifications",
-    "audit_history", "audit_finding_history",
-    "aud_findings", "aud_notifications", "aud_finding_attachments",
-    "capa", "capa_attachments",
-    "employees", "companies", "projects", "categories", "manpower_records",
-    "training_courses", "training_records", "training_assignments",
-    "training_matrix_cells", "training_record_history",
-    "env_noise_sessions", "env_noise_locations",
-    "env_air_samples", "env_water_samples", "env_waste_records",
-    "emergency_drills", "emergency_drill_actions",
-}
+APP_VERSION = "1.4.26"
 
 
 def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
@@ -124,52 +104,6 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.create_tables()
-        self._install_demo_connection_guard()
-
-    def _install_demo_connection_guard(self):
-        """Wrap the raw sqlite connection so modules that call db.conn.execute still hit the limit."""
-        if not DEMO_MODE:
-            return
-        if getattr(self.conn, "_demo_guard_installed", False):
-            return
-        original_execute = self.conn.execute
-        original_executemany = self.conn.executemany
-
-        def guarded_execute(sql, parameters=()):
-            self._enforce_demo_limit(sql)
-            return original_execute(sql, parameters)
-
-        def guarded_executemany(sql, seq_of_parameters):
-            self._enforce_demo_limit(sql)
-            # For bulk insert, also ensure final count would not exceed limit.
-            try:
-                text_sql = (sql or "").strip()
-                upper = text_sql.upper()
-                if upper.startswith("INSERT"):
-                    m = re.search(
-                        r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
-                        text_sql,
-                        flags=re.IGNORECASE,
-                    )
-                    if m:
-                        table = m.group(1).lower()
-                        if table in DEMO_LIMITED_TABLES:
-                            count = original_execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()[0]
-                            incoming = len(list(seq_of_parameters)) if seq_of_parameters is not None else 0
-                            if int(count or 0) + incoming > DEMO_RECORD_LIMIT:
-                                raise RuntimeError(
-                                    f"DEMO LIMIT: '{table}' allows at most {DEMO_RECORD_LIMIT} record(s) "
-                                    f"in this evaluation build (currently {count}, trying to add {incoming})."
-                                )
-            except RuntimeError:
-                raise
-            except Exception:
-                logging.exception("Demo executemany limit check failed")
-            return original_executemany(sql, seq_of_parameters)
-
-        self.conn.execute = guarded_execute
-        self.conn.executemany = guarded_executemany
-        self.conn._demo_guard_installed = True
 
     def create_tables(self):
 
@@ -913,43 +847,10 @@ class Database:
         self.conn.commit()
 
     def execute(self, sql, params=()):
-        self._enforce_demo_limit(sql)
         cur = self.conn.cursor()
         cur.execute(sql, params)
         self.conn.commit()
         return cur
-
-    def _enforce_demo_limit(self, sql):
-        """Block INSERT when a demo-limited table already has DEMO_RECORD_LIMIT rows."""
-        if not DEMO_MODE:
-            return
-        try:
-            text_sql = (sql or "").strip()
-            upper = text_sql.upper()
-            if not upper.startswith("INSERT"):
-                return
-            # INSERT [OR ...] INTO table
-            m = re.search(
-                r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+([A-Za-z_][A-Za-z0-9_]*)",
-                text_sql,
-                flags=re.IGNORECASE,
-            )
-            if not m:
-                return
-            table = m.group(1).lower()
-            if table not in DEMO_LIMITED_TABLES:
-                return
-            count = self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()[0]
-            if int(count or 0) >= DEMO_RECORD_LIMIT:
-                raise RuntimeError(
-                    f"DEMO LIMIT: '{table}' already has {DEMO_RECORD_LIMIT} record(s). "
-                    f"This evaluation build allows a maximum of {DEMO_RECORD_LIMIT} entries "
-                    f"per register. Delete an existing record to add another, or use the full licence."
-                )
-        except RuntimeError:
-            raise
-        except Exception:
-            logging.exception("Demo limit check failed")
 
     def fetchall(self, sql, params=()):
         return self.conn.execute(sql, params).fetchall()
@@ -4922,7 +4823,7 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.setWindowTitle(
-            f"{APP_NAME} - {APP_VERSION}" + ("  [EVALUATION — max 3 records per register]" if DEMO_MODE else "")
+            f"{APP_NAME} - {APP_VERSION}"
         )
 
         self.resize(1400, 850)
@@ -5015,6 +4916,7 @@ class MainWindow(QMainWindow):
             "Training",
             "Emergency Drill Management",
             "Environmental Monitoring",
+            "Lifting Register",
             "Manpower Details",
             "Chemical & SDS Register",
             "Risk Assessment",
@@ -5133,20 +5035,23 @@ class MainWindow(QMainWindow):
                 w, layout = self.page("Environmental Monitoring")
                 layout.addWidget(EnvironmentalMonitoringModule(self, db), 1)
             elif row == 9:
-                self.manpower_details()
+                w, layout = self.page("Lifting Register")
+                layout.addWidget(LiftingRegisterModule(self, db), 1)
             elif row == 10:
+                self.manpower_details()
+            elif row == 11:
                 w, layout = self.page("Chemical Register & SDS Management")
                 layout.addWidget(ChemicalSDSModule(self, db), 1)
-            elif row == 11:
+            elif row == 12:
                 w, layout = self.page("Risk Assessment / JSA / JHA")
                 layout.addWidget(RiskAssessmentModule(self, db), 1)
-            elif row == 12:
-                self.reports()
             elif row == 13:
-                self.master_data()
+                self.reports()
             elif row == 14:
-                self.settings_page()
+                self.master_data()
             elif row == 15:
+                self.settings_page()
+            elif row == 16:
                 self.cloud_sync_page()
 
             # page() records the exact top-level page built by this module.
@@ -16787,7 +16692,7 @@ class MainWindow(QMainWindow):
         backup=QPushButton("Backup Complete Application Data"); layout.addWidget(backup); backup.clicked.connect(self.backup)
         restore=QPushButton("Restore Application Backup"); layout.addWidget(restore); restore.clicked.connect(self.restore)
         about=QPushButton("About"); layout.addWidget(about)
-        about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System" + ("\n\nEVALUATION BUILD\nMaximum {0} records per register.".format(DEMO_RECORD_LIMIT) if DEMO_MODE else "")))
+        about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System"))
 
     def _supabase_config(self):
         project_url = safe(db.setting("supabase_project_url", "")).strip().rstrip("/")
@@ -41455,20 +41360,11 @@ class EnvironmentalMonitoringModule(QWidget):
             project TEXT DEFAULT '', location TEXT DEFAULT '', waste_type TEXT DEFAULT '',
             waste_name TEXT DEFAULT '', quantity REAL DEFAULT 0, unit TEXT DEFAULT 'kg',
             generated_by TEXT DEFAULT '', disposal_method TEXT DEFAULT '', remarks TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            disposed_quantity REAL DEFAULT 0
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_env_waste_date ON env_waste_records(record_date);
         CREATE INDEX IF NOT EXISTS idx_env_waste_type ON env_waste_records(waste_type);
         """)
-        # Additive column for existing installs (disposed quantity tracking).
-        try:
-            _wcols = [r[1] for r in self.db.conn.execute("PRAGMA table_info(env_waste_records)").fetchall()]
-            if "disposed_quantity" not in _wcols:
-                self.db.conn.execute("ALTER TABLE env_waste_records ADD COLUMN disposed_quantity REAL DEFAULT 0")
-                self.db.conn.commit()
-        except Exception:
-            pass
         # Additive migrations for older noise installs
         for table, column, definition in (
             ('env_noise_sessions','reviewed_by',"TEXT DEFAULT ''"),
@@ -42209,16 +42105,13 @@ class EnvironmentalMonitoringModule(QWidget):
         self.waste_type = QComboBox(); self.waste_type.addItems(self.WASTE_TYPES)
         self.waste_name = QLineEdit(); self.waste_name.setPlaceholderText("e.g. Contaminated rags, Spent solvent…")
         self.waste_qty = QDoubleSpinBox(); self.waste_qty.setRange(0, 1000000); self.waste_qty.setDecimals(2)
-        self.waste_disposed_qty = QDoubleSpinBox(); self.waste_disposed_qty.setRange(0, 1000000); self.waste_disposed_qty.setDecimals(2)
-        self.waste_disposed_qty.setToolTip("Quantity actually disposed / removed (same unit as generated quantity)")
         self.waste_unit = QComboBox(); self.waste_unit.addItems(self.WASTE_UNITS)
         self.waste_generated_by = QLineEdit(); self.waste_disposal = QLineEdit()
         self.waste_remarks = QLineEdit()
         form.addRow("Date *", self.waste_date); form.addRow("Project / Site *", self.waste_project)
         form.addRow("Location / Area *", self.waste_location); form.addRow("Waste Type *", self.waste_type)
-        form.addRow("Waste Name / Description *", self.waste_name); form.addRow("Quantity Generated *", self.waste_qty)
-        form.addRow("Quantity Disposed", self.waste_disposed_qty); form.addRow("Unit", self.waste_unit)
-        form.addRow("Generated By", self.waste_generated_by)
+        form.addRow("Waste Name / Description *", self.waste_name); form.addRow("Quantity *", self.waste_qty)
+        form.addRow("Unit", self.waste_unit); form.addRow("Generated By", self.waste_generated_by)
         form.addRow("Disposal / Handling Method", self.waste_disposal); form.addRow("Remarks", self.waste_remarks)
         layout.addWidget(card)
         btn_row = QHBoxLayout(); btn_row.addStretch(1)
@@ -42232,7 +42125,6 @@ class EnvironmentalMonitoringModule(QWidget):
     def clear_waste_form(self):
         self.waste_date.setDate(QDate.currentDate()); self.waste_project.clear(); self.waste_location.clear()
         self.waste_type.setCurrentIndex(0); self.waste_name.clear(); self.waste_qty.setValue(0)
-        self.waste_disposed_qty.setValue(0)
         self.waste_unit.setCurrentIndex(0); self.waste_generated_by.clear(); self.waste_disposal.clear(); self.waste_remarks.clear()
 
     def save_waste_record(self):
@@ -42246,11 +42138,10 @@ class EnvironmentalMonitoringModule(QWidget):
             next_id = self.db.conn.execute("SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='env_waste_records'),0)+1").fetchone()[0]
             record_no = f"WST-{datetime.now().year}-{int(next_id):04d}"
             self.db.conn.execute(
-                "INSERT INTO env_waste_records(record_no,record_date,project,location,waste_type,waste_name,quantity,unit,generated_by,disposal_method,remarks,disposed_quantity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO env_waste_records(record_no,record_date,project,location,waste_type,waste_name,quantity,unit,generated_by,disposal_method,remarks) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (record_no, self.waste_date.date().toString("yyyy-MM-dd"), self.waste_project.text().strip(), self.waste_location.text().strip(),
                  self.waste_type.currentText(), self.waste_name.text().strip(), float(self.waste_qty.value()), self.waste_unit.currentText(),
-                 self.waste_generated_by.text().strip(), self.waste_disposal.text().strip(), self.waste_remarks.text().strip(),
-                 float(self.waste_disposed_qty.value())))
+                 self.waste_generated_by.text().strip(), self.waste_disposal.text().strip(), self.waste_remarks.text().strip()))
             self.db.conn.commit(); self.refresh_waste_register(); self.refresh_waste_matrix(); self.refresh_waste_dashboard()
             QMessageBox.information(self, "Saved", f"Waste record {record_no} saved.")
             self.clear_waste_form(); self.waste_tabs.setCurrentIndex(1)
@@ -42286,8 +42177,8 @@ class EnvironmentalMonitoringModule(QWidget):
         hint = QLabel("Tip: hold Ctrl (or Cmd) to select multiple rows, or Shift for a range, then use Export Selected Rows.")
         hint.setStyleSheet("color:#526477;font-size:12px;padding:2px 0;")
         layout.addWidget(hint)
-        self.waste_table = QTableWidget(0, 12)
-        self.waste_table.setHorizontalHeaderLabels(["ID", "Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method"])
+        self.waste_table = QTableWidget(0, 11)
+        self.waste_table.setHorizontalHeaderLabels(["ID", "Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method"])
         self.waste_table.setColumnHidden(0, True); self.waste_table.setAlternatingRowColors(True)
         self.waste_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.waste_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -42317,13 +42208,8 @@ class EnvironmentalMonitoringModule(QWidget):
         self.waste_table.setRowCount(0)
         for rec in rows:
             r = self.waste_table.rowCount(); self.waste_table.insertRow(r)
-            disposed = 0.0
-            try:
-                disposed = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
-            except Exception:
-                disposed = 0.0
             for c, v in enumerate([rec["id"], rec["record_no"], rec["record_date"], rec["project"], rec["location"],
-                                   rec["waste_type"], rec["waste_name"], f"{rec['quantity']:.2f}", f"{disposed:.2f}", rec["unit"],
+                                   rec["waste_type"], rec["waste_name"], f"{rec['quantity']:.2f}", rec["unit"],
                                    rec["generated_by"], rec["disposal_method"]]):
                 self.waste_table.setItem(r, c, QTableWidgetItem(str(v or "")))
 
@@ -42348,20 +42234,15 @@ class EnvironmentalMonitoringModule(QWidget):
             sql += " ORDER BY record_date DESC, id DESC"
             rows = self.db.conn.execute(sql, params).fetchall()
             wb = Workbook(); ws = wb.active; ws.title = "Waste Register"
-            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method", "Remarks"]
+            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method", "Remarks"]
             ws.append(headers)
             for cell in ws[1]: cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
             for rec in rows:
-                disposed = 0.0
-                try:
-                    disposed = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
-                except Exception:
-                    disposed = 0.0
                 ws.append([rec["record_no"], rec["record_date"], rec["project"], rec["location"], rec["waste_type"],
-                           rec["waste_name"], rec["quantity"], disposed, rec["unit"], rec["generated_by"], rec["disposal_method"], rec["remarks"]])
+                           rec["waste_name"], rec["quantity"], rec["unit"], rec["generated_by"], rec["disposal_method"], rec["remarks"]])
             thin = Border(left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
                           top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
-            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=12):
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=11):
                 for cell in row: cell.border = thin
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = min(36, max(12, max(len(safe(c.value)) for c in col) + 2))
@@ -42375,17 +42256,9 @@ class EnvironmentalMonitoringModule(QWidget):
         """Compact filter dialog: year / month / date range, project, location — applies to register."""
         dlg = QDialog(self)
         dlg.setWindowTitle("Waste Quick Filter")
-        dlg.setWindowFlags(
-            Qt.WindowType.Window
-            | Qt.WindowType.WindowTitleHint
-            | Qt.WindowType.WindowSystemMenuHint
-            | Qt.WindowType.WindowMinimizeButtonHint
-            | Qt.WindowType.WindowMaximizeButtonHint
-            | Qt.WindowType.WindowCloseButtonHint
-        )
-        dlg.resize(400, 300)
-        dlg.setMinimumSize(360, 260)
-        fit_dialog_to_desktop(dlg, 0.42, 0.42)
+        dlg.setWindowFlags(dlg.windowFlags() | Qt.WindowType.WindowMinimizeButtonHint | Qt.WindowType.WindowCloseButtonHint)
+        dlg.resize(420, 280)
+        fit_dialog_to_desktop(dlg, 0.45, 0.45)
         form = QFormLayout(dlg)
         form.setContentsMargins(14, 14, 14, 10)
         form.setSpacing(8)
@@ -42471,20 +42344,20 @@ class EnvironmentalMonitoringModule(QWidget):
             path += ".xlsx"
         try:
             wb = Workbook(); ws = wb.active; ws.title = "Selected Waste"
-            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Qty Generated", "Qty Disposed", "Unit", "Generated By", "Disposal Method"]
+            headers = ["Record No.", "Date", "Project / Site", "Location", "Waste Type", "Waste Name", "Quantity", "Unit", "Generated By", "Disposal Method"]
             ws.append(headers)
             for cell in ws[1]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="17365D")
                 cell.alignment = Alignment(horizontal="center", wrap_text=True)
             for r in selected_rows:
                 vals = []
-                for c in range(1, 12):
+                for c in range(1, 11):
                     item = self.waste_table.item(r, c)
                     vals.append(item.text() if item else "")
                 ws.append(vals)
             thin = Border(left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
                           top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"))
-            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=11):
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=10):
                 for cell in row:
                     cell.border = thin
                     cell.alignment = Alignment(vertical="center", wrap_text=True)
@@ -42497,29 +42370,22 @@ class EnvironmentalMonitoringModule(QWidget):
             sm.append(["Exported on", datetime.now().strftime("%Y-%m-%d %H:%M")])
             sm.append(["Rows selected", len(selected_rows)])
             sm.append([])
-            sm.append(["Record No.", "Qty Generated", "Qty Disposed", "Unit", "Waste Type"])
+            sm.append(["Record No.", "Quantity", "Unit", "Waste Type"])
             for cell in sm[5]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="176B87")
             total_qty = 0.0
-            total_disp = 0.0
             for r in selected_rows:
                 no = self.waste_table.item(r, 1).text() if self.waste_table.item(r, 1) else ""
                 qty_txt = self.waste_table.item(r, 7).text() if self.waste_table.item(r, 7) else "0"
-                disp_txt = self.waste_table.item(r, 8).text() if self.waste_table.item(r, 8) else "0"
-                unit = self.waste_table.item(r, 9).text() if self.waste_table.item(r, 9) else ""
+                unit = self.waste_table.item(r, 8).text() if self.waste_table.item(r, 8) else ""
                 wtype = self.waste_table.item(r, 5).text() if self.waste_table.item(r, 5) else ""
                 try:
                     total_qty += float(qty_txt.replace(",", "") or 0)
                 except Exception:
                     pass
-                try:
-                    total_disp += float(disp_txt.replace(",", "") or 0)
-                except Exception:
-                    pass
-                sm.append([no, qty_txt, disp_txt, unit, wtype])
+                sm.append([no, qty_txt, unit, wtype])
             sm.append([])
-            sm.append(["Combined generated qty (mixed units)", f"{total_qty:.2f}"])
-            sm.append(["Combined disposed qty (mixed units)", f"{total_disp:.2f}"])
+            sm.append(["Combined quantity (mixed units)", f"{total_qty:.2f}"])
             sm["A" + str(sm.max_row)].font = Font(bold=True)
             for col in sm.columns:
                 sm.column_dimensions[col[0].column_letter].width = min(32, max(12, max(len(safe(c.value)) for c in col) + 2))
@@ -42571,7 +42437,7 @@ class EnvironmentalMonitoringModule(QWidget):
         year = int(self.matrix_year.value())
         project = self.matrix_project.text().strip().lower()
         location = self.matrix_location.text().strip().lower()
-        sql = "SELECT record_date, waste_type, quantity, unit, disposal_method, COALESCE(disposed_quantity,0) AS disposed_quantity FROM env_waste_records WHERE substr(record_date,1,4)=?"
+        sql = "SELECT record_date, waste_type, quantity, unit, disposal_method FROM env_waste_records WHERE substr(record_date,1,4)=?"
         params = [str(year)]
         if project:
             sql += " AND lower(project) LIKE ?"; params.append(f"%{project}%")
@@ -42613,12 +42479,10 @@ class EnvironmentalMonitoringModule(QWidget):
             except Exception:
                 q = 0.0
             matrix[m][wt] += q
-            try:
-                dq = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
-            except Exception:
-                dq = 0.0
-            disposed_by_month[m] += dq
-        headers = ["Month"] + active_types + ["Month Total (Generated)", "Month Total (Disposed)"]
+            # Count as "disposed tracking" when a disposal method is recorded
+            if safe(rec["disposal_method"]).strip():
+                disposed_by_month[m] += q
+        headers = ["Month"] + active_types + ["Month Total (Generated)", "With Disposal Method"]
         self.waste_matrix_table.setColumnCount(len(headers))
         self.waste_matrix_table.setHorizontalHeaderLabels(headers)
         self.waste_matrix_table.setRowCount(0)
@@ -42680,7 +42544,7 @@ class EnvironmentalMonitoringModule(QWidget):
             filt_bits.append(f"Location contains '{self.matrix_location.text().strip()}'")
         self.matrix_summary.setText(
             f"Filters: {' | '.join(filt_bits)}    ·    Records: {len(rows)}    ·    "
-            f"Generated qty (all units): {year_gen:.2f}    ·    Disposed qty (all units): {year_disp:.2f}"
+            f"Generated qty (all units): {year_gen:.2f}    ·    With disposal method noted: {year_disp:.2f}"
         )
 
     def export_waste_matrix(self):
@@ -42721,15 +42585,11 @@ class EnvironmentalMonitoringModule(QWidget):
             ws.freeze_panes = "B2"
             # Detail sheet with underlying records
             det = wb.create_sheet("Detail Records")
-            det.append(["Record Date", "Waste Type", "Qty Generated", "Qty Disposed", "Unit", "Disposal Method"])
+            det.append(["Record Date", "Waste Type", "Quantity", "Unit", "Disposal Method"])
             for cell in det[1]:
                 cell.font = Font(bold=True, color="FFFFFF"); cell.fill = PatternFill("solid", fgColor="176B87")
             for rec in self._waste_matrix_query_rows():
-                try:
-                    dq = float(rec["disposed_quantity"] if "disposed_quantity" in rec.keys() else 0) or 0.0
-                except Exception:
-                    dq = 0.0
-                det.append([rec["record_date"], rec["waste_type"], rec["quantity"], dq, rec["unit"], rec["disposal_method"]])
+                det.append([rec["record_date"], rec["waste_type"], rec["quantity"], rec["unit"], rec["disposal_method"]])
             for col in det.columns:
                 det.column_dimensions[col[0].column_letter].width = min(28, max(12, max(len(safe(c.value)) for c in col) + 2))
             det.auto_filter.ref = det.dimensions; det.freeze_panes = "A2"
@@ -42826,6 +42686,1160 @@ class EnvironmentalMonitoringModule(QWidget):
             QMessageBox.information(self, "Exported", f"Register exported:\n{path}")
         except Exception as exc:
             logging.exception("%s export", kind); QMessageBox.critical(self, "Export Failed", str(exc))
+
+
+
+# ============================================================
+# LIFTING REGISTER MODULE
+# Additive HSE module for lifting equipment, gear and
+# certificate validity tracking (no commercial details).
+# ============================================================
+
+class LiftingRegisterModule(QWidget):
+    """Track lifting equipment, gear (slings, shackles, etc.) and certificates.
+
+    Colour coding (remaining days to certificate / inspection expiry):
+      - Expired or overdue  -> dark red
+      - Less than 30 days   -> red
+      - 30–89 days          -> amber
+      - 90+ days / valid    -> green
+    Certificate history is retained on a dedicated tab when items are renewed.
+    """
+
+    EQUIPMENT_TYPES = [
+        "Mobile Crane", "Crawler Crane", "Tower Crane", "Overhead / Gantry Crane",
+        "Jib Crane", "Hoist", "Winch", "Forklift", "Telehandler", "MEWP / Man Basket",
+        "Spreader Beam", "Lifting Beam / Frame", "Wire Rope Sling", "Chain Sling",
+        "Webbing Sling", "Round Sling", "Shackle", "Eye Bolt / Eye Nut",
+        "Lifting Hook", "Clamp / Grab", "Lifting Magnet", "Vacuum Lifter",
+        "Swivel / Ring", "Lifting Chain Assembly", "Other Lifting Gear"
+    ]
+
+    STATUSES = ["In Service", "Under Inspection", "Quarantined", "Out of Service", "Disposed"]
+
+    def __init__(self, parent=None, database=None):
+        super().__init__(parent)
+        self.db = database or db
+        self._ensure_tables()
+        self._build_ui()
+        self.refresh_all()
+
+    # -------------------- schema --------------------
+    def _ensure_tables(self):
+        self.db.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS lifting_equipment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            asset_tag TEXT NOT NULL UNIQUE,
+            equipment_name TEXT NOT NULL,
+            equipment_type TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            serial_number TEXT DEFAULT '',
+            swl TEXT DEFAULT '',
+            project TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            department TEXT DEFAULT '',
+            responsible_person TEXT DEFAULT '',
+            manufacturer TEXT DEFAULT '',
+            status TEXT DEFAULT 'In Service',
+            certificate_no TEXT DEFAULT '',
+            cert_issue_date TEXT DEFAULT '',
+            cert_expiry_date TEXT DEFAULT '',
+            last_inspection_date TEXT DEFAULT '',
+            next_inspection_date TEXT DEFAULT '',
+            inspected_by TEXT DEFAULT '',
+            certifying_body TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            certificate_path TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_lifting_tag ON lifting_equipment(asset_tag);
+        CREATE INDEX IF NOT EXISTS idx_lifting_expiry ON lifting_equipment(cert_expiry_date);
+        CREATE INDEX IF NOT EXISTS idx_lifting_type ON lifting_equipment(equipment_type);
+
+        CREATE TABLE IF NOT EXISTS lifting_certificate_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            equipment_id INTEGER NOT NULL,
+            asset_tag TEXT DEFAULT '',
+            equipment_name TEXT DEFAULT '',
+            certificate_no TEXT DEFAULT '',
+            cert_issue_date TEXT DEFAULT '',
+            cert_expiry_date TEXT DEFAULT '',
+            inspected_by TEXT DEFAULT '',
+            certifying_body TEXT DEFAULT '',
+            inspection_date TEXT DEFAULT '',
+            next_inspection_date TEXT DEFAULT '',
+            certificate_path TEXT DEFAULT '',
+            remarks TEXT DEFAULT '',
+            archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            archived_by TEXT DEFAULT 'Local User',
+            archive_reason TEXT DEFAULT 'Certificate renewed',
+            FOREIGN KEY(equipment_id) REFERENCES lifting_equipment(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_lift_hist_equip ON lifting_certificate_history(equipment_id);
+        CREATE INDEX IF NOT EXISTS idx_lift_hist_expiry ON lifting_certificate_history(cert_expiry_date);
+        """)
+        self.db.conn.commit()
+
+    # -------------------- helpers --------------------
+    @staticmethod
+    def _parse_date(value):
+        text = safe(value).strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d", "%d-%b-%Y", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.strptime(text[:10] if fmt == "%Y-%m-%d" else text, fmt).date()
+            except Exception:
+                continue
+        try:
+            return date.fromisoformat(text[:10])
+        except Exception:
+            return None
+
+    def _days_remaining(self, expiry_value):
+        d = self._parse_date(expiry_value)
+        if not d:
+            return None
+        return (d - date.today()).days
+
+    def _colour_for_days(self, days):
+        """Return (background, foreground, label) for remaining days."""
+        if days is None:
+            return ("#ECEFF1", "#455A64", "No expiry")
+        if days < 0:
+            return ("#C62828", "#FFFFFF", f"Expired ({abs(days)}d)")
+        if days < 30:
+            return ("#E53935", "#FFFFFF", f"{days}d left")
+        if days < 90:
+            return ("#F9A825", "#212121", f"{days}d left")
+        return ("#2E7D32", "#FFFFFF", f"{days}d left")
+
+    def _effective_expiry(self, row):
+        """Prefer certificate expiry; fall back to next inspection date."""
+        cert = safe(row["cert_expiry_date"] if "cert_expiry_date" in row.keys() else "")
+        nxt = safe(row["next_inspection_date"] if "next_inspection_date" in row.keys() else "")
+        d_cert = self._parse_date(cert)
+        d_next = self._parse_date(nxt)
+        if d_cert and d_next:
+            return min(d_cert, d_next).isoformat()
+        if d_cert:
+            return d_cert.isoformat()
+        if d_next:
+            return d_next.isoformat()
+        return cert or nxt
+
+    def _next_asset_tag(self):
+        year = datetime.now().year
+        row = self.db.fetchone(
+            "SELECT asset_tag FROM lifting_equipment WHERE asset_tag LIKE ? ORDER BY id DESC LIMIT 1",
+            (f"LFT-{year}-%",),
+        )
+        if not row:
+            n = 1
+        else:
+            try:
+                n = int(safe(row["asset_tag"]).split("-")[-1]) + 1
+            except Exception:
+                n = 1
+        return f"LFT-{year}-{n:05d}"
+
+    def _table(self, headers):
+        t = QTableWidget(0, len(headers))
+        t.setHorizontalHeaderLabels(headers)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        t.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        t.horizontalHeader().setStretchLastSection(True)
+        t.verticalHeader().setVisible(False)
+        return t
+
+    # -------------------- UI --------------------
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 10, 12, 12)
+        root.setSpacing(8)
+        heading = QLabel("Lifting Register")
+        heading.setStyleSheet("font-size:22px;font-weight:800;color:#17365D;padding:2px;")
+        root.addWidget(heading)
+        sub = QLabel(
+            "HSE tracking for lifting equipment and gear (cranes, hoists, slings, shackles, beams, etc.). "
+            "Certificate validity is colour-coded: red = less than 30 days or expired · amber = under 90 days · green = valid."
+        )
+        sub.setWordWrap(True)
+        sub.setStyleSheet("color:#526579;padding:4px 2px;")
+        root.addWidget(sub)
+
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setStyleSheet(
+            "QTabBar::tab{padding:10px 16px;min-width:100px;font-weight:700;}"
+            "QTabWidget::pane{border:1px solid #D7E0E8;border-radius:8px;top:-1px;}"
+        )
+        root.addWidget(self.tabs, 1)
+
+        self.tabs.addTab(self._build_dashboard_tab(), "Dashboard")
+        self.tabs.addTab(self._build_register_tab(), "Equipment Register")
+        self.tabs.addTab(self._build_entry_tab(), "Add / Edit Equipment")
+        self.tabs.addTab(self._build_history_tab(), "Certificate History")
+        self.tabs.addTab(self._build_export_tab(), "Reports & Export")
+
+    def _build_dashboard_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        self.kpi_labels = {}
+        grid = QGridLayout()
+        for i, key in enumerate([
+            "Total Assets", "In Service", "Expired", "< 30 Days", "30–89 Days", "Valid (90+)", "Quarantined / OOS"
+        ]):
+            box = QGroupBox(key)
+            box.setStyleSheet("QGroupBox{font-weight:700;color:#17365D;}")
+            vl = QVBoxLayout(box)
+            lab = QLabel("0")
+            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lab.setStyleSheet("font-size:26px;font-weight:800;color:#17365D;padding:10px;")
+            vl.addWidget(lab)
+            self.kpi_labels[key] = lab
+            grid.addWidget(box, i // 4, i % 4)
+        layout.addLayout(grid)
+
+        layout.addWidget(QLabel("Items requiring attention (expired or due within 30 days)"))
+        self.dash_alert_table = self._table([
+            "ID", "Asset Tag", "Equipment Name", "Type", "Location", "Certificate Expiry",
+            "Next Inspection", "Days Left", "Status"
+        ])
+        self.dash_alert_table.setColumnHidden(0, True)
+        layout.addWidget(self.dash_alert_table, 1)
+        refresh = QPushButton("Refresh Dashboard")
+        refresh.clicked.connect(self.refresh_dashboard)
+        layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignRight)
+        return page
+
+    def _build_register_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+
+        filter_box = QGroupBox("Filters")
+        fl = QHBoxLayout(filter_box)
+        self.reg_search = QLineEdit()
+        self.reg_search.setPlaceholderText("Search tag, name, serial, location…")
+        self.reg_type = QComboBox()
+        self.reg_type.addItem("All Types")
+        self.reg_type.addItems(self.EQUIPMENT_TYPES)
+        self.reg_status = QComboBox()
+        self.reg_status.addItem("All Statuses")
+        self.reg_status.addItems(self.STATUSES)
+        self.reg_validity = QComboBox()
+        self.reg_validity.addItems([
+            "All Validity", "Expired", "Due < 30 days", "Due 30–89 days", "Valid 90+ days", "No expiry date"
+        ])
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(self.refresh_register)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(self._clear_reg_filters)
+        for w in (self.reg_search, self.reg_type, self.reg_status, self.reg_validity, apply_btn, clear_btn):
+            fl.addWidget(w)
+        layout.addWidget(filter_box)
+
+        btn_row = QHBoxLayout()
+        edit_btn = QPushButton("Edit Selected")
+        edit_btn.clicked.connect(self.edit_selected)
+        renew_btn = QPushButton("Renew Certificate")
+        renew_btn.clicked.connect(self.renew_certificate)
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self.delete_selected)
+        open_cert = QPushButton("Open Certificate File")
+        open_cert.clicked.connect(self.open_certificate_file)
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.refresh_register)
+        for b in (edit_btn, renew_btn, delete_btn, open_cert):
+            b.setMinimumHeight(32)
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
+        btn_row.addWidget(refresh)
+        layout.addLayout(btn_row)
+
+        legend = QLabel(
+            "Colour key:  "
+            "<span style='background:#C62828;color:white;padding:2px 8px;border-radius:3px;'>Expired</span>  "
+            "<span style='background:#E53935;color:white;padding:2px 8px;border-radius:3px;'>&lt; 30 days</span>  "
+            "<span style='background:#F9A825;color:#212121;padding:2px 8px;border-radius:3px;'>30–89 days</span>  "
+            "<span style='background:#2E7D32;color:white;padding:2px 8px;border-radius:3px;'>90+ days</span>"
+        )
+        legend.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(legend)
+
+        self.register_table = self._table([
+            "ID", "Asset Tag", "Equipment Name", "Type", "SWL", "Serial No.",
+            "Project", "Location", "Certificate No.", "Cert. Expiry", "Next Inspection",
+            "Days Left", "Status", "Responsible"
+        ])
+        self.register_table.setColumnHidden(0, True)
+        self.register_table.doubleClicked.connect(self.edit_selected)
+        layout.addWidget(self.register_table, 1)
+        return page
+
+    def _build_entry_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(16, 12, 16, 12)
+        intro = QLabel(
+            "Register lifting equipment or gear. Enter certificate and inspection dates for validity tracking. "
+            "Commercial / purchase details are not required — this register is for HSE control only."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;")
+        layout.addWidget(intro)
+
+        self._editing_id = None
+        form_box = QGroupBox("Equipment / Gear Details")
+        form = QFormLayout(form_box)
+
+        self.f_tag = QLineEdit()
+        self.f_tag.setPlaceholderText("Auto-generated if left blank")
+        self.f_name = QLineEdit()
+        self.f_type = QComboBox()
+        self.f_type.addItems(self.EQUIPMENT_TYPES)
+        self.f_desc = QLineEdit()
+        self.f_serial = QLineEdit()
+        self.f_swl = QLineEdit()
+        self.f_swl.setPlaceholderText("e.g. 5 t / 10 t / 2.5 t")
+        self.f_project = QLineEdit()
+        self.f_location = QLineEdit()
+        self.f_department = QLineEdit()
+        self.f_responsible = QLineEdit()
+        self.f_manufacturer = QLineEdit()
+        self.f_manufacturer.setPlaceholderText("Optional technical identification only")
+        self.f_status = QComboBox()
+        self.f_status.addItems(self.STATUSES)
+
+        self.f_cert_no = QLineEdit()
+        self.f_cert_issue = QDateEdit()
+        self.f_cert_issue.setCalendarPopup(True)
+        self.f_cert_issue.setDisplayFormat("dd-MMM-yyyy")
+        self.f_cert_issue.setDate(QDate.currentDate())
+        self.f_cert_expiry = QDateEdit()
+        self.f_cert_expiry.setCalendarPopup(True)
+        self.f_cert_expiry.setDisplayFormat("dd-MMM-yyyy")
+        self.f_cert_expiry.setDate(QDate.currentDate().addYears(1))
+        self.f_last_insp = QDateEdit()
+        self.f_last_insp.setCalendarPopup(True)
+        self.f_last_insp.setDisplayFormat("dd-MMM-yyyy")
+        self.f_last_insp.setDate(QDate.currentDate())
+        self.f_next_insp = QDateEdit()
+        self.f_next_insp.setCalendarPopup(True)
+        self.f_next_insp.setDisplayFormat("dd-MMM-yyyy")
+        self.f_next_insp.setDate(QDate.currentDate().addMonths(6))
+        self.f_inspected_by = QLineEdit()
+        self.f_cert_body = QLineEdit()
+        self.f_remarks = QTextEdit()
+        self.f_remarks.setMaximumHeight(70)
+        self.f_cert_path = QLineEdit()
+        self.f_cert_path.setReadOnly(True)
+        browse = QPushButton("Attach Certificate…")
+        browse.clicked.connect(self._browse_certificate)
+        path_row = QHBoxLayout()
+        path_row.addWidget(self.f_cert_path, 1)
+        path_row.addWidget(browse)
+
+        form.addRow("Asset Tag", self.f_tag)
+        form.addRow("Equipment / Gear Name *", self.f_name)
+        form.addRow("Type *", self.f_type)
+        form.addRow("Description / Spec", self.f_desc)
+        form.addRow("Serial Number", self.f_serial)
+        form.addRow("Safe Working Load (SWL)", self.f_swl)
+        form.addRow("Project / Site", self.f_project)
+        form.addRow("Location / Area", self.f_location)
+        form.addRow("Department", self.f_department)
+        form.addRow("Responsible Person", self.f_responsible)
+        form.addRow("Manufacturer (optional)", self.f_manufacturer)
+        form.addRow("Status", self.f_status)
+        form.addRow("Certificate Number", self.f_cert_no)
+        form.addRow("Certificate Issue Date", self.f_cert_issue)
+        form.addRow("Certificate Expiry Date *", self.f_cert_expiry)
+        form.addRow("Last Inspection Date", self.f_last_insp)
+        form.addRow("Next Inspection Date", self.f_next_insp)
+        form.addRow("Inspected / Certified By", self.f_inspected_by)
+        form.addRow("Certifying Body", self.f_cert_body)
+        form.addRow("Certificate File", path_row)
+        form.addRow("Remarks", self.f_remarks)
+        layout.addWidget(form_box)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        clear = QPushButton("Clear Form")
+        clear.clicked.connect(self.clear_form)
+        save = QPushButton("Save Equipment")
+        save.setMinimumHeight(38)
+        save.setStyleSheet("QPushButton{background:#176B87;color:white;font-weight:800;border-radius:7px;padding:8px 18px;}")
+        save.clicked.connect(self.save_equipment)
+        actions.addWidget(clear)
+        actions.addWidget(save)
+        layout.addLayout(actions)
+        layout.addStretch(1)
+        return page
+
+    def _build_history_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        title = QLabel("Certificate History — previous certificates retained when equipment is renewed")
+        title.setStyleSheet("font-size:15px;font-weight:800;color:#17365D;")
+        layout.addWidget(title)
+        filt = QHBoxLayout()
+        self.hist_search = QLineEdit()
+        self.hist_search.setPlaceholderText("Filter by asset tag or equipment name…")
+        apply_h = QPushButton("Apply")
+        apply_h.clicked.connect(self.refresh_history)
+        open_h = QPushButton("Open Certificate File")
+        open_h.clicked.connect(self.open_history_certificate)
+        filt.addWidget(self.hist_search, 1)
+        filt.addWidget(apply_h)
+        filt.addWidget(open_h)
+        layout.addLayout(filt)
+        legend = QLabel(
+            "History rows are colour-coded by how the archived certificate stood relative to its expiry date at archive time, "
+            "and by calendar proximity of the stored expiry date today."
+        )
+        legend.setWordWrap(True)
+        legend.setStyleSheet("color:#526579;")
+        layout.addWidget(legend)
+        self.history_table = self._table([
+            "ID", "Asset Tag", "Equipment Name", "Certificate No.", "Issue Date", "Expiry Date",
+            "Days (vs today)", "Inspected By", "Certifying Body", "Archived On", "Reason", "File"
+        ])
+        self.history_table.setColumnHidden(0, True)
+        layout.addWidget(self.history_table, 1)
+        return page
+
+    def _build_export_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        intro = QLabel(
+            "Export the lifting register in landscape professional formats. "
+            "Exports respect the current filters on the Equipment Register tab (search, type, status, validity)."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("padding:10px 12px;background:#EAF2F8;border:1px solid #D5E2EC;border-radius:8px;")
+        layout.addWidget(intro)
+        box = QGroupBox("Export Options")
+        bl = QVBoxLayout(box)
+        row = QHBoxLayout()
+        pdf_btn = QPushButton("Export PDF (Landscape)")
+        word_btn = QPushButton("Export Word (Landscape)")
+        xlsx_btn = QPushButton("Export Excel")
+        for b in (pdf_btn, word_btn, xlsx_btn):
+            b.setMinimumHeight(40)
+            b.setMinimumWidth(180)
+        pdf_btn.clicked.connect(lambda: self.export_register("pdf"))
+        word_btn.clicked.connect(lambda: self.export_register("docx"))
+        xlsx_btn.clicked.connect(lambda: self.export_register("xlsx"))
+        row.addWidget(pdf_btn)
+        row.addWidget(word_btn)
+        row.addWidget(xlsx_btn)
+        row.addStretch(1)
+        bl.addLayout(row)
+        note = QLabel(
+            "PDF and Word reports include a colour-coded validity column and are laid out in landscape. "
+            "Excel includes the full register plus a Certificate History sheet."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#526579;")
+        bl.addWidget(note)
+        layout.addWidget(box)
+        layout.addStretch(1)
+        return page
+
+    # -------------------- form helpers --------------------
+    def _browse_certificate(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Attach Certificate", "",
+            "Documents / Images (*.pdf *.png *.jpg *.jpeg *.bmp *.doc *.docx);;All Files (*.*)"
+        )
+        if path:
+            self.f_cert_path.setText(path)
+
+    def clear_form(self):
+        self._editing_id = None
+        self.f_tag.clear()
+        self.f_name.clear()
+        self.f_type.setCurrentIndex(0)
+        self.f_desc.clear()
+        self.f_serial.clear()
+        self.f_swl.clear()
+        self.f_project.clear()
+        self.f_location.clear()
+        self.f_department.clear()
+        self.f_responsible.clear()
+        self.f_manufacturer.clear()
+        self.f_status.setCurrentIndex(0)
+        self.f_cert_no.clear()
+        self.f_cert_issue.setDate(QDate.currentDate())
+        self.f_cert_expiry.setDate(QDate.currentDate().addYears(1))
+        self.f_last_insp.setDate(QDate.currentDate())
+        self.f_next_insp.setDate(QDate.currentDate().addMonths(6))
+        self.f_inspected_by.clear()
+        self.f_cert_body.clear()
+        self.f_remarks.clear()
+        self.f_cert_path.clear()
+
+    def _form_payload(self):
+        name = self.f_name.text().strip()
+        if not name:
+            QMessageBox.warning(self, "Required", "Equipment / Gear Name is mandatory.")
+            return None
+        tag = self.f_tag.text().strip() or self._next_asset_tag()
+        cert_path = self.f_cert_path.text().strip()
+        stored_path = ""
+        if cert_path and Path(cert_path).is_file():
+            try:
+                folder = ATTACH_DIR / "lifting_certificates"
+                folder.mkdir(parents=True, exist_ok=True)
+                dest = folder / f"{tag}_{Path(cert_path).name}"
+                n = 1
+                while dest.exists() and str(dest) != cert_path:
+                    dest = folder / f"{tag}_{n}_{Path(cert_path).name}"
+                    n += 1
+                if str(dest.resolve()) != str(Path(cert_path).resolve()):
+                    shutil.copy2(cert_path, dest)
+                stored_path = str(dest)
+            except Exception:
+                logging.exception("lifting certificate copy")
+                stored_path = cert_path
+        elif cert_path:
+            stored_path = cert_path
+        return {
+            "asset_tag": tag,
+            "equipment_name": name,
+            "equipment_type": self.f_type.currentText(),
+            "description": self.f_desc.text().strip(),
+            "serial_number": self.f_serial.text().strip(),
+            "swl": self.f_swl.text().strip(),
+            "project": self.f_project.text().strip(),
+            "location": self.f_location.text().strip(),
+            "department": self.f_department.text().strip(),
+            "responsible_person": self.f_responsible.text().strip(),
+            "manufacturer": self.f_manufacturer.text().strip(),
+            "status": self.f_status.currentText(),
+            "certificate_no": self.f_cert_no.text().strip(),
+            "cert_issue_date": self.f_cert_issue.date().toString("yyyy-MM-dd"),
+            "cert_expiry_date": self.f_cert_expiry.date().toString("yyyy-MM-dd"),
+            "last_inspection_date": self.f_last_insp.date().toString("yyyy-MM-dd"),
+            "next_inspection_date": self.f_next_insp.date().toString("yyyy-MM-dd"),
+            "inspected_by": self.f_inspected_by.text().strip(),
+            "certifying_body": self.f_cert_body.text().strip(),
+            "remarks": self.f_remarks.toPlainText().strip(),
+            "certificate_path": stored_path,
+        }
+
+    def save_equipment(self):
+        data = self._form_payload()
+        if not data:
+            return
+        try:
+            if self._editing_id:
+                # Archive previous certificate details if expiry / cert number changed
+                prev = self.db.fetchone("SELECT * FROM lifting_equipment WHERE id=?", (self._editing_id,))
+                if prev:
+                    prev_expiry = safe(prev["cert_expiry_date"])
+                    prev_cert = safe(prev["certificate_no"])
+                    if (prev_expiry and prev_expiry != data["cert_expiry_date"]) or (
+                        prev_cert and prev_cert != data["certificate_no"]
+                    ):
+                        self._archive_certificate(prev, reason="Updated / renewed from Add-Edit form")
+                cols = list(data.keys())
+                assignments = ",".join(f"{k}=?" for k in cols)
+                self.db.execute(
+                    f"UPDATE lifting_equipment SET {assignments}, updated_at=? WHERE id=?",
+                    list(data.values()) + [datetime.now().isoformat(timespec="seconds"), self._editing_id],
+                )
+                msg = f"Equipment {data['asset_tag']} updated."
+            else:
+                exists = self.db.fetchone("SELECT id FROM lifting_equipment WHERE asset_tag=?", (data["asset_tag"],))
+                if exists:
+                    QMessageBox.warning(self, "Duplicate Tag", f"Asset tag {data['asset_tag']} already exists.")
+                    return
+                cols = list(data.keys())
+                self.db.execute(
+                    f"INSERT INTO lifting_equipment ({','.join(cols)}) VALUES ({','.join('?' for _ in cols)})",
+                    list(data.values()),
+                )
+                msg = f"Equipment {data['asset_tag']} registered."
+            self.refresh_all()
+            QMessageBox.information(self, "Saved", msg)
+            self.clear_form()
+            self.tabs.setCurrentIndex(1)
+        except Exception as exc:
+            logging.exception("lifting save")
+            QMessageBox.critical(self, "Save Failed", str(exc))
+
+    def _archive_certificate(self, row, reason="Certificate renewed"):
+        self.db.execute(
+            """INSERT INTO lifting_certificate_history
+               (equipment_id, asset_tag, equipment_name, certificate_no, cert_issue_date, cert_expiry_date,
+                inspected_by, certifying_body, inspection_date, next_inspection_date, certificate_path,
+                remarks, archived_by, archive_reason)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                int(row["id"]), safe(row["asset_tag"]), safe(row["equipment_name"]),
+                safe(row["certificate_no"]), safe(row["cert_issue_date"]), safe(row["cert_expiry_date"]),
+                safe(row["inspected_by"]), safe(row["certifying_body"]),
+                safe(row["last_inspection_date"]), safe(row["next_inspection_date"]),
+                safe(row["certificate_path"]), safe(row["remarks"]),
+                safe(db.setting("current_user", "") or "Local User"), reason,
+            ),
+        )
+
+    # -------------------- selection actions --------------------
+    def _selected_ids(self):
+        rows = sorted({idx.row() for idx in self.register_table.selectedIndexes()})
+        ids = []
+        for r in rows:
+            item = self.register_table.item(r, 0)
+            if item:
+                try:
+                    ids.append(int(item.text()))
+                except Exception:
+                    pass
+        return ids
+
+    def edit_selected(self, *_):
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Select an equipment row first.")
+            return
+        row = self.db.fetchone("SELECT * FROM lifting_equipment WHERE id=?", (ids[0],))
+        if not row:
+            return
+        self._editing_id = int(row["id"])
+        self.f_tag.setText(safe(row["asset_tag"]))
+        self.f_name.setText(safe(row["equipment_name"]))
+        idx = self.f_type.findText(safe(row["equipment_type"]))
+        self.f_type.setCurrentIndex(idx if idx >= 0 else 0)
+        self.f_desc.setText(safe(row["description"]))
+        self.f_serial.setText(safe(row["serial_number"]))
+        self.f_swl.setText(safe(row["swl"]))
+        self.f_project.setText(safe(row["project"]))
+        self.f_location.setText(safe(row["location"]))
+        self.f_department.setText(safe(row["department"]))
+        self.f_responsible.setText(safe(row["responsible_person"]))
+        self.f_manufacturer.setText(safe(row["manufacturer"]))
+        sidx = self.f_status.findText(safe(row["status"]))
+        self.f_status.setCurrentIndex(sidx if sidx >= 0 else 0)
+        self.f_cert_no.setText(safe(row["certificate_no"]))
+        for widget, key in (
+            (self.f_cert_issue, "cert_issue_date"),
+            (self.f_cert_expiry, "cert_expiry_date"),
+            (self.f_last_insp, "last_inspection_date"),
+            (self.f_next_insp, "next_inspection_date"),
+        ):
+            d = self._parse_date(row[key])
+            if d:
+                widget.setDate(QDate(d.year, d.month, d.day))
+        self.f_inspected_by.setText(safe(row["inspected_by"]))
+        self.f_cert_body.setText(safe(row["certifying_body"]))
+        self.f_remarks.setPlainText(safe(row["remarks"]))
+        self.f_cert_path.setText(safe(row["certificate_path"]))
+        self.tabs.setCurrentIndex(2)
+
+    def renew_certificate(self):
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Select an equipment row to renew.")
+            return
+        row = self.db.fetchone("SELECT * FROM lifting_equipment WHERE id=?", (ids[0],))
+        if not row:
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Renew Certificate — {safe(row['asset_tag'])}")
+        dlg.resize(520, 420)
+        form = QFormLayout()
+        cert_no = QLineEdit(safe(row["certificate_no"]))
+        issue = QDateEdit(QDate.currentDate()); issue.setCalendarPopup(True); issue.setDisplayFormat("dd-MMM-yyyy")
+        expiry = QDateEdit(QDate.currentDate().addYears(1)); expiry.setCalendarPopup(True); expiry.setDisplayFormat("dd-MMM-yyyy")
+        last = QDateEdit(QDate.currentDate()); last.setCalendarPopup(True); last.setDisplayFormat("dd-MMM-yyyy")
+        nxt = QDateEdit(QDate.currentDate().addMonths(6)); nxt.setCalendarPopup(True); nxt.setDisplayFormat("dd-MMM-yyyy")
+        inspected = QLineEdit(safe(row["inspected_by"]))
+        body = QLineEdit(safe(row["certifying_body"]))
+        path_edit = QLineEdit()
+        browse = QPushButton("Attach New Certificate…")
+
+        def browse_new():
+            p, _ = QFileDialog.getOpenFileName(dlg, "New Certificate", "", "Documents / Images (*.pdf *.png *.jpg *.jpeg *.doc *.docx);;All Files (*.*)")
+            if p:
+                path_edit.setText(p)
+        browse.clicked.connect(browse_new)
+        path_row = QHBoxLayout(); path_row.addWidget(path_edit, 1); path_row.addWidget(browse)
+        form.addRow("New Certificate No.", cert_no)
+        form.addRow("Issue Date", issue)
+        form.addRow("Expiry Date", expiry)
+        form.addRow("Inspection Date", last)
+        form.addRow("Next Inspection", nxt)
+        form.addRow("Inspected By", inspected)
+        form.addRow("Certifying Body", body)
+        form.addRow("Certificate File", path_row)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept); buttons.rejected.connect(dlg.reject)
+        outer = QVBoxLayout(dlg); outer.addLayout(form); outer.addWidget(buttons)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            self._archive_certificate(row, reason="Certificate renewed")
+            stored = safe(row["certificate_path"])
+            new_path = path_edit.text().strip()
+            if new_path and Path(new_path).is_file():
+                folder = ATTACH_DIR / "lifting_certificates"
+                folder.mkdir(parents=True, exist_ok=True)
+                dest = folder / f"{safe(row['asset_tag'])}_{Path(new_path).name}"
+                n = 1
+                while dest.exists():
+                    dest = folder / f"{safe(row['asset_tag'])}_{n}_{Path(new_path).name}"
+                    n += 1
+                shutil.copy2(new_path, dest)
+                stored = str(dest)
+            self.db.execute(
+                """UPDATE lifting_equipment SET certificate_no=?, cert_issue_date=?, cert_expiry_date=?,
+                   last_inspection_date=?, next_inspection_date=?, inspected_by=?, certifying_body=?,
+                   certificate_path=?, updated_at=? WHERE id=?""",
+                (
+                    cert_no.text().strip(), issue.date().toString("yyyy-MM-dd"),
+                    expiry.date().toString("yyyy-MM-dd"), last.date().toString("yyyy-MM-dd"),
+                    nxt.date().toString("yyyy-MM-dd"), inspected.text().strip(), body.text().strip(),
+                    stored, datetime.now().isoformat(timespec="seconds"), int(row["id"]),
+                ),
+            )
+            self.refresh_all()
+            QMessageBox.information(self, "Renewed", "Previous certificate archived. New validity saved.")
+        except Exception as exc:
+            logging.exception("lifting renew")
+            QMessageBox.critical(self, "Renew Failed", str(exc))
+
+    def delete_selected(self):
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Select one or more rows to delete.")
+            return
+        if QMessageBox.question(
+            self, "Delete",
+            f"Delete {len(ids)} selected lifting record(s) and their certificate history?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        for i in ids:
+            self.db.execute("DELETE FROM lifting_certificate_history WHERE equipment_id=?", (i,))
+            self.db.execute("DELETE FROM lifting_equipment WHERE id=?", (i,))
+        self.refresh_all()
+
+    def open_certificate_file(self):
+        ids = self._selected_ids()
+        if not ids:
+            QMessageBox.information(self, "Select", "Select a row first.")
+            return
+        row = self.db.fetchone("SELECT certificate_path FROM lifting_equipment WHERE id=?", (ids[0],))
+        path = resolve_attachment_path(row["certificate_path"]) if row else None
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        else:
+            QMessageBox.information(self, "Certificate", "No certificate file is attached, or the file could not be found.")
+
+    def open_history_certificate(self):
+        row = self.history_table.currentRow()
+        if row < 0 or not self.history_table.item(row, 0):
+            QMessageBox.information(self, "Select", "Select a history row first.")
+            return
+        hid = int(self.history_table.item(row, 0).text())
+        rec = self.db.fetchone("SELECT certificate_path FROM lifting_certificate_history WHERE id=?", (hid,))
+        path = resolve_attachment_path(rec["certificate_path"]) if rec else None
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        else:
+            QMessageBox.information(self, "Certificate", "Certificate file not available for this history row.")
+
+    def _clear_reg_filters(self):
+        self.reg_search.clear()
+        self.reg_type.setCurrentIndex(0)
+        self.reg_status.setCurrentIndex(0)
+        self.reg_validity.setCurrentIndex(0)
+        self.refresh_register()
+
+    # -------------------- data load --------------------
+    def _filtered_equipment(self):
+        rows = self.db.fetchall("SELECT * FROM lifting_equipment ORDER BY asset_tag")
+        q = safe(self.reg_search.text()).strip().lower() if hasattr(self, "reg_search") else ""
+        etype = self.reg_type.currentText() if hasattr(self, "reg_type") else "All Types"
+        status = self.reg_status.currentText() if hasattr(self, "reg_status") else "All Statuses"
+        validity = self.reg_validity.currentText() if hasattr(self, "reg_validity") else "All Validity"
+        out = []
+        for r in rows:
+            if etype != "All Types" and safe(r["equipment_type"]) != etype:
+                continue
+            if status != "All Statuses" and safe(r["status"]) != status:
+                continue
+            if q:
+                blob = " ".join(safe(r[k]).lower() for k in (
+                    "asset_tag", "equipment_name", "serial_number", "location", "project",
+                    "certificate_no", "responsible_person", "description"
+                ))
+                if q not in blob:
+                    continue
+            days = self._days_remaining(self._effective_expiry(r))
+            if validity == "Expired" and not (days is not None and days < 0):
+                continue
+            if validity == "Due < 30 days" and not (days is not None and 0 <= days < 30):
+                continue
+            if validity == "Due 30–89 days" and not (days is not None and 30 <= days < 90):
+                continue
+            if validity == "Valid 90+ days" and not (days is not None and days >= 90):
+                continue
+            if validity == "No expiry date" and days is not None:
+                continue
+            out.append(r)
+        return out
+
+    def refresh_register(self):
+        if not hasattr(self, "register_table"):
+            return
+        rows = self._filtered_equipment()
+        self.register_table.setRowCount(0)
+        for rec in rows:
+            r = self.register_table.rowCount()
+            self.register_table.insertRow(r)
+            eff = self._effective_expiry(rec)
+            days = self._days_remaining(eff)
+            bg, fg, label = self._colour_for_days(days)
+            vals = [
+                rec["id"], rec["asset_tag"], rec["equipment_name"], rec["equipment_type"],
+                rec["swl"], rec["serial_number"], rec["project"], rec["location"],
+                rec["certificate_no"], rec["cert_expiry_date"], rec["next_inspection_date"],
+                label, rec["status"], rec["responsible_person"],
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(safe(v))
+                if c in (9, 10, 11):
+                    it.setBackground(QColor(bg))
+                    it.setForeground(QColor(fg))
+                    it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                self.register_table.setItem(r, c, it)
+
+    def refresh_dashboard(self):
+        if not hasattr(self, "kpi_labels"):
+            return
+        rows = self.db.fetchall("SELECT * FROM lifting_equipment")
+        total = len(rows)
+        in_service = sum(1 for r in rows if safe(r["status"]) == "In Service")
+        expired = due30 = due90 = valid = 0
+        oos = sum(1 for r in rows if safe(r["status"]) in ("Quarantined", "Out of Service", "Disposed"))
+        alerts = []
+        for r in rows:
+            days = self._days_remaining(self._effective_expiry(r))
+            if days is None:
+                continue
+            if days < 0:
+                expired += 1
+                alerts.append((days, r))
+            elif days < 30:
+                due30 += 1
+                alerts.append((days, r))
+            elif days < 90:
+                due90 += 1
+            else:
+                valid += 1
+        self.kpi_labels["Total Assets"].setText(str(total))
+        self.kpi_labels["In Service"].setText(str(in_service))
+        self.kpi_labels["Expired"].setText(str(expired))
+        self.kpi_labels["< 30 Days"].setText(str(due30))
+        self.kpi_labels["30–89 Days"].setText(str(due90))
+        self.kpi_labels["Valid (90+)"].setText(str(valid))
+        self.kpi_labels["Quarantined / OOS"].setText(str(oos))
+        # colour KPI numbers
+        self.kpi_labels["Expired"].setStyleSheet("font-size:26px;font-weight:800;color:#C62828;padding:10px;")
+        self.kpi_labels["< 30 Days"].setStyleSheet("font-size:26px;font-weight:800;color:#E53935;padding:10px;")
+        self.kpi_labels["30–89 Days"].setStyleSheet("font-size:26px;font-weight:800;color:#F9A825;padding:10px;")
+        self.kpi_labels["Valid (90+)"].setStyleSheet("font-size:26px;font-weight:800;color:#2E7D32;padding:10px;")
+
+        alerts.sort(key=lambda x: x[0])
+        self.dash_alert_table.setRowCount(0)
+        for days, rec in alerts:
+            r = self.dash_alert_table.rowCount()
+            self.dash_alert_table.insertRow(r)
+            bg, fg, label = self._colour_for_days(days)
+            vals = [
+                rec["id"], rec["asset_tag"], rec["equipment_name"], rec["equipment_type"],
+                rec["location"], rec["cert_expiry_date"], rec["next_inspection_date"], label, rec["status"],
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(safe(v))
+                if c == 7:
+                    it.setBackground(QColor(bg))
+                    it.setForeground(QColor(fg))
+                    it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                self.dash_alert_table.setItem(r, c, it)
+
+    def refresh_history(self):
+        if not hasattr(self, "history_table"):
+            return
+        q = safe(self.hist_search.text()).strip().lower() if hasattr(self, "hist_search") else ""
+        rows = self.db.fetchall(
+            "SELECT * FROM lifting_certificate_history ORDER BY archived_at DESC, id DESC"
+        )
+        self.history_table.setRowCount(0)
+        for rec in rows:
+            if q and q not in (safe(rec["asset_tag"]) + " " + safe(rec["equipment_name"])).lower():
+                continue
+            r = self.history_table.rowCount()
+            self.history_table.insertRow(r)
+            days = self._days_remaining(rec["cert_expiry_date"])
+            bg, fg, label = self._colour_for_days(days)
+            fname = Path(safe(rec["certificate_path"]).replace("\\", "/")).name if safe(rec["certificate_path"]) else ""
+            vals = [
+                rec["id"], rec["asset_tag"], rec["equipment_name"], rec["certificate_no"],
+                rec["cert_issue_date"], rec["cert_expiry_date"], label,
+                rec["inspected_by"], rec["certifying_body"],
+                safe(rec["archived_at"])[:19], rec["archive_reason"], fname,
+            ]
+            for c, v in enumerate(vals):
+                it = QTableWidgetItem(safe(v))
+                if c == 6:
+                    it.setBackground(QColor(bg))
+                    it.setForeground(QColor(fg))
+                    it.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+                self.history_table.setItem(r, c, it)
+
+    def refresh_all(self):
+        for fn in (self.refresh_dashboard, self.refresh_register, self.refresh_history):
+            try:
+                fn()
+            except Exception:
+                logging.exception("Lifting register refresh")
+
+    # -------------------- exports --------------------
+    def export_register(self, kind):
+        rows = self._filtered_equipment()
+        if not rows:
+            QMessageBox.information(self, "Export", "No records match the current filters.")
+            return
+        filters = {
+            "pdf": ("PDF Files (*.pdf)", ".pdf"),
+            "docx": ("Word Documents (*.docx)", ".docx"),
+            "xlsx": ("Excel Files (*.xlsx)", ".xlsx"),
+        }
+        filt, ext = filters[kind]
+        default = f"Lifting_Register_{today()}{ext}"
+        path, _ = QFileDialog.getSaveFileName(self, "Export Lifting Register", default, filt)
+        if not path:
+            return
+        if not path.lower().endswith(ext):
+            path += ext
+        try:
+            if kind == "xlsx":
+                self._export_xlsx(path, rows)
+            elif kind == "pdf":
+                self._export_pdf(path, rows)
+            else:
+                self._export_docx(path, rows)
+            QMessageBox.information(self, "Exported", f"Lifting register exported:\n{path}")
+        except Exception as exc:
+            logging.exception("lifting export")
+            QMessageBox.critical(self, "Export Failed", str(exc))
+
+    def _export_xlsx(self, path, rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Lifting Register"
+        headers = [
+            "Asset Tag", "Equipment Name", "Type", "Description", "Serial No.", "SWL",
+            "Project", "Location", "Department", "Responsible", "Status",
+            "Certificate No.", "Cert. Issue", "Cert. Expiry", "Last Inspection",
+            "Next Inspection", "Days Left", "Inspected By", "Certifying Body", "Remarks"
+        ]
+        ws.append(headers)
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="17365D")
+            cell.alignment = Alignment(horizontal="center", wrap_text=True)
+        fill_map = {
+            "expired": PatternFill("solid", fgColor="C62828"),
+            "red": PatternFill("solid", fgColor="E53935"),
+            "amber": PatternFill("solid", fgColor="F9A825"),
+            "green": PatternFill("solid", fgColor="2E7D32"),
+        }
+        font_white = Font(bold=True, color="FFFFFF")
+        font_dark = Font(bold=True, color="212121")
+        for rec in rows:
+            days = self._days_remaining(self._effective_expiry(rec))
+            _, _, label = self._colour_for_days(days)
+            ws.append([
+                rec["asset_tag"], rec["equipment_name"], rec["equipment_type"], rec["description"],
+                rec["serial_number"], rec["swl"], rec["project"], rec["location"], rec["department"],
+                rec["responsible_person"], rec["status"], rec["certificate_no"], rec["cert_issue_date"],
+                rec["cert_expiry_date"], rec["last_inspection_date"], rec["next_inspection_date"],
+                label, rec["inspected_by"], rec["certifying_body"], rec["remarks"],
+            ])
+            row_idx = ws.max_row
+            cell = ws.cell(row_idx, 17)
+            if days is not None and days < 0:
+                cell.fill = fill_map["expired"]; cell.font = font_white
+            elif days is not None and days < 30:
+                cell.fill = fill_map["red"]; cell.font = font_white
+            elif days is not None and days < 90:
+                cell.fill = fill_map["amber"]; cell.font = font_dark
+            elif days is not None:
+                cell.fill = fill_map["green"]; cell.font = font_white
+        thin = Border(
+            left=Side(style="thin", color="5A6A78"), right=Side(style="thin", color="5A6A78"),
+            top=Side(style="thin", color="5A6A78"), bottom=Side(style="thin", color="5A6A78"),
+        )
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=len(headers)):
+            for cell in row:
+                cell.border = thin
+                cell.alignment = Alignment(vertical="center", wrap_text=True)
+        for col in ws.columns:
+            ws.column_dimensions[col[0].column_letter].width = min(28, max(11, max(len(safe(c.value)) for c in col) + 2))
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+        hist = wb.create_sheet("Certificate History")
+        hist.append([
+            "Asset Tag", "Equipment Name", "Certificate No.", "Issue Date", "Expiry Date",
+            "Inspected By", "Certifying Body", "Archived On", "Reason"
+        ])
+        for cell in hist[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="176B87")
+        for h in self.db.fetchall("SELECT * FROM lifting_certificate_history ORDER BY archived_at DESC"):
+            hist.append([
+                h["asset_tag"], h["equipment_name"], h["certificate_no"], h["cert_issue_date"],
+                h["cert_expiry_date"], h["inspected_by"], h["certifying_body"],
+                safe(h["archived_at"])[:19], h["archive_reason"],
+            ])
+        for col in hist.columns:
+            hist.column_dimensions[col[0].column_letter].width = min(28, max(12, max(len(safe(c.value)) for c in col) + 2))
+        hist.freeze_panes = "A2"
+        hist.auto_filter.ref = hist.dimensions
+        wb.save(path)
+
+    def _export_pdf(self, path, rows):
+        styles = getSampleStyleSheet()
+        story = []
+        company = company_name()
+        report_no = f"{document_prefix()}-LFT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        header = Table([
+            [Paragraph(f"<b>{html.escape(company)}</b><br/><font size='13'>LIFTING EQUIPMENT REGISTER</font>", styles["Title"]),
+             Paragraph(f"<b>Document No.:</b> {html.escape(report_no)}<br/><b>Date:</b> {date.today().strftime('%d-%b-%Y')}<br/><b>Records:</b> {len(rows)}", styles["BodyText"])]
+        ], colWidths=[420, 280])
+        header.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#17365D")),
+            ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#EEF3F7")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("PADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story += [header, Spacer(1, 10)]
+        data = [[
+            "Asset Tag", "Name", "Type", "SWL", "Location", "Cert. No.",
+            "Expiry", "Next Insp.", "Days Left", "Status"
+        ]]
+        style_commands = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#17365D")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+            ("FONTSIZE", (0, 0), (-1, -1), 7),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("PADDING", (0, 0), (-1, -1), 3),
+        ]
+        for i, rec in enumerate(rows, 1):
+            days = self._days_remaining(self._effective_expiry(rec))
+            bg, _, label = self._colour_for_days(days)
+            data.append([
+                safe(rec["asset_tag"]), safe(rec["equipment_name"]), safe(rec["equipment_type"]),
+                safe(rec["swl"]), safe(rec["location"]), safe(rec["certificate_no"]),
+                safe(rec["cert_expiry_date"]), safe(rec["next_inspection_date"]), label, safe(rec["status"]),
+            ])
+            style_commands.append(("BACKGROUND", (8, i), (8, i), colors.HexColor(bg)))
+            if bg in ("#C62828", "#E53935", "#2E7D32"):
+                style_commands.append(("TEXTCOLOR", (8, i), (8, i), colors.white))
+        t = Table(data, colWidths=[70, 95, 80, 40, 70, 65, 55, 55, 55, 55], repeatRows=1)
+        t.setStyle(TableStyle(style_commands))
+        story.append(t)
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(
+            "Colour key: Dark red = expired · Red = less than 30 days remaining · Amber = 30–89 days · Green = 90+ days valid.",
+            styles["Normal"],
+        ))
+        def _border(canvas, doc):
+            canvas.saveState()
+            canvas.setStrokeColor(colors.HexColor("#17365D"))
+            canvas.setLineWidth(0.8)
+            canvas.rect(14, 14, landscape(A4)[0] - 28, landscape(A4)[1] - 28)
+            canvas.restoreState()
+        SimpleDocTemplate(
+            path, pagesize=landscape(A4), rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24
+        ).build(story, onFirstPage=_border, onLaterPages=_border)
+
+    def _export_docx(self, path, rows):
+        doc = Document()
+        section = doc.sections[0]
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
+        section.left_margin = Inches(0.45)
+        section.right_margin = Inches(0.45)
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        report_no = f"{document_prefix()}-LFT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        add_docx_report_header(doc, "LIFTING EQUIPMENT REGISTER", "LFT", report_no)
+        p = doc.add_paragraph(
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Records: {len(rows)}  |  "
+            "HSE lifting equipment & gear validity register (no commercial data)."
+        )
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        headers = [
+            "Asset Tag", "Equipment Name", "Type", "SWL", "Location",
+            "Cert. No.", "Expiry", "Next Insp.", "Days Left", "Status"
+        ]
+        table = doc.add_table(rows=1, cols=len(headers))
+        for i, h in enumerate(headers):
+            table.rows[0].cells[i].text = h
+        for rec in rows:
+            days = self._days_remaining(self._effective_expiry(rec))
+            bg, _, label = self._colour_for_days(days)
+            cells = table.add_row().cells
+            vals = [
+                rec["asset_tag"], rec["equipment_name"], rec["equipment_type"], rec["swl"],
+                rec["location"], rec["certificate_no"], rec["cert_expiry_date"],
+                rec["next_inspection_date"], label, rec["status"],
+            ]
+            for i, v in enumerate(vals):
+                cells[i].text = xml_safe(v)
+            # shade days-left cell
+            try:
+                add_docx_cell_shading(cells[8], bg.replace("#", ""))
+            except Exception:
+                pass
+        style_docx_table(table, header=True, font_size=7)
+        doc.add_paragraph()
+        note = doc.add_paragraph()
+        note.add_run(
+            "Colour key: Dark red = expired · Red = < 30 days · Amber = 30–89 days · Green = 90+ days valid. "
+            "Previous certificates are retained in the Certificate History tab when an item is renewed."
+        ).font.size = Pt(8)
+        # History appendix
+        hist_rows = self.db.fetchall("SELECT * FROM lifting_certificate_history ORDER BY archived_at DESC LIMIT 500")
+        if hist_rows:
+            doc.add_heading("Certificate History (archived)", level=2)
+            ht = doc.add_table(rows=1, cols=7)
+            for i, h in enumerate(["Asset Tag", "Name", "Cert. No.", "Issue", "Expiry", "Archived", "Reason"]):
+                ht.rows[0].cells[i].text = h
+            for h in hist_rows:
+                cells = ht.add_row().cells
+                for i, v in enumerate([
+                    h["asset_tag"], h["equipment_name"], h["certificate_no"],
+                    h["cert_issue_date"], h["cert_expiry_date"],
+                    safe(h["archived_at"])[:19], h["archive_reason"],
+                ]):
+                    cells[i].text = xml_safe(v)
+            style_docx_table(ht, header=True, font_size=7)
+        add_docx_footer(doc)
+        save_docx_validated(doc, path)
 
 
 # ============================================================
