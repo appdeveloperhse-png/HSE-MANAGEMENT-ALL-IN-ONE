@@ -11310,7 +11310,7 @@ class MainWindow(QMainWindow):
                     saved_noi_number = safe(existing["number"])
                 else:
                     number = next_number("HSE-NOI", "noi_register")
-                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,body_parts_injured,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + (body_parts_str, "Draft", now, now))
+                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,body_parts_injured,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + (body_parts_str, "Draft", now, now))
                     saved = db.fetchone("SELECT id FROM noi_register WHERE number=?", (number,))
                     if not saved:
                         raise RuntimeError("NOI was saved but its new register ID could not be retrieved.")
