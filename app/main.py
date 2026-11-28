@@ -501,6 +501,14 @@ class Database:
         incident_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(incidents)").fetchall()}
         if "investigation_details" not in incident_cols:
             self.conn.execute("ALTER TABLE incidents ADD COLUMN investigation_details TEXT DEFAULT ''")
+        if "body_parts_injured" not in incident_cols:
+            self.conn.execute("ALTER TABLE incidents ADD COLUMN body_parts_injured TEXT DEFAULT ''")
+        noi_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(noi_register)").fetchall()}
+        if "body_parts_injured" not in noi_cols:
+            try:
+                self.conn.execute("ALTER TABLE noi_register ADD COLUMN body_parts_injured TEXT DEFAULT ''")
+            except Exception:
+                pass
         # Incident/RCA extensions are additive only; existing data remains intact.
         incident_extra = {
             "incident_title": "TEXT DEFAULT ''",
@@ -3508,9 +3516,31 @@ def generate_table_docx(table_name, path, record_ids=None):
     if not columns:
         raise ValueError("There is no data to export.")
     doc = Document()
-    add_docx_header(doc)
-    add_docx_title(doc, f"{table_name.replace('_', ' ').title()} Report")
-    p = doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    # Investigation / incident register exports are landscape for readability
+    if table_name in ("incidents", "noi_register"):
+        try:
+            set_docx_landscape(doc)
+        except Exception:
+            try:
+                section = doc.sections[0]
+                section.orientation = WD_ORIENT.LANDSCAPE
+                section.page_width, section.page_height = section.page_height, section.page_width
+                section.left_margin = Inches(0.5)
+                section.right_margin = Inches(0.5)
+                section.top_margin = Inches(0.45)
+                section.bottom_margin = Inches(0.45)
+            except Exception:
+                pass
+        try:
+            add_docx_report_header(doc, f"{table_name.replace('_', ' ').title()} Register", "INC" if table_name == "incidents" else "NOI",
+                                  f"{document_prefix()}-{table_name[:3].upper()}-{datetime.now().strftime('%Y%m%d')}")
+        except Exception:
+            add_docx_header(doc)
+            add_docx_title(doc, f"{table_name.replace('_', ' ').title()} Report")
+    else:
+        add_docx_header(doc)
+        add_docx_title(doc, f"{table_name.replace('_', ' ').title()} Report")
+    p = doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Records: {len(data)}")
     p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     table = doc.add_table(rows=1, cols=len(columns))
     for i, col in enumerate(columns):
@@ -3551,9 +3581,26 @@ def generate_table_docx(table_name, path, record_ids=None):
             cells = table.add_row().cells
             for i, value in enumerate(row):
                 cells[i].text = xml_safe(value)
-    style_docx_table(table)
-    add_docx_footer(doc)
+    try:
+        style_docx_table(table, header=True, font_size=7 if table_name in ("incidents", "noi_register") else 8)
+    except TypeError:
+        style_docx_table(table)
+    try:
+        add_docx_footer(doc)
+    except Exception:
+        pass
     save_docx_validated(doc, path)
+
+
+
+# Standard body parts for injury classification (NOI + Investigation + Dashboard)
+BODY_PARTS_INJURED = [
+    "Head", "Face", "Eye(s)", "Ear(s)", "Neck",
+    "Shoulder", "Arm", "Elbow", "Wrist", "Hand", "Finger(s)",
+    "Chest", "Back", "Abdomen", "Hip",
+    "Leg", "Knee", "Ankle", "Foot", "Toe(s)",
+    "Multiple Parts", "Other / Not Specified"
+]
 
 
 class PieChartWidget(QWidget):
@@ -10008,9 +10055,328 @@ class MainWindow(QMainWindow):
         btns["Delete Selected"].clicked.connect(lambda checked=False: self.delete_selected_record(table, "incidents", "incident_attachments", "Incident", load_investigations))
         btns["Professional Report"].clicked.connect(professional)
         table.cellDoubleClicked.connect(lambda _r, _c: edit_selected())
+
+        # ---------------- Dashboard ----------------
+        dash_tab = QWidget()
+        dash_outer = QVBoxLayout(dash_tab)
+        dash_outer.setContentsMargins(10, 10, 10, 10)
+        dash_scroll = QScrollArea(); dash_scroll.setWidgetResizable(True); dash_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        dash_body = QWidget(); dash_layout = QVBoxLayout(dash_body); dash_layout.setSpacing(12)
+        dash_title = QLabel("INCIDENT INVESTIGATION DASHBOARD")
+        dash_title.setStyleSheet("font-size:18px;font-weight:800;color:#17365D;")
+        dash_layout.addWidget(dash_title)
+
+        kpi_row = QHBoxLayout()
+        kpi_cards = {}
+        for key, label, color in [
+            ("total", "Total Investigations", "#17365D"),
+            ("open", "Open", "#B45309"),
+            ("closed", "Closed", "#166534"),
+            ("under_review", "Under Review", "#1D4ED8"),
+            ("approved", "Approved", "#0F766E"),
+            ("noi", "NOI Records", "#6D28D9"),
+        ]:
+            card = QFrame(); card.setCursor(Qt.CursorShape.PointingHandCursor)
+            card.setStyleSheet(f"QFrame{{background:#fff;border:2px solid {color};border-radius:10px;}} QLabel{{border:none;}}")
+            cv = QVBoxLayout(card); cv.setContentsMargins(12, 10, 12, 10)
+            num = QLabel("0"); num.setStyleSheet(f"font-size:28px;font-weight:900;color:{color};")
+            num.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lab = QLabel(label); lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lab.setStyleSheet("color:#526477;font-weight:600;")
+            cv.addWidget(num); cv.addWidget(lab)
+            kpi_row.addWidget(card)
+            kpi_cards[key] = (card, num, label)
+        dash_layout.addLayout(kpi_row)
+
+        charts_grid = QGridLayout(); charts_grid.setSpacing(10)
+        pie_type = PieChartWidget({}, title="By Incident Type")
+        pie_loc = PieChartWidget({}, title="By Location")
+        pie_proj = PieChartWidget({}, title="By Project")
+        pie_status = PieChartWidget({}, title="By Status")
+        bar_body = BarChartWidget({}, title="Body Parts Injured (%)")
+        pie_cause = PieChartWidget({}, title="Direct / Root Cause Themes")
+        for w in (pie_type, pie_loc, pie_proj, pie_status, bar_body, pie_cause):
+            w.setMinimumHeight(260)
+        charts_grid.addWidget(pie_type, 0, 0)
+        charts_grid.addWidget(pie_loc, 0, 1)
+        charts_grid.addWidget(pie_proj, 1, 0)
+        charts_grid.addWidget(pie_status, 1, 1)
+        charts_grid.addWidget(bar_body, 2, 0)
+        charts_grid.addWidget(pie_cause, 2, 1)
+        charts_grid.setColumnStretch(0, 1); charts_grid.setColumnStretch(1, 1)
+        dash_layout.addLayout(charts_grid, 1)
+
+        detail_label = QLabel("Click a KPI card to list related records below.")
+        detail_label.setStyleSheet("color:#526477;font-weight:600;")
+        dash_layout.addWidget(detail_label)
+        detail_table = QTableWidget(0, 7)
+        detail_table.setHorizontalHeaderLabels(["ID", "Number", "Date", "Type", "Location", "Project", "Status"])
+        detail_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        detail_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        detail_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        detail_table.setMinimumHeight(180)
+        dash_layout.addWidget(detail_table)
+        refresh_dash_btn = QPushButton("Refresh Dashboard")
+        dash_layout.addWidget(refresh_dash_btn, alignment=Qt.AlignmentFlag.AlignRight)
+        dash_scroll.setWidget(dash_body)
+        dash_outer.addWidget(dash_scroll, 1)
+
+        def _count_map(rows, key_fn):
+            from collections import Counter
+            c = Counter()
+            for r in rows:
+                k = key_fn(r) or "—"
+                c[str(k)[:40]] += 1
+            return dict(c)
+
+        def show_detail_rows(rows, title="Records"):
+            detail_label.setText(f"{title} — {len(rows)} record(s). Double-click a row to open.")
+            detail_table.setRowCount(len(rows))
+            for i, r in enumerate(rows):
+                vals = [r["id"], r["number"], r["incident_date"] if "incident_date" in r.keys() else r["report_date"] if "report_date" in r.keys() else "",
+                        r["incident_type"], r["location"], r["project"] if "project" in r.keys() else "",
+                        r["status"] if "status" in r.keys() else ""]
+                for c, v in enumerate(vals):
+                    detail_table.setItem(i, c, QTableWidgetItem(safe(v)))
+                detail_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+
+        def refresh_dashboard():
+            inv_rows = db.fetchall("SELECT * FROM incidents ORDER BY id DESC") or []
+            noi_rows = db.fetchall("SELECT * FROM noi_register ORDER BY id DESC") or []
+            open_n = sum(1 for r in inv_rows if safe(r["status"]).lower() in ("open", "draft", ""))
+            closed_n = sum(1 for r in inv_rows if safe(r["status"]).lower() in ("closed", "close", "closed out", "closeout"))
+            under = 0; approved = 0
+            for r in inv_rows:
+                try:
+                    det = json.loads(safe(r["investigation_details"]) or "{}")
+                except Exception:
+                    det = {}
+                wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
+                st = safe(wf.get("status", ""))
+                if st in ("Under Review", "Submitted", "Reviewed"):
+                    under += 1
+                if st in ("Approved",) or safe(r["status"]).lower() == "approved":
+                    approved += 1
+            kpi_cards["total"][1].setText(str(len(inv_rows)))
+            kpi_cards["open"][1].setText(str(open_n))
+            kpi_cards["closed"][1].setText(str(closed_n))
+            kpi_cards["under_review"][1].setText(str(under))
+            kpi_cards["approved"][1].setText(str(approved))
+            kpi_cards["noi"][1].setText(str(len(noi_rows)))
+            pie_type.set_values(_count_map(inv_rows, lambda r: r["incident_type"]))
+            pie_loc.set_values(_count_map(inv_rows, lambda r: r["location"]))
+            pie_proj.set_values(_count_map(inv_rows, lambda r: r["project"]))
+            pie_status.set_values(_count_map(inv_rows, lambda r: r["status"] or "Open"))
+            # Body parts percentages
+            body_counts = {}
+            for r in list(inv_rows) + list(noi_rows):
+                try:
+                    parts = safe(r["body_parts_injured"] if "body_parts_injured" in r.keys() else "")
+                except Exception:
+                    parts = ""
+                for p in [x.strip() for x in parts.replace(";", ",").split(",") if x.strip()]:
+                    body_counts[p] = body_counts.get(p, 0) + 1
+            total_body = sum(body_counts.values()) or 1
+            # BarChartWidget expects counts; title says %
+            bar_body.set_values(body_counts)
+            pie_cause.set_values(_count_map(inv_rows, lambda r: (safe(r["root_cause"]) or safe(r["direct_cause"]) or "—")[:40]))
+            show_detail_rows(inv_rows, "All Investigations")
+
+        def on_kpi_click(key):
+            inv_rows = db.fetchall("SELECT * FROM incidents ORDER BY id DESC") or []
+            noi_rows = db.fetchall("SELECT * FROM noi_register ORDER BY id DESC") or []
+            if key == "total":
+                show_detail_rows(inv_rows, "All Investigations")
+            elif key == "open":
+                show_detail_rows([r for r in inv_rows if safe(r["status"]).lower() in ("open", "draft", "")], "Open Investigations")
+            elif key == "closed":
+                show_detail_rows([r for r in inv_rows if safe(r["status"]).lower() in ("closed", "close", "closed out", "closeout")], "Closed Investigations")
+            elif key == "under_review":
+                sel = []
+                for r in inv_rows:
+                    try: det = json.loads(safe(r["investigation_details"]) or "{}")
+                    except Exception: det = {}
+                    wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
+                    if safe(wf.get("status", "")) in ("Under Review", "Submitted", "Reviewed"):
+                        sel.append(r)
+                show_detail_rows(sel, "Under Review")
+            elif key == "approved":
+                sel = []
+                for r in inv_rows:
+                    try: det = json.loads(safe(r["investigation_details"]) or "{}")
+                    except Exception: det = {}
+                    wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
+                    if safe(wf.get("status", "")) == "Approved" or safe(r["status"]).lower() == "approved":
+                        sel.append(r)
+                show_detail_rows(sel, "Approved Investigations")
+            elif key == "noi":
+                show_detail_rows(noi_rows, "NOI Records")
+
+        for key, (card, _num, _lab) in kpi_cards.items():
+            card.mousePressEvent = (lambda e, k=key: on_kpi_click(k))
+
+        def open_detail_row():
+            r = detail_table.currentRow()
+            if r < 0 or not detail_table.item(r, 0): return
+            rid = detail_table.item(r, 0).data(Qt.ItemDataRole.UserRole)
+            # Prefer investigation if exists
+            inv = db.fetchone("SELECT id FROM incidents WHERE id=?", (rid,))
+            if inv:
+                self.incident_form(load_investigations, int(rid))
+            else:
+                self.noi_form(load_noi, int(rid))
+
+        detail_table.doubleClicked.connect(lambda *_: open_detail_row())
+        refresh_dash_btn.clicked.connect(refresh_dashboard)
+
+        # ---------------- Close-Out ----------------
+        close_tab = QWidget(); close_layout = QVBoxLayout(close_tab)
+        close_layout.addWidget(QLabel("CLOSE-OUT — Approved investigations ready for close-out. Add evidence, submit, review and approve to close the incident."))
+        close_table = QTableWidget(0, 8)
+        close_table.setHorizontalHeaderLabels(["ID", "Number", "Date", "Type", "Location", "Workflow", "CAPA Linked", "Status"])
+        close_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        close_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        close_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        close_layout.addWidget(close_table, 1)
+        close_btns = QHBoxLayout()
+        open_close_btn = QPushButton("Open Close-Out…")
+        refresh_close_btn = QPushButton("Refresh")
+        close_btns.addWidget(open_close_btn); close_btns.addStretch(); close_btns.addWidget(refresh_close_btn)
+        close_layout.addLayout(close_btns)
+
+        def load_closeout_list():
+            rows = db.fetchall("SELECT * FROM incidents ORDER BY id DESC") or []
+            eligible = []
+            for r in rows:
+                try: det = json.loads(safe(r["investigation_details"]) or "{}")
+                except Exception: det = {}
+                wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
+                st = safe(wf.get("status", "")) or safe(r["status"])
+                # Show Approved, or already in close-out flow, or Closed
+                if st in ("Approved", "Close-Out Submitted", "Close-Out Reviewed", "Closed", "Closed Out") or safe(r["status"]).lower() in ("closed", "closed out"):
+                    eligible.append((r, det, wf, st))
+            close_table.setRowCount(len(eligible))
+            for i, (r, det, wf, st) in enumerate(eligible):
+                capa = safe(r["capa_number"] if "capa_number" in r.keys() else "") or "—"
+                vals = [r["id"], r["number"], r["incident_date"], r["incident_type"], r["location"], st, capa, r["status"]]
+                for c, v in enumerate(vals):
+                    close_table.setItem(i, c, QTableWidgetItem(safe(v)))
+                close_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, int(r["id"]))
+
+        def open_closeout_dialog():
+            r = close_table.currentRow()
+            if r < 0 or not close_table.item(r, 0):
+                QMessageBox.information(self, "Select", "Select an approved investigation first."); return
+            rid = int(close_table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+            rec = db.fetchone("SELECT * FROM incidents WHERE id=?", (rid,))
+            if not rec: return
+            try: det = json.loads(safe(rec["investigation_details"]) or "{}")
+            except Exception: det = {}
+            wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
+            co = det.get("closeout", {}) if isinstance(det.get("closeout"), dict) else {}
+
+            dlg = QDialog(self); dlg.setWindowTitle(f"Close-Out — {rec['number']}"); dlg.resize(900, 700)
+            lay = QVBoxLayout(dlg)
+            lay.addWidget(QLabel(f"<b>{safe(rec['number'])}</b> — {safe(rec['incident_type'])} @ {safe(rec['location'])}"))
+            lay.addWidget(QLabel(f"Investigation status: {safe(wf.get('status', rec['status']))} | Approved by: {safe(wf.get('approved_by', '—'))}"))
+
+            # Related CAPA / corrective actions
+            capa_no = safe(rec["capa_number"] if "capa_number" in rec.keys() else "")
+            actions = det.get("corrective_actions") or []
+            if capa_no:
+                capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
+                if capa_row:
+                    lay.addWidget(QLabel(f"Linked CAPA: {capa_no} — Status: {safe(capa_row['status'])}"))
+            act_table = QTableWidget(0, 4)
+            act_table.setHorizontalHeaderLabels(["Action", "Responsible", "Target", "Status"])
+            act_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            act_table.setRowCount(len(actions))
+            for i, a in enumerate(actions):
+                if not isinstance(a, dict): continue
+                for c, k in enumerate(["action", "responsible", "target_date", "status"]):
+                    act_table.setItem(i, c, QTableWidgetItem(safe(a.get(k, ""))))
+            lay.addWidget(QLabel("Corrective actions from investigation:"))
+            lay.addWidget(act_table, 1)
+
+            evidence_list = QListWidget()
+            pending_files = []
+            for name in (co.get("evidence_files") or []):
+                evidence_list.addItem(str(name))
+            lay.addWidget(QLabel("Close-out evidence:"))
+            lay.addWidget(evidence_list)
+            eb = QHBoxLayout()
+            add_ev = QPushButton("Add Evidence File…")
+            def add_evidence():
+                paths, _ = QFileDialog.getOpenFileNames(dlg, "Close-out evidence")
+                for pth in paths:
+                    if pth not in pending_files:
+                        pending_files.append(pth)
+                        evidence_list.addItem(Path(pth).name + " (new)")
+            add_ev.clicked.connect(add_evidence); eb.addWidget(add_ev); eb.addStretch(); lay.addLayout(eb)
+
+            notes = QTextEdit(); notes.setPlainText(safe(co.get("notes", ""))); notes.setPlaceholderText("Close-out notes / verification summary")
+            lay.addWidget(notes)
+            submitted_by = QLineEdit(safe(co.get("submitted_by", ""))); reviewed_by = QLineEdit(safe(co.get("reviewed_by", ""))); approved_by = QLineEdit(safe(co.get("approved_by", "")))
+            form = QFormLayout()
+            form.addRow("Submitted By", submitted_by); form.addRow("Reviewed By", reviewed_by); form.addRow("Approved By", approved_by)
+            lay.addLayout(form)
+
+            bb = QDialogButtonBox()
+            btn_submit = bb.addButton("Submit Close-Out", QDialogButtonBox.ButtonRole.ActionRole)
+            btn_review = bb.addButton("Review Close-Out", QDialogButtonBox.ButtonRole.ActionRole)
+            btn_approve = bb.addButton("Approve & Close Incident", QDialogButtonBox.ButtonRole.AcceptRole)
+            btn_cancel = bb.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+            lay.addWidget(bb); btn_cancel.clicked.connect(dlg.reject)
+
+            def persist(new_wf_status, close_status=None):
+                try:
+                    saved_names = list(co.get("evidence_files") or [])
+                    if pending_files:
+                        saved = copy_attachments(pending_files, safe(rec["number"]), "incident_attachments", rid, "Closeout Evidence")
+                        saved_names.extend([Path(x).name for x in saved])
+                    det["closeout"] = {
+                        "notes": notes.toPlainText().strip(),
+                        "submitted_by": submitted_by.text().strip(),
+                        "reviewed_by": reviewed_by.text().strip(),
+                        "approved_by": approved_by.text().strip(),
+                        "evidence_files": saved_names,
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    if not isinstance(det.get("investigation_workflow"), dict):
+                        det["investigation_workflow"] = {}
+                    det["investigation_workflow"]["status"] = new_wf_status
+                    db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(det, ensure_ascii=False), rid))
+                    if close_status:
+                        db.execute("UPDATE incidents SET status=? WHERE id=?", (close_status, rid))
+                    db.conn.commit() if hasattr(db, 'conn') else None
+                    try:
+                        db.execute  # touch
+                    except Exception:
+                        pass
+                    # db.execute already commits in many wrappers - try commit via conn
+                    try:
+                        db.conn.commit()
+                    except Exception:
+                        pass
+                    dlg.accept(); load_closeout_list(); load_investigations(); refresh_dashboard()
+                    QMessageBox.information(self, "Close-Out", f"Status updated to: {new_wf_status}" + (f" / Incident {close_status}" if close_status else ""))
+                except Exception as exc:
+                    logging.exception("closeout")
+                    QMessageBox.critical(dlg, "Failed", str(exc))
+
+            btn_submit.clicked.connect(lambda: persist("Close-Out Submitted") if submitted_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Submitted By name."))
+            btn_review.clicked.connect(lambda: persist("Close-Out Reviewed") if reviewed_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Reviewed By name."))
+            btn_approve.clicked.connect(lambda: persist("Closed Out", "Closed") if approved_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Approved By name."))
+            dlg.exec()
+
+        open_close_btn.clicked.connect(open_closeout_dialog)
+        refresh_close_btn.clicked.connect(load_closeout_list)
+
+        tabs.addTab(dash_tab, "Dashboard")
         tabs.addTab(noi_tab, "Notification of Incident (NOI)")
         tabs.addTab(inv_tab, "Investigation Register")
-        load_noi(); load_investigations()
+        tabs.addTab(close_tab, "Close-Out")
+        load_noi(); load_investigations(); refresh_dashboard(); load_closeout_list()
 
     def noi_form(self, refresh, noi_id=None):
         existing = db.fetchone("SELECT * FROM noi_register WHERE id=?", (noi_id,)) if noi_id else None
@@ -10094,7 +10460,25 @@ class MainWindow(QMainWindow):
         attachment_hint.setWordWrap(True)
         attachment_hint.setStyleSheet("color:#64748b;font-size:11px;")
         attachment_layout.addWidget(attachment_hint)
-        grid.addWidget(attachment_box, 11, 0, 1, 2)
+        # Body parts injured (multi-select) — feeds Investigation dashboard
+        body_box = QGroupBox("Body Part(s) Injured (select all that apply)")
+        body_box.setStyleSheet("QGroupBox{font-weight:700;color:#17365D;}")
+        body_grid = QGridLayout(body_box)
+        body_checks = {}
+        existing_parts = []
+        if existing:
+            try:
+                existing_parts = [p.strip() for p in safe(existing["body_parts_injured"] if "body_parts_injured" in existing.keys() else "").replace(";", ",").split(",") if p.strip()]
+            except Exception:
+                existing_parts = []
+        for i, part in enumerate(BODY_PARTS_INJURED):
+            cb = QCheckBox(part)
+            cb.setChecked(part in existing_parts)
+            body_checks[part] = cb
+            body_grid.addWidget(cb, i // 5, i % 5)
+        grid.addWidget(body_box, 11, 0, 1, 2)
+
+        grid.addWidget(attachment_box, 12, 0, 1, 2)
         def pick_noi_attachments():
             paths, _ = QFileDialog.getOpenFileNames(dialog, "Select NOI Attachments", "", "All Files (*)")
             for selected_path in paths:
@@ -10121,11 +10505,11 @@ class MainWindow(QMainWindow):
         add_attachment_btn.clicked.connect(pick_noi_attachments)
         remove_attachment_btn.clicked.connect(remove_noi_attachment)
 
-        field("prepared_by", "Prepared By (Full Name)", existing["prepared_by"] if existing else "", 12, 0, 2)
+        field("prepared_by", "Prepared By (Full Name)", existing["prepared_by"] if existing else "", 13, 0, 2)
         workflow_note = QLabel("After saving, use Submit NOI → Review NOI → Approve NOI in the register. Reviewer and approver names are recorded by their respective workflow actions.")
         workflow_note.setWordWrap(True)
         workflow_note.setStyleSheet("color:#526477;background:#eef4fa;border:1px solid #d5e1ed;border-radius:6px;padding:8px;")
-        grid.addWidget(workflow_note, 13, 0, 1, 2)
+        grid.addWidget(workflow_note, 14, 0, 1, 2)
         for col in (0, 1): grid.setColumnStretch(col, 1)
         scroll.setWidget(content); outer.addWidget(scroll, 1)
         footer = QHBoxLayout(); footer.addStretch()
@@ -10146,14 +10530,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(dialog, "Linked Investigation", "Investigation Required cannot be changed to No because this NOI is already linked to an investigation."); return
             try:
                 now = datetime.now().isoformat()
+                body_parts_str = ", ".join([p for p, cb in body_checks.items() if cb.isChecked()])
                 values = tuple(val(k) for k in ["report_date", "incident_date", "happened_time", "location", "project", "company", "department", "activity", "incident_type", "injury_type", "reported_by", "reported_by_designation", "person_involved", "description", "immediate_action", "investigation_required", "prepared_by"])
                 if existing:
-                    db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,updated_at=? WHERE id=?""", values + (now, noi_id))
+                    db.execute("""UPDATE noi_register SET report_date=?,incident_date=?,happened_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,injury_type=?,reported_by=?,reported_by_designation=?,person_involved=?,description=?,immediate_action=?,investigation_required=?,prepared_by=?,body_parts_injured=?,updated_at=? WHERE id=?""", values + (body_parts_str, now, noi_id))
                     saved_noi_id = int(noi_id)
                     saved_noi_number = safe(existing["number"])
                 else:
                     number = next_number("HSE-NOI", "noi_register")
-                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + ("Draft", now, now))
+                    db.execute("""INSERT INTO noi_register(number,report_date,incident_date,happened_time,location,project,company,department,activity,incident_type,injury_type,reported_by,reported_by_designation,person_involved,description,immediate_action,investigation_required,prepared_by,body_parts_injured,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (number,) + values + (body_parts_str, "Draft", now, now))
                     saved = db.fetchone("SELECT id FROM noi_register WHERE number=?", (number,))
                     if not saved:
                         raise RuntimeError("NOI was saved but its new register ID could not be retrieved.")
@@ -10773,6 +11158,11 @@ class MainWindow(QMainWindow):
                 rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
                 db.execute("UPDATE incidents SET incident_title=?, permit_number=?, noi_id=? WHERE id=?",
                            (edits["incident_title"].text().strip(), edits["permit_number"].text().strip(), linked_noi_id, rid))
+                try:
+                    body_parts_str = ", ".join([p for p, cb in inv_body_checks.items() if cb.isChecked()])
+                    db.execute("UPDATE incidents SET body_parts_injured=? WHERE id=?", (body_parts_str, rid))
+                except Exception:
+                    logging.exception("body_parts_injured save")
                 if linked_noi_id:
                     db.execute("UPDATE noi_register SET linked_incident_id=?, status=CASE WHEN status='Approved' THEN status ELSE 'Investigation Linked' END, updated_at=? WHERE id=?",
                                (rid, datetime.now().isoformat(), linked_noi_id))
@@ -43815,7 +44205,6 @@ class DigitalLiftingPlanModule(QWidget):
 
 
     def _export_plan(self, plan_id):
-        """Create a controlled, engineering-style lifting plan pack (DLP module only)."""
         row = self.db.conn.execute(
             'SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status,created_by FROM digital_lifting_plans WHERE id=?',
             (plan_id,)
@@ -43827,7 +44216,7 @@ class DigitalLiftingPlanModule(QWidget):
         except Exception:
             data = {}
         data['workflow_status'] = row['workflow_status']
-        number = str(row['plan_number'] or 'LIFT-PLAN')
+        number = row['plan_number']
         path, selected_filter = QFileDialog.getSaveFileName(
             self, 'Export Lifting Plan', f'{number}_Lifting_Plan.docx',
             'Word Documents (*.docx);;PDF Files (*.pdf)'
@@ -43836,19 +44225,19 @@ class DigitalLiftingPlanModule(QWidget):
             return
         if path.lower().endswith('.pdf') or ('PDF' in (selected_filter or '') and not path.lower().endswith('.docx')):
             fmt = 'pdf'
-            if not path.lower().endswith('.pdf'): path += '.pdf'
+            if not path.lower().endswith('.pdf'):
+                path += '.pdf'
         else:
             fmt = 'docx'
-            if not path.lower().endswith('.docx'): path += '.docx'
-
+            if not path.lower().endswith('.docx'):
+                path += '.docx'
         try:
-            side_img = self._render_drawing_image(data, 'side', 1800, 1050)
-            plan_img = self._render_drawing_image(data, 'plan', 1800, 1050)
-            generated = datetime.now().strftime('%d-%b-%Y %H:%M')
+            side_img = self._render_drawing_image(data, 'side')
+            plan_img = self._render_drawing_image(data, 'plan')
             report_no = f"{document_prefix()}-LP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            company = str(company_name() or 'Company')
-            unit = str(data.get('load_unit') or 'kg').lower()
-            load_kg = float(row['load_weight_kg'] or data.get('load_weight_kg') or 0)
+            company = company_name()
+            unit = data.get('load_unit') or 'kg'
+            load_kg = float(row['load_weight_kg'] or 0)
             load_disp = f"{load_kg / 1000.0:,.3f} t" if unit in ('t', 'ton', 'tonne', 'tonnes') else f"{load_kg:,.2f} kg"
             prepared = data.get('plan_prepared_by') or row['created_by'] or ''
             reviewed = data.get('reviewed_by') or ''
@@ -43856,237 +44245,127 @@ class DigitalLiftingPlanModule(QWidget):
             review_date = data.get('review_date') or ''
             approve_date = data.get('approve_date') or ''
             review_comments = data.get('review_comments') or ''
-            lift_types = ', '.join(data.get('lift_types') or []) or 'Not specified'
-
-            # All values below are read from the saved DLP payload; blank values are shown as "Not entered".
-            def val(key, default='Not entered'):
-                v = data.get(key, '')
-                if v is None or str(v).strip() == '': return default
-                return str(v).strip()
-            def fmt_num(key, suffix=''):
-                try:
-                    v = float(data.get(key) or 0)
-                    return (f'{v:,.3f}'.rstrip('0').rstrip('.') + (f' {suffix}' if suffix else '')) if v else 'Not entered'
-                except Exception:
-                    return val(key)
-            sections = [
-                ('01  PLAN & LIFT INFORMATION', [
-                    ('Plan Number', number), ('Document Reference', report_no), ('Workflow Status', row['workflow_status']),
-                    ('Project / Contract', row['project']), ('Lifting Location', row['location']), ('Planned Lifting Date', row['lifting_date']),
-                    ('Lifting Activity', val('activity')), ('Lift Classification', lift_types), ('Load Type', val('load_type')),
-                    ('Load Description', row['load_description']), ('Load Weight', load_disp),
-                ]),
-                ('02  LOAD, RIGGING & LIFTING GEOMETRY', [
-                    ('Dynamic / Impact Factor', fmt_num('dynamic_factor')), ('Hook Block Weight', fmt_num('hook_block_weight_kg','kg')),
-                    ('Total Sling Weight', fmt_num('sling_weight_kg','kg')), ('Total Shackle Weight', fmt_num('shackle_weight_kg','kg')),
-                    ('Spreader / Lifting Beam Weight', fmt_num('spreader_weight_kg','kg')), ('Other Rigging Weight', fmt_num('other_rigging_weight_kg','kg')),
-                    ('Load Length', fmt_num('load_length_m','m')), ('Load Width', fmt_num('load_width_m','m')),
-                    ('Load Height', fmt_num('load_height_m','m')), ('Required Lifting Height', fmt_num('lifting_height_m','m')),
-                    ('Working Radius', fmt_num('working_radius_m','m')), ('Load Travel Distance', fmt_num('load_travel_distance_m','m')),
-                    ('Number of Sling Legs', val('sling_legs')), ('Sling Angle from Horizontal', fmt_num('sling_angle_deg','deg')),
-                    ('Sling WLL per Leg', fmt_num('sling_wll_kg','kg')), ('Centre of Gravity / Load Distribution', val('centre_of_gravity')),
-                    ('Lifting Points / Arrangement', val('lifting_points')),
-                ]),
-                ('03  CRANE & LOAD CHART CONFIGURATION', [
-                    ('Crane Type', val('crane_type')), ('Make / Model', val('crane_make_model')), ('Crane Serial Number', val('crane_serial_no')),
-                    ('Rated Crane Capacity (reference)', fmt_num('crane_capacity_t','t')), ('Verified Net Chart Capacity', fmt_num('chart_capacity_kg','kg')),
-                    ('Working Radius', fmt_num('working_radius_m','m')), ('Main Boom Length', fmt_num('boom_length_m','m')),
-                    ('Jib Length', fmt_num('jib_length_m','m')), ('Counterweight', fmt_num('counterweight_t','t')),
-                    ('Outrigger Configuration', val('outrigger_configuration')), ('Load Chart Reference / Revision', val('load_chart_reference')),
-                    ('Load Chart Configuration Verified', val('chart_configuration_verified')),
-                    ('Crane Level Within Manufacturer Limits', val('crane_level_verified')),
-                ]),
-                ('04  GROUND CONDITIONS & OUTRIGGER SUPPORT', [
-                    ('Maximum Outrigger Reaction', fmt_num('max_outrigger_reaction_kn','kN')), ('Mat / Pad Length', fmt_num('mat_length_m','m')),
-                    ('Mat / Pad Width', fmt_num('mat_width_m','m')), ('Verified Ground Bearing Capacity', fmt_num('verified_gbc_kpa','kPa')),
-                    ('Ground Assessment Reference', val('ground_assessment_ref')), ('Ground Condition / Underground Services', val('ground_condition')),
-                    ('Mat / Pad Design Verified', val('mat_design_verified')),
-                ]),
-                ('05  LIFTING METHOD, ENVIRONMENT & CONTROLS', [
-                    ('Wind Speed', fmt_num('wind_speed_ms','m/s')), ('Approved Wind Limit', fmt_num('approved_wind_limit_ms','m/s')),
-                    ('Other Weather / Visibility Limits', val('weather_limits')), ('Lifting Method / Sequence', val('lifting_method')),
-                    ('Exclusion Zone / Barricading', val('exclusion_zone')), ('Overhead / Underground / Nearby Obstacles', val('obstacles')),
-                    ('Emergency / Recovery Arrangements', val('emergency_arrangements')), ('Additional Notes', val('additional_notes')),
-                ]),
-                ('06  LIFTING TEAM & RESPONSIBILITIES', [
-                    ('Appointed Person', val('appointed_person')), ('Lifting Supervisor', val('lifting_supervisor')),
-                    ('HSE Representative', val('hse_representative')), ('Crane Operator', val('operator')),
-                    ('Rigger', val('rigger')), ('Banksman / Signal Person', val('banksman')),
-                ]),
+            pairs = [
+                ('Plan Number', number), ('Status', row['workflow_status']),
+                ('Project', row['project']), ('Location', row['location']),
+                ('Lifting Date', row['lifting_date']), ('Load Description', row['load_description']),
+                ('Load Weight', load_disp),
+                ('Lift Types', ', '.join(data.get('lift_types') or [])),
+                ('Load Type', data.get('load_type', '')),
+                ('Crane Type', data.get('crane_type', '')),
+                ('Crane Make / Model', data.get('crane_make_model', '')),
+                ('Crane Serial No.', data.get('crane_serial_no', '')),
+                ('Crane Capacity (t)', data.get('crane_capacity_t', '')),
+                ('Working Radius (m)', data.get('working_radius_m', '')),
+                ('Boom Length (m)', data.get('boom_length_m', '')),
+                ('Sling Legs', data.get('sling_legs', '')),
+                ('Chart Capacity (kg)', data.get('chart_capacity_kg', '')),
+                ('Prepared By', prepared),
+                ('Reviewed By', reviewed), ('Review Date', review_date),
+                ('Approved By', approved), ('Approval Date', approve_date),
             ]
-            attachments = []
-            try:
-                attachments = self.db.conn.execute(
-                    'SELECT file_name,file_path,attachment_category FROM digital_lifting_plan_attachments WHERE plan_id=? ORDER BY id',
-                    (plan_id,)
-                ).fetchall()
-            except Exception:
-                logging.exception('DLP attachment lookup during export')
-
-            engineering = str(data.get('_engineering_summary') or 'Engineering check summary was not saved with this plan. Recalculate and save the plan to include the latest checks.')
-            # Keep the plan's saved calculations; this export does not create or certify engineering values.
             if fmt == 'docx':
-                from docx.enum.section import WD_SECTION
-                from docx.enum.text import WD_BREAK
                 doc = Document()
-                sec = doc.sections[0]
-                sec.orientation = WD_ORIENT.LANDSCAPE
-                sec.page_width, sec.page_height = sec.page_height, sec.page_width
-                sec.top_margin = Inches(0.55); sec.bottom_margin = Inches(0.55)
-                sec.left_margin = Inches(0.58); sec.right_margin = Inches(0.58)
-                normal = doc.styles['Normal']; normal.font.name = 'Arial'; normal.font.size = Pt(8)
-                normal.paragraph_format.space_after = Pt(3)
-                # Controlled document header
-                hdr = sec.header
-                ht = hdr.add_table(rows=1, cols=2, width=Inches(10.0)); ht.autofit = False
-                ht.columns[0].width = Inches(6.6); ht.columns[1].width = Inches(3.4)
-                ht.cell(0,0).text = company + '\nLIFTING OPERATIONS | ENGINEERING PLAN'
-                ht.cell(0,1).text = f'DOCUMENT: {number}\nSTATUS: {row["workflow_status"]}'
-                for ci, cell in enumerate(ht.rows[0].cells):
-                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                    for para in cell.paragraphs:
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.RIGHT
-                        for run in para.runs:
-                            run.bold = True; run.font.name = 'Arial'; run.font.size = Pt(8 if ci else 10)
-                            run.font.color.rgb = __import__('docx').shared.RGBColor(23,54,93)
-                # Header table needs a paragraph before it in Word; retain a compact title panel.
-                title = doc.add_paragraph(); title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                r = title.add_run('LIFTING PLAN & METHOD STATEMENT'); r.bold = True; r.font.size = Pt(18); r.font.color.rgb = __import__('docx').shared.RGBColor(23,54,93)
-                sub = doc.add_paragraph(); sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                rr = sub.add_run(f'{number}    |    {row["project"] or "Project not entered"}    |    {row["lifting_date"] or "Date not entered"}')
-                rr.bold = True; rr.font.size = Pt(9)
-
-                def shade(cell, fill):
-                    tcPr = cell._tc.get_or_add_tcPr(); shd = OxmlElement('w:shd'); shd.set(qn('w:fill'), fill); tcPr.append(shd)
-                def set_cell(cell, text, bold=False, color=None):
-                    cell.text = str(text if text not in (None, '') else 'Not entered')
-                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            run.font.name='Arial'; run.font.size=Pt(7.5); run.bold=bold
-                            if color: run.font.color.rgb = __import__('docx').shared.RGBColor(*color)
-                def add_section(title_text, items):
-                    h = doc.add_paragraph(); h.paragraph_format.space_before=Pt(7); h.paragraph_format.space_after=Pt(3)
-                    run=h.add_run(title_text); run.bold=True; run.font.size=Pt(10); run.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
-                    t=doc.add_table(rows=0, cols=4); t.autofit=False; t.alignment=WD_TABLE_ALIGNMENT.CENTER
-                    widths=[1.72,3.28,1.72,3.28]
-                    for c,w in zip(t.columns,widths): c.width=Inches(w)
-                    for i in range(0,len(items),2):
-                        cells=t.add_row().cells
-                        pair=items[i:i+2]
-                        for j in range(2):
-                            k,v=pair[j] if j < len(pair) else ('','')
-                            set_cell(cells[j*2],k,True,(23,54,93)); shade(cells[j*2],'DCE6F1')
-                            set_cell(cells[j*2+1],v)
-                    doc.add_paragraph().paragraph_format.space_after=Pt(0)
-                # Cover / summary strip
-                cover = doc.add_table(rows=2, cols=4); cover.alignment=WD_TABLE_ALIGNMENT.CENTER; cover.autofit=False
-                topvals=[('PROJECT',row['project']),('LOCATION',row['location']),('LIFT DATE',row['lifting_date']),('WORKFLOW STATUS',row['workflow_status'])]
-                for i,(k,v) in enumerate(topvals):
-                    set_cell(cover.cell(0,i),k,True,(255,255,255)); shade(cover.cell(0,i),'17365D')
-                    set_cell(cover.cell(1,i),v or 'Not entered',True); shade(cover.cell(1,i),'EEF3F8')
-                for title_text, items in sections:
-                    add_section(title_text, items)
-
-                # Engineering calculation report in a separate clearly identified section.
-                doc.add_page_break()
-                h=doc.add_paragraph(); rr=h.add_run('07  ENGINEERING CHECKS & CALCULATION SUMMARY'); rr.bold=True; rr.font.size=Pt(13); rr.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
-                p=doc.add_paragraph(engineering); p.paragraph_format.space_after=Pt(5)
-                for run in p.runs: run.font.name='Consolas'; run.font.size=Pt(8)
-                caution=doc.add_paragraph('IMPORTANT: This calculation output is decision-support information based on entered data. It is not a substitute for the crane manufacturer load chart, engineered lift study, site verification or competent-person approval.');
-                for run in caution.runs: run.bold=True; run.font.size=Pt(8); run.font.color.rgb=__import__('docx').shared.RGBColor(156,0,6)
+                try:
+                    set_docx_landscape(doc)
+                except Exception:
+                    pass
+                try:
+                    add_docx_report_header(doc, 'DIGITAL LIFTING PLAN', 'LP', number)
+                except Exception:
+                    # manual header with logo from settings
+                    logo = None
+                    try:
+                        logo = report_logo_path()
+                    except Exception:
+                        logo = None
+                    table = doc.add_table(rows=1, cols=2)
+                    if logo and Path(logo).is_file():
+                        try:
+                            table.rows[0].cells[0].paragraphs[0].add_run().add_picture(str(logo), width=Inches(1.1))
+                        except Exception:
+                            pass
+                    table.rows[0].cells[1].paragraphs[0].add_run(f'{company}\nDIGITAL LIFTING PLAN\n{number}').bold = True
+                try:
+                    add_docx_kv_table(doc, pairs)
+                except Exception:
+                    for k, v in pairs:
+                        doc.add_paragraph(f'{k}: {v}')
+                if data.get('_engineering_summary'):
+                    try:
+                        add_docx_boxed_section(doc, 'Engineering Check Summary & Suggestions', data.get('_engineering_summary'), 8)
+                    except Exception:
+                        doc.add_heading('Engineering Check Summary & Suggestions', level=2)
+                        doc.add_paragraph(str(data.get('_engineering_summary')))
                 if review_comments:
-                    doc.add_heading('Review Comments', level=2); doc.add_paragraph(str(review_comments))
-                doc.add_heading('08  REVIEW, APPROVAL & AUTHORISATION', level=1)
-                sig=doc.add_table(rows=2, cols=3); sig.alignment=WD_TABLE_ALIGNMENT.CENTER
-                for i, label in enumerate(('PREPARED BY','REVIEWED BY','APPROVED BY')):
-                    set_cell(sig.cell(0,i),label,True,(255,255,255)); shade(sig.cell(0,i),'17365D')
-                sig.cell(1,0).text=f'{prepared or "Not entered"}\nSignature: __________________________\nDate: ______________________________'
-                sig.cell(1,1).text=f'{reviewed or "Not entered"}\nSignature: __________________________\nDate: {review_date or "______________________________"}'
-                sig.cell(1,2).text=f'{approved or "Not entered"}\nSignature: __________________________\nDate: {approve_date or "______________________________"}'
-                for rrw in sig.rows[1].cells:
-                    for para in rrw.paragraphs:
-                        for run in para.runs: run.font.size=Pt(8)
-                doc.add_heading('09  SUPPORTING DOCUMENTS / ATTACHMENTS', level=1)
-                if attachments:
-                    at=doc.add_table(rows=1,cols=3); at.alignment=WD_TABLE_ALIGNMENT.CENTER
-                    for i,x in enumerate(('FILE / DOCUMENT','CATEGORY','SAVED LOCATION')):
-                        set_cell(at.cell(0,i),x,True,(255,255,255)); shade(at.cell(0,i),'17365D')
-                    for a in attachments:
-                        cells=at.add_row().cells
-                        set_cell(cells[0],a['file_name'] or Path(a['file_path']).name); set_cell(cells[1],a['attachment_category']); set_cell(cells[2],a['file_path'])
-                else: doc.add_paragraph('No supporting attachments are registered against this plan.')
-
-                # Drawings are intentionally full-page landscape sheets for legibility.
-                for drawing_title, image_path in (('10  LIFTING ARRANGEMENT — SIDE ELEVATION',side_img),('11  LIFTING ARRANGEMENT — PLAN VIEW',plan_img)):
-                    doc.add_page_break(); ph=doc.add_paragraph(); ph.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    run=ph.add_run(drawing_title); run.bold=True; run.font.size=Pt(14); run.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
-                    if Path(image_path).is_file() and Path(image_path).stat().st_size>500:
-                        pp=doc.add_paragraph(); pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(image_path),width=Inches(9.6))
-                    else: doc.add_paragraph('Drawing unavailable — open the Digital Lifting Plan Drawings tab to review.')
-                    note=doc.add_paragraph('SCHEMATIC ONLY — NOT TO SCALE. Verify crane configuration, load chart, rigging arrangement, clearances and site conditions before execution.')
-                    note.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    for run in note.runs: run.bold=True; run.font.size=Pt(8); run.font.color.rgb=__import__('docx').shared.RGBColor(156,0,6)
-                # Footer with document traceability
-                for section in doc.sections:
-                    fp=section.footer.paragraphs[0]; fp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    fr=fp.add_run(f'{company}  |  {report_no}  |  Generated {generated}  |  Controlled copy when approved')
-                    fr.font.size=Pt(7); fr.font.color.rgb=__import__('docx').shared.RGBColor(100,116,139)
-                try: save_docx_validated(doc, path)
-                except Exception: doc.save(path)
+                    doc.add_heading('Review Comments', level=2)
+                    doc.add_paragraph(review_comments)
+                # Signatures
+                doc.add_heading('Authorisation', level=2)
+                sig = doc.add_table(rows=2, cols=3)
+                sig.rows[0].cells[0].text = f'Prepared by:\n{prepared}\nSignature: _______________\nDate: ________'
+                sig.rows[0].cells[1].text = f'Reviewed by:\n{reviewed}\nSignature: _______________\nDate: {review_date or "________"}'
+                sig.rows[0].cells[2].text = f'Approved by:\n{approved}\nSignature: _______________\nDate: {approve_date or "________"}'
+                doc.add_heading('Engineering Drawing — Side Elevation', level=2)
+                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
+                    try:
+                        doc.add_picture(str(side_img), width=Inches(9.2))
+                    except Exception as pic_exc:
+                        logging.exception('side pic')
+                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
+                else:
+                    doc.add_paragraph('[Side elevation drawing was not generated]')
+                doc.add_heading('Engineering Drawing — Plan View', level=2)
+                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
+                    try:
+                        doc.add_picture(str(plan_img), width=Inches(9.2))
+                    except Exception as pic_exc:
+                        logging.exception('plan pic')
+                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
+                else:
+                    doc.add_paragraph('[Plan view drawing was not generated]')
+                try:
+                    add_docx_footer(doc)
+                except Exception:
+                    pass
+                try:
+                    save_docx_validated(doc, path)
+                except Exception:
+                    doc.save(path)
             else:
-                from reportlab.lib.units import mm
-                from reportlab.platypus import PageBreak, KeepTogether
-                styles=getSampleStyleSheet()
-                from reportlab.lib.styles import ParagraphStyle
-                styles.add(ParagraphStyle(name='LPTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#17365D'), alignment=1, spaceAfter=5))
-                styles.add(ParagraphStyle(name='LPSection', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#17365D'), spaceBefore=8, spaceAfter=4, keepWithNext=True))
-                styles.add(ParagraphStyle(name='LPBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=7.3, leading=9, spaceAfter=1))
-                styles.add(ParagraphStyle(name='LPSmall', parent=styles['BodyText'], fontName='Helvetica', fontSize=7, leading=9))
-                def esc(x): return html.escape(str(x if x not in (None,'') else 'Not entered')).replace('\n','<br/>')
-                story=[Paragraph(esc(company),styles['Heading2']),Paragraph('LIFTING PLAN & METHOD STATEMENT',styles['LPTitle']),
-                       Paragraph(f'<b>{esc(number)}</b> &nbsp; | &nbsp; Document Ref: {esc(report_no)} &nbsp; | &nbsp; Status: {esc(row["workflow_status"])}',styles['LPBody']),Spacer(1,5)]
-                top=[[Paragraph(f'<b>{esc(k)}</b>',styles['LPSmall']) for k,_ in [('PROJECT',0),('LOCATION',0),('LIFT DATE',0),('STATUS',0)]],
-                     [Paragraph(esc(v),styles['LPSmall']) for v in (row['project'],row['location'],row['lifting_date'],row['workflow_status'])]]
-                tt=Table(top,colWidths=[67.5*mm]*4,repeatRows=1)
-                tt.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('BACKGROUND',(0,1),(-1,1),colors.HexColor('#EEF3F8')),('GRID',(0,0),(-1,-1),0.45,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),5),('VALIGN',(0,0),(-1,-1),'TOP')]))
-                story += [tt,Spacer(1,5)]
-                for section_title, items in sections:
-                    story.append(Paragraph(esc(section_title),styles['LPSection']))
-                    rows=[]
-                    for i in range(0,len(items),2):
-                        a=items[i]; b=items[i+1] if i+1<len(items) else ('','')
-                        rows.append([Paragraph('<b>'+esc(a[0])+'</b>',styles['LPSmall']),Paragraph(esc(a[1]),styles['LPSmall']),Paragraph('<b>'+esc(b[0])+'</b>' if b[0] else '',styles['LPSmall']),Paragraph(esc(b[1]) if b[0] else '',styles['LPSmall'])])
-                    t=Table(rows,colWidths=[37*mm,58*mm,37*mm,58*mm],repeatRows=0)
-                    t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#B7C3CF')),('BACKGROUND',(0,0),(0,-1),colors.HexColor('#E5ECF3')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#E5ECF3')),('PADDING',(0,0),(-1,-1),4),('VALIGN',(0,0),(-1,-1),'TOP')]))
-                    story += [t,Spacer(1,3)]
-                story += [PageBreak(),Paragraph('07  ENGINEERING CHECKS & CALCULATION SUMMARY',styles['LPTitle'])]
-                for line in engineering.splitlines(): story.append(Paragraph(esc(line),styles['LPBody']))
-                story += [Spacer(1,8),Paragraph('<b>IMPORTANT:</b> This output is decision-support information based on entered data. It is not a substitute for the manufacturer load chart, engineered lift study, site verification or competent-person approval.',styles['LPBody'])]
-                if review_comments: story += [Paragraph('Review Comments',styles['LPSection']),Paragraph(esc(review_comments),styles['LPBody'])]
-                story += [Paragraph('08  REVIEW, APPROVAL & AUTHORISATION',styles['LPSection'])]
-                sigdata=[[Paragraph('<b>PREPARED BY</b>',styles['LPSmall']),Paragraph('<b>REVIEWED BY</b>',styles['LPSmall']),Paragraph('<b>APPROVED BY</b>',styles['LPSmall'])],
-                         [Paragraph(f'{esc(prepared)}<br/><br/>Signature: __________________<br/>Date: ______________',styles['LPSmall']),Paragraph(f'{esc(reviewed)}<br/><br/>Signature: __________________<br/>Date: {esc(review_date)}',styles['LPSmall']),Paragraph(f'{esc(approved)}<br/><br/>Signature: __________________<br/>Date: {esc(approve_date)}',styles['LPSmall'])]]
-                st=Table(sigdata,colWidths=[90*mm]*3,rowHeights=[8*mm,30*mm]); st.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),5),('VALIGN',(0,0),(-1,-1),'TOP')]))
-                story += [st,Paragraph('09  SUPPORTING DOCUMENTS / ATTACHMENTS',styles['LPSection'])]
-                if attachments:
-                    ad=[[Paragraph('<b>FILE / DOCUMENT</b>',styles['LPSmall']),Paragraph('<b>CATEGORY</b>',styles['LPSmall']),Paragraph('<b>SAVED LOCATION</b>',styles['LPSmall'])]]
-                    ad += [[Paragraph(esc(a['file_name'] or Path(a['file_path']).name),styles['LPSmall']),Paragraph(esc(a['attachment_category']),styles['LPSmall']),Paragraph(esc(a['file_path']),styles['LPSmall'])] for a in attachments]
-                    at=Table(ad,colWidths=[65*mm,45*mm,160*mm],repeatRows=1); at.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),4),('VALIGN',(0,0),(-1,-1),'TOP')]))
-                    story.append(at)
-                else: story.append(Paragraph('No supporting attachments are registered against this plan.',styles['LPBody']))
-                for title_text,image_path in (('10  LIFTING ARRANGEMENT — SIDE ELEVATION',side_img),('11  LIFTING ARRANGEMENT — PLAN VIEW',plan_img)):
-                    story += [PageBreak(),Paragraph(esc(title_text),styles['LPTitle']),Spacer(1,4)]
-                    if Path(image_path).is_file() and Path(image_path).stat().st_size>500:
-                        story.append(RLImage(str(image_path),width=265*mm,height=155*mm,kind='proportional'))
-                    else: story.append(Paragraph('Drawing unavailable — review the Drawings tab in the application.',styles['LPBody']))
-                    story.append(Paragraph('<b>SCHEMATIC ONLY — NOT TO SCALE. Verify crane configuration, load chart, rigging arrangement, clearances and site conditions before execution.</b>',styles['LPBody']))
-                def page_footer(canvas, doc_obj):
-                    canvas.saveState(); canvas.setFont('Helvetica',6.5); canvas.setFillColor(colors.HexColor('#64748B'))
-                    canvas.drawCentredString(landscape(A4)[0]/2,9*mm,f'{company}  |  {report_no}  |  Generated {generated}  |  Page {doc_obj.page}')
-                    canvas.restoreState()
-                SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=16*mm,title=f'{number} Lifting Plan',author=company).build(story,onFirstPage=page_footer,onLaterPages=page_footer)
-            QMessageBox.information(self, 'Exported', f'Professional lifting plan exported successfully:\n{path}')
+                styles = getSampleStyleSheet()
+                story = [
+                    Paragraph(f"<b>{html.escape(str(company))}</b> — DIGITAL LIFTING PLAN", styles['Title']),
+                    Paragraph(f"Plan: {html.escape(str(number))} | Doc: {html.escape(report_no)} | Status: {html.escape(str(row['workflow_status']))}", styles['Normal']),
+                    Spacer(1, 8),
+                ]
+                meta = [
+                    [f"Project: {row['project']}", f"Location: {row['location']}"],
+                    [f"Date: {row['lifting_date']}", f"Load: {row['load_description']} ({load_disp})"],
+                    [f"Prepared: {prepared}", f"Reviewed: {reviewed} ({review_date})"],
+                    [f"Approved: {approved} ({approve_date})", f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}"],
+                ]
+                mt = Table(meta, colWidths=[320, 320])
+                mt.setStyle(TableStyle([
+                    ('GRID', (0, 0), (-1, -1), 0.6, colors.HexColor('#4A5C6A')),
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#EEF3F7')),
+                    ('PADDING', (0, 0), (-1, -1), 5),
+                ]))
+                story += [mt, Spacer(1, 10)]
+                if data.get('_engineering_summary'):
+                    story.append(Paragraph('<b>Engineering Check Summary & Suggestions</b>', styles['Heading2']))
+                    for line in str(data.get('_engineering_summary')).splitlines()[:55]:
+                        story.append(Paragraph(html.escape(line), styles['Normal']))
+                    story.append(Spacer(1, 8))
+                story.append(Paragraph('<b>Side Elevation</b>', styles['Heading2']))
+                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
+                    story.append(RLImage(str(side_img), width=520, height=300, kind='proportional'))
+                story.append(Spacer(1, 8))
+                story.append(Paragraph('<b>Plan View</b>', styles['Heading2']))
+                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
+                    story.append(RLImage(str(plan_img), width=520, height=300, kind='proportional'))
+                SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22).build(story)
+            QMessageBox.information(self, 'Exported', f'Lifting plan exported with drawings:\n{path}')
         except Exception as exc:
             logging.exception('lifting plan export')
             QMessageBox.critical(self, 'Export Failed', f'Could not export the lifting plan.\n\n{type(exc).__name__}: {exc}')
