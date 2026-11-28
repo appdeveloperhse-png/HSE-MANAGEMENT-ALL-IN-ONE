@@ -3767,6 +3767,187 @@ class BarChartWidget(QWidget):
         painter.end()
 
 
+
+class BodyAnatomyWidget(QWidget):
+    """Human body map showing injured body-part percentages (not a bar chart)."""
+
+    # Relative regions within body drawing coordinates (0-100 x, 0-200 y)
+    REGIONS = {
+        "Head": (42, 4, 16, 16),
+        "Face": (44, 12, 12, 10),
+        "Eye(s)": (45, 12, 10, 5),
+        "Ear(s)": (38, 14, 6, 8),
+        "Neck": (46, 20, 8, 8),
+        "Shoulder": (28, 28, 44, 10),
+        "Chest": (38, 36, 24, 22),
+        "Back": (40, 38, 20, 24),
+        "Abdomen": (40, 56, 20, 16),
+        "Arm": (18, 32, 12, 40),
+        "Elbow": (18, 50, 12, 10),
+        "Wrist": (18, 68, 12, 8),
+        "Hand": (16, 74, 14, 12),
+        "Finger(s)": (16, 82, 14, 10),
+        "Hip": (38, 70, 24, 12),
+        "Leg": (38, 80, 10, 40),
+        "Knee": (38, 108, 10, 10),
+        "Ankle": (38, 140, 10, 8),
+        "Foot": (34, 148, 16, 10),
+        "Toe(s)": (34, 154, 16, 6),
+        "Multiple Parts": (70, 180, 26, 10),
+        "Other / Not Specified": (2, 180, 30, 10),
+    }
+
+    def __init__(self, values=None, parent=None, title="Body Parts Injured"):
+        super().__init__(parent)
+        self.values = values or {}
+        self.title = title
+        self.setMinimumHeight(320)
+        self.setMinimumWidth(280)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setStyleSheet("background:#FFFFFF;border:1px solid #D6E2EE;border-radius:8px;")
+
+    def set_values(self, values):
+        self.values = values or {}
+        self.update()
+
+    def _heat(self, pct):
+        """Map 0-100% to cool→hot colour."""
+        pct = max(0.0, min(100.0, float(pct)))
+        if pct <= 0:
+            return QColor("#E8EEF4")
+        if pct < 15:
+            return QColor("#FDE68A")
+        if pct < 30:
+            return QColor("#FBBF24")
+        if pct < 50:
+            return QColor("#F97316")
+        if pct < 70:
+            return QColor("#EF4444")
+        return QColor("#B91C1C")
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QPen, QBrush, QFont, QPainterPath
+        from PySide6.QtCore import QRectF, QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor("#FFFFFF"))
+        p.setPen(QPen(QColor("#17365D")))
+        p.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        p.drawText(12, 18, self.title or "Body Parts Injured")
+
+        total = sum(max(0, int(v)) for v in self.values.values()) or 0
+        # Layout: body on left, legend on right
+        area = self.rect().adjusted(10, 28, -10, -10)
+        body_w = int(area.width() * 0.48)
+        body_h = area.height()
+        # Body coordinate system 0-100 x, 0-170 y mapped into body rect
+        ox, oy = area.left() + 8, area.top() + 4
+        scale_x = (body_w - 16) / 100.0
+        scale_y = (body_h - 8) / 170.0
+
+        def R(x, y, w, h):
+            return QRectF(ox + x * scale_x, oy + y * scale_y, w * scale_x, h * scale_y)
+
+        # Silhouette base (light)
+        p.setPen(QPen(QColor("#94A3B8"), 1.5))
+        p.setBrush(QBrush(QColor("#F1F5F9")))
+        # Head
+        p.drawEllipse(R(40, 2, 20, 22))
+        # Neck
+        p.drawRoundedRect(R(46, 22, 8, 8), 2, 2)
+        # Torso
+        p.drawRoundedRect(R(34, 28, 32, 48), 8, 8)
+        # Arms
+        p.drawRoundedRect(R(14, 30, 18, 50), 6, 6)
+        p.drawRoundedRect(R(68, 30, 18, 50), 6, 6)
+        # Legs
+        p.drawRoundedRect(R(36, 74, 12, 70), 5, 5)
+        p.drawRoundedRect(R(52, 74, 12, 70), 5, 5)
+        # Feet
+        p.drawRoundedRect(R(32, 142, 16, 10), 3, 3)
+        p.drawRoundedRect(R(52, 142, 16, 10), 3, 3)
+
+        # Heat overlay for parts that have counts
+        pct_map = {}
+        for part, count in self.values.items():
+            pct_map[part] = (100.0 * int(count) / total) if total else 0.0
+
+        # Map aliases
+        alias = {
+            "Eye": "Eye(s)", "Eyes": "Eye(s)", "Ear": "Ear(s)", "Ears": "Ear(s)",
+            "Fingers": "Finger(s)", "Finger": "Finger(s)", "Toes": "Toe(s)", "Toe": "Toe(s)",
+        }
+
+        # Paint heat regions
+        for name, (x, y, w, h) in self.REGIONS.items():
+            key = name
+            count = 0
+            if name in self.values:
+                count = int(self.values[name])
+            else:
+                for k, v in self.values.items():
+                    if k.lower() == name.lower() or alias.get(k) == name:
+                        count = int(v); break
+            if count <= 0 and name not in ("Multiple Parts", "Other / Not Specified"):
+                continue
+            pct = pct_map.get(name, 0)
+            if count > 0:
+                col = self._heat(pct)
+                col.setAlpha(200)
+                p.setBrush(QBrush(col))
+                p.setPen(QPen(col.darker(120), 1))
+                p.drawRoundedRect(R(x, y, w, h), 3, 3)
+                # percentage label on region if large enough
+                if w * scale_x > 18 and h * scale_y > 12:
+                    p.setPen(QColor("#FFFFFF") if pct >= 30 else QColor("#1E293B"))
+                    p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                    p.drawText(R(x, y, w, h), Qt.AlignmentFlag.AlignCenter, f"{pct:.0f}%")
+
+        # Outline silhouette again for clarity
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor("#334155"), 1.8))
+        p.drawEllipse(R(40, 2, 20, 22))
+        p.drawRoundedRect(R(34, 28, 32, 48), 8, 8)
+        p.drawRoundedRect(R(14, 30, 18, 50), 6, 6)
+        p.drawRoundedRect(R(68, 30, 18, 50), 6, 6)
+        p.drawRoundedRect(R(36, 74, 12, 70), 5, 5)
+        p.drawRoundedRect(R(52, 74, 12, 70), 5, 5)
+
+        # Legend on the right
+        lx = area.left() + body_w + 12
+        ly = area.top() + 4
+        p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+        p.setPen(QColor("#17365D"))
+        p.drawText(lx, ly + 10, f"Total injuries tagged: {total}")
+        ly += 22
+        p.setFont(QFont("Segoe UI", 8))
+        items = sorted(self.values.items(), key=lambda kv: -int(kv[1]))[:14]
+        if not items:
+            p.setPen(QColor("#888888"))
+            p.drawText(lx, ly + 12, "No body-part data yet")
+        for name, count in items:
+            pct = (100.0 * int(count) / total) if total else 0
+            col = self._heat(pct)
+            p.setBrush(QBrush(col))
+            p.setPen(QPen(QColor("#FFFFFF")))
+            p.drawRoundedRect(lx, ly, 12, 12, 2, 2)
+            p.setPen(QColor("#334155"))
+            p.drawText(lx + 16, ly + 11, f"{str(name)[:18]}  {count} ({pct:.0f}%)")
+            ly += 16
+            if ly > area.bottom() - 20:
+                break
+        # Heat scale
+        ly = max(ly + 8, area.bottom() - 28)
+        p.setFont(QFont("Segoe UI", 7))
+        p.setPen(QColor("#64748B"))
+        p.drawText(lx, ly, "Low → High injury share")
+        for i, pct in enumerate((5, 20, 40, 60, 85)):
+            p.setBrush(QBrush(self._heat(pct)))
+            p.setPen(QPen(QColor("#FFFFFF")))
+            p.drawRect(lx + i * 18, ly + 6, 16, 10)
+        p.end()
+
+
 # ============================================================
 # AUDIT MANAGEMENT MODULE (v2) - DATA, ROUTING AND REPORT LOGIC
 # Self-contained. Reads/writes only: audits (parent), aud_findings (child),
@@ -10093,15 +10274,16 @@ class MainWindow(QMainWindow):
         pie_loc = PieChartWidget({}, title="By Location")
         pie_proj = PieChartWidget({}, title="By Project")
         pie_status = PieChartWidget({}, title="By Status")
-        bar_body = BarChartWidget({}, title="Body Parts Injured (%)")
+        body_map = BodyAnatomyWidget({}, title="Body Parts Injured — Anatomy Map")
         pie_cause = PieChartWidget({}, title="Direct / Root Cause Themes")
-        for w in (pie_type, pie_loc, pie_proj, pie_status, bar_body, pie_cause):
+        for w in (pie_type, pie_loc, pie_proj, pie_status, pie_cause):
             w.setMinimumHeight(260)
+        body_map.setMinimumHeight(360)
         charts_grid.addWidget(pie_type, 0, 0)
         charts_grid.addWidget(pie_loc, 0, 1)
         charts_grid.addWidget(pie_proj, 1, 0)
         charts_grid.addWidget(pie_status, 1, 1)
-        charts_grid.addWidget(bar_body, 2, 0)
+        charts_grid.addWidget(body_map, 2, 0, 1, 1)
         charts_grid.addWidget(pie_cause, 2, 1)
         charts_grid.setColumnStretch(0, 1); charts_grid.setColumnStretch(1, 1)
         dash_layout.addLayout(charts_grid, 1)
@@ -10178,7 +10360,7 @@ class MainWindow(QMainWindow):
                     body_counts[p] = body_counts.get(p, 0) + 1
             total_body = sum(body_counts.values()) or 1
             # BarChartWidget expects counts; title says %
-            bar_body.set_values(body_counts)
+            body_map.set_values(body_counts)
             pie_cause.set_values(_count_map(inv_rows, lambda r: (safe(r["root_cause"]) or safe(r["direct_cause"]) or "—")[:40]))
             show_detail_rows(inv_rows, "All Investigations")
 
@@ -10252,9 +10434,12 @@ class MainWindow(QMainWindow):
                 except Exception: det = {}
                 wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
                 st = safe(wf.get("status", "")) or safe(r["status"])
-                # Show Approved, or already in close-out flow, or Closed
-                if st in ("Approved", "Close-Out Submitted", "Close-Out Reviewed", "Closed", "Closed Out") or safe(r["status"]).lower() in ("closed", "closed out"):
-                    eligible.append((r, det, wf, st))
+                # All investigation methods; show when approved / close-out / closed, or has corrective actions
+                has_actions = bool(det.get("corrective_actions") or det.get("icam_control_rows") or safe(r["corrective_action"]))
+                if st in ("Approved", "Close-Out Submitted", "Close-Out Reviewed", "Closed", "Closed Out") or safe(r["status"]).lower() in ("closed", "closed out") or (has_actions and st in ("Approved", "Reviewed", "Submitted", "Under Review", "Open", "")):
+                    # Prefer showing approved+; still list if has actions and past draft
+                    if st in ("Approved", "Close-Out Submitted", "Close-Out Reviewed", "Closed", "Closed Out") or safe(r["status"]).lower() in ("closed", "closed out") or (has_actions and safe(wf.get("status", "")) in ("Approved", "Reviewed")):
+                        eligible.append((r, det, wf, st))
             close_table.setRowCount(len(eligible))
             for i, (r, det, wf, st) in enumerate(eligible):
                 capa = safe(r["capa_number"] if "capa_number" in r.keys() else "") or "—"
@@ -10275,50 +10460,121 @@ class MainWindow(QMainWindow):
             wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
             co = det.get("closeout", {}) if isinstance(det.get("closeout"), dict) else {}
 
-            dlg = QDialog(self); dlg.setWindowTitle(f"Close-Out — {rec['number']}"); dlg.resize(900, 700)
-            lay = QVBoxLayout(dlg)
-            lay.addWidget(QLabel(f"<b>{safe(rec['number'])}</b> — {safe(rec['incident_type'])} @ {safe(rec['location'])}"))
-            lay.addWidget(QLabel(f"Investigation status: {safe(wf.get('status', rec['status']))} | Approved by: {safe(wf.get('approved_by', '—'))}"))
+            # Collect corrective actions from all investigation method shapes
+            actions = []
+            raw_actions = det.get("corrective_actions") or []
+            if isinstance(raw_actions, list):
+                for a in raw_actions:
+                    if isinstance(a, dict) and safe(a.get("action", "")).strip():
+                        actions.append(dict(a))
+                    elif isinstance(a, str) and a.strip():
+                        actions.append({"action": a.strip(), "responsible": "", "target_date": "", "status": "Open"})
+            # ICAM control measures as actions if no corrective_actions list
+            if not actions:
+                for row in (det.get("icam_control_rows") or []):
+                    if isinstance(row, (list, tuple)) and len(row) >= 3:
+                        actions.append({"action": safe(row[2]) if not isinstance(row[2], str) else safe(row[2]), "responsible": "", "target_date": "", "status": "Open", "source": "ICAM"})
+                    elif isinstance(row, dict) and safe(row.get("control_measure", "")).strip():
+                        actions.append({"action": safe(row.get("control_measure")), "responsible": safe(row.get("responsible")), "target_date": safe(row.get("target_date")), "status": safe(row.get("status", "Open")), "source": "ICAM"})
+            # Legacy single corrective_action field
+            if not actions and safe(rec["corrective_action"]):
+                for line in safe(rec["corrective_action"]).splitlines():
+                    if line.strip():
+                        actions.append({"action": line.strip(), "responsible": "", "target_date": "", "status": "Open", "source": "Legacy"})
+            if not actions:
+                actions = [{"action": "(No corrective action text recorded — add close-out evidence for the investigation overall)", "responsible": "", "target_date": "", "status": "Open", "source": "General"}]
 
-            # Related CAPA / corrective actions
+            # Per-action evidence map from saved closeout
+            action_evidence = co.get("action_evidence") if isinstance(co.get("action_evidence"), dict) else {}
+            # migrate old flat evidence_files into action 0
+            if not action_evidence and co.get("evidence_files"):
+                action_evidence = {"0": list(co.get("evidence_files") or [])}
+
+            dlg = QDialog(self); dlg.setWindowTitle(f"Close-Out — {rec['number']}"); dlg.resize(960, 760)
+            lay = QVBoxLayout(dlg)
+            method = safe(rec["investigation_method"]) or "—"
+            lay.addWidget(QLabel(f"<b>{safe(rec['number'])}</b> — {safe(rec['incident_type'])} @ {safe(rec['location'])}"))
+            lay.addWidget(QLabel(f"Investigation method: <b>{method}</b> | Workflow: {safe(wf.get('status', rec['status']))} | Approved by: {safe(wf.get('approved_by', '—'))}"))
+
             capa_no = safe(rec["capa_number"] if "capa_number" in rec.keys() else "")
-            actions = det.get("corrective_actions") or []
             if capa_no:
                 capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
                 if capa_row:
                     lay.addWidget(QLabel(f"Linked CAPA: {capa_no} — Status: {safe(capa_row['status'])}"))
-            act_table = QTableWidget(0, 4)
-            act_table.setHorizontalHeaderLabels(["Action", "Responsible", "Target", "Status"])
-            act_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-            act_table.setRowCount(len(actions))
-            for i, a in enumerate(actions):
-                if not isinstance(a, dict): continue
-                for c, k in enumerate(["action", "responsible", "target_date", "status"]):
-                    act_table.setItem(i, c, QTableWidgetItem(safe(a.get(k, ""))))
-            lay.addWidget(QLabel("Corrective actions from investigation:"))
-            lay.addWidget(act_table, 1)
 
-            evidence_list = QListWidget()
-            pending_files = []
-            for name in (co.get("evidence_files") or []):
-                evidence_list.addItem(str(name))
-            lay.addWidget(QLabel("Close-out evidence:"))
-            lay.addWidget(evidence_list)
-            eb = QHBoxLayout()
-            add_ev = QPushButton("Add Evidence File…")
-            def add_evidence():
-                paths, _ = QFileDialog.getOpenFileNames(dlg, "Close-out evidence")
-                for pth in paths:
-                    if pth not in pending_files:
-                        pending_files.append(pth)
-                        evidence_list.addItem(Path(pth).name + " (new)")
-            add_ev.clicked.connect(add_evidence); eb.addWidget(add_ev); eb.addStretch(); lay.addLayout(eb)
+            info = QLabel("Each corrective action below can have one or more close-out evidence files. Add evidence per action, then submit / review / approve.")
+            info.setWordWrap(True); info.setStyleSheet("color:#526477;padding:4px;")
+            lay.addWidget(info)
 
-            notes = QTextEdit(); notes.setPlainText(safe(co.get("notes", ""))); notes.setPlaceholderText("Close-out notes / verification summary")
-            lay.addWidget(notes)
-            submitted_by = QLineEdit(safe(co.get("submitted_by", ""))); reviewed_by = QLineEdit(safe(co.get("reviewed_by", ""))); approved_by = QLineEdit(safe(co.get("approved_by", "")))
+            scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
+            content = QWidget(); content_lay = QVBoxLayout(content)
+            action_widgets = []  # list of dicts: action text, list widget, pending paths
+
+            for idx, a in enumerate(actions):
+                box = QGroupBox(f"Corrective Action {idx + 1}")
+                box.setStyleSheet("QGroupBox{font-weight:700;color:#17365D;}")
+                bv = QVBoxLayout(box)
+                act_txt = safe(a.get("action", ""))
+                meta = f"Responsible: {safe(a.get('responsible')) or '—'}  |  Target: {safe(a.get('target_date')) or '—'}  |  Status: {safe(a.get('status')) or 'Open'}"
+                if a.get("source"):
+                    meta += f"  |  Source: {a.get('source')}"
+                lab = QLabel(act_txt); lab.setWordWrap(True); lab.setStyleSheet("background:#F8FAFC;border:1px solid #E2E8F0;padding:8px;border-radius:6px;")
+                bv.addWidget(lab)
+                bv.addWidget(QLabel(meta))
+                ev_list = QListWidget(); ev_list.setMinimumHeight(70)
+                # existing saved names
+                existing_names = list(action_evidence.get(str(idx)) or action_evidence.get(idx) or [])
+                for name in existing_names:
+                    ev_list.addItem(str(name))
+                bv.addWidget(QLabel("Close-out evidence for this action:"))
+                bv.addWidget(ev_list)
+                pending = []
+                row = QHBoxLayout()
+                add_btn = QPushButton("Add Evidence…")
+                rem_btn = QPushButton("Remove Selected")
+                def _add(lst=ev_list, pend=pending):
+                    paths, _ = QFileDialog.getOpenFileNames(dlg, "Close-out evidence files")
+                    for pth in paths:
+                        if pth not in pend:
+                            pend.append(pth)
+                            item = QListWidgetItem(Path(pth).name + " (new)")
+                            item.setData(Qt.ItemDataRole.UserRole, pth)
+                            lst.addItem(item)
+                def _rem(lst=ev_list, pend=pending):
+                    item = lst.currentItem()
+                    if not item: return
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    if isinstance(data, str) and data in pend:
+                        pend.remove(data)
+                    lst.takeItem(lst.row(item))
+                add_btn.clicked.connect(_add)
+                rem_btn.clicked.connect(_rem)
+                row.addWidget(add_btn); row.addWidget(rem_btn); row.addStretch(1)
+                bv.addLayout(row)
+                content_lay.addWidget(box)
+                action_widgets.append({
+                    "index": idx,
+                    "action": act_txt,
+                    "list": ev_list,
+                    "pending": pending,
+                    "existing": existing_names,
+                    "meta": a,
+                })
+
+            content_lay.addStretch(1)
+            scroll.setWidget(content)
+            lay.addWidget(scroll, 1)
+
+            notes = QTextEdit(); notes.setPlainText(safe(co.get("notes", ""))); notes.setPlaceholderText("Overall close-out notes / verification summary")
+            notes.setMaximumHeight(80)
+            lay.addWidget(QLabel("Overall close-out notes:")); lay.addWidget(notes)
+            submitted_by = QLineEdit(safe(co.get("submitted_by", "")))
+            reviewed_by = QLineEdit(safe(co.get("reviewed_by", "")))
+            approved_by = QLineEdit(safe(co.get("approved_by", "")))
             form = QFormLayout()
-            form.addRow("Submitted By", submitted_by); form.addRow("Reviewed By", reviewed_by); form.addRow("Approved By", approved_by)
+            form.addRow("Submitted By", submitted_by)
+            form.addRow("Reviewed By", reviewed_by)
+            form.addRow("Approved By", approved_by)
             lay.addLayout(form)
 
             bb = QDialogButtonBox()
@@ -10330,16 +10586,41 @@ class MainWindow(QMainWindow):
 
             def persist(new_wf_status, close_status=None):
                 try:
-                    saved_names = list(co.get("evidence_files") or [])
-                    if pending_files:
-                        saved = copy_attachments(pending_files, safe(rec["number"]), "incident_attachments", rid, "Closeout Evidence")
-                        saved_names.extend([Path(x).name for x in saved])
+                    new_action_evidence = {}
+                    all_saved_flat = []
+                    for aw in action_widgets:
+                        names = list(aw["existing"])
+                        # drop removed existing (those still in list without pending path)
+                        still = []
+                        for i in range(aw["list"].count()):
+                            it = aw["list"].item(i)
+                            data = it.data(Qt.ItemDataRole.UserRole)
+                            if isinstance(data, str) and data in aw["pending"]:
+                                continue  # will copy below
+                            # existing display name
+                            text_name = it.text().replace(" (new)", "").strip()
+                            if text_name and not (isinstance(data, str) and data in aw["pending"]):
+                                still.append(text_name)
+                        names = still
+                        if aw["pending"]:
+                            saved = copy_attachments(aw["pending"], safe(rec["number"]), "incident_attachments", rid, f"Closeout Evidence — Action {aw['index']+1}")
+                            for sp in saved:
+                                names.append(Path(sp).name)
+                        new_action_evidence[str(aw["index"])] = names
+                        all_saved_flat.extend(names)
+                        # also stamp onto corrective_actions entry
+                        if aw["index"] < len(actions):
+                            actions[aw["index"]]["closeout_evidence"] = names
+                            if names:
+                                actions[aw["index"]]["status"] = "Closed" if close_status else safe(actions[aw["index"]].get("status") or "Open")
+                    det["corrective_actions"] = actions
                     det["closeout"] = {
                         "notes": notes.toPlainText().strip(),
                         "submitted_by": submitted_by.text().strip(),
                         "reviewed_by": reviewed_by.text().strip(),
                         "approved_by": approved_by.text().strip(),
-                        "evidence_files": saved_names,
+                        "action_evidence": new_action_evidence,
+                        "evidence_files": all_saved_flat,  # backward compatible flat list
                         "updated_at": datetime.now().isoformat(),
                     }
                     if not isinstance(det.get("investigation_workflow"), dict):
@@ -10348,12 +10629,6 @@ class MainWindow(QMainWindow):
                     db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(det, ensure_ascii=False), rid))
                     if close_status:
                         db.execute("UPDATE incidents SET status=? WHERE id=?", (close_status, rid))
-                    db.conn.commit() if hasattr(db, 'conn') else None
-                    try:
-                        db.execute  # touch
-                    except Exception:
-                        pass
-                    # db.execute already commits in many wrappers - try commit via conn
                     try:
                         db.conn.commit()
                     except Exception:
