@@ -2250,63 +2250,147 @@ def add_docx_boxed_section(document, title, text, font_size=8):
     return t
 
 
-def add_docx_attachments(document, rows):
-    """Embed incident evidence in the investigation report, not just list filenames."""
-    document.add_heading("Evidence / Attachments", level=2)
+
+def add_docx_page_borders(document, color="17365D", size="24", space="18"):
+    """Apply a professional page border on every section of a Word report."""
+    try:
+        for section in document.sections:
+            sectPr = section._sectPr
+            for child in list(sectPr):
+                if child.tag == qn("w:pgBorders"):
+                    sectPr.remove(child)
+            pgBorders = OxmlElement("w:pgBorders")
+            pgBorders.set(qn("w:offsetFrom"), "page")
+            for edge in ("top", "left", "bottom", "right"):
+                el = OxmlElement(f"w:{edge}")
+                el.set(qn("w:val"), "single")
+                el.set(qn("w:sz"), str(size))
+                el.set(qn("w:space"), str(space))
+                el.set(qn("w:color"), color)
+                pgBorders.append(el)
+            sectPr.append(pgBorders)
+    except Exception:
+        logging.exception("Unable to apply Word page borders")
+
+
+def _embed_attachment_grid(document, rows, heading="Evidence / Attachments"):
+    """Embed evidence in a 2-column grid; each cell ~4 inch so images stay inside the cell."""
+    if heading:
+        document.add_heading(heading, level=2)
     if not rows:
         document.add_paragraph("No attachments recorded.")
         return
     image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+    items = []
     for index, row in enumerate(rows, 1):
-        stored = safe(row["file_path"])
+        try:
+            stored = safe(row["file_path"])
+        except Exception:
+            stored = safe(row.get("file_path", "")) if hasattr(row, "get") else ""
         path = resolve_attachment_path(stored)
-        filename = Path(stored.replace("\\", "/")).name or f"Attachment {index}"
-        kind = safe(row["attachment_type"]) if "attachment_type" in row.keys() else "Evidence"
-        remark = safe(row["remark"]) if "remark" in row.keys() else ""
-        para = document.add_paragraph()
-        label = para.add_run(f"{index}. {filename} | Type: {kind}")
-        label.bold = True
+        filename = Path(str(stored).replace("\\", "/")).name or f"Attachment {index}"
+        try:
+            kind = safe(row["attachment_type"]) if "attachment_type" in row.keys() else "Evidence"
+        except Exception:
+            kind = "Evidence"
+        try:
+            remark = safe(row["remark"]) if "remark" in row.keys() else ""
+        except Exception:
+            remark = ""
+        caption_lines = [f"{index}. {filename}", f"Type: {kind}"]
         if remark:
-            document.add_paragraph(f"Remark: {remark}")
-        if not path:
-            document.add_paragraph("Attachment file could not be located. The stored filename is retained for traceability.")
-            continue
-        suffix = path.suffix.lower()
-        if suffix in image_exts:
-            # Normalize with Pillow first. This fixes unsupported/rotated formats and
-            # avoids silently omitting valid photos from the final investigation report.
-            stream = attachment_image_stream(str(path))
-            if stream is not None:
+            caption_lines.append(f"Comment: {remark}")
+        caption = "\n".join(caption_lines)
+        stream = None
+        note = ""
+        if path:
+            suffix = path.suffix.lower()
+            if suffix in image_exts:
+                stream = attachment_image_stream(str(path))
+                if stream is None:
+                    note = "Image could not be converted for embedding."
+            elif suffix == ".pdf":
                 try:
-                    pic = document.add_paragraph()
-                    pic.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    pic.add_run().add_picture(stream, width=Inches(5.7))
-                    continue
+                    import fitz
+                    pdf = fitz.open(str(path))
+                    if len(pdf) > 0:
+                        pix = pdf[0].get_pixmap(matrix=fitz.Matrix(1.2, 1.2), alpha=False)
+                        stream = io.BytesIO(pix.tobytes("png"))
+                        if len(pdf) > 1:
+                            caption_lines.append(f"(PDF — page 1 of {len(pdf)})")
+                            caption = "\n".join(caption_lines)
+                    pdf.close()
                 except Exception:
-                    logging.exception("Unable to embed incident image attachment: %s", path)
-            document.add_paragraph("Image was found but could not be converted for Word embedding.")
-        elif suffix == ".pdf":
-            try:
-                import fitz
-                pdf = fitz.open(str(path))
-                for page_no, page in enumerate(pdf, 1):
-                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
-                    stream = io.BytesIO(pix.tobytes("png"))
-                    cap = document.add_paragraph(f"{filename} — Page {page_no}")
-                    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    document.add_picture(stream, width=Inches(5.8))
-                pdf.close()
-            except Exception:
-                logging.exception("Unable to embed incident PDF attachment: %s", path)
-                document.add_paragraph("PDF could not be rendered on this computer; the original file remains in the attachment store.")
-        elif suffix in {".txt", ".csv", ".log"}:
-            try:
-                content = path.read_text(encoding="utf-8", errors="replace")
-                document.add_paragraph(content[:20000] if content else "(No readable text content.)")
-            except Exception:
-                document.add_paragraph("Text attachment could not be read during export.")
+                    note = "PDF could not be rendered; file retained in attachment store."
+            elif suffix in {".txt", ".csv", ".log"}:
+                try:
+                    content = path.read_text(encoding="utf-8", errors="replace")
+                    note = (content[:400] + ("…" if len(content) > 400 else "")) if content else "(empty text)"
+                except Exception:
+                    note = "Text file could not be read."
+            else:
+                note = f"File retained in store ({path.suffix or 'unknown type'})."
         else:
-            document.add_paragraph(f"Original file retained in the attachment store ({path.suffix or 'unknown file type'}).")
+            note = "File could not be located — filename retained for traceability."
+        items.append({"caption": caption, "stream": stream, "note": note})
+
+    cols = 2
+    cell_w = Inches(4.0)
+    img_w = Inches(3.45)
+    for start in range(0, len(items), cols):
+        chunk = items[start:start + cols]
+        table = document.add_table(rows=1, cols=cols)
+        table.autofit = False
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        for c in range(cols):
+            try:
+                table.columns[c].width = cell_w
+            except Exception:
+                pass
+            table.rows[0].cells[c].width = cell_w
+        for c in range(cols):
+            cell = table.rows[0].cells[c]
+            set_docx_cell_borders(
+                cell,
+                top={"val": "single", "sz": 8, "color": "17365D"},
+                bottom={"val": "single", "sz": 8, "color": "17365D"},
+                left={"val": "single", "sz": 8, "color": "17365D"},
+                right={"val": "single", "sz": 8, "color": "17365D"},
+            )
+            if c >= len(chunk):
+                cell.text = ""
+                continue
+            item = chunk[c]
+            p0 = cell.paragraphs[0]
+            p0.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p0.add_run(item["caption"])
+            run.bold = True
+            run.font.size = Pt(8)
+            if item["stream"] is not None:
+                try:
+                    item["stream"].seek(0)
+                    p_img = cell.add_paragraph()
+                    p_img.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    p_img.paragraph_format.space_before = Pt(4)
+                    p_img.paragraph_format.space_after = Pt(2)
+                    p_img.add_run().add_picture(item["stream"], width=img_w)
+                except Exception:
+                    logging.exception("Unable to embed attachment in grid cell")
+                    p_err = cell.add_paragraph()
+                    p_err.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    r = p_err.add_run(item["note"] or "Could not embed image.")
+                    r.font.size = Pt(8)
+            elif item["note"]:
+                p_n = cell.add_paragraph()
+                p_n.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                r = p_n.add_run(item["note"])
+                r.font.size = Pt(8)
+        document.add_paragraph()
+
+
+def add_docx_attachments(document, rows, heading="Evidence / Attachments"):
+    """Embed incident evidence in the investigation report (2x2 grid, ~4\" cells)."""
+    return _embed_attachment_grid(document, rows, heading=heading)
 
 
 def add_docx_signatures(document):
@@ -2328,6 +2412,10 @@ def generate_incident_docx(incident_id, path):
     # investigation tables and evidence fields, so landscape prevents table
     # compression while preserving the existing report content.
     set_docx_landscape(doc)
+    try:
+        add_docx_page_borders(doc, color="17365D", size="24", space="18")
+    except Exception:
+        logging.exception("incident report page borders")
     add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"],normalize_logo=True)
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
     noi_reference = ""
@@ -2556,16 +2644,16 @@ def generate_incident_docx(incident_id, path):
             cells[4].text = xml_safe(er["review_status"])
             cells[5].text = xml_safe(er["reviewed_by"])
         style_docx_table(co_table, header=True, font_size=7)
+        co_attach_rows = []
         for er in co_rows:
-            fp = Path(safe(er["file_path"]))
-            if fp.is_file() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}:
-                try:
-                    doc.add_paragraph(f"Evidence — Action {int(er['action_index'] or 0)+1}: {fp.name} [{safe(er['review_status'])}]")
-                    doc.add_picture(str(fp), width=Inches(4.5))
-                except Exception:
-                    doc.add_paragraph(f"(Could not embed image: {fp.name})")
-            elif fp.is_file():
-                doc.add_paragraph(f"Evidence file: {fp.name} — {safe(er['review_status'])}")
+            co_attach_rows.append({
+                "file_path": safe(er["file_path"]),
+                "attachment_type": f"Close-out — Action {int(er['action_index'] or 0)+1}",
+                "remark": f"Status: {safe(er['review_status'])} | By: {safe(er['submitted_by'])} | {safe(er['action_text'])[:120]}",
+            })
+        if co_attach_rows:
+            _embed_attachment_grid(doc, co_attach_rows, heading="Close-Out Evidence Images")
+
     try:
         co = details.get("closeout", {}) if isinstance(details.get("closeout"), dict) else {}
         if co:
