@@ -851,6 +851,24 @@ class Database:
         );
         CREATE INDEX IF NOT EXISTS idx_obs_closeout_observation ON observation_closeout_evidence(observation_id);
         CREATE INDEX IF NOT EXISTS idx_obs_closeout_batch ON observation_closeout_evidence(batch_id);
+
+        CREATE TABLE IF NOT EXISTS incident_closeout_evidence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            incident_id INTEGER NOT NULL,
+            action_index INTEGER DEFAULT 0,
+            action_text TEXT DEFAULT '',
+            file_path TEXT NOT NULL,
+            submitted_by TEXT DEFAULT '',
+            submitted_at TEXT DEFAULT '',
+            review_status TEXT DEFAULT 'Draft',
+            reviewed_by TEXT DEFAULT '',
+            reviewed_at TEXT DEFAULT '',
+            review_comments TEXT DEFAULT '',
+            FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_inc_closeout_incident ON incident_closeout_evidence(incident_id);
+        CREATE INDEX IF NOT EXISTS idx_inc_closeout_batch ON incident_closeout_evidence(batch_id);
         """)
         self.conn.commit()
 
@@ -2509,6 +2527,51 @@ def generate_incident_docx(incident_id, path):
         approval_table.cell(0,col).vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
         approval_table.cell(1,col).vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
     style_docx_table(approval_table,header=True,font_size=8)
+
+    # ---- Close-out evidence register ----
+    try:
+        co_rows = db.fetchall(
+            "SELECT * FROM incident_closeout_evidence WHERE incident_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN ('deleted','void','cancelled') ORDER BY action_index, id",
+            (incident_id,),
+        ) or []
+    except Exception:
+        co_rows = []
+    if co_rows:
+        doc.add_heading("Close-Out Evidence", 2)
+        co_table = doc.add_table(rows=1, cols=6)
+        for ci, h in enumerate(["Action #", "Corrective Action", "File", "Submitted By", "Status", "Reviewed By"]):
+            co_table.rows[0].cells[ci].text = h
+        for er in co_rows:
+            cells = co_table.add_row().cells
+            cells[0].text = str(int(er["action_index"] or 0) + 1)
+            cells[1].text = xml_safe(er["action_text"])
+            cells[2].text = xml_safe(Path(safe(er["file_path"])).name)
+            cells[3].text = xml_safe(er["submitted_by"])
+            cells[4].text = xml_safe(er["review_status"])
+            cells[5].text = xml_safe(er["reviewed_by"])
+        style_docx_table(co_table, header=True, font_size=7)
+        for er in co_rows:
+            fp = Path(safe(er["file_path"]))
+            if fp.is_file() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}:
+                try:
+                    doc.add_paragraph(f"Evidence — Action {int(er['action_index'] or 0)+1}: {fp.name} [{safe(er['review_status'])}]")
+                    doc.add_picture(str(fp), width=Inches(4.5))
+                except Exception:
+                    doc.add_paragraph(f"(Could not embed image: {fp.name})")
+            elif fp.is_file():
+                doc.add_paragraph(f"Evidence file: {fp.name} — {safe(er['review_status'])}")
+    try:
+        co = details.get("closeout", {}) if isinstance(details.get("closeout"), dict) else {}
+        if co:
+            add_docx_boxed_section(doc, "Close-Out Notes", safe(co.get("notes", "")), 8)
+            add_docx_kv_table(doc, [
+                ("Close-Out Submitted By", safe(co.get("submitted_by", ""))),
+                ("Close-Out Reviewed By", safe(co.get("reviewed_by", ""))),
+                ("Close-Out Approved By", safe(co.get("approved_by", ""))),
+            ])
+    except Exception:
+        pass
+
     add_docx_footer(doc); save_docx_validated(doc,path)
 
 
@@ -10451,7 +10514,7 @@ class MainWindow(QMainWindow):
         def open_closeout_dialog():
             r = close_table.currentRow()
             if r < 0 or not close_table.item(r, 0):
-                QMessageBox.information(self, "Select", "Select an approved investigation first."); return
+                QMessageBox.information(self, "Select", "Select an investigation first."); return
             rid = int(close_table.item(r, 0).data(Qt.ItemDataRole.UserRole))
             rec = db.fetchone("SELECT * FROM incidents WHERE id=?", (rid,))
             if not rec: return
@@ -10460,188 +10523,279 @@ class MainWindow(QMainWindow):
             wf = det.get("investigation_workflow", {}) if isinstance(det.get("investigation_workflow"), dict) else {}
             co = det.get("closeout", {}) if isinstance(det.get("closeout"), dict) else {}
 
-            # Collect corrective actions from all investigation method shapes
+            # Corrective actions from all investigation methods
             actions = []
-            raw_actions = det.get("corrective_actions") or []
-            if isinstance(raw_actions, list):
-                for a in raw_actions:
-                    if isinstance(a, dict) and safe(a.get("action", "")).strip():
-                        actions.append(dict(a))
-                    elif isinstance(a, str) and a.strip():
-                        actions.append({"action": a.strip(), "responsible": "", "target_date": "", "status": "Open"})
-            # ICAM control measures as actions if no corrective_actions list
+            for a in (det.get("corrective_actions") or []):
+                if isinstance(a, dict) and safe(a.get("action", "")).strip():
+                    actions.append(dict(a))
+                elif isinstance(a, str) and a.strip():
+                    actions.append({"action": a.strip(), "responsible": "", "target_date": "", "status": "Open"})
             if not actions:
                 for row in (det.get("icam_control_rows") or []):
-                    if isinstance(row, (list, tuple)) and len(row) >= 3:
-                        actions.append({"action": safe(row[2]) if not isinstance(row[2], str) else safe(row[2]), "responsible": "", "target_date": "", "status": "Open", "source": "ICAM"})
-                    elif isinstance(row, dict) and safe(row.get("control_measure", "")).strip():
+                    if isinstance(row, dict) and safe(row.get("control_measure", "")).strip():
                         actions.append({"action": safe(row.get("control_measure")), "responsible": safe(row.get("responsible")), "target_date": safe(row.get("target_date")), "status": safe(row.get("status", "Open")), "source": "ICAM"})
-            # Legacy single corrective_action field
             if not actions and safe(rec["corrective_action"]):
                 for line in safe(rec["corrective_action"]).splitlines():
                     if line.strip():
                         actions.append({"action": line.strip(), "responsible": "", "target_date": "", "status": "Open", "source": "Legacy"})
             if not actions:
-                actions = [{"action": "(No corrective action text recorded — add close-out evidence for the investigation overall)", "responsible": "", "target_date": "", "status": "Open", "source": "General"}]
+                actions = [{"action": "(Overall investigation close-out — no specific corrective action text)", "responsible": "", "target_date": "", "status": "Open", "source": "General"}]
 
-            # Per-action evidence map from saved closeout
-            action_evidence = co.get("action_evidence") if isinstance(co.get("action_evidence"), dict) else {}
-            # migrate old flat evidence_files into action 0
-            if not action_evidence and co.get("evidence_files"):
-                action_evidence = {"0": list(co.get("evidence_files") or [])}
+            dlg = QDialog(self)
+            dlg.setWindowTitle(f"Close-Out Evidence — {rec['number']}")
+            dlg.setMinimumSize(720, 520)
+            try:
+                fit_dialog_to_desktop(dlg, 0.90, 0.88)
+            except Exception:
+                dlg.resize(920, 680)
+            root = QVBoxLayout(dlg)
+            root.setContentsMargins(12, 10, 12, 10)
 
-            dlg = QDialog(self); dlg.setWindowTitle(f"Close-Out — {rec['number']}"); dlg.resize(960, 760)
-            lay = QVBoxLayout(dlg)
-            method = safe(rec["investigation_method"]) or "—"
-            lay.addWidget(QLabel(f"<b>{safe(rec['number'])}</b> — {safe(rec['incident_type'])} @ {safe(rec['location'])}"))
-            lay.addWidget(QLabel(f"Investigation method: <b>{method}</b> | Workflow: {safe(wf.get('status', rec['status']))} | Approved by: {safe(wf.get('approved_by', '—'))}"))
+            hdr = QLabel(f"<b>{safe(rec['number'])}</b> — {safe(rec['incident_type'])} @ {safe(rec['location'])}<br>"
+                         f"Method: <b>{safe(rec['investigation_method']) or '—'}</b> | Workflow: {safe(wf.get('status', rec['status']))}")
+            hdr.setWordWrap(True)
+            root.addWidget(hdr)
 
-            capa_no = safe(rec["capa_number"] if "capa_number" in rec.keys() else "")
-            if capa_no:
-                capa_row = db.fetchone("SELECT * FROM capa WHERE number=?", (capa_no,))
-                if capa_row:
-                    lay.addWidget(QLabel(f"Linked CAPA: {capa_no} — Status: {safe(capa_row['status'])}"))
+            # Evidence table (like observation close-out)
+            ev_table = QTableWidget(0, 8)
+            ev_table.setHorizontalHeaderLabels(["ID", "Action #", "Corrective Action", "File", "Submitted By", "Submitted At", "Status", "Reviewed By"])
+            ev_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            ev_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            ev_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            ev_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            ev_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            ev_table.setColumnHidden(0, True)
+            root.addWidget(ev_table, 1)
 
-            info = QLabel("Each corrective action below can have one or more close-out evidence files. Add evidence per action, then submit / review / approve.")
-            info.setWordWrap(True); info.setStyleSheet("color:#526477;padding:4px;")
-            lay.addWidget(info)
+            def reload_evidence():
+                rows = db.fetchall(
+                    "SELECT * FROM incident_closeout_evidence WHERE incident_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN ('deleted','void','cancelled') ORDER BY action_index, id",
+                    (rid,),
+                ) or []
+                ev_table.setRowCount(len(rows))
+                for i, er in enumerate(rows):
+                    vals = [
+                        er["id"],
+                        int(er["action_index"] or 0) + 1,
+                        safe(er["action_text"])[:80],
+                        Path(safe(er["file_path"])).name,
+                        er["submitted_by"],
+                        safe(er["submitted_at"])[:19],
+                        er["review_status"],
+                        er["reviewed_by"],
+                    ]
+                    for c, v in enumerate(vals):
+                        it = QTableWidgetItem(str(v or ""))
+                        if c == 6:
+                            st = safe(v).lower()
+                            if st == "approved":
+                                it.setBackground(QColor("#DCFCE7")); it.setForeground(QColor("#166534"))
+                            elif st in ("pending review", "submitted", "submitted for review"):
+                                it.setBackground(QColor("#DBEAFE")); it.setForeground(QColor("#1D4ED8"))
+                            elif st in ("rejected", "returned"):
+                                it.setBackground(QColor("#FEE2E2")); it.setForeground(QColor("#991B1B"))
+                            elif st == "draft":
+                                it.setBackground(QColor("#F1F5F9"))
+                        ev_table.setItem(i, c, it)
+                    ev_table.item(i, 0).setData(Qt.ItemDataRole.UserRole, int(er["id"]))
 
-            scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setFrameShape(QFrame.Shape.NoFrame)
-            content = QWidget(); content_lay = QVBoxLayout(content)
-            action_widgets = []  # list of dicts: action text, list widget, pending paths
+            reload_evidence()
 
-            for idx, a in enumerate(actions):
-                box = QGroupBox(f"Corrective Action {idx + 1}")
-                box.setStyleSheet("QGroupBox{font-weight:700;color:#17365D;}")
-                bv = QVBoxLayout(box)
-                act_txt = safe(a.get("action", ""))
-                meta = f"Responsible: {safe(a.get('responsible')) or '—'}  |  Target: {safe(a.get('target_date')) or '—'}  |  Status: {safe(a.get('status')) or 'Open'}"
-                if a.get("source"):
-                    meta += f"  |  Source: {a.get('source')}"
-                lab = QLabel(act_txt); lab.setWordWrap(True); lab.setStyleSheet("background:#F8FAFC;border:1px solid #E2E8F0;padding:8px;border-radius:6px;")
-                bv.addWidget(lab)
-                bv.addWidget(QLabel(meta))
-                ev_list = QListWidget(); ev_list.setMinimumHeight(70)
-                # existing saved names
-                existing_names = list(action_evidence.get(str(idx)) or action_evidence.get(idx) or [])
-                for name in existing_names:
-                    ev_list.addItem(str(name))
-                bv.addWidget(QLabel("Close-out evidence for this action:"))
-                bv.addWidget(ev_list)
-                pending = []
-                row = QHBoxLayout()
-                add_btn = QPushButton("Add Evidence…")
-                rem_btn = QPushButton("Remove Selected")
-                def _add(lst=ev_list, pend=pending):
-                    paths, _ = QFileDialog.getOpenFileNames(dlg, "Close-out evidence files")
-                    for pth in paths:
-                        if pth not in pend:
-                            pend.append(pth)
-                            item = QListWidgetItem(Path(pth).name + " (new)")
-                            item.setData(Qt.ItemDataRole.UserRole, pth)
-                            lst.addItem(item)
-                def _rem(lst=ev_list, pend=pending):
-                    item = lst.currentItem()
-                    if not item: return
-                    data = item.data(Qt.ItemDataRole.UserRole)
-                    if isinstance(data, str) and data in pend:
-                        pend.remove(data)
-                    lst.takeItem(lst.row(item))
-                add_btn.clicked.connect(_add)
-                rem_btn.clicked.connect(_rem)
-                row.addWidget(add_btn); row.addWidget(rem_btn); row.addStretch(1)
-                bv.addLayout(row)
-                content_lay.addWidget(box)
-                action_widgets.append({
-                    "index": idx,
-                    "action": act_txt,
-                    "list": ev_list,
-                    "pending": pending,
-                    "existing": existing_names,
-                    "meta": a,
-                })
-
-            content_lay.addStretch(1)
-            scroll.setWidget(content)
-            lay.addWidget(scroll, 1)
-
-            notes = QTextEdit(); notes.setPlainText(safe(co.get("notes", ""))); notes.setPlaceholderText("Overall close-out notes / verification summary")
-            notes.setMaximumHeight(80)
-            lay.addWidget(QLabel("Overall close-out notes:")); lay.addWidget(notes)
-            submitted_by = QLineEdit(safe(co.get("submitted_by", "")))
-            reviewed_by = QLineEdit(safe(co.get("reviewed_by", "")))
-            approved_by = QLineEdit(safe(co.get("approved_by", "")))
+            # Action selector for attaching
+            act_combo = QComboBox()
+            for i, a in enumerate(actions):
+                act_combo.addItem(f"Action {i+1}: {safe(a.get('action',''))[:70]}", i)
             form = QFormLayout()
-            form.addRow("Submitted By", submitted_by)
-            form.addRow("Reviewed By", reviewed_by)
-            form.addRow("Approved By", approved_by)
-            lay.addLayout(form)
+            form.addRow("Attach evidence to", act_combo)
+            submitter = QLineEdit()
+            submitter.setPlaceholderText("Name / ID of person submitting evidence")
+            form.addRow("Submitted By", submitter)
+            root.addLayout(form)
 
-            bb = QDialogButtonBox()
-            btn_submit = bb.addButton("Submit Close-Out", QDialogButtonBox.ButtonRole.ActionRole)
-            btn_review = bb.addButton("Review Close-Out", QDialogButtonBox.ButtonRole.ActionRole)
-            btn_approve = bb.addButton("Approve & Close Incident", QDialogButtonBox.ButtonRole.AcceptRole)
-            btn_cancel = bb.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-            lay.addWidget(bb); btn_cancel.clicked.connect(dlg.reject)
+            notes = QTextEdit(); notes.setPlainText(safe(co.get("notes", "")))
+            notes.setPlaceholderText("Overall close-out notes")
+            notes.setMaximumHeight(70)
+            root.addWidget(QLabel("Close-out notes:"))
+            root.addWidget(notes)
 
-            def persist(new_wf_status, close_status=None):
+            btn_row = QHBoxLayout()
+            btn_add = QPushButton("Add Attachment(s)…")
+            btn_submit = QPushButton("Submit Selected")
+            btn_review = QPushButton("Review Selected")
+            btn_approve = QPushButton("Approve Selected")
+            btn_reject = QPushButton("Reject Selected")
+            btn_export = QPushButton("Export Professional Report")
+            btn_close = QPushButton("Close")
+            for b in (btn_add, btn_submit, btn_review, btn_approve, btn_reject, btn_export, btn_close):
+                b.setMinimumHeight(34)
+                btn_row.addWidget(b)
+            root.addLayout(btn_row)
+
+            def selected_evidence_ids():
+                ids = []
+                for idx in ev_table.selectionModel().selectedRows():
+                    item = ev_table.item(idx.row(), 0)
+                    if item:
+                        ids.append(int(item.data(Qt.ItemDataRole.UserRole)))
+                return ids
+
+            def add_attachments():
+                by = submitter.text().strip()
+                if not by:
+                    QMessageBox.warning(dlg, "Required", "Enter Submitted By before attaching."); return
+                paths, _ = QFileDialog.getOpenFileNames(
+                    dlg, "Select Close-out Evidence",
+                    "", "Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
+                )
+                if not paths:
+                    return
+                action_idx = int(act_combo.currentData())
+                action_text = safe(actions[action_idx].get("action", "")) if 0 <= action_idx < len(actions) else ""
+                batch = f"INC-CO-{rid}-{action_idx}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
                 try:
-                    new_action_evidence = {}
-                    all_saved_flat = []
-                    for aw in action_widgets:
-                        names = list(aw["existing"])
-                        # drop removed existing (those still in list without pending path)
-                        still = []
-                        for i in range(aw["list"].count()):
-                            it = aw["list"].item(i)
-                            data = it.data(Qt.ItemDataRole.UserRole)
-                            if isinstance(data, str) and data in aw["pending"]:
-                                continue  # will copy below
-                            # existing display name
-                            text_name = it.text().replace(" (new)", "").strip()
-                            if text_name and not (isinstance(data, str) and data in aw["pending"]):
-                                still.append(text_name)
-                        names = still
-                        if aw["pending"]:
-                            saved = copy_attachments(aw["pending"], safe(rec["number"]), "incident_attachments", rid, f"Closeout Evidence — Action {aw['index']+1}")
-                            for sp in saved:
-                                names.append(Path(sp).name)
-                        new_action_evidence[str(aw["index"])] = names
-                        all_saved_flat.extend(names)
-                        # also stamp onto corrective_actions entry
-                        if aw["index"] < len(actions):
-                            actions[aw["index"]]["closeout_evidence"] = names
-                            if names:
-                                actions[aw["index"]]["status"] = "Closed" if close_status else safe(actions[aw["index"]].get("status") or "Open")
-                    det["corrective_actions"] = actions
-                    det["closeout"] = {
-                        "notes": notes.toPlainText().strip(),
-                        "submitted_by": submitted_by.text().strip(),
-                        "reviewed_by": reviewed_by.text().strip(),
-                        "approved_by": approved_by.text().strip(),
-                        "action_evidence": new_action_evidence,
-                        "evidence_files": all_saved_flat,  # backward compatible flat list
-                        "updated_at": datetime.now().isoformat(),
-                    }
-                    if not isinstance(det.get("investigation_workflow"), dict):
-                        det["investigation_workflow"] = {}
-                    det["investigation_workflow"]["status"] = new_wf_status
-                    db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(det, ensure_ascii=False), rid))
-                    if close_status:
-                        db.execute("UPDATE incidents SET status=? WHERE id=?", (close_status, rid))
-                    try:
-                        db.conn.commit()
-                    except Exception:
-                        pass
-                    dlg.accept(); load_closeout_list(); load_investigations(); refresh_dashboard()
-                    QMessageBox.information(self, "Close-Out", f"Status updated to: {new_wf_status}" + (f" / Incident {close_status}" if close_status else ""))
+                    for src_name in paths:
+                        source = Path(src_name)
+                        if not source.is_file():
+                            continue
+                        dest = ATTACH_DIR / f"{safe(rec['number'])}_Closeout_A{action_idx+1}_{source.name}"
+                        counter = 1
+                        while dest.exists():
+                            dest = ATTACH_DIR / f"{safe(rec['number'])}_Closeout_A{action_idx+1}_{counter}_{source.name}"
+                            counter += 1
+                        shutil.copy2(source, dest)
+                        now = datetime.now().isoformat(timespec="seconds")
+                        db.execute(
+                            """INSERT INTO incident_closeout_evidence(batch_id,incident_id,action_index,action_text,file_path,submitted_by,submitted_at,review_status)
+                               VALUES(?,?,?,?,?,?,?,'Draft')""",
+                            (batch, rid, action_idx, action_text, str(dest), by, now),
+                        )
+                        try:
+                            db.execute(
+                                "INSERT INTO incident_attachments(incident_id,file_path,attachment_type) VALUES(?,?,?)",
+                                (rid, str(dest), "Close-out Evidence"),
+                            )
+                        except Exception:
+                            pass
+                    reload_evidence()
+                    QMessageBox.information(dlg, "Attached", f"{len(paths)} file(s) added as Draft for Action {action_idx+1}.\nUse Submit Selected when ready.")
                 except Exception as exc:
-                    logging.exception("closeout")
+                    logging.exception("inc closeout attach")
                     QMessageBox.critical(dlg, "Failed", str(exc))
 
-            btn_submit.clicked.connect(lambda: persist("Close-Out Submitted") if submitted_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Submitted By name."))
-            btn_review.clicked.connect(lambda: persist("Close-Out Reviewed") if reviewed_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Reviewed By name."))
-            btn_approve.clicked.connect(lambda: persist("Closed Out", "Closed") if approved_by.text().strip() else QMessageBox.warning(dlg, "Required", "Enter Approved By name."))
+            def set_status(new_status, require_reviewer=False):
+                ids = selected_evidence_ids()
+                if not ids:
+                    QMessageBox.warning(dlg, "Select", "Select one or more evidence rows."); return
+                name = ""
+                comment = ""
+                if require_reviewer:
+                    name, ok = QInputDialog.getText(dlg, new_status, "Reviewer / Approver full name:")
+                    if not ok or not name.strip():
+                        QMessageBox.warning(dlg, "Required", "Name is required."); return
+                    name = name.strip()
+                    if new_status in ("Rejected", "Returned"):
+                        comment, ok2 = QInputDialog.getMultiLineText(dlg, "Comments", "Reason / comments:")
+                        if not ok2:
+                            return
+                        comment = (comment or "").strip()
+                elif new_status in ("Pending Review", "Submitted for Review"):
+                    name = submitter.text().strip() or "Submitter"
+                now = datetime.now().isoformat(timespec="seconds")
+                try:
+                    for eid in ids:
+                        row = db.fetchone("SELECT * FROM incident_closeout_evidence WHERE id=?", (eid,))
+                        if not row:
+                            continue
+                        cur = safe(row["review_status"]).lower()
+                        if new_status in ("Pending Review", "Submitted for Review") and cur not in ("draft", "rejected", "returned", ""):
+                            continue
+                        if new_status == "Approved" and cur not in ("pending review", "submitted for review", "submitted"):
+                            QMessageBox.warning(dlg, "Workflow", "Only Pending Review evidence can be approved. Submit first.")
+                            return
+                        if new_status in ("Rejected", "Returned") and cur not in ("pending review", "submitted for review", "submitted"):
+                            QMessageBox.warning(dlg, "Workflow", "Only Pending Review evidence can be rejected.")
+                            return
+                        db.execute(
+                            """UPDATE incident_closeout_evidence
+                               SET review_status=?, reviewed_by=?, reviewed_at=?, review_comments=?
+                               WHERE id=?""",
+                            (new_status, name, now, comment, eid),
+                        )
+                    # If all evidence for this incident is Approved → close incident
+                    remaining = db.fetchall(
+                        "SELECT review_status FROM incident_closeout_evidence WHERE incident_id=? AND lower(trim(COALESCE(review_status,''))) NOT IN ('deleted','void','cancelled')",
+                        (rid,),
+                    ) or []
+                    if remaining and all(safe(x["review_status"]).lower() == "approved" for x in remaining):
+                        det2 = det
+                        if not isinstance(det2.get("investigation_workflow"), dict):
+                            det2["investigation_workflow"] = {}
+                        det2["investigation_workflow"]["status"] = "Closed Out"
+                        det2["closeout"] = {
+                            "notes": notes.toPlainText().strip(),
+                            "submitted_by": submitter.text().strip() or safe(co.get("submitted_by", "")),
+                            "reviewed_by": name or safe(co.get("reviewed_by", "")),
+                            "approved_by": name,
+                            "updated_at": now,
+                        }
+                        db.execute("UPDATE incidents SET investigation_details=?, status=? WHERE id=?",
+                                   (json.dumps(det2, ensure_ascii=False), "Closed", rid))
+                        QMessageBox.information(dlg, "Closed", "All close-out evidence is Approved. Incident status set to Closed.")
+                    reload_evidence()
+                    load_closeout_list()
+                    load_investigations()
+                    refresh_dashboard()
+                except Exception as exc:
+                    logging.exception("inc closeout status")
+                    QMessageBox.critical(dlg, "Failed", str(exc))
+
+            def export_report():
+                # Require at least one approved evidence ideally, but still allow export with whatever is attached
+                number = safe(rec["number"])
+                path_out, _ = QFileDialog.getSaveFileName(
+                    dlg, "Export Investigation Professional Report (with Close-Out Evidence)",
+                    f"{number}_Investigation_CloseOut_Report.docx", "Word Document (*.docx)"
+                )
+                if not path_out:
+                    return
+                if not path_out.lower().endswith(".docx"):
+                    path_out += ".docx"
+                try:
+                    # persist notes
+                    det["closeout"] = {
+                        "notes": notes.toPlainText().strip(),
+                        "submitted_by": submitter.text().strip() or safe(co.get("submitted_by", "")),
+                        "reviewed_by": safe(co.get("reviewed_by", "")),
+                        "approved_by": safe(co.get("approved_by", "")),
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    db.execute("UPDATE incidents SET investigation_details=? WHERE id=?",
+                               (json.dumps(det, ensure_ascii=False), rid))
+                    generate_incident_docx(int(rid), path_out)
+                    if not Path(path_out).exists() or Path(path_out).stat().st_size < 500:
+                        raise ValueError("Report was not created correctly.")
+                    QMessageBox.information(dlg, "Exported", f"Professional report with close-out evidence:\n{path_out}")
+                except Exception as exc:
+                    logging.exception("inc closeout export")
+                    QMessageBox.critical(dlg, "Export Failed", str(exc))
+
+            btn_add.clicked.connect(add_attachments)
+            btn_submit.clicked.connect(lambda: set_status("Pending Review"))
+            btn_review.clicked.connect(lambda: set_status("Pending Review"))  # submitter marks ready
+            btn_approve.clicked.connect(lambda: set_status("Approved", require_reviewer=True))
+            btn_reject.clicked.connect(lambda: set_status("Rejected", require_reviewer=True))
+            btn_export.clicked.connect(export_report)
+            btn_close.clicked.connect(dlg.accept)
+
+            # Double-click opens file
+            def open_file(row, _col):
+                item = ev_table.item(row, 0)
+                if not item: return
+                er = db.fetchone("SELECT file_path FROM incident_closeout_evidence WHERE id=?", (int(item.data(Qt.ItemDataRole.UserRole)),))
+                if er and Path(safe(er["file_path"])).is_file():
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(safe(er["file_path"])).resolve())))
+            ev_table.cellDoubleClicked.connect(open_file)
+
             dlg.exec()
 
         open_close_btn.clicked.connect(open_closeout_dialog)
