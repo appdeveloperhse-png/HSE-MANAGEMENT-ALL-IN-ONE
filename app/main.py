@@ -43815,6 +43815,7 @@ class DigitalLiftingPlanModule(QWidget):
 
 
     def _export_plan(self, plan_id):
+        """Create a controlled, engineering-style lifting plan pack (DLP module only)."""
         row = self.db.conn.execute(
             'SELECT plan_number,project,location,lifting_date,load_description,load_weight_kg,payload_json,workflow_status,created_by FROM digital_lifting_plans WHERE id=?',
             (plan_id,)
@@ -43826,7 +43827,7 @@ class DigitalLiftingPlanModule(QWidget):
         except Exception:
             data = {}
         data['workflow_status'] = row['workflow_status']
-        number = row['plan_number']
+        number = str(row['plan_number'] or 'LIFT-PLAN')
         path, selected_filter = QFileDialog.getSaveFileName(
             self, 'Export Lifting Plan', f'{number}_Lifting_Plan.docx',
             'Word Documents (*.docx);;PDF Files (*.pdf)'
@@ -43835,19 +43836,19 @@ class DigitalLiftingPlanModule(QWidget):
             return
         if path.lower().endswith('.pdf') or ('PDF' in (selected_filter or '') and not path.lower().endswith('.docx')):
             fmt = 'pdf'
-            if not path.lower().endswith('.pdf'):
-                path += '.pdf'
+            if not path.lower().endswith('.pdf'): path += '.pdf'
         else:
             fmt = 'docx'
-            if not path.lower().endswith('.docx'):
-                path += '.docx'
+            if not path.lower().endswith('.docx'): path += '.docx'
+
         try:
-            side_img = self._render_drawing_image(data, 'side')
-            plan_img = self._render_drawing_image(data, 'plan')
+            side_img = self._render_drawing_image(data, 'side', 1800, 1050)
+            plan_img = self._render_drawing_image(data, 'plan', 1800, 1050)
+            generated = datetime.now().strftime('%d-%b-%Y %H:%M')
             report_no = f"{document_prefix()}-LP-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            company = company_name()
-            unit = data.get('load_unit') or 'kg'
-            load_kg = float(row['load_weight_kg'] or 0)
+            company = str(company_name() or 'Company')
+            unit = str(data.get('load_unit') or 'kg').lower()
+            load_kg = float(row['load_weight_kg'] or data.get('load_weight_kg') or 0)
             load_disp = f"{load_kg / 1000.0:,.3f} t" if unit in ('t', 'ton', 'tonne', 'tonnes') else f"{load_kg:,.2f} kg"
             prepared = data.get('plan_prepared_by') or row['created_by'] or ''
             reviewed = data.get('reviewed_by') or ''
@@ -43855,127 +43856,237 @@ class DigitalLiftingPlanModule(QWidget):
             review_date = data.get('review_date') or ''
             approve_date = data.get('approve_date') or ''
             review_comments = data.get('review_comments') or ''
-            pairs = [
-                ('Plan Number', number), ('Status', row['workflow_status']),
-                ('Project', row['project']), ('Location', row['location']),
-                ('Lifting Date', row['lifting_date']), ('Load Description', row['load_description']),
-                ('Load Weight', load_disp),
-                ('Lift Types', ', '.join(data.get('lift_types') or [])),
-                ('Load Type', data.get('load_type', '')),
-                ('Crane Type', data.get('crane_type', '')),
-                ('Crane Make / Model', data.get('crane_make_model', '')),
-                ('Crane Serial No.', data.get('crane_serial_no', '')),
-                ('Crane Capacity (t)', data.get('crane_capacity_t', '')),
-                ('Working Radius (m)', data.get('working_radius_m', '')),
-                ('Boom Length (m)', data.get('boom_length_m', '')),
-                ('Sling Legs', data.get('sling_legs', '')),
-                ('Chart Capacity (kg)', data.get('chart_capacity_kg', '')),
-                ('Prepared By', prepared),
-                ('Reviewed By', reviewed), ('Review Date', review_date),
-                ('Approved By', approved), ('Approval Date', approve_date),
+            lift_types = ', '.join(data.get('lift_types') or []) or 'Not specified'
+
+            # All values below are read from the saved DLP payload; blank values are shown as "Not entered".
+            def val(key, default='Not entered'):
+                v = data.get(key, '')
+                if v is None or str(v).strip() == '': return default
+                return str(v).strip()
+            def fmt_num(key, suffix=''):
+                try:
+                    v = float(data.get(key) or 0)
+                    return (f'{v:,.3f}'.rstrip('0').rstrip('.') + (f' {suffix}' if suffix else '')) if v else 'Not entered'
+                except Exception:
+                    return val(key)
+            sections = [
+                ('01  PLAN & LIFT INFORMATION', [
+                    ('Plan Number', number), ('Document Reference', report_no), ('Workflow Status', row['workflow_status']),
+                    ('Project / Contract', row['project']), ('Lifting Location', row['location']), ('Planned Lifting Date', row['lifting_date']),
+                    ('Lifting Activity', val('activity')), ('Lift Classification', lift_types), ('Load Type', val('load_type')),
+                    ('Load Description', row['load_description']), ('Load Weight', load_disp),
+                ]),
+                ('02  LOAD, RIGGING & LIFTING GEOMETRY', [
+                    ('Dynamic / Impact Factor', fmt_num('dynamic_factor')), ('Hook Block Weight', fmt_num('hook_block_weight_kg','kg')),
+                    ('Total Sling Weight', fmt_num('sling_weight_kg','kg')), ('Total Shackle Weight', fmt_num('shackle_weight_kg','kg')),
+                    ('Spreader / Lifting Beam Weight', fmt_num('spreader_weight_kg','kg')), ('Other Rigging Weight', fmt_num('other_rigging_weight_kg','kg')),
+                    ('Load Length', fmt_num('load_length_m','m')), ('Load Width', fmt_num('load_width_m','m')),
+                    ('Load Height', fmt_num('load_height_m','m')), ('Required Lifting Height', fmt_num('lifting_height_m','m')),
+                    ('Working Radius', fmt_num('working_radius_m','m')), ('Load Travel Distance', fmt_num('load_travel_distance_m','m')),
+                    ('Number of Sling Legs', val('sling_legs')), ('Sling Angle from Horizontal', fmt_num('sling_angle_deg','deg')),
+                    ('Sling WLL per Leg', fmt_num('sling_wll_kg','kg')), ('Centre of Gravity / Load Distribution', val('centre_of_gravity')),
+                    ('Lifting Points / Arrangement', val('lifting_points')),
+                ]),
+                ('03  CRANE & LOAD CHART CONFIGURATION', [
+                    ('Crane Type', val('crane_type')), ('Make / Model', val('crane_make_model')), ('Crane Serial Number', val('crane_serial_no')),
+                    ('Rated Crane Capacity (reference)', fmt_num('crane_capacity_t','t')), ('Verified Net Chart Capacity', fmt_num('chart_capacity_kg','kg')),
+                    ('Working Radius', fmt_num('working_radius_m','m')), ('Main Boom Length', fmt_num('boom_length_m','m')),
+                    ('Jib Length', fmt_num('jib_length_m','m')), ('Counterweight', fmt_num('counterweight_t','t')),
+                    ('Outrigger Configuration', val('outrigger_configuration')), ('Load Chart Reference / Revision', val('load_chart_reference')),
+                    ('Load Chart Configuration Verified', val('chart_configuration_verified')),
+                    ('Crane Level Within Manufacturer Limits', val('crane_level_verified')),
+                ]),
+                ('04  GROUND CONDITIONS & OUTRIGGER SUPPORT', [
+                    ('Maximum Outrigger Reaction', fmt_num('max_outrigger_reaction_kn','kN')), ('Mat / Pad Length', fmt_num('mat_length_m','m')),
+                    ('Mat / Pad Width', fmt_num('mat_width_m','m')), ('Verified Ground Bearing Capacity', fmt_num('verified_gbc_kpa','kPa')),
+                    ('Ground Assessment Reference', val('ground_assessment_ref')), ('Ground Condition / Underground Services', val('ground_condition')),
+                    ('Mat / Pad Design Verified', val('mat_design_verified')),
+                ]),
+                ('05  LIFTING METHOD, ENVIRONMENT & CONTROLS', [
+                    ('Wind Speed', fmt_num('wind_speed_ms','m/s')), ('Approved Wind Limit', fmt_num('approved_wind_limit_ms','m/s')),
+                    ('Other Weather / Visibility Limits', val('weather_limits')), ('Lifting Method / Sequence', val('lifting_method')),
+                    ('Exclusion Zone / Barricading', val('exclusion_zone')), ('Overhead / Underground / Nearby Obstacles', val('obstacles')),
+                    ('Emergency / Recovery Arrangements', val('emergency_arrangements')), ('Additional Notes', val('additional_notes')),
+                ]),
+                ('06  LIFTING TEAM & RESPONSIBILITIES', [
+                    ('Appointed Person', val('appointed_person')), ('Lifting Supervisor', val('lifting_supervisor')),
+                    ('HSE Representative', val('hse_representative')), ('Crane Operator', val('operator')),
+                    ('Rigger', val('rigger')), ('Banksman / Signal Person', val('banksman')),
+                ]),
             ]
+            attachments = []
+            try:
+                attachments = self.db.conn.execute(
+                    'SELECT file_name,file_path,attachment_category FROM digital_lifting_plan_attachments WHERE plan_id=? ORDER BY id',
+                    (plan_id,)
+                ).fetchall()
+            except Exception:
+                logging.exception('DLP attachment lookup during export')
+
+            engineering = str(data.get('_engineering_summary') or 'Engineering check summary was not saved with this plan. Recalculate and save the plan to include the latest checks.')
+            # Keep the plan's saved calculations; this export does not create or certify engineering values.
             if fmt == 'docx':
+                from docx.enum.section import WD_SECTION
+                from docx.enum.text import WD_BREAK
                 doc = Document()
-                try:
-                    set_docx_landscape(doc)
-                except Exception:
-                    pass
-                try:
-                    add_docx_report_header(doc, 'DIGITAL LIFTING PLAN', 'LP', number)
-                except Exception:
-                    # manual header with logo from settings
-                    logo = None
-                    try:
-                        logo = report_logo_path()
-                    except Exception:
-                        logo = None
-                    table = doc.add_table(rows=1, cols=2)
-                    if logo and Path(logo).is_file():
-                        try:
-                            table.rows[0].cells[0].paragraphs[0].add_run().add_picture(str(logo), width=Inches(1.1))
-                        except Exception:
-                            pass
-                    table.rows[0].cells[1].paragraphs[0].add_run(f'{company}\nDIGITAL LIFTING PLAN\n{number}').bold = True
-                try:
-                    add_docx_kv_table(doc, pairs)
-                except Exception:
-                    for k, v in pairs:
-                        doc.add_paragraph(f'{k}: {v}')
-                if data.get('_engineering_summary'):
-                    try:
-                        add_docx_boxed_section(doc, 'Engineering Check Summary & Suggestions', data.get('_engineering_summary'), 8)
-                    except Exception:
-                        doc.add_heading('Engineering Check Summary & Suggestions', level=2)
-                        doc.add_paragraph(str(data.get('_engineering_summary')))
+                sec = doc.sections[0]
+                sec.orientation = WD_ORIENT.LANDSCAPE
+                sec.page_width, sec.page_height = sec.page_height, sec.page_width
+                sec.top_margin = Inches(0.55); sec.bottom_margin = Inches(0.55)
+                sec.left_margin = Inches(0.58); sec.right_margin = Inches(0.58)
+                normal = doc.styles['Normal']; normal.font.name = 'Arial'; normal.font.size = Pt(8)
+                normal.paragraph_format.space_after = Pt(3)
+                # Controlled document header
+                hdr = sec.header
+                ht = hdr.add_table(rows=1, cols=2, width=Inches(10.0)); ht.autofit = False
+                ht.columns[0].width = Inches(6.6); ht.columns[1].width = Inches(3.4)
+                ht.cell(0,0).text = company + '\nLIFTING OPERATIONS | ENGINEERING PLAN'
+                ht.cell(0,1).text = f'DOCUMENT: {number}\nSTATUS: {row["workflow_status"]}'
+                for ci, cell in enumerate(ht.rows[0].cells):
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    for para in cell.paragraphs:
+                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT if ci == 0 else WD_ALIGN_PARAGRAPH.RIGHT
+                        for run in para.runs:
+                            run.bold = True; run.font.name = 'Arial'; run.font.size = Pt(8 if ci else 10)
+                            run.font.color.rgb = __import__('docx').shared.RGBColor(23,54,93)
+                # Header table needs a paragraph before it in Word; retain a compact title panel.
+                title = doc.add_paragraph(); title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                r = title.add_run('LIFTING PLAN & METHOD STATEMENT'); r.bold = True; r.font.size = Pt(18); r.font.color.rgb = __import__('docx').shared.RGBColor(23,54,93)
+                sub = doc.add_paragraph(); sub.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                rr = sub.add_run(f'{number}    |    {row["project"] or "Project not entered"}    |    {row["lifting_date"] or "Date not entered"}')
+                rr.bold = True; rr.font.size = Pt(9)
+
+                def shade(cell, fill):
+                    tcPr = cell._tc.get_or_add_tcPr(); shd = OxmlElement('w:shd'); shd.set(qn('w:fill'), fill); tcPr.append(shd)
+                def set_cell(cell, text, bold=False, color=None):
+                    cell.text = str(text if text not in (None, '') else 'Not entered')
+                    cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    for para in cell.paragraphs:
+                        for run in para.runs:
+                            run.font.name='Arial'; run.font.size=Pt(7.5); run.bold=bold
+                            if color: run.font.color.rgb = __import__('docx').shared.RGBColor(*color)
+                def add_section(title_text, items):
+                    h = doc.add_paragraph(); h.paragraph_format.space_before=Pt(7); h.paragraph_format.space_after=Pt(3)
+                    run=h.add_run(title_text); run.bold=True; run.font.size=Pt(10); run.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
+                    t=doc.add_table(rows=0, cols=4); t.autofit=False; t.alignment=WD_TABLE_ALIGNMENT.CENTER
+                    widths=[1.72,3.28,1.72,3.28]
+                    for c,w in zip(t.columns,widths): c.width=Inches(w)
+                    for i in range(0,len(items),2):
+                        cells=t.add_row().cells
+                        pair=items[i:i+2]
+                        for j in range(2):
+                            k,v=pair[j] if j < len(pair) else ('','')
+                            set_cell(cells[j*2],k,True,(23,54,93)); shade(cells[j*2],'DCE6F1')
+                            set_cell(cells[j*2+1],v)
+                    doc.add_paragraph().paragraph_format.space_after=Pt(0)
+                # Cover / summary strip
+                cover = doc.add_table(rows=2, cols=4); cover.alignment=WD_TABLE_ALIGNMENT.CENTER; cover.autofit=False
+                topvals=[('PROJECT',row['project']),('LOCATION',row['location']),('LIFT DATE',row['lifting_date']),('WORKFLOW STATUS',row['workflow_status'])]
+                for i,(k,v) in enumerate(topvals):
+                    set_cell(cover.cell(0,i),k,True,(255,255,255)); shade(cover.cell(0,i),'17365D')
+                    set_cell(cover.cell(1,i),v or 'Not entered',True); shade(cover.cell(1,i),'EEF3F8')
+                for title_text, items in sections:
+                    add_section(title_text, items)
+
+                # Engineering calculation report in a separate clearly identified section.
+                doc.add_page_break()
+                h=doc.add_paragraph(); rr=h.add_run('07  ENGINEERING CHECKS & CALCULATION SUMMARY'); rr.bold=True; rr.font.size=Pt(13); rr.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
+                p=doc.add_paragraph(engineering); p.paragraph_format.space_after=Pt(5)
+                for run in p.runs: run.font.name='Consolas'; run.font.size=Pt(8)
+                caution=doc.add_paragraph('IMPORTANT: This calculation output is decision-support information based on entered data. It is not a substitute for the crane manufacturer load chart, engineered lift study, site verification or competent-person approval.');
+                for run in caution.runs: run.bold=True; run.font.size=Pt(8); run.font.color.rgb=__import__('docx').shared.RGBColor(156,0,6)
                 if review_comments:
-                    doc.add_heading('Review Comments', level=2)
-                    doc.add_paragraph(review_comments)
-                # Signatures
-                doc.add_heading('Authorisation', level=2)
-                sig = doc.add_table(rows=2, cols=3)
-                sig.rows[0].cells[0].text = f'Prepared by:\n{prepared}\nSignature: _______________\nDate: ________'
-                sig.rows[0].cells[1].text = f'Reviewed by:\n{reviewed}\nSignature: _______________\nDate: {review_date or "________"}'
-                sig.rows[0].cells[2].text = f'Approved by:\n{approved}\nSignature: _______________\nDate: {approve_date or "________"}'
-                doc.add_heading('Engineering Drawing — Side Elevation', level=2)
-                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
-                    try:
-                        doc.add_picture(str(side_img), width=Inches(9.2))
-                    except Exception as pic_exc:
-                        logging.exception('side pic')
-                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
-                else:
-                    doc.add_paragraph('[Side elevation drawing was not generated]')
-                doc.add_heading('Engineering Drawing — Plan View', level=2)
-                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
-                    try:
-                        doc.add_picture(str(plan_img), width=Inches(9.2))
-                    except Exception as pic_exc:
-                        logging.exception('plan pic')
-                        doc.add_paragraph(f'[Drawing could not be embedded: {pic_exc}]')
-                else:
-                    doc.add_paragraph('[Plan view drawing was not generated]')
-                try:
-                    add_docx_footer(doc)
-                except Exception:
-                    pass
-                try:
-                    save_docx_validated(doc, path)
-                except Exception:
-                    doc.save(path)
+                    doc.add_heading('Review Comments', level=2); doc.add_paragraph(str(review_comments))
+                doc.add_heading('08  REVIEW, APPROVAL & AUTHORISATION', level=1)
+                sig=doc.add_table(rows=2, cols=3); sig.alignment=WD_TABLE_ALIGNMENT.CENTER
+                for i, label in enumerate(('PREPARED BY','REVIEWED BY','APPROVED BY')):
+                    set_cell(sig.cell(0,i),label,True,(255,255,255)); shade(sig.cell(0,i),'17365D')
+                sig.cell(1,0).text=f'{prepared or "Not entered"}\nSignature: __________________________\nDate: ______________________________'
+                sig.cell(1,1).text=f'{reviewed or "Not entered"}\nSignature: __________________________\nDate: {review_date or "______________________________"}'
+                sig.cell(1,2).text=f'{approved or "Not entered"}\nSignature: __________________________\nDate: {approve_date or "______________________________"}'
+                for rrw in sig.rows[1].cells:
+                    for para in rrw.paragraphs:
+                        for run in para.runs: run.font.size=Pt(8)
+                doc.add_heading('09  SUPPORTING DOCUMENTS / ATTACHMENTS', level=1)
+                if attachments:
+                    at=doc.add_table(rows=1,cols=3); at.alignment=WD_TABLE_ALIGNMENT.CENTER
+                    for i,x in enumerate(('FILE / DOCUMENT','CATEGORY','SAVED LOCATION')):
+                        set_cell(at.cell(0,i),x,True,(255,255,255)); shade(at.cell(0,i),'17365D')
+                    for a in attachments:
+                        cells=at.add_row().cells
+                        set_cell(cells[0],a['file_name'] or Path(a['file_path']).name); set_cell(cells[1],a['attachment_category']); set_cell(cells[2],a['file_path'])
+                else: doc.add_paragraph('No supporting attachments are registered against this plan.')
+
+                # Drawings are intentionally full-page landscape sheets for legibility.
+                for drawing_title, image_path in (('10  LIFTING ARRANGEMENT — SIDE ELEVATION',side_img),('11  LIFTING ARRANGEMENT — PLAN VIEW',plan_img)):
+                    doc.add_page_break(); ph=doc.add_paragraph(); ph.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                    run=ph.add_run(drawing_title); run.bold=True; run.font.size=Pt(14); run.font.color.rgb=__import__('docx').shared.RGBColor(23,54,93)
+                    if Path(image_path).is_file() and Path(image_path).stat().st_size>500:
+                        pp=doc.add_paragraph(); pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(image_path),width=Inches(9.6))
+                    else: doc.add_paragraph('Drawing unavailable — open the Digital Lifting Plan Drawings tab to review.')
+                    note=doc.add_paragraph('SCHEMATIC ONLY — NOT TO SCALE. Verify crane configuration, load chart, rigging arrangement, clearances and site conditions before execution.')
+                    note.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                    for run in note.runs: run.bold=True; run.font.size=Pt(8); run.font.color.rgb=__import__('docx').shared.RGBColor(156,0,6)
+                # Footer with document traceability
+                for section in doc.sections:
+                    fp=section.footer.paragraphs[0]; fp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                    fr=fp.add_run(f'{company}  |  {report_no}  |  Generated {generated}  |  Controlled copy when approved')
+                    fr.font.size=Pt(7); fr.font.color.rgb=__import__('docx').shared.RGBColor(100,116,139)
+                try: save_docx_validated(doc, path)
+                except Exception: doc.save(path)
             else:
-                styles = getSampleStyleSheet()
-                story = [
-                    Paragraph(f"<b>{html.escape(str(company))}</b> — DIGITAL LIFTING PLAN", styles['Title']),
-                    Paragraph(f"Plan: {html.escape(str(number))} | Doc: {html.escape(report_no)} | Status: {html.escape(str(row['workflow_status']))}", styles['Normal']),
-                    Spacer(1, 8),
-                ]
-                meta = [
-                    [f"Project: {row['project']}", f"Location: {row['location']}"],
-                    [f"Date: {row['lifting_date']}", f"Load: {row['load_description']} ({load_disp})"],
-                    [f"Prepared: {prepared}", f"Reviewed: {reviewed} ({review_date})"],
-                    [f"Approved: {approved} ({approve_date})", f"Crane: {data.get('crane_type', '')} {data.get('crane_make_model', '')}"],
-                ]
-                mt = Table(meta, colWidths=[320, 320])
-                mt.setStyle(TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.6, colors.HexColor('#4A5C6A')),
-                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#EEF3F7')),
-                    ('PADDING', (0, 0), (-1, -1), 5),
-                ]))
-                story += [mt, Spacer(1, 10)]
-                if data.get('_engineering_summary'):
-                    story.append(Paragraph('<b>Engineering Check Summary & Suggestions</b>', styles['Heading2']))
-                    for line in str(data.get('_engineering_summary')).splitlines()[:55]:
-                        story.append(Paragraph(html.escape(line), styles['Normal']))
-                    story.append(Spacer(1, 8))
-                story.append(Paragraph('<b>Side Elevation</b>', styles['Heading2']))
-                if Path(side_img).is_file() and Path(side_img).stat().st_size > 500:
-                    story.append(RLImage(str(side_img), width=520, height=300, kind='proportional'))
-                story.append(Spacer(1, 8))
-                story.append(Paragraph('<b>Plan View</b>', styles['Heading2']))
-                if Path(plan_img).is_file() and Path(plan_img).stat().st_size > 500:
-                    story.append(RLImage(str(plan_img), width=520, height=300, kind='proportional'))
-                SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22).build(story)
-            QMessageBox.information(self, 'Exported', f'Lifting plan exported with drawings:\n{path}')
+                from reportlab.lib.units import mm
+                from reportlab.platypus import PageBreak, KeepTogether
+                styles=getSampleStyleSheet()
+                from reportlab.lib.styles import ParagraphStyle
+                styles.add(ParagraphStyle(name='LPTitle', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#17365D'), alignment=1, spaceAfter=5))
+                styles.add(ParagraphStyle(name='LPSection', parent=styles['Heading2'], fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#17365D'), spaceBefore=8, spaceAfter=4, keepWithNext=True))
+                styles.add(ParagraphStyle(name='LPBody', parent=styles['BodyText'], fontName='Helvetica', fontSize=7.3, leading=9, spaceAfter=1))
+                styles.add(ParagraphStyle(name='LPSmall', parent=styles['BodyText'], fontName='Helvetica', fontSize=7, leading=9))
+                def esc(x): return html.escape(str(x if x not in (None,'') else 'Not entered')).replace('\n','<br/>')
+                story=[Paragraph(esc(company),styles['Heading2']),Paragraph('LIFTING PLAN & METHOD STATEMENT',styles['LPTitle']),
+                       Paragraph(f'<b>{esc(number)}</b> &nbsp; | &nbsp; Document Ref: {esc(report_no)} &nbsp; | &nbsp; Status: {esc(row["workflow_status"])}',styles['LPBody']),Spacer(1,5)]
+                top=[[Paragraph(f'<b>{esc(k)}</b>',styles['LPSmall']) for k,_ in [('PROJECT',0),('LOCATION',0),('LIFT DATE',0),('STATUS',0)]],
+                     [Paragraph(esc(v),styles['LPSmall']) for v in (row['project'],row['location'],row['lifting_date'],row['workflow_status'])]]
+                tt=Table(top,colWidths=[67.5*mm]*4,repeatRows=1)
+                tt.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('BACKGROUND',(0,1),(-1,1),colors.HexColor('#EEF3F8')),('GRID',(0,0),(-1,-1),0.45,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),5),('VALIGN',(0,0),(-1,-1),'TOP')]))
+                story += [tt,Spacer(1,5)]
+                for section_title, items in sections:
+                    story.append(Paragraph(esc(section_title),styles['LPSection']))
+                    rows=[]
+                    for i in range(0,len(items),2):
+                        a=items[i]; b=items[i+1] if i+1<len(items) else ('','')
+                        rows.append([Paragraph('<b>'+esc(a[0])+'</b>',styles['LPSmall']),Paragraph(esc(a[1]),styles['LPSmall']),Paragraph('<b>'+esc(b[0])+'</b>' if b[0] else '',styles['LPSmall']),Paragraph(esc(b[1]) if b[0] else '',styles['LPSmall'])])
+                    t=Table(rows,colWidths=[37*mm,58*mm,37*mm,58*mm],repeatRows=0)
+                    t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#B7C3CF')),('BACKGROUND',(0,0),(0,-1),colors.HexColor('#E5ECF3')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#E5ECF3')),('PADDING',(0,0),(-1,-1),4),('VALIGN',(0,0),(-1,-1),'TOP')]))
+                    story += [t,Spacer(1,3)]
+                story += [PageBreak(),Paragraph('07  ENGINEERING CHECKS & CALCULATION SUMMARY',styles['LPTitle'])]
+                for line in engineering.splitlines(): story.append(Paragraph(esc(line),styles['LPBody']))
+                story += [Spacer(1,8),Paragraph('<b>IMPORTANT:</b> This output is decision-support information based on entered data. It is not a substitute for the manufacturer load chart, engineered lift study, site verification or competent-person approval.',styles['LPBody'])]
+                if review_comments: story += [Paragraph('Review Comments',styles['LPSection']),Paragraph(esc(review_comments),styles['LPBody'])]
+                story += [Paragraph('08  REVIEW, APPROVAL & AUTHORISATION',styles['LPSection'])]
+                sigdata=[[Paragraph('<b>PREPARED BY</b>',styles['LPSmall']),Paragraph('<b>REVIEWED BY</b>',styles['LPSmall']),Paragraph('<b>APPROVED BY</b>',styles['LPSmall'])],
+                         [Paragraph(f'{esc(prepared)}<br/><br/>Signature: __________________<br/>Date: ______________',styles['LPSmall']),Paragraph(f'{esc(reviewed)}<br/><br/>Signature: __________________<br/>Date: {esc(review_date)}',styles['LPSmall']),Paragraph(f'{esc(approved)}<br/><br/>Signature: __________________<br/>Date: {esc(approve_date)}',styles['LPSmall'])]]
+                st=Table(sigdata,colWidths=[90*mm]*3,rowHeights=[8*mm,30*mm]); st.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.5,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),5),('VALIGN',(0,0),(-1,-1),'TOP')]))
+                story += [st,Paragraph('09  SUPPORTING DOCUMENTS / ATTACHMENTS',styles['LPSection'])]
+                if attachments:
+                    ad=[[Paragraph('<b>FILE / DOCUMENT</b>',styles['LPSmall']),Paragraph('<b>CATEGORY</b>',styles['LPSmall']),Paragraph('<b>SAVED LOCATION</b>',styles['LPSmall'])]]
+                    ad += [[Paragraph(esc(a['file_name'] or Path(a['file_path']).name),styles['LPSmall']),Paragraph(esc(a['attachment_category']),styles['LPSmall']),Paragraph(esc(a['file_path']),styles['LPSmall'])] for a in attachments]
+                    at=Table(ad,colWidths=[65*mm,45*mm,160*mm],repeatRows=1); at.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#17365D')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#AAB7C4')),('PADDING',(0,0),(-1,-1),4),('VALIGN',(0,0),(-1,-1),'TOP')]))
+                    story.append(at)
+                else: story.append(Paragraph('No supporting attachments are registered against this plan.',styles['LPBody']))
+                for title_text,image_path in (('10  LIFTING ARRANGEMENT — SIDE ELEVATION',side_img),('11  LIFTING ARRANGEMENT — PLAN VIEW',plan_img)):
+                    story += [PageBreak(),Paragraph(esc(title_text),styles['LPTitle']),Spacer(1,4)]
+                    if Path(image_path).is_file() and Path(image_path).stat().st_size>500:
+                        story.append(RLImage(str(image_path),width=265*mm,height=155*mm,kind='proportional'))
+                    else: story.append(Paragraph('Drawing unavailable — review the Drawings tab in the application.',styles['LPBody']))
+                    story.append(Paragraph('<b>SCHEMATIC ONLY — NOT TO SCALE. Verify crane configuration, load chart, rigging arrangement, clearances and site conditions before execution.</b>',styles['LPBody']))
+                def page_footer(canvas, doc_obj):
+                    canvas.saveState(); canvas.setFont('Helvetica',6.5); canvas.setFillColor(colors.HexColor('#64748B'))
+                    canvas.drawCentredString(landscape(A4)[0]/2,9*mm,f'{company}  |  {report_no}  |  Generated {generated}  |  Page {doc_obj.page}')
+                    canvas.restoreState()
+                SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=12*mm,leftMargin=12*mm,topMargin=12*mm,bottomMargin=16*mm,title=f'{number} Lifting Plan',author=company).build(story,onFirstPage=page_footer,onLaterPages=page_footer)
+            QMessageBox.information(self, 'Exported', f'Professional lifting plan exported successfully:\n{path}')
         except Exception as exc:
             logging.exception('lifting plan export')
             QMessageBox.critical(self, 'Export Failed', f'Could not export the lifting plan.\n\n{type(exc).__name__}: {exc}')
