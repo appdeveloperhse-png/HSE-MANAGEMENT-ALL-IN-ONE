@@ -66,11 +66,17 @@ def fit_dialog_to_desktop(dialog, width_ratio=0.92, height_ratio=0.88):
         if not screen:
             return
         area = screen.availableGeometry()
-        max_w = max(640, int(area.width() * width_ratio))
-        max_h = max(480, int(area.height() * height_ratio))
-        dialog.setMaximumSize(min(max_w, area.width()), min(max_h, area.height()))
-        current = dialog.size()
-        dialog.resize(min(current.width(), max_w), min(current.height(), max_h))
+        max_w = max(480, min(int(area.width() * width_ratio), area.width() - 20))
+        max_h = max(360, min(int(area.height() * height_ratio), area.height() - 20))
+        dialog.setMaximumSize(max_w, max_h)
+        # Prefer a size that fits; never exceed available geometry
+        target_w = min(dialog.width() or max_w, max_w)
+        target_h = min(dialog.height() or max_h, max_h)
+        dialog.resize(target_w, target_h)
+        # Centre within available geometry so nothing goes off-screen
+        x = area.x() + max(0, (area.width() - dialog.width()) // 2)
+        y = area.y() + max(0, (area.height() - dialog.height()) // 2)
+        dialog.move(x, y)
     except Exception:
         logging.exception("Unable to fit dialog to desktop")
 
@@ -3832,9 +3838,8 @@ class BarChartWidget(QWidget):
 
 
 class BodyAnatomyWidget(QWidget):
-    """Realistic-style human body map with injury heat percentages."""
+    """Human body injury map — reliable QPainter silhouette with heat percentages."""
 
-    # Normalized regions on 100x180 body figure
     REGIONS = {
         "Head": (42, 2, 16, 18),
         "Face": (44, 10, 12, 10),
@@ -3863,7 +3868,7 @@ class BodyAnatomyWidget(QWidget):
     def __init__(self, values=None, parent=None, title="Body Parts Injured"):
         super().__init__(parent)
         self.values = values or {}
-        self.title = title
+        self.title = title or "Body Parts Injured"
         self.setMinimumHeight(380)
         self.setMinimumWidth(300)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3876,173 +3881,152 @@ class BodyAnatomyWidget(QWidget):
     def _heat(self, pct):
         pct = max(0.0, min(100.0, float(pct)))
         if pct <= 0:
-            return QColor(0, 0, 0, 0)
-        # Soft medical heat: amber → red
+            return QColor(232, 238, 244, 80)
         if pct < 12:
-            return QColor(253, 224, 71, 160)
+            return QColor(253, 224, 71, 180)
         if pct < 25:
-            return QColor(251, 191, 36, 180)
+            return QColor(251, 191, 36, 190)
         if pct < 40:
-            return QColor(249, 115, 22, 190)
+            return QColor(249, 115, 22, 200)
         if pct < 60:
-            return QColor(239, 68, 68, 200)
-        return QColor(185, 28, 28, 220)
+            return QColor(239, 68, 68, 210)
+        return QColor(185, 28, 28, 230)
 
     def paintEvent(self, event):
-        from PySide6.QtGui import QPainter, QPen, QBrush, QFont, QPainterPath, QLinearGradient, QRadialGradient
-        from PySide6.QtCore import QRectF, QPointF
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
-        p.fillRect(self.rect(), QColor("#FFFFFF"))
-        p.setPen(QPen(QColor("#17365D")))
-        p.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
-        p.drawText(12, 18, self.title or "Body Parts Injured")
+        try:
+            p = QPainter(self)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.fillRect(self.rect(), QColor("#FFFFFF"))
 
-        total = sum(max(0, int(v)) for v in self.values.values()) or 0
-        area = self.rect().adjusted(8, 26, -8, -8)
-        body_w = int(area.width() * 0.46)
-        ox, oy = area.left() + 6, area.top() + 2
-        sx = (body_w - 12) / 100.0
-        sy = (area.height() - 6) / 180.0
+            p.setPen(QPen(QColor("#17365D")))
+            p.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            p.drawText(12, 18, self.title)
 
-        def R(x, y, w, h):
-            return QRectF(ox + x * sx, oy + y * sy, w * sx, h * sy)
+            total = sum(max(0, int(v)) for v in (self.values or {}).values()) or 0
+            area = self.rect().adjusted(8, 28, -8, -8)
+            if area.width() < 40 or area.height() < 40:
+                p.end()
+                return
 
-        def ellipse_path(x, y, w, h):
-            path = QPainterPath()
-            path.addEllipse(R(x, y, w, h))
-            return path
+            body_w = max(120, int(area.width() * 0.48))
+            ox = area.left() + 8
+            oy = area.top() + 4
+            sx = (body_w - 16) / 100.0
+            sy = (area.height() - 8) / 180.0
 
-        # ---- Realistic silhouette using soft gradients (not cartoon blocks) ----
-        skin = QColor("#E8C4A8")
-        skin_shadow = QColor("#D4A574")
-        outline = QColor("#8B6B4A")
+            def rectf(x, y, w, h):
+                return QRectF(ox + x * sx, oy + y * sy, max(1.0, w * sx), max(1.0, h * sy))
 
-        # Body gradient fill helper
-        def fill_path(path, base=skin):
-            br = path.boundingRect()
-            grad = QLinearGradient(br.topLeft(), br.bottomRight())
-            grad.setColorAt(0.0, base.lighter(108))
-            grad.setColorAt(0.45, base)
-            grad.setColorAt(1.0, skin_shadow)
-            p.setBrush(QBrush(grad))
-            p.setPen(QPen(outline, 1.4))
-            p.drawPath(path)
+            skin = QColor("#E8C4A8")
+            skin_dark = QColor("#C9956C")
+            outline = QColor("#6B4F3A")
 
-        # Head (oval)
-        head = ellipse_path(40, 1, 20, 22)
-        fill_path(head)
-        # Neck
-        neck = QPainterPath()
-        neck.addRoundedRect(R(46, 21, 8, 8), 2 * sx, 2 * sy)
-        fill_path(neck)
-        # Torso - slightly tapered
-        torso = QPainterPath()
-        torso.moveTo(R(32, 28).topLeft())
-        torso.lineTo(R(68, 28).topLeft())
-        torso.lineTo(R(62, 70).topLeft())
-        torso.lineTo(R(38, 70).topLeft())
-        torso.closeSubpath()
-        fill_path(torso)
-        # Arms (rounded)
-        for ax in (12, 70):
-            arm = QPainterPath()
-            arm.addRoundedRect(R(ax, 30, 16, 48), 6 * sx, 8 * sy)
-            fill_path(arm)
-            hand = ellipse_path(ax + 1, 76, 14, 12)
-            fill_path(hand)
-        # Legs
-        for lx in (38, 52):
-            leg = QPainterPath()
-            leg.addRoundedRect(R(lx, 70, 12, 72), 5 * sx, 8 * sy)
-            fill_path(leg)
-            foot = QPainterPath()
-            foot.addRoundedRect(R(lx - 2, 140, 16, 10), 3 * sx, 2 * sy)
-            fill_path(foot)
+            # --- Base silhouette (always visible) ---
+            p.setPen(QPen(outline, 1.6))
+            p.setBrush(QBrush(skin))
+            # Head
+            p.drawEllipse(rectf(40, 1, 20, 22))
+            # Neck
+            p.drawRoundedRect(rectf(46, 21, 8, 8), 2, 2)
+            # Torso
+            p.drawRoundedRect(rectf(34, 28, 32, 44), 10, 10)
+            # Arms
+            p.drawRoundedRect(rectf(14, 30, 16, 48), 6, 6)
+            p.drawRoundedRect(rectf(70, 30, 16, 48), 6, 6)
+            # Hands
+            p.drawEllipse(rectf(14, 76, 14, 12))
+            p.drawEllipse(rectf(72, 76, 14, 12))
+            # Legs
+            p.drawRoundedRect(rectf(36, 70, 13, 72), 5, 5)
+            p.drawRoundedRect(rectf(51, 70, 13, 72), 5, 5)
+            # Feet
+            p.drawRoundedRect(rectf(32, 140, 16, 10), 3, 3)
+            p.drawRoundedRect(rectf(52, 140, 16, 10), 3, 3)
 
-        # Subtle muscle / anatomy contour lines
-        p.setPen(QPen(QColor(139, 107, 74, 70), 1.0))
-        p.drawLine(R(50, 34).center(), R(50, 66).center())
-        p.drawLine(R(42, 78).center(), R(42, 130).center())
-        p.drawLine(R(58, 78).center(), R(58, 130).center())
-
-        # Heat overlay
-        pct_map = {k: (100.0 * int(v) / total) if total else 0 for k, v in self.values.items()}
-        alias = {
-            "Eye": "Eye(s)", "Eyes": "Eye(s)", "Ear": "Ear(s)", "Ears": "Ear(s)",
-            "Fingers": "Finger(s)", "Finger": "Finger(s)", "Toes": "Toe(s)", "Toe": "Toe(s)",
-        }
-
-        for name, (x, y, w, h) in self.REGIONS.items():
-            count = 0
-            if name in self.values:
-                count = int(self.values[name])
-            else:
-                for k, v in self.values.items():
-                    if k.lower() == name.lower() or alias.get(k) == name:
-                        count = int(v)
-                        break
-            if count <= 0:
-                continue
-            pct = pct_map.get(name, 0)
-            col = self._heat(pct)
-            if col.alpha() == 0:
-                continue
-            # Soft radial heat blob
-            rr = R(x, y, w, h)
-            rad = QRadialGradient(rr.center(), max(rr.width(), rr.height()) * 0.65)
-            rad.setColorAt(0.0, col)
-            faded = QColor(col); faded.setAlpha(max(20, col.alpha() // 4))
-            rad.setColorAt(1.0, faded)
-            p.setBrush(QBrush(rad))
+            # Soft shading pass
             p.setPen(Qt.PenStyle.NoPen)
-            p.drawEllipse(rr.adjusted(-2, -2, 2, 2))
-            if rr.width() > 16 and rr.height() > 12:
-                p.setPen(QColor("#FFFFFF") if pct >= 28 else QColor("#1E293B"))
-                p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
-                p.drawText(rr, Qt.AlignmentFlag.AlignCenter, f"{pct:.0f}%")
+            p.setBrush(QBrush(QColor(201, 149, 108, 50)))
+            p.drawEllipse(rectf(42, 4, 16, 16))
+            p.drawRoundedRect(rectf(38, 32, 24, 36), 8, 8)
 
-        # Outline polish
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(outline.darker(120), 1.6))
-        p.drawPath(head)
-        p.drawPath(torso)
+            # Heat overlays
+            pct_map = {k: (100.0 * int(v) / total) if total else 0.0 for k, v in (self.values or {}).items()}
+            alias = {
+                "Eye": "Eye(s)", "Eyes": "Eye(s)", "Ear": "Ear(s)", "Ears": "Ear(s)",
+                "Fingers": "Finger(s)", "Finger": "Finger(s)", "Toes": "Toe(s)", "Toe": "Toe(s)",
+            }
+            for name, (x, y, w, h) in self.REGIONS.items():
+                count = 0
+                if name in (self.values or {}):
+                    count = int(self.values[name])
+                else:
+                    for k, v in (self.values or {}).items():
+                        if str(k).lower() == name.lower() or alias.get(k) == name:
+                            count = int(v)
+                            break
+                if count <= 0:
+                    continue
+                pct = pct_map.get(name, 0.0)
+                col = self._heat(pct)
+                rr = rectf(x, y, w, h)
+                p.setBrush(QBrush(col))
+                p.setPen(QPen(col.darker(115), 1))
+                p.drawEllipse(rr.adjusted(-1, -1, 1, 1))
+                if rr.width() > 14 and rr.height() > 10:
+                    p.setPen(QColor("#FFFFFF") if pct >= 25 else QColor("#1E293B"))
+                    p.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
+                    p.drawText(rr, Qt.AlignmentFlag.AlignCenter, f"{pct:.0f}%")
 
-        # Legend
-        lx = area.left() + body_w + 10
-        ly = area.top() + 4
-        p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
-        p.setPen(QColor("#17365D"))
-        p.drawText(lx, ly + 10, f"Total injury tags: {total}")
-        ly += 22
-        p.setFont(QFont("Segoe UI", 8))
-        items = sorted(self.values.items(), key=lambda kv: -int(kv[1]))[:14]
-        if not items:
-            p.setPen(QColor("#888888"))
-            p.drawText(lx, ly + 12, "No body-part data yet")
-        for name, count in items:
-            pct = (100.0 * int(count) / total) if total else 0
-            col = self._heat(max(pct, 5) if count else 0)
-            if col.alpha() == 0:
-                col = QColor("#E8EEF4")
-            p.setBrush(QBrush(col))
-            p.setPen(QPen(QColor("#FFFFFF")))
-            p.drawRoundedRect(lx, ly, 12, 12, 2, 2)
-            p.setPen(QColor("#334155"))
-            p.drawText(lx + 16, ly + 11, f"{str(name)[:18]}  {count} ({pct:.0f}%)")
-            ly += 16
-            if ly > area.bottom() - 30:
-                break
-        ly = max(ly + 6, area.bottom() - 32)
-        p.setFont(QFont("Segoe UI", 7))
-        p.setPen(QColor("#64748B"))
-        p.drawText(lx, ly, "Heat: low share → high share")
-        for i, pct in enumerate((8, 20, 35, 55, 80)):
-            p.setBrush(QBrush(self._heat(pct)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.drawRect(lx + i * 18, ly + 6, 16, 10)
-        p.end()
+            # Re-draw outline for clarity
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(outline, 1.8))
+            p.drawEllipse(rectf(40, 1, 20, 22))
+            p.drawRoundedRect(rectf(34, 28, 32, 44), 10, 10)
+
+            # Legend
+            lx = area.left() + body_w + 12
+            ly = area.top() + 6
+            p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
+            p.setPen(QColor("#17365D"))
+            p.drawText(lx, ly + 10, f"Total injury tags: {total}")
+            ly += 22
+            p.setFont(QFont("Segoe UI", 8))
+            items = sorted((self.values or {}).items(), key=lambda kv: -int(kv[1]))[:14]
+            if not items:
+                p.setPen(QColor("#888888"))
+                p.drawText(lx, ly + 12, "No body-part data yet")
+                p.drawText(lx, ly + 28, "(Body map is ready —")
+                p.drawText(lx, ly + 42, "add injuries in NOI / Investigation)")
+            for name, count in items:
+                pct = (100.0 * int(count) / total) if total else 0.0
+                col = self._heat(max(pct, 5) if count else 0)
+                p.setBrush(QBrush(col))
+                p.setPen(QPen(QColor("#FFFFFF")))
+                p.drawRoundedRect(lx, ly, 12, 12, 2, 2)
+                p.setPen(QColor("#334155"))
+                p.drawText(lx + 16, ly + 11, f"{str(name)[:18]}  {count} ({pct:.0f}%)")
+                ly += 16
+                if ly > area.bottom() - 34:
+                    break
+            ly = max(ly + 6, area.bottom() - 34)
+            p.setFont(QFont("Segoe UI", 7))
+            p.setPen(QColor("#64748B"))
+            p.drawText(lx, ly, "Heat: low → high share")
+            for i, pct in enumerate((8, 20, 35, 55, 80)):
+                p.setBrush(QBrush(self._heat(pct)))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.drawRect(lx + i * 18, ly + 6, 16, 10)
+            p.end()
+        except Exception:
+            logging.exception("BodyAnatomyWidget paintEvent")
+            try:
+                p = QPainter(self)
+                p.fillRect(self.rect(), QColor("#FFFFFF"))
+                p.setPen(QColor("#B91C1C"))
+                p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Body map error — see log")
+                p.end()
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -8562,14 +8546,14 @@ class MainWindow(QMainWindow):
             act_lay.addWidget(act_text)
             top_split.addWidget(obs_box, 1)
             top_split.addWidget(act_box, 1)
-            outer.addLayout(top_split)
+            body_lay.addLayout(top_split)
 
             progress_label = QLabel()
             progress_label.setStyleSheet(
                 "font-weight:800;color:#061018;padding:7px;background:#E8F1FB;"
                 "border:1px solid #64748b;border-radius:4px;"
             )
-            outer.addWidget(progress_label)
+            body_lay.addWidget(progress_label)
             submitter_box = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "")))
             submitter_box.setPlaceholderText("Submitted by (name / ID)")
             submitter_box.setMinimumHeight(32)
@@ -8603,7 +8587,7 @@ class MainWindow(QMainWindow):
             scroll.setWidgetResizable(True)
             scroll.setMinimumHeight(360)
             scroll.setWidget(cards_host)
-            outer.addWidget(scroll, 1)
+            body_lay.addWidget(scroll, 1)
 
             def progress():
                 total = len(actions)
@@ -10617,9 +10601,12 @@ class MainWindow(QMainWindow):
 
             dialog = QDialog(self)
             dialog.setWindowTitle(f"Incident Close-out Evidence — {safe(rec['number'])}")
-            dialog.resize(1100, 820)
+            dialog.setSizeGripEnabled(True)
+            # Start modest; fit_dialog clamps to screen so buttons stay visible
+            dialog.resize(980, 680)
+            dialog.setMinimumSize(640, 420)
             try:
-                fit_dialog_to_desktop(dialog, 0.95, 0.94)
+                fit_dialog_to_desktop(dialog, 0.88, 0.86)
             except Exception:
                 pass
             dialog.setStyleSheet(
@@ -10632,7 +10619,15 @@ class MainWindow(QMainWindow):
             )
             outer = QVBoxLayout(dialog)
             outer.setContentsMargins(10, 10, 10, 8)
-            outer.setSpacing(8)
+            outer.setSpacing(6)
+            # Scrollable body keeps footer buttons always on-screen
+            body_scroll = QScrollArea()
+            body_scroll.setWidgetResizable(True)
+            body_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            body_host = QWidget()
+            body_lay = QVBoxLayout(body_host)
+            body_lay.setContentsMargins(4, 4, 4, 4)
+            body_lay.setSpacing(8)
 
             title = QLabel(
                 f"<b style='font-size:15px;color:#061018;'>{html.escape(safe(rec['number']))}</b>"
@@ -10643,7 +10638,7 @@ class MainWindow(QMainWindow):
             )
             title.setTextFormat(Qt.TextFormat.RichText)
             title.setWordWrap(True)
-            outer.addWidget(title)
+            body_lay.addWidget(title)
 
             top_split = QHBoxLayout()
             desc_box = QGroupBox("Incident Description")
@@ -10671,7 +10666,7 @@ class MainWindow(QMainWindow):
             submitter_box = QLineEdit(safe(db.setting("current_user", "") or db.setting("username", "") or co.get("submitted_by", "")))
             submitter_box.setPlaceholderText("Submitted by (name / ID)")
             submitter_box.setMinimumHeight(32)
-            outer.addWidget(submitter_box)
+            body_lay.addWidget(submitter_box)
 
             # Load evidence grouped by action index
             actions = []
@@ -10921,8 +10916,11 @@ class MainWindow(QMainWindow):
             notes.setPlainText(safe(co.get("notes", "")))
             notes.setPlaceholderText("Overall close-out notes")
             notes.setMaximumHeight(70)
-            outer.addWidget(QLabel("Close-out notes:"))
-            outer.addWidget(notes)
+            body_lay.addWidget(QLabel("Close-out notes:"))
+            body_lay.addWidget(notes)
+
+            body_scroll.setWidget(body_host)
+            outer.addWidget(body_scroll, 1)
 
             footer = QHBoxLayout()
             btn_submit = QPushButton("Submit Evidence for Review")
@@ -10941,6 +10939,11 @@ class MainWindow(QMainWindow):
                 b.setStyleSheet(f"QPushButton{{background:{bg};color:#fff;font-weight:800;border-radius:5px;padding:6px 12px;}}")
                 footer.addWidget(b)
             outer.addLayout(footer)
+            # Re-fit after layout so footer remains visible on small screens
+            try:
+                fit_dialog_to_desktop(dialog, 0.88, 0.86)
+            except Exception:
+                pass
 
             def submit_all():
                 by = submitter_box.text().strip()
